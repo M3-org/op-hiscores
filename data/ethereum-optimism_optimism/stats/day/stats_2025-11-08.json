@@ -1,0 +1,111 @@
+{
+  "interval": {
+    "intervalStart": "2025-11-08T00:00:00.000Z",
+    "intervalEnd": "2025-11-09T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2025-11-08 to 2025-11-09, ethereum-optimism/optimism had 1 new PRs (0 merged), 1 new issues, and 5 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7WwTti",
+      "title": "Unable to deploy L2 contracts on devnet with op-deployer v0.5.0-rc.2 due to DeployImplementations ABI mismatch.",
+      "author": "gologo13",
+      "number": 18222,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Hello, I’m trying to run Ethereum + Optimism dev networks with Osaka/Fusaka-ready clients.\nI run into an ABI mismatch with op-deployer v0.5.0-rc.2 and [officially published contract artifacts bundle](https://storage.googleapis.com/oplabs-contract-artifacts/artifacts-v1-fffcbb0ebf7f83311791534a41e65ef90df47797f9ca8f86941452f597f7128c.tar.gz).\n\nAs of now, https://console.cloud.google.com/artifacts/docker/oplabs-tools-artifacts/us/images/op-deployer/sha256:152cb9409d2d885f287bd2caa947a1ea2e9e921e124c3782c7fe297fa2614130 has tags: [77f31c359f9b3608bf48a8b0981e79b67bd95cb4](https://github.com/ethereum-optimism/optimism/commit/77f31c359f9b3608bf48a8b0981e79b67bd95cb4) and `v0.5.0-rc.2`.\n\nop-deployer v0.5.0-rc2 supports op-contracts/v5.0.0-rc.2. So, there should be compatibility, but it does not appear so.\n I’d appreciate guidance and can move this if it belongs in a different repo.\n\n**Bug Description**\n\n`op-deployer:v0.5.0-rc.2` assumes the `DeployImplementations` script exposes a `runWithBytes(bytes)` entry point and encodes deployment inputs as a single byte array. The Go caller (`opcm.DeployImplementationsInput`) was updated accordingly and attempts to invoke runWithBytes. However, the officially published contract artifacts bundle ([artifacts-v1-fffcbb0e…](https://storage.googleapis.com/oplabs-contract-artifacts/artifacts-v1-fffcbb0ebf7f83311791534a41e65ef90df47797f9ca8f86941452f597f7128c.tar.gz)) that ships with the devnet tooling still contains an ABI where `DeployImplementations.run(address _dii, address _dio)` is the only entry point; `runWithBytes` is absent. As a result, `op-deployer` fails to load the script at runtime with the error “ABI has 2 arguments, Go has 1”, making L2 contract deployment impossible when using the latest `op-deployer` image together with the published artifacts.\n\n**Steps to Reproduce**\n\n1. Save `network-config.yaml` attached below\n2. Run the devnet bootstrap so that op-deployer apply is executed using the [latest optimism-package](https://github.com/ethpandaops/optimism-package/commit/7bef190d7c0b9f619438ed08b17bd5e5f51e72ff)\n```\nkurtosis run --enclave op-devnet github.com/ethpandaops/optimism-package@7bef190d7c0b9f619438ed08b17bd5e5f51e72ff  --args-file network-config.yaml\n```\n3. Observe the failure during “Apply L2 contract deployments”; the stdout ends with:\n```\nApplication failed: failed to load OPCM script: failed to load DeployImplementations script: script DeployImplementations does not have a method run that accepts an argument of type opcm.DeployImplementationsInput: ABI arguments don't match Go types: ABI has 2 arguments, Go has 1\n```\n\n**Expected behavior**\n\nOptimism dev-net is launched successfully.\n\nThe published artifacts for `op-deployer v0.5.0-rc.2` should include a `DeployImplementations` ABI that exposes `runWithBytes(bytes)`, matching the Go caller introduced in this release. With a matching ABI, `op-deployer apply` should complete successfully.\n\n**Environment Information:**\n\n* Operating System: macOS 14.6 (Darwin 24.6.0)\n* Package Version: op-deployer:v0.5.0-rc.2\n* Optimism package: commit 7bef190d7c0b9f619438ed08b17bd5e5f51e72ff\n* Published artifact bundle: artifacts-v1-fffcbb0ebf7f83311791534a41e65ef90df47797f9ca8f86941452f597f7128c.tar.gz (commit `d44bbea2407f4308f9fda20cf776bcb6dff7ff08` recorded inside the bundle)\n\n**Configurations:**\n\nnetwork-config.yaml:\n\nWhat matters most in this context is `op_contract_deployer_params`.\n\n* image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-deployer:v0.5.0-rc.2\n* l1_artifacts_locator / l2_artifacts_locator: https://storage.googleapis.com/oplabs-contract-artifacts/artifacts-v1-fffcbb0ebf7f83311791534a41e65ef90df47797f9ca8f86941452f597f7128c.tar.gz\n* No custom flags beyond the defaults in optimism-package for the devnet.\n\n```\n# https://docs.optimism.io/chain/testing/dev-node#configure-your-network\noptimism_package:\n  observability:\n    # Whether to configure observability (e.g. prometheus)\n    enabled: true\n    # Whether to enable features exclusive to the K8s backend (ie log collection)\n    enable_k8s_features: false\n    # Default prometheus configuration\n    prometheus_params:\n      storage_tsdb_retention_time: \"1d\"\n      storage_tsdb_retention_size: \"512MB\"\n      # Resource management for prometheus container\n      # CPU is milicores\n      # RAM is in MB\n      min_cpu: 10\n      max_cpu: 1000\n      min_mem: 128\n      max_mem: 2048\n      # Prometheus docker image to use\n      # Defaults to the latest image\n      image: \"prom/prometheus:v3.1.0\"\n\n  # AltDA Deploy Configuration, which is passed to op-deployer.\n  #\n  # For simplicity we currently enforce chains to all be altda or all rollups.\n  # Adding a single altda chain to a cluster essentially makes all chains have altda levels of security.\n  #\n  # To setup an altda cluster, make sure to\n  # 1. Set altda_deploy_config.use_altda to true (and da_commitment_type to KeccakCommitment)\n  # 2. For each chain,\n  #    - Add \"da_server\" to the additional_services list if it should use alt-da\n  #    - For altda chains, set da_server_params to use an image and cmd of your choice (one could use da-server, another eigenda-proxy, another celestia proxy, etc). If unset, op's default da-server image will be used.\n  altda_deploy_config:\n    use_altda: false\n    # DAChallengeContract, and hence is equivalent to setting use_altda to false.\n    # Furthermore, altda rollups using generic commitments might anyways need to support failing over\n    # to keccak commitments if the altda layer is down.\n    da_commitment_type: KeccakCommitment\n    da_challenge_window: 100\n    da_resolve_window: 100\n    da_bond_size: 0\n    da_resolver_refund_percentage: 0\n\n  # An array of L2 networks to run\n  chains:\n    op-rollup-l2:\n      participants:\n        sequencer-1:\n          el:\n            image: \"us-docker.pkg.dev/oplabs-tools-artifacts/images/op-geth:v1.101603.4\"\n          cl:\n            image: \"us-docker.pkg.dev/oplabs-tools-artifacts/images/op-node:v1.16.1\"\n      network_params:\n        network_id: 12345\n        holocene_time_offset: 0\n      batcher_params:\n        image: \"us-docker.pkg.dev/oplabs-tools-artifacts/images/op-batcher:v1.16.2\"\n      proposer_params:\n        image: \"us-docker.pkg.dev/oplabs-tools-artifacts/images/op-proposer:v1.9.5\"\n\n  # L2 contract deployer configuration - used for all L2 networks.\n  # The docker image that should be used for the L2 contract deployer.\n  # Locators can be http(s) URLs.\n  op_contract_deployer_params:\n    image: us-docker.pkg.dev/oplabs-tools-artifacts/images/op-deployer:v0.5.0-rc.2\n    l1_artifacts_locator: https://storage.googleapis.com/oplabs-contract-artifacts/artifacts-v1-fffcbb0ebf7f83311791534a41e65ef90df47797f9ca8f86941452f597f7128c.tar.gz\n    l2_artifacts_locator: https://storage.googleapis.com/oplabs-contract-artifacts/artifacts-v1-fffcbb0ebf7f83311791534a41e65ef90df47797f9ca8f86941452f597f7128c.tar.gz\n\n  # The global log level that all clients should log at\n  # Valid values are \"error\", \"warn\", \"info\", \"debug\", and \"trace\"\n  # This value will be overridden by participant-specific values\n  global_log_level: \"info\"\n\n  # Whether the environment should be persistent; this is WIP and is slowly being rolled out across services\n  # Defaults to false\n  persistent: false\n\nethereum_package:\n  participants:\n    - el_type: geth\n      el_image: ethereum/client-go:v1.16.7\n      cl_type: lighthouse\n      cl_image: sigp/lighthouse:v8.0.0\n      vc_type: lighthouse\n      vc_image: sigp/lighthouse:v8.0.0\n  network_params:\n    preset: minimal\n    genesis_delay: 5\n    additional_preloaded_contracts: '\n      {\n        \"0x4e59b44847b379578588920cA78FbF26c0B4956C\": {\n          \"balance\": \"0ETH\",\n          \"code\": \"0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3\",\n          \"storage\": {},\n          \"nonce\": \"1\"\n        },\n        \"0x5c18e203f0f39282e731e0115b83d341f9ec3e0a\": {\n          \"balance\": \"100000ETH\",\n          \"code\": \"0x\",\n          \"storage\": {},\n          \"nonce\": \"0\"\n        }\n      }\n    '\n  port_publisher:\n    nat_exit_ip: KURTOSIS_IP_ADDR_PLACEHOLDER\n    el:\n      enabled: true\n      public_port_start: 40500\n```\n\n**Logs:**\n\n```\nt=2025-11-07T23:03:07+0000 lvl=info msg=\"Initialized path database\" readonly=true triecache=\"0.00 B\" statecache=\"0.00 B\" buffer=\"0.00 B\" history=\"entire chain\"\nApplication failed: failed to load OPCM script: failed to load DeployImplementations script: script DeployImplementations does not have a method run that accepts an argument of type opcm.DeployImplementationsInput: ABI arguments don't match Go types: ABI has 2 arguments, Go has 1\n```\n\n**Additional context**\n\n* The Go caller introduced in `op-deployer/pkg/deployer/opcm/implementations.go` now expects to call runWithBytes(bytes):\n```\n func NewDeployImplementationsForgeCaller(client *forge.Client) forge.ScriptCaller[DeployImplementationsInput, DeployImplementationsOutput] {\n      return forge.NewScriptCaller(\n          client,\n          \"scripts/deploy/DeployImplementations.s.sol:DeployImplementations\",\n          \"runWithBytes(bytes)\",\n          &forge.BytesScriptEncoder[DeployImplementationsInput]{TypeName: \"DeployImplementationsInput\"},\n          &forge.BytesScriptDecoder[DeployImplementationsOutput]{TypeName: \"DeployImplementationsOutput\"},\n      )\n  }\n```\n* The `forge-artifacts/DeployImplementations.s.sol/DeployImplementations.json` included in `artifacts-v1-fffcbb0e…` still exposes only:\n```\n  {\n    \"type\": \"function\",\n    \"name\": \"run\",\n    \"inputs\": [\n      { \"name\": \"_dii\", \"type\": \"address\" },\n      { \"name\": \"_dio\", \"type\": \"address\" }\n    ],\n    \"outputs\": [],\n    \"stateMutability\": \"nonpayable\"\n  }\n```\nwhile lacking any runWithBytes entry.\n* The artifact bundle records commit `d44bbea2407f4308f9fda20cf776bcb6dff7ff08`, which predates the `runWithBytes` update. To unblock deployments, a new artifact bundle built from `op-contracts v5.0.0-rc.2` (where `runWithBytes` is implemented) needs to be published and referenced by the default URLs.\n\n",
+      "createdAt": "2025-11-08T06:50:21Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM6yTwb8",
+      "title": "Add DeployFeesDepositor script",
+      "author": "maurelian",
+      "number": 18223,
+      "body": "**Description**\r\n\r\nAdds a script for deploying the `FeesDepositor`. This script follows the pattern of other existing 'one off' deployment scripts (ie. `DeployMips2.s.sol`) as well as the tests of those scripts. \r\n\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2025-11-08T15:20:01Z",
+      "mergedAt": null,
+      "additions": 269,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 12
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "its-everdred",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1020682?u=ef69e13586ebc33960d4aa1bf7ef3938bebd59a3&v=4",
+      "totalScore": 34.6327738965761,
+      "prScore": 34.6327738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 15.246421958998376,
+      "prScore": 15.246421958998376,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sara554-beep",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/57232642?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "AmadiMichael",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97467680?u=0f7a396ff96c3f3515f0fe6dc535088847af019f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "gologo13",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/163405?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 0,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 5
+}
