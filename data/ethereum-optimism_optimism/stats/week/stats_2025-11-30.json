@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2025-11-30 to 2025-12-07, ethereum-optimism/optimism had 59 new PRs (41 merged), 29 new issues, and 64 active contributors.",
+  "overview": "From 2025-11-30 to 2025-12-07, ethereum-optimism/optimism had 64 new PRs (44 merged), 29 new issues, and 65 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM7blDli",
@@ -15,6 +15,30 @@
       "repository": "ethereum-optimism/optimism",
       "body": "**Description**\nWhen `op-node` is configured with `--syncmode=execution-layer` and is restarted after having already synced with reth, it gets stuck in an initialization loop, continuously reporting `el_syncing=true` and refusing to send `ForkchoiceUpdate` requests to the execution engine.\n\n**Environment**\nop-node version: v1.16.2\nExecution client: reth, v1.9.3\nSync mode: `--syncmode=execution-layer`\n\n**Expected Behavior**\nWhen `op-node` restarts and `reth` already has synced data (e.g., block 8594953), `op-node` should:\nQuery `reth`'s current state via `engine_forkchoiceUpdatedV3`\nRecognize that `reth` is already synced (not actually syncing)\nResume normal operation (CL sync mode or continue from current state)\n\n**Actual Behavior**\nAfter restart, `op-node`:\n1. Enters `syncStatusWillStartEL` state because `--syncmode=execution-layer` is configured\n2. Reports `el_syncing=true` indefinitely\n3. Never sends `ForkchoiceUpdate` to `reth`\n4. Logs show:\n```\nt=2025-12-02T03:46:26.595+0000 lvl=debug msg=\"Sync process step\" unsafe=0 safe=0 el_syncing=true\nt=2025-12-02T03:46:26.595+0000 lvl=warn msg=\"Rollup driver is backing off because execution engine is syncing\" unsafe_head=0 unsafe_hash=0x0000000000000000000000000000000000000000000000000000000000000000\n```\n5. Meanwhile, `reth` is fully operational with synced data:\n```\nWARN Beacon client online, but no consensus updates received for a while. This may be because of a reth error, or an error in the beacon client! Please investigate reth and beacon client logs! period=135.344793103s\n```\n\nRoot Cause Analysis\nIn `engine_controller.go`:\n```\nfunc NewEngineController(...) *EngineController {\n    syncStatus := syncStatusCL\n    if syncCfg.SyncMode == sync.ELSync {\n        syncStatus = syncStatusWillStartEL  // <-- Gets stuck here on restart\n    }\n    // ...\n}\n\nfunc (e *EngineController) isEngineInitialELSyncing() bool {\n    return e.syncStatus == syncStatusWillStartEL ||\n           e.syncStatus == syncStatusStartedEL ||\n           e.syncStatus == syncStatusFinishedELButNotFinalized\n}\n```\nThe issue is that `syncStatus` is always initialized to `syncStatusWillStartEL` when `--syncmode=execution-layer` is configured, regardless of whether the execution client already has synced data.\n\n**Reproduction Steps**\n1. Start op-node with --syncmode=execution-layer and reth\n2. Wait until synced to a reasonable height (e.g., block 8594974)\n3. Restart op-node (while reth keeps running or restart both)\n4. Observe that op-node gets stuck with el_syncing=true\n\n**Suggested Fix**\nWhen op-node starts in EL sync mode, it should first query the execution client's current state:\n```\nfunc NewEngineController(...) *EngineController {\n    syncStatus := syncStatusCL\n    if syncCfg.SyncMode == sync.ELSync {\n        // Query execution client's current finalized/safe/unsafe heads\n        // If execution client already has finalized blocks, skip to syncStatusFinishedEL\n        // Otherwise, start EL sync as normal\n        syncStatus = syncStatusWillStartEL\n    }\n    // ...\n}\n```\nAlternatively, during the first `tryUpdateEngine` call, check if the execution client responds with `VALID` for its current head, indicating it's already synced.\n\n**Impact**\n\n- Severity: High\n- Affected users: Anyone using --syncmode=execution-layer with a persistent execution client\n- Service impact: Complete node stall after restart, requiring manual configuration change to recover\n",
       "createdAt": "2025-12-02T04:02:31Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM7b-1iI",
+      "title": "create a new op-spammer component for deployment in devnets",
+      "author": "geoknee",
+      "number": 18482,
+      "repository": "ethereum-optimism/optimism",
+      "body": "For v0, this would be a simple service which can be configured with a private key and ethereum RPC endpoint, and periodically sends any kind of user transaction to that endpoint. \n\nThis would help catch bugs on devnets which are all-too-often completely devoid of any kind of user traffic. This obscures problems and delays the discovery of bugs until we hit production networks. \n\nThis would be a good candidate to be written in Rust for any beginner Rustacean looking for a small task to onboard with. \n\nExtensions for a v1:\n* cycles through all transaction _types_ (setCode, legacy, ...)\n* fuzzes the `calldata`, `to`, `amount` fields\n* maintains a high load of transactions, enough to fill blocks to 50%, 100%\n* optimizes for recovering funds / not needing constant topups\n* can be controlled over an RPC\n* can be configured to send \"spam\" (calldata heavy transactions) or compute-heavy transactions (it could CREATE2 deploy a contract which allows for heavy compute and send transactions there). ",
+      "createdAt": "2025-12-03T15:19:13Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM7caRrz",
+      "title": "Update op-node v1.16.3. EL node can’t synchronize",
+      "author": "J1a-wei",
+      "number": 18510,
+      "repository": "ethereum-optimism/optimism",
+      "body": "We run Optimism, Base, and Worldchain using op-geth and op-node. Today we upgraded op-node from v1.16.2 to v1.16.3, and now all three op-stack deployments can’t synchronize—the logs all show the same issue. \n\n```\n2025-12-05T15:53:59.448752163+08:00 t=2025-12-05T07:53:59+0000 lvl=info msg=\"Walking back L1Block by hash\" curr=0x1778fbe67edaff50fd66937a1bc84001a30675fbb49b2f9d1715534c34c684f9:23941450 next=0xc67cfd13b7484bc173f3deb0d85f9d64c0d7a1ebeaca1163572c60b43c313e66:23941449 l2block=0xace3b44d8317456b0220f81608117215ee74152a05bdfce00c64fdecd235f5c1:144637148\n\n```",
+      "createdAt": "2025-12-05T07:55:16Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 2
@@ -40,30 +64,6 @@
       "body": "Introduce a new \"trace type\" (I regret not calling that game type now...) for ZK games. It should call the challenge method if it disagrees with the proposed output root and the game hasn't already been challenged.\n\nIt does not need to generate proofs or respond to challenges as part of this issue.",
       "createdAt": "2025-11-18T21:23:37Z",
       "closedAt": "2025-12-03T20:21:02Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM7Y9xoZ",
-      "title": "SPIKE: Investigate which service should generate ZK proofs",
-      "author": "ajsutton",
-      "number": 18319,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Output is a P/PS deciding where the ZK proof required for challenged proposals is generated. The known options are:\n* Existing op-proposer (need to add proving)\n* Proposer from op-succinct (potentially need to implement features from op-proposer and manage migration)\n* op-challenger\n\nA key input to this question is how easy it is to generate proofs from Go code vs Rust code. We should consider both Succinct's prover and RiscZero's given we intend to support both in the future.",
-      "createdAt": "2025-11-18T21:14:35Z",
-      "closedAt": "2025-12-03T02:54:02Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM7a73pr",
-      "title": "challenger: Improve test coverage",
-      "author": "pauldowman",
-      "number": 18427,
-      "repository": "ethereum-optimism/optimism",
-      "body": "",
-      "createdAt": "2025-11-27T22:13:20Z",
-      "closedAt": "2025-12-03T02:52:15Z",
       "state": "CLOSED",
       "commentCount": 1
     }
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 13869,
-    "deletions": 4833,
-    "files": 328,
-    "commitCount": 391
+    "additions": 13890,
+    "deletions": 4838,
+    "files": 329,
+    "commitCount": 399
   },
   "completedItems": [
     {
@@ -893,6 +893,34 @@
         "op-service/sources/l1_beacon_client.go",
         "op-service/sources/l1_beacon_client_test.go"
       ]
+    },
+    {
+      "title": "chore(op-acceptance-tests): op-acceptor v3.8.0",
+      "prNumber": 18530,
+      "type": "tests",
+      "body": "Updates op-acceptor to [v3.8.0](https://github.com/ethereum-optimism/infra/releases/tag/op-acceptor%2Fv3.8.0)",
+      "files": [
+        "mise.toml",
+        "op-acceptance-tests/justfile"
+      ]
+    },
+    {
+      "title": "chore(op-acceptance-tests): delete very old logs",
+      "prNumber": 18529,
+      "type": "tests",
+      "body": "Deletes acceptance-testing log dirs older than 60 days, to prevent the disk from running out of space.\n",
+      "files": [
+        ".circleci/config.yml"
+      ]
+    },
+    {
+      "title": "fix: Full checkout for FFI build",
+      "prNumber": 18527,
+      "type": "bugfix",
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\nthe FFI build fails with blobless checkouts, this reintroduces `full` checkout for affected builds",
+      "files": [
+        ".circleci/config.yml"
+      ]
     }
   ],
   "topContributors": [
@@ -967,6 +995,16 @@
       "summary": null
     },
     {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 124.72615575221386,
+      "prScore": 70.22615575221386,
+      "issueScore": 0,
+      "reviewScore": 54.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
       "totalScore": 118.15903511543782,
@@ -997,13 +1035,13 @@
       "summary": null
     },
     {
-      "username": "serpixel",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
-      "totalScore": 104.72615575221386,
-      "prScore": 70.22615575221386,
+      "username": "scharissis",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/376382?u=21da38bcf55ef6712398ef67e8c7d96096c4a045&v=4",
+      "totalScore": 102.0461761026843,
+      "prScore": 101.7061761026843,
       "issueScore": 0,
-      "reviewScore": 34.5,
-      "commentScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -1049,10 +1087,10 @@
     {
       "username": "almanax-ai",
       "avatarUrl": "https://avatars.githubusercontent.com/in/934833?v=4",
-      "totalScore": 63,
+      "totalScore": 67.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 63,
+      "reviewScore": 67.5,
       "commentScore": 0,
       "summary": null
     },
@@ -1063,6 +1101,16 @@
       "prScore": 40.93343326021392,
       "issueScore": 0,
       "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aliersh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/65925295?u=ca33e5aab17ee0622941543bbe9c34db4690216b&v=4",
+      "totalScore": 53.12480198316502,
+      "prScore": 53.12480198316502,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1117,12 +1165,12 @@
       "summary": null
     },
     {
-      "username": "aliersh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/65925295?u=ca33e5aab17ee0622941543bbe9c34db4690216b&v=4",
-      "totalScore": 46.004654802605074,
-      "prScore": 46.004654802605074,
+      "username": "janjakubnanista",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1451480?u=4b613ee7defd11d243d913e89ddc2309769e0c57&v=4",
+      "totalScore": 42.09159928635343,
+      "prScore": 37.09159928635343,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -1253,16 +1301,6 @@
       "prScore": 20.573784010874306,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "janjakubnanista",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1451480?u=4b613ee7defd11d243d913e89ddc2309769e0c57&v=4",
-      "totalScore": 20.42564421182577,
-      "prScore": 15.425644211825771,
-      "issueScore": 0,
-      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -1447,13 +1485,13 @@
       "summary": null
     },
     {
-      "username": "scharissis",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/376382?u=21da38bcf55ef6712398ef67e8c7d96096c4a045&v=4",
-      "totalScore": 5.039720770839918,
-      "prScore": 5.039720770839918,
+      "username": "DenseDenise",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/174255385?v=4",
+      "totalScore": 5.88361228866811,
+      "prScore": 5.68361228866811,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1547,6 +1585,16 @@
       "summary": null
     },
     {
+      "username": "MaryAndMoore",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/174786779?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ryan-the-alien",
       "avatarUrl": "https://avatars.githubusercontent.com/u/97949506?u=875e0488914088fa9351127218761e308578c93d&v=4",
       "totalScore": 0.2,
@@ -1567,9 +1615,9 @@
       "summary": null
     }
   ],
-  "newPRs": 59,
-  "mergedPRs": 41,
+  "newPRs": 64,
+  "mergedPRs": 44,
   "newIssues": 29,
   "closedIssues": 16,
-  "activeContributors": 64
+  "activeContributors": 65
 }
