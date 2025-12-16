@@ -26,32 +26,56 @@ function stripMarkdown(text: string): string {
 }
 
 export async function GET() {
-  const summaries = await db
-    .select()
-    .from(overallSummaries)
-    .where(eq(overallSummaries.intervalType, "day"))
-    .orderBy(desc(overallSummaries.date))
-    .limit(20);
+  const [dailySummaries, weeklySummaries, monthlySummaries] = await Promise.all(
+    [
+      db
+        .select()
+        .from(overallSummaries)
+        .where(eq(overallSummaries.intervalType, "day"))
+        .orderBy(desc(overallSummaries.date))
+        .limit(30),
+      db
+        .select()
+        .from(overallSummaries)
+        .where(eq(overallSummaries.intervalType, "week"))
+        .orderBy(desc(overallSummaries.date))
+        .limit(4),
+      db
+        .select()
+        .from(overallSummaries)
+        .where(eq(overallSummaries.intervalType, "month"))
+        .orderBy(desc(overallSummaries.date))
+        .limit(1),
+    ],
+  );
 
   const siteUrl = process.env.SITE_URL;
   const title = "Contributor Analytics";
 
-  const items = summaries
-    .map((summary) => {
-      const description = summary.summary
-        ? stripMarkdown(summary.summary).slice(0, 500)
-        : "Daily contributor activity summary";
+  const formatItem = (
+    summary: (typeof dailySummaries)[number],
+    intervalType: string,
+    labelPrefix: string,
+  ) => {
+    const description = summary.summary
+      ? stripMarkdown(summary.summary).slice(0, 500)
+      : `${labelPrefix} contributor activity summary`;
 
-      return `
+    return `
     <item>
-      <title>Daily Summary: ${summary.date}</title>
-      <link>${siteUrl}/summary/day/${summary.date}</link>
-      <guid isPermaLink="true">${siteUrl}/summary/day/${summary.date}</guid>
+      <title>${labelPrefix}: ${summary.date}</title>
+      <link>${siteUrl}/summary/${intervalType}/${summary.date}</link>
+      <guid isPermaLink="true">${siteUrl}/summary/${intervalType}/${summary.date}</guid>
       <pubDate>${new Date(summary.date).toUTCString()}</pubDate>
       <description>${escapeXml(description)}${description.length >= 500 ? "..." : ""}</description>
     </item>`;
-    })
-    .join("");
+  };
+
+  const items = [
+    ...monthlySummaries.map((s) => formatItem(s, "month", "Monthly Summary")),
+    ...weeklySummaries.map((s) => formatItem(s, "week", "Weekly Summary")),
+    ...dailySummaries.map((s) => formatItem(s, "day", "Daily Summary")),
+  ].join("");
 
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
