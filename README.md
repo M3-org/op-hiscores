@@ -362,6 +362,39 @@ This architecture ensures:
 
 ## Deploying Your Own Instance
 
+### Fork Configuration
+
+Pipeline config is loaded from a JSON file specified by `PIPELINE_CONFIG_FILE`. This allows GitHub's "Sync fork" button to work without conflicts.
+
+**Option 1: Create your own config file (recommended)**
+
+```bash
+# Create your config based on the template
+cp config/example.json config/myorg.json
+# Edit config/myorg.json with your repositories, project context, scoring, etc.
+```
+
+Then set the `PIPELINE_CONFIG_FILE` secret in your repository:
+
+- Go to Settings → Secrets and variables → Actions
+- Add secret: `PIPELINE_CONFIG_FILE` = `config/myorg.json`
+
+**Option 2: Edit workflow files directly**
+
+Change `PIPELINE_CONFIG_FILE` in the workflow files:
+
+- `.github/workflows/run-pipelines.yml`
+- `.github/workflows/deploy.yml`
+
+Note: This will cause minor merge conflicts when syncing with upstream.
+
+**Config files:**
+
+| File                        | Purpose                      |
+| --------------------------- | ---------------------------- |
+| `config/example.json`       | Default template config      |
+| `config/pipeline.config.ts` | Config loader (don't modify) |
+
 ### GitHub Pages Configuration
 
 This project is configured to deploy to GitHub Pages with **automatic base path detection**. The deploy workflow automatically determines whether your repo is:
@@ -380,6 +413,7 @@ If you fork this repository:
 2. **Add Required Secrets** (Settings → Secrets and variables → Actions):
 
    - `OPENROUTER_API_KEY` - Required for AI summary generation
+   - `PIPELINE_CONFIG_FILE` - Path to your config (e.g., `config/myorg.json`)
    - `NEXT_PUBLIC_GITHUB_CLIENT_ID` - Optional, for wallet linking
    - `NEXT_PUBLIC_AUTH_WORKER_URL` - Optional, for wallet linking
 
@@ -391,6 +425,12 @@ If you fork this repository:
 
 4. **Access Your Site**:
    - After successful deployment: `https://your-username.github.io/your-repo-name/`
+
+**Optional environment variables** (auto-detected if not set):
+
+- `SITE_NAME` - Display name (used in navigation, RSS feed)
+- `SITE_URL` - Site URL (auto-detected for GitHub Pages)
+- `BASE_PATH` - Base path for routing (auto-detected from repo name)
 
 ### Deployment Architecture
 
