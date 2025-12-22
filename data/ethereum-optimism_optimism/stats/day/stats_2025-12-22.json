@@ -1,0 +1,387 @@
+{
+  "interval": {
+    "intervalStart": "2025-12-22T00:00:00.000Z",
+    "intervalEnd": "2025-12-23T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2025-12-22 to 2025-12-23, ethereum-optimism/optimism had 11 new PRs (1 merged), 7 new issues, and 26 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7Y2Zgl",
+      "title": "[M2] op-node: Light CL:  Follow External Source",
+      "author": "pcw109550",
+      "number": 18317,
+      "repository": "ethereum-optimism/optimism",
+      "body": "- Goal: Implement external following for safe/finalized data using `--l2.follow.source` flag\n- Definition of Done:\n    - op-node supports `--l2.follow.source` to mirror external safe/finalized feeds.\n    - Node reaches the safe/finalized tips as provided by the external source.\n    - Acceptance tests: Using sync-tester with op-sepolia.\n    - Deployment: Verifier and Sequencer on devnet with derivation disabled, following mirrored safe/finalized data.",
+      "createdAt": "2025-11-18T13:08:16Z",
+      "closedAt": "2025-12-22T10:10:01Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7f2ATd",
+      "title": "op-contracts: Blueprint Deployment Boundary Bug",
+      "author": "Bidon15",
+      "number": 18685,
+      "repository": "ethereum-optimism/optimism",
+      "body": "OP Stack contract deployment fails on **any fresh EVM environment** (local development, custom chains) due to issues around the 24KB contract size limit. This bug is hidden on Ethereum Mainnet and Sepolia because contracts are pre-deployed there.\n\n### Two Related Failure Modes\n\n| Scenario                                              | Contract Size | Error                                           | Cause                                                |\n| ----------------------------------------------------- | ------------- | ----------------------------------------------- | ---------------------------------------------------- |\n| **Default v5.0.0 settings** (`optimizer_runs = 5000`) | > 24KB        | `max code size exceeded` → `DeploymentFailed()` | Contracts too large for EVM                          |\n| **Aggressive optimization** (`optimizer_runs = 200`)  | < 24KB        | `NotABlueprint()`                               | Single blueprint, `target2 = address(0)` not handled |\n\n### The Catch-22\n\nWhen a developer encounters `max code size exceeded`, the natural response is to lower `optimizer_runs`. This shrinks contracts below 24KB, requiring only 1 blueprint, which then triggers `NotABlueprint()` because `target2 = address(0)` is not handled. Developers are trapped between two bugs regardless of optimization settings.\n\n---\n\n## Affected Environments\n\n| Environment             | State        | Bug Triggered?       |\n| ----------------------- | ------------ | -------------------- |\n| Anvil / Hardhat / Fresh | Empty/Fresh  | **Yes** - Always     |\n| Ethereum Mainnet        | Pre-deployed | No (reuses existing) |\n| Sepolia                 | Pre-deployed | No (reuses existing) |\n\n---\n\n## Root Cause\n\n**File:** `packages/contracts-bedrock/src/libraries/Blueprint.sol`\n\nThe `deployFrom` function unconditionally parses `_target2` as a blueprint, even when it's `address(0)`:\n\n```solidity\nfunction deployFrom(address _target1, address _target2, bytes32 _salt, bytes memory _data)\n    internal returns (address newContract_)\n{\n    Preamble memory preamble1 = parseBlueprintPreamble(address(_target1).code);\n    // ...validation...\n\n    // BUG: No check if _target2 == address(0)\n    // When contract fits in 1 blueprint, _target2 is address(0)\n    // address(0).code returns empty bytes → reverts with NotABlueprint()\n    Preamble memory preamble2 = parseBlueprintPreamble(address(_target2).code);  // FAILS\n    // ...\n}\n```\n\n### Why Hidden on Mainnet/Sepolia\n\n```solidity\nif (preComputedAddress.code.length > 0) {\n    return preComputedAddress;  // Skip deployment → bug never triggered\n}\ndeployFromBlueprint(...);  // Only reaches here on fresh chains → BUG\n```\n\n---\n\n## Steps to Reproduce\n\n### Prerequisites\n\n- Go 1.21+, Foundry, Git\n\n### Quick Steps\n\n```bash\n# 1. Clone and build\ngit clone https://github.com/ethereum-optimism/optimism.git && cd optimism\ngit checkout op-contracts/v5.0.0 && git submodule update --init --recursive\ncd packages/contracts-bedrock && forge build\n\n# 2. Build op-deployer\ncd ../../op-deployer && go build -o /tmp/op-deployer ./cmd/op-deployer\n\n# 3. Start Anvil\nanvil --host 0.0.0.0 --port 8545 --accounts 10 --balance 10000 --chain-id 31337\n\n# 4. Initialize deployment\nmkdir -p /tmp/anvil-deploy\n/tmp/op-deployer init --l1-chain-id 31337 --l2-chain-ids 42069 --intent-type custom --workdir /tmp/anvil-deploy\n```\n\n### Configure intent.toml\n\n```toml\nconfigType = \"custom\"\nl1ChainID = 31337\nfundDevAccounts = true\n\n# Use file:// locator pointing to built artifacts (bypasses embedded)\nl1ContractsLocator = \"file:///path/to/optimism/packages/contracts-bedrock/forge-artifacts\"\nl2ContractsLocator = \"file:///path/to/optimism/packages/contracts-bedrock/forge-artifacts\"\n\n[superchainRoles]\n  SuperchainProxyAdminOwner = \"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"\n  SuperchainGuardian = \"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"\n  ProtocolVersionsOwner = \"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"\n  Challenger = \"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"\n\n[[chains]]\n  id = \"0x000000000000000000000000000000000000000000000000000000000000a455\"\n  baseFeeVaultRecipient = \"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"\n  l1FeeVaultRecipient = \"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"\n  sequencerFeeVaultRecipient = \"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\"\n  eip1559DenominatorCanyon = 250\n  eip1559Denominator = 50\n  eip1559Elasticity = 6\n  gasLimit = 60000000\n  [chains.roles]\n    l1ProxyAdminOwner = \"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"\n    l2ProxyAdminOwner = \"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"\n    systemConfigOwner = \"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"\n    unsafeBlockSigner = \"0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC\"\n    batcher = \"0x90F79bf6EB2c4f870365E785982E1f101E93b906\"\n    proposer = \"0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65\"\n    challenger = \"0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc\"\n```\n\n### Run and Observe Error\n\n```bash\n/tmp/op-deployer apply \\\n  --l1-rpc-url http://127.0.0.1:8545 \\\n  --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \\\n  --workdir /tmp/anvil-deploy \\\n  --deployment-target live\n```\n\n**Error output:**\n\n```\nlvl=warn msg=Revert err=\"max code size exceeded\"\nlvl=warn msg=Revert label=OPContractsManagerDeployerImpl err=\"execution reverted\" revertData=0x30116425\npanic: revision id 103 cannot be reverted\n```\n\n---\n\n## Reproduction Results\n\n| Contract                   | Size   | Margin  | Blueprints |\n| -------------------------- | ------ | ------- | ---------- |\n| FaultDisputeGame           | 25.9KB | -1.4KB  | 2 needed   |\n| PermissionedDisputeGame    | 26.6KB | -2.0KB  | 2 needed   |\n| OPContractsManager         | 11.4KB | +13.2KB | 1 needed   |\n| OPContractsManagerDeployer | 18.5KB | +6.1KB  | 1 needed   |\n\n**Error chain:** `max code size exceeded` → `DeploymentFailed()` → `panic: revision id 103 cannot be reverted`\n\n---\n\n## Impact\n\n| Metric             | Value                                             |\n| ------------------ | ------------------------------------------------- |\n| **Severity**       | High                                              |\n| **Affected Users** | All local development, all custom EVM deployments |\n| **Workaround**     | None                                              |\n\n**Blocked:** Local dev (Anvil), custom chains, CI/CD pipelines, fresh testnet deployments.\n\n---\n\n## Related Files\n\n- `packages/contracts-bedrock/src/libraries/Blueprint.sol`\n- `packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol`\n- `packages/contracts-bedrock/src/L1/OPContractsManager.sol`\n\n---\n\n## Version Information\n\n- **op-deployer:** v0.5.2\n- **op-contracts:** v5.0.0\n",
+      "createdAt": "2025-12-22T22:52:55Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7fuxGR",
+      "title": "kona: Check L2 reorg due to L1 reorg",
+      "author": "pcw109550",
+      "number": 18676,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Found while attempting to run monorepo acceptance tests targeting kona-node.\n\nL1 origin selection is done at https://github.com/op-rs/kona/blob/fe6dfcf771059109f1d75043d5ecbbfa3b6ca1a5/crates/node/service/src/actors/sequencer/actor.rs#L214 while block building at kona.\n\nKona seems to fail detecting L1 reorg while unsafe block building, and also not resetting(reorging). This case was supposed to be covered at kona's acceptance test at `l2_reorg_after_l1_reorgs_test.go`, `TestL2ReorgAfterL1Reorg` test but due to https://github.com/ethereum-optimism/optimism/issues/18675 the test preset was running op-node sequencer instead of kona-node sequencer so this L1 reorg case was not covered.\n\nManually created temp test at https://github.com/ethereum-optimism/optimism/tree/pcw109550/temp-kona-unsafe-head-l1-reorg. We may compare the logs between targeting op-node or kona-node.\n\n#### op-node\n\nop-node correctly triggers L2 reorg due to L1 reorg, correcting L1 origin of unsafe heads.\n\nop-node:\n```sh\ncd op-acceptance-tests/tests/sync/unsafe_reorg\ngo test ./... -run ^TestKona_ReorgRecovery$   -count=1 -v   > t-op-node.log\n```\n\nExample logs:\n```\n    sync_test.go:46:            INFO [12-22|19:39:25.137] Target L2 Block to reorg                 l2=c4867a..e28da7:12 l1_origin=a40ad0..b5badb:4\n    sync_test.go:52:            INFO [12-22|19:39:57.167] Triggering L1 reorg                      l1=a40ad0..b5badb:4\n    sync_test.go:62:            INFO [12-22|19:39:57.174] Triggered L1 reorg                       l1=3793a3..d60e63:4\n    sync_test.go:89:            INFO [12-22|19:40:17.178] seq wowow                                bn=88d71d..fe758c:0 l1=210dff..303438:0\n    sync_test.go:89:            INFO [12-22|19:40:17.178] seq wowow                                bn=3345a4..45bef4:1 l1=210dff..303438:0\n    sync_test.go:89:            INFO [12-22|19:40:17.179] seq wowow                                bn=39bff2..ef0823:2 l1=210dff..303438:0\n    sync_test.go:89:            INFO [12-22|19:40:17.180] seq wowow                                bn=f8c2db..7a19dd:3 l1=210dff..303438:0\n    sync_test.go:89:            INFO [12-22|19:40:17.180] seq wowow                                bn=524a88..9e405b:4 l1=210dff..303438:0\n    sync_test.go:89:            INFO [12-22|19:40:17.181] seq wowow                                bn=8f92d8..13c014:5 l1=210dff..303438:0\n    sync_test.go:89:            INFO [12-22|19:40:17.182] seq wowow                                bn=698a4a..bb2b3e:6 l1=210dff..303438:0\n    sync_test.go:89:            INFO [12-22|19:40:17.182] seq wowow                                bn=dc22f3..1d42da:7 l1=9f74d0..821f45:1\n    sync_test.go:89:            INFO [12-22|19:40:17.183] seq wowow                                bn=7ac768..dcff83:8 l1=26f71e..6fbbc5:2\n    sync_test.go:89:            INFO [12-22|19:40:17.184] seq wowow                                bn=cf7626..408ed5:9 l1=7d972b..d8f257:3\n    sync_test.go:89:            INFO [12-22|19:40:17.184] seq wowow                                bn=c3a3fc..061536:10 l1=7d972b..d8f257:3\n    sync_test.go:89:            INFO [12-22|19:40:17.185] seq wowow                                bn=6ae593..f33173:11 l1=7d972b..d8f257:3\n    sync_test.go:89:            INFO [12-22|19:40:17.185] seq wowow                                bn=5e389f..b13379:12 l1=3793a3..d60e63:4\n    sync_test.go:89:            INFO [12-22|19:40:17.186] seq wowow                                bn=09de5d..d64aee:13 l1=3793a3..d60e63:4\n    sync_test.go:89:            INFO [12-22|19:40:17.186] seq wowow                                bn=5fc4d7..009dfa:14 l1=3793a3..d60e63:4\n    sync_test.go:89:            INFO [12-22|19:40:17.187] seq wowow                                bn=45975c..a7b541:15 l1=857df6..50d4d0:5\n    sync_test.go:89:            INFO [12-22|19:40:17.187] seq wowow                                bn=580222..603512:16 l1=857df6..50d4d0:5\n    sync_test.go:95:            INFO [12-22|19:40:17.198] l1 wowow                                 bn=210dff..303438:0\n    sync_test.go:95:            INFO [12-22|19:40:17.198] l1 wowow                                 bn=9f74d0..821f45:1\n    sync_test.go:95:            INFO [12-22|19:40:17.198] l1 wowow                                 bn=26f71e..6fbbc5:2\n    sync_test.go:95:            INFO [12-22|19:40:17.199] l1 wowow                                 bn=7d972b..d8f257:3\n    sync_test.go:95:            INFO [12-22|19:40:17.199] l1 wowow                                 bn=3793a3..d60e63:4\n    sync_test.go:95:            INFO [12-22|19:40:17.199] l1 wowow                                 bn=857df6..50d4d0:5\n```\n\n#### kona-node\n\nop-node fails to detec L1 reorg, never correcting L1 origin of unsafe heads.\n\nkona-node\n```sh\ncd op-acceptance-tests/tests/sync/unsafe_reorg\n# build kona-node\nDEVSTACK_L2CL_KIND=kona RUST_BINARY_PATH_KONA_NODE=/tmp/kona-node go test ./... -run ^TestKona_ReorgRecovery$   -count=1 -v   > t-kona-node.log\ngrep -E \"wow|Target L2 Block to reorg|Triggering L1 reorg|Triggered L1 reorg|Triggered L2 reorg\" t-kona-node.log\n```\n\nExample logs:\n```\n    sync_test.go:46:            INFO [12-22|19:51:38.227] Target L2 Block to reorg                 l2=485c4f..b8c75b:12 l1_origin=8f07ca..784b1e:4\n    sync_test.go:52:            INFO [12-22|19:52:10.309] Triggering L1 reorg                      l1=8f07ca..784b1e:4\n    sync_test.go:62:            INFO [12-22|19:52:10.314] Triggered L1 reorg                       l1=88a6d1..2c629d:4\n    sync_test.go:89:            INFO [12-22|19:52:30.317] seq wowow                                bn=566965..e73137:0 l1=788267..1cda25:0\n    sync_test.go:89:            INFO [12-22|19:52:30.317] seq wowow                                bn=37200c..ec8191:1 l1=788267..1cda25:0\n    sync_test.go:89:            INFO [12-22|19:52:30.317] seq wowow                                bn=c5cd36..356326:2 l1=788267..1cda25:0\n    sync_test.go:89:            INFO [12-22|19:52:30.318] seq wowow                                bn=f69467..3f6983:3 l1=788267..1cda25:0\n    sync_test.go:89:            INFO [12-22|19:52:30.318] seq wowow                                bn=ca91df..41bb5c:4 l1=788267..1cda25:0\n    sync_test.go:89:            INFO [12-22|19:52:30.318] seq wowow                                bn=6b604e..309cef:5 l1=788267..1cda25:0\n    sync_test.go:89:            INFO [12-22|19:52:30.318] seq wowow                                bn=993038..c3f10e:6 l1=788267..1cda25:0\n    sync_test.go:89:            INFO [12-22|19:52:30.319] seq wowow                                bn=fd1c74..c77f7b:7 l1=788267..1cda25:0\n    sync_test.go:89:            INFO [12-22|19:52:30.319] seq wowow                                bn=b62ee2..2b6538:8 l1=fbb460..efd863:1\n    sync_test.go:89:            INFO [12-22|19:52:30.319] seq wowow                                bn=0943fc..ed02d3:9 l1=a52333..b7862b:2\n    sync_test.go:89:            INFO [12-22|19:52:30.319] seq wowow                                bn=353776..5dc355:10 l1=79c6dc..d102d4:3\n    sync_test.go:89:            INFO [12-22|19:52:30.320] seq wowow                                bn=bc0d9f..a30718:11 l1=79c6dc..d102d4:3\n    sync_test.go:89:            INFO [12-22|19:52:30.320] seq wowow                                bn=485c4f..b8c75b:12 l1=8f07ca..784b1e:4\n    sync_test.go:89:            INFO [12-22|19:52:30.320] seq wowow                                bn=a3d6f1..6bbf9d:13 l1=8f07ca..784b1e:4\n    sync_test.go:89:            INFO [12-22|19:52:30.320] seq wowow                                bn=55f15a..c4fd4b:14 l1=8f07ca..784b1e:4\n    sync_test.go:89:            INFO [12-22|19:52:30.321] seq wowow                                bn=53f4ec..fe06f6:15 l1=9c33a7..2c079c:5\n    sync_test.go:95:            INFO [12-22|19:52:30.327] l1 wowow                                 bn=788267..1cda25:0\n    sync_test.go:95:            INFO [12-22|19:52:30.327] l1 wowow                                 bn=fbb460..efd863:1\n    sync_test.go:95:            INFO [12-22|19:52:30.327] l1 wowow                                 bn=a52333..b7862b:2\n    sync_test.go:95:            INFO [12-22|19:52:30.328] l1 wowow                                 bn=79c6dc..d102d4:3\n    sync_test.go:95:            INFO [12-22|19:52:30.328] l1 wowow                                 bn=88a6d1..2c629d:4\n```\n\n\n\n\n\n",
+      "createdAt": "2025-12-22T12:16:15Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7funhq",
+      "title": "kona|acceptance-tests: TestSequencerPreset does not support kona sequencer",
+      "author": "pcw109550",
+      "number": 18675,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Found while attempting to run monorepo acceptance tests targeting kona-node.\n\nAfter init test:\nhttps://github.com/op-rs/kona/blob/47b2f1c6ee1b340d65161c3a13160c8d070fec21/tests/node/reorgs/init_test.go\n\n```go\n\tl2Config := node_utils.ParseL2NodeConfigFromEnv()\n\n\tfmt.Printf(\"Running e2e reorg tests with Config: %d\\n\", l2Config)\n\n\tpresets.DoMain(m, node_utils.WithMixedWithTestSequencer(l2Config))\n```\n\nEven if \n```go\n\t\tKonaSequencerNodesWithGeth: 1,\n\t\tKonaSequencerNodesWithReth: 1,\n```\nare enabled, preset `WithMixedWithTestSequencer` does not use these field\n\nhttps://github.com/op-rs/kona/blob/47b2f1c6ee1b340d65161c3a13160c8d070fec21/tests/node/utils/test_sequencer_preset.go\n\nleading that the kona sequencer not spawning even if the preset is configured.\n\nAlso need to take a look at this logic:\n```go\nfunc WithMixedWithTestSequencer(l2Config L2NodeConfig) stack.CommonOption {\n\tif l2Config.OpSequencerNodesWithGeth == 0 && l2Config.OpSequencerNodesWithReth == 0 {\n\t\tl2Config.OpSequencerNodesWithGeth = 1\n\t}\n```\nSo the preset is intentionally not using op-node sequencer, it overrides to use the op-node as a sequencer.\n\nThis causes `simple-kona-sequencer` network not spawning kona sequencer. For example, you can run \n```\njust test-e2e-sysgo-run node node/reorgs \"simple-kona-sequencer\" TestL2ReorgAfterL1Reorg\n```\nand check sequencer logs. The logs detail show op-node sequencer is spawned, which was not intended.\n",
+      "createdAt": "2025-12-22T12:04:23Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7fucff",
+      "title": "kona|op-devstack: Revise Sequencer detection while test bootstrapping",
+      "author": "pcw109550",
+      "number": 18674,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Found while attempting to run monorepo acceptance tests targeting kona-node.\n\nop-devstack spins up preset network, and detect whether the L2 CL Node is sequencer via calling the `admin_sequencerActive()` API.\n\nhttps://github.com/ethereum-optimism/optimism/blob/903584f595405d8db361c899d6e3500645e3e639/op-devstack/stack/match/sequencer.go#L10-L21\n\nThis means kona node must be always admin API enabled. Need to patch `op-devstack/sysgo/l2_cl_kona.go` and add `\"KONA_NODE_RPC_ENABLE_ADMIN=true\"`. Or we may patch the devstack to not use the admin API for sequencer detection.\n\nEven after this fix, we may need kona-node patch at https://github.com/op-rs/kona/blob/fe6dfcf771059109f1d75043d5ecbbfa3b6ca1a5/crates/node/rpc/src/admin.rs#L95-L99.\n\nThis behavior is inconsistent with op-node. If admin API enabled but validator, we must not return `ErrorCode::MethodNotFound`\n",
+      "createdAt": "2025-12-22T11:50:20Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM66KTMK",
+      "title": "feat(contracts): DelegatedDisputeGame for Super Dispute Game system",
+      "author": "opsuperchain",
+      "number": 18677,
+      "body": "## Summary\n\nIntroduces **DelegatedDisputeGame**, a lightweight dispute game that enables per-chain withdrawals by delegating dispute resolution to a shared SuperFaultDisputeGame.\n\n## How It Works\n\n- DelegatedDisputeGame has no dispute logic - `status()` and `resolvedAt()` delegate to the SuperGame\n- Single SuperGame resolution applies to all chains simultaneously  \n- Per-chain AnchorStateRegistry validates SuperGame via trusted `SUPERCHAIN_REGISTRY` reference\n- Invalidating a SuperGame (blacklist/retire) cascades to all DelegatedGames referencing it\n\n## Changes\n\n- **`src/dispute/DelegatedDisputeGame.sol`** - New contract implementing delegation\n- **`interfaces/dispute/IDelegatedDisputeGame.sol`** - Interface\n- **`src/dispute/AnchorStateRegistry.sol`** - Added SuperGame validation in `isGameProper()`\n- **`test/dispute/DelegatedDisputeGame.t.sol`** - 43 tests\n\n## Future Work\n\n- [ ] OPCM v2 integration for deployment\n- [ ] Additional tests for SuperGame invalidation cascade scenarios\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2025-12-22T15:11:12Z",
+      "mergedAt": null,
+      "additions": 1496,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM66CmJK",
+      "title": "op-challenger: Integrate super node trace provider",
+      "author": "ajsutton",
+      "number": 18668,
+      "body": "**Description**\r\n\r\nIntegrate the super node trace provider into op-challenger. Since we plan to remove op-supervisor support as soon as all the tests are migrated, this is setup to replace it with a simple config toggle to choose between supervisor and super node. That requires significantly fewer changes to the config/cli validation code which would just be thrown out again when removing op-supervisor support. If needed we can add a hidden CLI flag to set the toggle as well, but there's a pretty good chance the supervisor tests can be updated without needing it.\r\n\r\nThere's still some places that create a supervisor client and trace provider directly like in op-e2e and vm runner. We'll need to switch them over in follow up PRs.\r\n\r\n**Metadata**\r\n\r\n#18524 ",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2025-12-22T00:47:50Z",
+      "mergedAt": null,
+      "additions": 442,
+      "deletions": 194
+    },
+    {
+      "id": "PR_kwDODjvEJM66KyKh",
+      "title": "ci: complete migration of docker builds from CircleCI to GitHub Actions",
+      "author": "falcorocks",
+      "number": 18678,
+      "body": "Migrate Docker image builds from CircleCI to GitHub Actions.\n\n- Remove CCI docker-build job and scheduled-docker-publish workflow\n- Add cross-platform verification (amd64/arm64) to both branch and tag workflows\n- Upgrade factory workflow to latest version",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2025-12-22T15:53:39Z",
+      "mergedAt": null,
+      "additions": 73,
+      "deletions": 426
+    },
+    {
+      "id": "PR_kwDODjvEJM66D6jO",
+      "title": "op-challenger/op-dispute-mon: Remove asterisc support",
+      "author": "ajsutton",
+      "number": 18670,
+      "body": "**Description**\r\n\r\nRemove support for Asterisc, AsteriscKona and SuperAsteriscKona game types from op-challenger and op-dispute-mon. We never shipped asterisc to production and at this point won't do so.\r\n\r\n**Tests**\r\n\r\nRemoved related tests.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2025-12-22T04:17:28Z",
+      "mergedAt": null,
+      "additions": 48,
+      "deletions": 2036
+    },
+    {
+      "id": "PR_kwDODjvEJM66NEeg",
+      "title": "op-acceptance-tests: fix port collisions",
+      "author": "bitwiseguy",
+      "number": 18684,
+      "body": "# Overview\r\nFixes a bug related to port collisions during flashblocks acceptance tests. The issue surface via the following error message:\r\n```\r\nlisten tcp 127.0.0.1:42373: bind: address already in use\r\n```\r\n\r\n# Root cause\r\nThe root cause was a race condition in P2P port allocation:\r\n1. `NewELNodeIdentity()` called `getAvailableLocalPort()` early during setup to pre-allocate P2P ports\r\n2. `getAvailableLocalPort()` opens a listener to find a free port, then immediately closes it\r\n3. Between port \"reservation\" and when op-geth actually binds to it (after deployer runs, L1 nodes start, etc.), the OS could re-allocate that port to other services (e.g., tcpproxy).\r\n4. When op-geth finally tried to bind, the port was already in use\r\n\r\n# Solution\r\n1. Use dynamic port assignment and connect peers after services start\r\n2. Use port 0 - let the OS assign ports when services actually start\r\n3. Remove pre-computed enode - no longer needed since we connect dynamically\r\n4. Connect peers after startup - use `WithL2ELP2PConnection()` to connect P2P after both nodes are running, querying actual ports via `admin_nodeInfo`\r\n5. Fix ID lookup - changed L2Builder key from \"sequencer\" to \"sequencer-builder\" to avoid collision in GetL2EL()\r\n6. Normalize node ID comparison - handle format differences between geth (keccak hash) and reth (compressed pubkey) by deriving standardized IDs from enode URLs",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2025-12-22T19:33:31Z",
+      "mergedAt": null,
+      "additions": 47,
+      "deletions": 43
+    }
+  ],
+  "codeChanges": {
+    "additions": 9,
+    "deletions": 0,
+    "files": 1,
+    "commitCount": 30
+  },
+  "completedItems": [
+    {
+      "title": "chore(ai-test): skip test/universal/StandardBridge.t.sol - already has comprehensive coverage",
+      "prNumber": 18671,
+      "type": "tests",
+      "body": "# chore(ai-test): skip StandardBridge.t.sol - already has comprehensive coverage\n\n## Summary\n\nAdds an entry to the `no-need-changes.toml` tracking file indicating that `test/universal/StandardBridge.t.sol` was analyzed and determined to alr",
+      "files": [
+        "ops/ai-eng/contracts-test-maintenance/no-need-changes.toml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 75.04562217443691,
+      "prScore": 72.84562217443691,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 73.12478505215468,
+      "prScore": 73.12478505215468,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 46.23650626002761,
+      "prScore": 46.23650626002761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 33.231600057846784,
+      "prScore": 24.03160005784678,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "almanax-ai",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/934833?v=4",
+      "totalScore": 27,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "devin-ai-integration",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/811515?v=4",
+      "totalScore": 25.17329254649702,
+      "prScore": 24.97329254649702,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 21.72057851955055,
+      "prScore": 21.72057851955055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 15.99750955863044,
+      "prScore": 15.99750955863044,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 14.365009979138408,
+      "prScore": 14.365009979138408,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "AmadiMichael",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97467680?u=0f7a396ff96c3f3515f0fe6dc535088847af019f&v=4",
+      "totalScore": 10.70452866480763,
+      "prScore": 6.204528664807629,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 10.2,
+      "prScore": 0,
+      "issueScore": 10,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "charlesma4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/22969108?v=4",
+      "totalScore": 8.931197381662155,
+      "prScore": 8.931197381662155,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "scharissis",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/376382?u=21da38bcf55ef6712398ef67e8c7d96096c4a045&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xniha",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/205694301?u=40549cc9822668a94e580372e47c3350107eb9aa&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Bidon15",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1822365?u=b1611621e143a8dc3075e161d979ed26d2a3d97f&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ryan-the-alien",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97949506?u=875e0488914088fa9351127218761e308578c93d&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "googgoog",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16096091?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 11,
+  "mergedPRs": 1,
+  "newIssues": 7,
+  "closedIssues": 1,
+  "activeContributors": 26
+}
