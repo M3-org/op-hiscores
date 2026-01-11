@@ -46,7 +46,7 @@ import { storeOverallSummary } from "@/lib/pipelines/summarize/mutations";
 import { overallSummaries } from "@/lib/data/schema";
 import { db } from "@/lib/data/db";
 import { and, eq } from "drizzle-orm";
-import { IntervalType } from "@/lib/date-utils";
+import { IntervalType, RepoIntervalType } from "@/lib/date-utils";
 import { readdir, readFile } from "fs/promises";
 import { existsSync } from "fs";
 
@@ -300,6 +300,11 @@ program
   .option("--daily", "Generate daily summaries")
   .option("--weekly", "Generate weekly summaries")
   .option("--monthly", "Generate monthly summaries")
+  .option("--lifetime", "Generate lifetime (all-time) summaries")
+  .option(
+    "-u, --username <username>",
+    "Filter to a specific username (for testing)",
+  )
   .action(async (options) => {
     // Validate required environment variables for AI summaries
     validateEnvVars(["GITHUB_TOKEN", "OPENROUTER_API_KEY"]);
@@ -355,19 +360,21 @@ program
         `Generating ${summaryType} summaries using config from ${configPath}`,
       );
 
-      // If no interval flags are set, enable all intervals
+      // If no interval flags are set, enable all intervals (except lifetime)
       const hasIntervalFlags =
-        options.daily || options.weekly || options.monthly;
+        options.daily || options.weekly || options.monthly || options.lifetime;
       const enabledIntervals = hasIntervalFlags
         ? {
             day: !!options.daily,
             week: !!options.weekly,
             month: !!options.monthly,
+            lifetime: !!options.lifetime,
           }
         : {
             day: true,
             week: true,
             month: true,
+            lifetime: false, // Lifetime is opt-in only
           };
       // Create summarizer context
       const context = createSummarizerContext({
@@ -379,6 +386,7 @@ program
         overwrite: options.force,
         dateRange,
         enabledIntervals,
+        usernameFilter: options.username,
       });
       // Run the appropriate pipeline based on summary type
       if (summaryType === "contributors") {
@@ -440,7 +448,7 @@ program
         },
       });
 
-      const intervalType = options.interval as IntervalType;
+      const intervalType = options.interval as RepoIntervalType;
       if (!["day", "week", "month"].includes(intervalType)) {
         rootLogger.error(
           `Invalid interval type: ${options.interval}. Must be day, week, or month.`,
@@ -464,7 +472,7 @@ program
        */
       async function checkExistingSummary(
         date: string,
-        interval: IntervalType,
+        interval: RepoIntervalType,
       ): Promise<boolean> {
         const existingSummary = await db.query.overallSummaries.findFirst({
           where: and(
@@ -702,12 +710,15 @@ program
       const limit = parseInt(options.limit, 10);
       const userLimit = limit === 0 ? undefined : limit;
 
+      const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL;
+
       // Export all leaderboard endpoints
       await exportAllLeaderboardAPIs(options.outputDir, {
         limit: userLimit,
         contributionStartDate:
           pipelineConfig.contributionStartDate ?? "2024-10-15",
         logger: rootLogger,
+        baseUrl,
       });
 
       rootLogger.info("\nLeaderboard API export completed successfully!");
@@ -775,10 +786,10 @@ program
         options.type === "all"
           ? (["overall", "repository", "contributor"] as const)
           : ([options.type] as const);
-      const intervalsToExport: IntervalType[] =
+      const intervalsToExport: RepoIntervalType[] =
         options.interval === "all"
           ? ["day", "week", "month"]
-          : [options.interval as IntervalType];
+          : [options.interval as RepoIntervalType];
 
       let totalExported = 0;
 
