@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-01-29 to 2026-01-30, ethereum-optimism/optimism had 18 new PRs (8 merged), 23 new issues, and 35 active contributors.",
+  "overview": "From 2026-01-29 to 2026-01-30, ethereum-optimism/optimism had 19 new PRs (8 merged), 23 new issues, and 35 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM7mxK99",
@@ -90,7 +90,7 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-01-29T22:04:41Z",
       "mergedAt": null,
-      "additions": 1158,
+      "additions": 1265,
       "deletions": 42
     },
     {
@@ -118,23 +118,23 @@
       "deletions": 1715
     },
     {
-      "id": "PR_kwDODjvEJM7APfr3",
-      "title": "feat(flashblocks): add validation module for sequence ordering and reorg detection (1)",
+      "id": "PR_kwDODjvEJM7APgUZ",
+      "title": "feat(flashblocks): add canonical block reconciliation to clear stale pending state (2)",
       "author": "teddyknox",
-      "number": 18993,
-      "body": "Part of the [speculative flashblock building design](https://www.notion.so/oplabs/Flashblocks-Upstreaming-node-reth-features-2e8f153ee162805eaaa5f067fe3440a3?source=copy_link).\r\n\r\n## Motivation\r\n\r\nThe existing flashblocks implementation relies on implicit parent hash matching to reject invalid sequences, but lacks explicit detection of sequence gaps, duplicates, and reorgs. This PR adds the foundational validation types that subsequent PRs will use for canonical block reconciliation and speculative building.\r\n\r\n## Changes\r\n\r\nAdds `validation.rs` with three stateless validators:\r\n\r\n- **`FlashblockSequenceValidator`** - Validates that incoming flashblocks follow expected ordering. Returns `NextInSequence`, `FirstOfNextBlock`, `Duplicate`, `NonSequentialGap`, or `InvalidNewBlockIndex`.\r\n\r\n- **`ReorgDetector`** - Compares transaction hash slices between tracked pending state and canonical blocks. Returns `NoReorg` or `ReorgDetected` with diagnostic counts.\r\n\r\n- **`CanonicalBlockReconciler`** - Determines reconciliation strategy when canonical blocks arrive: `CatchUp`, `HandleReorg`, `DepthLimitExceeded`, `Continue`, or `NoPendingState`.\r\n\r\nAll types are stateless with `const fn` where possible, making them easy to test and reason about.\r\n\r\n## Testing\r\n\r\nComprehensive unit tests covering:\r\n- Sequence validation: consecutive indices, block transitions, gaps, duplicates\r\n- Reorg detection: matching sequences, different order, different counts, different hashes\r\n- Reconciliation: all strategy branches and priority ordering\r\n",
+      "number": 18994,
+      "body": "This PR introduces a new unified ID type system for op-devstack that addresses the parallel type system problem where 19 separate ID types each require ~150 lines of boilerplate code. The new system uses Go generics to provide type safety with a single underlying implementation.\r\n\r\n**This is Phase 1 of a multi-phase refactor.** It introduces the new types alongside the existing system, with no breaking changes.\r\n\r\n## Problem\r\n\r\nThe current ID system has several issues:\r\n\r\n1. **Code Duplication**: 19 ID types × ~150 lines each = ~2,850 lines of nearly identical boilerplate\r\n2. **Parallel Type Systems**: Each ID type (e.g., `L2BatcherID`) has separate marshal/unmarshal, String(), sorting functions\r\n3. **Polymorphic Lookup Complexity**: `RollupBoostNode` is-a `L2ELNode`, but their ID types are separate, requiring manual conversion in lookups\r\n4. **No Unified Querying**: Can't easily query \"all components on chain X\" without checking each registry\r\n\r\nSee the [design document](https://www.notion.so/oplabs/Devstack-ID-Type-System-Refactor-2eef153ee1628048bb7ade1030fe6e9b) for the full rationale.\r\n\r\n## Solution\r\n\r\nIntroduce a unified `ComponentID` type with a generic wrapper `ID[T]` for type safety:\r\n\r\n```go\r\n// Single underlying type for all IDs\r\ntype ComponentID struct {\r\n    kind    ComponentKind\r\n    shape   IDShape\r\n    key     string\r\n    chainID eth.ChainID\r\n}\r\n\r\n// Type-safe wrapper using generics\r\ntype ID[T KindMarker] struct {\r\n    ComponentID\r\n}\r\n\r\n// Marker types provide compile-time type safety\r\ntype L2BatcherMarker struct{}\r\nfunc (L2BatcherMarker) componentKind() ComponentKind { return KindL2Batcher }\r\n\r\n// Type alias for backward-compatible naming\r\ntype L2BatcherID2 = ID[L2BatcherMarker]\r\n```\r\n\r\n## Changes\r\n\r\n### New Files\r\n\r\n| File | Description |\r\n|------|-------------|\r\n| `stack/component_id.go` | Unified ID system (~500 lines) |\r\n| `stack/component_id_test.go` | Comprehensive test suite (~330 lines) |\r\n\r\n### Key Features\r\n\r\n- **Single Implementation**: One `MarshalText`/`UnmarshalText` implementation for all ID types\r\n- **Type Safety**: `L2BatcherID2` and `L2ELNodeID2` are distinct types at compile time\r\n- **IDShape**: Handles three ID formats (key+chain, chain-only, key-only) cleanly\r\n- **Conversion Helpers**: `ConvertL2BatcherID(old) L2BatcherID2` for incremental migration\r\n- **Serialization Compatible**: Produces identical output to old system (`\"L2Batcher-mynode-420\"`)\r\n\r\n### Non-Breaking\r\n\r\n- Old ID types (`L2BatcherID`, etc.) remain unchanged\r\n- New types use \"2\" suffix (`L2BatcherID2`, `NewL2BatcherID2()`)\r\n- Both systems can coexist during migration\r\n\r\n## Test Plan\r\n\r\n- [x] All new ID type constructors create correct kind/key/chainID\r\n- [x] Marshal/Unmarshal round-trip works for all three ID shapes\r\n- [x] Type safety verified (different ID types are not interchangeable)\r\n- [x] Kind mismatch during unmarshal produces clear error\r\n- [x] Conversion helpers preserve all data\r\n- [x] Serialization output matches old system exactly\r\n- [x] IDs work as map keys\r\n- [x] Sorting works correctly\r\n- [x] Existing stack tests pass\r\n\r\n## Future Phases\r\n\r\n- **Phase 2**: Unified Registry to replace 12+ separate `RWMap` instances\r\n- **Phase 3**: Capability interfaces (`L2ELCapable`) for polymorphic lookups\r\n- **Phase 4**: Remove old ID types, simplify interfaces\r\n\r\n## How to Review\r\n\r\n1. Start with `stack/component_id.go`:\r\n   - `ComponentID` struct and its methods (lines 1-200)\r\n   - `KindMarker` interface and marker types (lines 200-260)\r\n   - Type aliases and constructors (lines 260-360)\r\n   - `ID[T]` methods (lines 360-400)\r\n   - Conversion helpers (lines 400-500)\r\n\r\n2. Review `stack/component_id_test.go` to understand the expected behavior\r\n\r\n3. Check the [design document](https://www.notion.so/oplabs/Devstack-ID-Type-System-Refactor-2eef153ee1628048bb7ade1030fe6e9b) for the full rationale\r\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-01-29T22:02:39Z",
+      "createdAt": "2026-01-29T22:03:33Z",
       "mergedAt": null,
-      "additions": 550,
-      "deletions": 0
+      "additions": 672,
+      "deletions": 11
     }
   ],
   "codeChanges": {
     "additions": 1542,
     "deletions": 1882,
     "files": 40,
-    "commitCount": 45
+    "commitCount": 46
   },
   "completedItems": [
     {
@@ -614,7 +614,7 @@
       "summary": null
     }
   ],
-  "newPRs": 18,
+  "newPRs": 19,
   "mergedPRs": 8,
   "newIssues": 23,
   "closedIssues": 3,
