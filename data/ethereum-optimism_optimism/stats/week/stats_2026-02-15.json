@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-02-15 to 2026-02-22, ethereum-optimism/optimism had 56 new PRs (35 merged), 9 new issues, and 81 active contributors.",
+  "overview": "From 2026-02-15 to 2026-02-22, ethereum-optimism/optimism had 56 new PRs (36 merged), 11 new issues, and 83 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM7j7E2n",
@@ -44,6 +44,18 @@
       "commentCount": 1
     },
     {
+      "id": "I_kwDODjvEJM7ssgEC",
+      "title": "op-node: block building delayed up to 2 seconds during L1 batch derivation",
+      "author": "akundaz",
+      "number": 19263,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Bug Description**\nWhen L1 batches arrive for derivation, the sequencer's FCU w/attr call can be delayed by nearly 2 seconds, causing blocks to be produced late.\n\nThis can delay the subsequent block too and this makes producing the expected number of flashblocks unfeasible. \n\n**Steps to Reproduce**\n1. Clone the [builder-playground repo](https://github.com/flashbots/builder-playground)\n    ```\n    git clone git@github.com:flashbots/builder-playground.git\n    ```\n2. Start the opstack recipe in builder-playground with the \n    ```\n    go run . cook opstack \\\n        --flashblocks \\\n        --external-builder http://host.docker.internal:4444 \\\n        --block-time 1 \\\n        --batcher-max-channel-duration 50\n    ```\n   This will run the default op-node version in builder-playground, which is `v1.16.3`. \n3. Wait 10 minutes (50 L1 blocks) for the derivation pipeline to run\n4. Filter rollup-boost logs for lines that contain \"Sending fork_choice_updated_v3 to builder\" and \"timestamp=Some(1771637243)\". Note how the timestamp (of when the log is printed) is very close to the second boundary nearly all the time, but when the L1 batch derivation pipeline runs, the timestamp is delayed, usually in the hundreds of milliseconds.\n\nOptional: I also tested this out against HEAD. To do this compile op-node locally, then point builder-playground to the new binary\n```\n# In optimism repo\ncd op-node\njust op-node\n\n# In builder-playground repo\ngo run . cook opstack \\\n    .... same flags as before \\\n    --override op-node=/path/to/op-node/binary/like/optimism/op-node/bin/op-node\n```\nThis has the advantage of being able to test potential op-node fixes easily or add new debug logs. For example, I modified `onBuildStart` in `op-node/rollup/engine/build_start.go` to print the delays in op-node to easier inspect delays:\n```\nfunc (e *EngineController) onBuildStart(ctx context.Context, ev BuildStartEvent) {\n\teventReceivedTime := time.Now()\n\trpcCtx, cancel := context.WithTimeout(e.ctx, buildStartTimeout)\n\tdefer cancel()\n\n\t// Calculate slot delay: how late are we compared to when we should start building?\n\t// We should start building at (block_timestamp - block_time)\n\t// slot_delay_ms = actual_start - expected_start\n\t// Positive = late, Negative = early, ~0 = on time\n\tblockTimestamp := time.Unix(int64(ev.Attributes.Attributes.Timestamp), 0)\n\texpectedStart := blockTimestamp.Add(-time.Duration(e.rollupCfg.BlockTime) * time.Second)\n\tslotDelayMs := eventReceivedTime.Sub(expectedStart).Milliseconds()\n\n\te.log.Info(\"BuildStartEvent received\",\n\t\t\"block_number\", ev.Attributes.Parent.Number+1,\n\t\t\"slot_delay_ms\", slotDelayMs)\n\n    ...rest of function unchanged\n```\n\n**Expected behavior**\nDesired behavior is for FCU w/attr to come reliably at the same time each second.\n\n**Environment Information:**\nLocal testing on mac. We see this in all our environments running linux.\nTested op-node versions `v1.16.3` and `a439b465` (my current head commit).\n\n**Configurations:**\n`--batcher-max-channel-duration 50`. This doesn't show up reliably if I set this value low, which makes sense because derivation is much quicker then.\n\n**Logs:**\n<!--\nLogs and/or error messages that help illustrate the issue.\n-->\nLog sample from running op-node with the additional print statement from above (filtered and truncated):\n```\nt=2026-02-20T21:17:41-0500 lvl=info msg=\"BuildStartEvent received\" block_number=612 slot_delay_ms=11\n..\nt=2026-02-20T21:17:42-0500 lvl=info msg=\"BuildStartEvent received\" block_number=613 slot_delay_ms=5\n..\nrepeated 600 times:\nlvl=info msg=\"decoded singular batch from channel\"\nlvl=info msg=\"generated attributes in payload queue\"\n..\nt=2026-02-20T21:17:43-0500 lvl=info msg=\"BuildStartEvent received\" block_number=614 slot_delay_ms=217\n..\nt=2026-02-20T21:17:44-0500 lvl=info msg=\"BuildStartEvent received\" block_number=615 slot_delay_ms=4\n\n```\n\n**Additional context**\nI initially thought https://github.com/ethereum-optimism/optimism/issues/15393 would be a contributing factor, but adding debouncing (via https://github.com/ethereum-optimism/optimism/pull/18385) did not get rid of the delay. \n\nI suspect the root cause is that the `EngineController` holds a lock while making blocking RPC calls:\n```\nfunc (e *EngineController) OnEvent(ctx context.Context, ev event.Event) bool {\n\te.mu.Lock()\n\tdefer e.mu.Unlock()\n\t// ... blocking RPC calls while holding lock\n}\n```\nDuring batch derivation hundreds of events are emitted and the FCU w/attr call would need to wait for all of them, which could cause such a delay.",
+      "createdAt": "2026-02-21T02:27:11Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
       "id": "I_kwDODjvEJM7b-1iI",
       "title": "create a new op-spammer component for deployment in devnets",
       "author": "geoknee",
@@ -52,18 +64,6 @@
       "body": "For v0, this would be a simple service which can be configured with a private key and ethereum RPC endpoint, and periodically sends any kind of user transaction to that endpoint. \n\nThis would help catch bugs on devnets which are all-too-often completely devoid of any kind of user traffic. This obscures problems and delays the discovery of bugs until we hit production networks. \n\nThis would be a good candidate to be written in Rust for any beginner Rustacean looking for a small task to onboard with. \n\nExtensions for a v1:\n* cycles through all transaction _types_ (setCode, legacy, ...)\n* fuzzes the `calldata`, `to`, `amount` fields\n* maintains a high load of transactions, enough to fill blocks to 50%, 100%\n* optimizes for recovering funds / not needing constant topups\n* can be controlled over an RPC\n* can be configured to send \"spam\" (calldata heavy transactions) or compute-heavy transactions (it could CREATE2 deploy a contract which allows for heavy compute and send transactions there). ",
       "createdAt": "2025-12-03T15:19:13Z",
       "closedAt": "2026-02-20T14:19:09Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDODjvEJM7j7B9-",
-      "title": "[L2CM Upgrades] Add upgradePredeploys() function to L2 ProxyAdmin",
-      "author": "maurelian",
-      "number": 18829,
-      "repository": "ethereum-optimism/optimism",
-      "body": "### Description\nAdd new upgradePredeploys() function to ProxyAdmin that delegates to L2ContractsManager's upgrade() function, only callable by Depositor account (0xdeaddead...0001).\n\n### References\nhttps://github.com/ethereum-optimism/design-docs/blob/8f49778644d4a16cc8c7ec73ed80ae8290a709e7/protocol/l2-contract-upgrades.md?plain=1#L105-L113\n\n### Acceptance Criteria / Definition of Done\nFunction added with access restriction to Depositor account, successfully delegates to L2ContractsManager, maintains backwards compatibility with current ProxyAdmin interface.",
-      "createdAt": "2026-01-16T22:39:09Z",
-      "closedAt": "2026-02-17T18:23:56Z",
       "state": "CLOSED",
       "commentCount": 0
     }
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 23546,
-    "deletions": 5247,
-    "files": 290,
-    "commitCount": 484
+    "additions": 28100,
+    "deletions": 5662,
+    "files": 297,
+    "commitCount": 485
   },
   "completedItems": [
     {
@@ -174,6 +174,38 @@
         "rust/op-reth/crates/flashblocks/tests/it/harness.rs",
         "rust/op-reth/crates/flashblocks/tests/it/main.rs",
         "rust/op-reth/crates/flashblocks/tests/it/service.rs"
+      ]
+    },
+    {
+      "title": "feat(flashblocks): add transaction caching to avoid re-executing unchanged transactions (4)",
+      "prNumber": 19030,
+      "type": "feature",
+      "body": "## Summary\r\n- Adds `TransactionCache` to cache execution results from flashblock builds\r\n- When a new flashblock arrives with a matching transaction prefix, execution resumes from cached state instead of re-executing from scratch\r\n- Integra",
+      "files": [
+        "op-reth/Cargo.lock",
+        "op-reth/crates/flashblocks/Cargo.toml",
+        "op-reth/crates/flashblocks/docs/client-side-upstream-scope.md",
+        "op-reth/crates/flashblocks/src/cache.rs",
+        "op-reth/crates/flashblocks/src/lib.rs",
+        "op-reth/crates/flashblocks/src/service.rs",
+        "op-reth/crates/flashblocks/src/tx_cache.rs",
+        "op-reth/crates/flashblocks/src/worker.rs",
+        "op-reth/crates/flashblocks/tests/it/service.rs",
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/src/cache.rs",
+        "rust/op-reth/crates/flashblocks/src/lib.rs",
+        "rust/op-reth/crates/flashblocks/src/pending_state.rs",
+        "rust/op-reth/crates/flashblocks/src/service.rs",
+        "rust/op-reth/crates/flashblocks/src/tx_cache.rs",
+        "rust/op-reth/crates/flashblocks/src/worker.rs",
+        "rust/op-reth/crates/flashblocks/tests/it/harness.rs",
+        "rust/op-reth/crates/flashblocks/tests/it/service.rs",
+        "rust/op-reth/crates/flashblocks/src/payload.rs",
+        "rust/op-reth/crates/flashblocks/src/sequence.rs",
+        "rust/op-reth/crates/flashblocks/src/validation.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/pending_block.rs"
       ]
     },
     {
@@ -1295,6 +1327,26 @@
       "summary": null
     },
     {
+      "username": "akundaz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18058966?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ajes1337",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/11885892?u=91a1ed33a44bc8cd18ccfb39ab3551b220928335&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "0xForerunner",
       "avatarUrl": "https://avatars.githubusercontent.com/u/8366997?u=c3f281f81f1cf7b351515964f79cf4193a585f24&v=4",
       "totalScore": 2,
@@ -1336,8 +1388,8 @@
     }
   ],
   "newPRs": 56,
-  "mergedPRs": 35,
-  "newIssues": 9,
+  "mergedPRs": 36,
+  "newIssues": 11,
   "closedIssues": 9,
-  "activeContributors": 81
+  "activeContributors": 83
 }
