@@ -1,0 +1,331 @@
+{
+  "interval": {
+    "intervalStart": "2026-02-23T00:00:00.000Z",
+    "intervalEnd": "2026-02-24T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-02-23 to 2026-02-24, ethereum-optimism/optimism had 15 new PRs (3 merged), 2 new issues, and 20 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7ppcKv",
+      "title": "Use binary format for Kona hints instead of String serialization",
+      "author": "kien-rise",
+      "number": 19125,
+      "repository": "ethereum-optimism/optimism",
+      "body": "\n**TL;DR:**\n\n❌ Current: Hint → String → Bytes → String → Hint\n✅ Proposed: Hint → Bytes → Hint\n\n<!--\nNeed help?\nRefer to our contributing guidelines for additional information about making a good issue:\nhttps://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\n-->\n\n**Is your feature request related to a problem? Please describe.**\n\nKona hints are currently represented as `String`, which requires manual string construction and parsing.\n\nFor example, hints are encoded using string formatting:\n\nhttps://github.com/ethereum-optimism/optimism/blob/v1.16.6/kona/crates/proof/proof/src/hint.rs#L58\n\n```rust\n// kona/crates/proof/proof/src/hint.rs\n\n    /// Encodes the hint as a string.\n    pub fn encode(&self) -> String {\n        alloc::format!(\"{} {}\", self.ty, self.data)\n    }\n```\n\nThey are later parsed by splitting and decoding:\n\nhttps://github.com/ethereum-optimism/optimism/blob/v1.16.6/kona/crates/proof/proof/src/hint.rs#L69\n\n```rust\n// kona/crates/proof/proof/src/hint.rs\n\n    fn from_str(s: &str) -> Result<Self, Self::Err> {\n        let mut parts = s.split(' ').collect::<Vec<_>>();\n\n        if parts.len() != 2 {\n            return Err(HintParsingError(alloc::format!(\"Invalid hint format: {s}\")));\n        }\n\n        let hint_type = parts.remove(0).parse::<HT>()?;\n        let hint_data =\n            hex::decode(parts.remove(0)).map_err(|e| HintParsingError(e.to_string()))?.into();\n\n        Ok(Self { ty: hint_type, data: hint_data })\n    }\n```\n\nEventually, this string is converted into bytes before being sent over the channel:\n\nhttps://github.com/ethereum-optimism/optimism/blob/v1.16.6/kona/crates/proof/preimage/src/hint.rs#L36\n\n```rust\n// kona/crates/proof/preimage/src/hint.rs\n\n        // Form the hint into a byte buffer. The format is a 4-byte big-endian length prefix\n        // followed by the hint string.\n        self.channel.write(u32::to_be_bytes(hint.len() as u32).as_ref()).await?;\n        self.channel.write(hint.as_bytes()).await?;\n```\n\nUsing `String` here introduces unnecessary overhead and forces us to handle UTF-8 decoding errors:\n\nhttps://github.com/ethereum-optimism/optimism/blob/v1.16.6/kona/crates/proof/preimage/src/hint.rs#L84\n\n```rust\n// kona/crates/proof/preimage/src/hint.rs\n\n        let payload = match String::from_utf8(raw_payload) {\n            Ok(p) => p,\n            Err(e) => {\n                // Write back on error to prevent blocking the client.\n                self.channel.write(&[0x00]).await?;\n\n                return Err(PreimageOracleError::Other(format!(\n                    \"Failed to decode hint payload: {e}\"\n                )));\n            }\n        };\n```\n\n\n**Describe the solution you'd like**\n\nUse a binary encoding format for hints instead of strings.\n\nBenefits:\n- Better performance\n- Eliminates manual string manipulation\n- Avoids UTF-8 decoding errors\n\nHere is my implementation: https://github.com/kien-rise/kona/commit/7d02b5741db6ba09ab03d71677ca3a7a4ba3ef41\n\n**Describe alternatives you've considered**\n\nHint is currently defined as a generic type:\n\n```rust\n#[derive(Debug, Clone, PartialEq, Eq, Hash)]\npub struct Hint<HT> {\n    /// The type of hint.\n    pub ty: HT,\n    /// The data associated with the hint.\n    pub data: Bytes,\n}\n```\n\nI considered converting it into an enum, but that would be a larger refactor than necessary right now. I’d prefer to make incremental improvements.\n\n**Additional context**\n\nN/A",
+      "createdAt": "2026-02-10T07:46:52Z",
+      "closedAt": "2026-02-23T04:29:07Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7tQmrp",
+      "title": "op-supernode: Prune Denylist on L1 Reorg and Alert",
+      "author": "axelKingsley",
+      "number": 19289,
+      "repository": "ethereum-optimism/optimism",
+      "body": "We need to ensure that whenever the Virtual Node responds to an L1 reorg, all downstream components prune data:\n\nChain Containers must prune their `Denylist` - if not, then a legitimate Unsafe chain could be denied inappropriately\n\nActivities need to be notified via the same `Reset` callback already used. This is because they need to prune their verification results and logs.\nRelated: Related to: https://github.com/ethereum-optimism/optimism/issues/19287\n",
+      "createdAt": "2026-02-23T22:58:39Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7tQHK9",
+      "title": "op-supernode: Prune Interop Database on L1 Reorg",
+      "author": "axelKingsley",
+      "number": 19287,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Currently, when the L1 reorgs, there is no attempt from the interop activity to remove old data.\n\nThe individual virtual nodes will respond to reorgs, and that in turn will clear out the individual log databases and verification data. However, if L1 inconsistency is not understood by the supernode, it could potentially represent situations where some virtual nodes are on a divergent L1 view.\n\nNote that this is exceedingly unlikely in an application sense because all Virtual Nodes share an L1 connection. However, if an L1 were to reorg as logs were collected, an inconsistent view of that particular timestamp could be constructed. This would cause a \"Safe\" view of the data which is hiding inconsistency.\n\nTo address this, we should slightly expand the CurrentL1 tracking to:\n- Confirm CurrentL1 values are all canonical with one-another\n- Confirm L1 values did not change during the operation\n\nSome of this consistency checking is already done in the interop activity.\n\n\nFar-Future Note:\nMany of the operational patterns of tracking the CurrentL1 and providing L2 timestamped data are generic to all Verification Activities. Therefore, many of the structs and runtime patterns in it SHOULD be moved upward so that each VA can feature a minimal definition of how to setup and run. Not the purpose of this ticket, but as we think about ensuring L1 consistency, we should consider that actually this could be supplied at a level above activities themselves.",
+      "createdAt": "2026-02-23T22:20:53Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7Fuc-r",
+      "title": "exp: OZ v5 Initializable forward-compat in OPCM upgrade",
+      "author": "smartcontracts",
+      "number": 19284,
+      "body": "## What Changed\n\nAdds forward-compatible OpenZeppelin v5 `Initializable` storage handling to `OPContractsManagerUtils.upgrade()`.\n\n**Source contract** (`OPContractsManagerUtils.sol`):\n- After the existing v4 slot clear (1 byte at slot 0), the upgrade function now also:\n  1. Reads the ERC-7201 namespaced `Initializable` slot (`0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00`)\n  2. Reverts with `OPContractsManagerUtils_InitializingDuringUpgrade()` if the `_initializing` bool (byte offset 8) is set\n  3. Zeros the `uint64 _initialized` portion (low 8 bytes), preserving the rest of the slot\n\n**Interface** (`IOPContractsManagerUtils.sol`):\n- Added `OPContractsManagerUtils_InitializingDuringUpgrade` error\n\n**Tests** (`OPContractsManagerUtils.t.sol`):\n- `test_upgrade_v4ContractStillWorks_succeeds` -- v4 contracts still upgrade correctly (ERC-7201 slot is all zeros, no-op)\n- `test_upgrade_v5SlotCleared_succeeds` -- v5-style `_initialized = 1` at ERC-7201 slot gets cleared\n- `test_upgrade_v5SlotMaxInitialized_succeeds` -- v5 `_initialized = type(uint64).max` gets cleared\n- `test_upgrade_v5InitializingDuringUpgrade_reverts` -- reverts when `_initializing` is set\n- `test_upgrade_v5SlotPreservesUpperBytes_succeeds` -- upper bytes beyond the struct are preserved\n\n## Decisions Made\n\n- **ERC-7201 slot is hardcoded** rather than computed at runtime. The slot is a well-known constant derived from `keccak256(abi.encode(uint256(keccak256(\"openzeppelin.storage.Initializable\")) - 1)) & ~bytes32(uint256(0xff))`. Computing it would add unnecessary gas for something that will never change.\n- **Revert on `_initializing = true`** rather than silently clearing. A contract should never be mid-initialization during an upgrade -- this catches impossible states rather than masking them.\n- **Tests added to existing `OPContractsManagerUtils_Upgrade_Test`** rather than a separate contract, to comply with the test naming convention (`<Contract>_<Function>_Test`).\n\n## Complexity Report\n\n**Low complexity.** The change is surgical -- 15 lines of new Solidity logic (read, check, mask, write) plus a new error. No new dependencies, no storage layout changes, no version bumps needed (OPContractsManagerUtils is not versioned with semver). All 17 `just pr` checks pass on first attempt after fixing the test name.\n\nThe one surprise was the test naming validator: it parses `<Contract>_<Function>_Test` from the contract name and verifies the function exists in the source. A separate `OPContractsManagerUtils_UpgradeOZv5_Test` failed because `upgradeOZv5` is not a real function. Adding tests to the existing `_Upgrade_Test` was the correct fix.\n\n## Side Effects\n\n- No version bumps required (OPContractsManagerUtils has no semver)\n- No snapshot changes\n- No ABI changes beyond the new error (which is additive)\n- Existing tests unaffected (gas changes are minimal: ~30-70 gas per existing upgrade test due to the extra slot read/write on a zero slot)\n\n## Context\n\nAddresses audit Finding 22 from the Feb 2026 security audit. OZ v4 stores `_initialized` as `uint8` at slot 0 offset 0. OZ v5 stores `_initialized` as `uint64` at an ERC-7201 namespaced slot. The existing code only cleared the v4 slot, so a v5 contract entering the OPCM upgrade path would silently fail to reinitialize.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-02-23T19:00:53Z",
+      "mergedAt": null,
+      "additions": 192,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDODjvEJM7FvFhT",
+      "title": "fix(contracts): forward-compatible OZ v5 Initializable in upgrade (Finding 22)",
+      "author": "smartcontracts",
+      "number": 19286,
+      "body": "## Summary\n\n- Make `OPContractsManagerUtils.upgrade()` forward-compatible with OpenZeppelin v5's `Initializable` storage layout by also clearing the ERC-7201 namespaced slot (`0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00`)\n- For v4 contracts this slot is all zeros, so the new code is a no-op (adds ~30-70 gas for the additional slot read/write)\n- Reverts with `OPContractsManagerUtils_InitializingDuringUpgrade()` if the `_initializing` bool is set, since a contract should never be mid-initialization during an upgrade\n- Addresses audit Finding 22: prevents silent failure to reinitialize if a v5 contract ever enters the OPCM upgrade path\n\n## Changes\n\n| File | Change |\n|------|--------|\n| `src/L1/opcm/OPContractsManagerUtils.sol` | Add v5 slot clear logic after existing v4 slot clear, add new custom error |\n| `interfaces/L1/opcm/IOPContractsManagerUtils.sol` | Add `OPContractsManagerUtils_InitializingDuringUpgrade` error |\n| `test/L1/opcm/OPContractsManagerUtils.t.sol` | 5 new tests for v5 slot clearing behavior |\n| `snapshots/abi/OPContractsManagerUtils.json` | Regenerated ABI snapshot with new error |\n\n## Test plan\n\n- [x] `test_upgrade_v4ContractStillWorks_succeeds` -- v4 contracts unaffected (ERC-7201 slot stays zero)\n- [x] `test_upgrade_v5SlotCleared_succeeds` -- v5 `_initialized = 1` gets cleared\n- [x] `test_upgrade_v5SlotMaxInitialized_succeeds` -- v5 `_initialized = type(uint64).max` gets cleared\n- [x] `test_upgrade_v5InitializingDuringUpgrade_reverts` -- reverts when `_initializing` bool is set\n- [x] `test_upgrade_v5SlotPreservesUpperBytes_succeeds` -- upper bytes preserved during clear\n- [x] All 7 existing upgrade tests continue to pass\n- [x] `just pr` passes all 17 checks\n\nGenerated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-02-23T19:52:06Z",
+      "mergedAt": null,
+      "additions": 159,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7Fkr9s",
+      "title": "test(contracts): improve DelayedWETH test coverage with fuzz tests",
+      "author": "devin-ai-integration",
+      "number": 19275,
+      "body": "# test(contracts): improve DelayedWETH test coverage with fuzz tests\n\n## Summary\n\nEnhances `test/dispute/DelayedWETH.t.sol` by converting 9 focused tests to fuzz tests and adding 3 new tests to fill coverage gaps.\n\n**Fuzz conversions (9 tests):**\n- `unlock`: both `once` and `twice` tests now fuzz amounts and time deltas\n- `withdraw`: both `whileUnlocked` and `withdrawFromWhileUnlocked` now fuzz withdrawal amounts\n- `hold`: `byOwner`, `withoutAmount`, and `byNonOwner` now fuzz amounts/addresses\n- `recover`: `byNonOwner` and `moreThanBalance` now fuzz addresses/amounts\n\n**New tests (3):**\n- `testFuzz_recover_partialAmount_succeeds` — covers the previously untested `_wad < address(this).balance` branch in `recover()`\n- `testFuzz_hold_noAmountNonOwner_fails` — covers access control on the single-arg `hold(address)` overload\n- `test_version_validFormat_succeeds` — validates `version()` returns valid semver via `SemverComp.parse()`\n\nNo existing tests were removed. All original test logic is preserved.\n\n## Review & Testing Checklist for Human\n\n- [ ] Verify `testFuzz_unlock_once_succeeds` is safe without explicit `bound()` — the fuzz param `_wad` is unbounded, relying on `wd.amount += _wad` not overflowing from zero. Confirm this is intentional and safe.\n- [ ] Confirm `vm.deal(alice, _wad)` in withdraw/hold fuzz tests doesn't mask issues — it replaces any pre-existing balance from `setUp()`. The tests capture balance *after* deposit, so the delta assertion should be correct regardless, but worth a sanity check.\n- [ ] Verify the new `testFuzz_recover_partialAmount_succeeds` correctly targets the `_wad < balance` branch and its assertion (`address(delayedWeth).balance == _balance - _wad`) matches the source contract's `uint256 amount = _wad < address(this).balance ? _wad : address(this).balance` logic.\n\n### Notes\n- `just pre-pr` passes cleanly\n- All 25 tests pass locally\n- Link to Devin run: https://app.devin.ai/sessions/f7ea3112987b4512957baa57cb7cd1bc\n- Requested by: @aliersh",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-02-23T07:25:06Z",
+      "mergedAt": "2026-02-23T17:50:52Z",
+      "additions": 134,
+      "deletions": 50
+    },
+    {
+      "id": "PR_kwDODjvEJM7FqGfs",
+      "title": "ci: disable incremental compilation and bump rust cache version",
+      "author": "theochap",
+      "number": 19278,
+      "body": "## Summary\n\n- Set `CARGO_INCREMENTAL=0` in `rust-setup-env` to disable incremental compilation for all Rust CI jobs, reducing cache size and improving reproducibility\n- Bump rust build cache version from 15 to 16 to invalidate stale caches\n- Use a YAML anchor in `main.yml` so the cache version only needs to be updated in one place\n\n## Test plan\n\n- [ ] Verify Rust CI jobs run clean with fresh caches\n- [ ] Confirm no incremental compilation artifacts bloat the cache\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-02-23T14:07:39Z",
+      "mergedAt": null,
+      "additions": 102,
+      "deletions": 93
+    },
+    {
+      "id": "PR_kwDODjvEJM7Ft3N5",
+      "title": "fix(contracts): address audit findings 14, 6, 8, 13, 19",
+      "author": "smartcontracts",
+      "number": 19281,
+      "body": "## Summary\n\nAddresses several findings from the Feb 2026 security audit (round 2):\n\n- **Finding 14 (medium)**: Reuse existing DelayedWETH from SystemConfig in the Migrator instead of deploying a new one. Deploying a new proxy would create divergence — SystemConfig would still point to the old DelayedWETH, and future upgrades (which load from SystemConfig) would reference a different contract than the shared DGF games. Note: marked as medium severity but has no impact in practice.\n- **Finding 6 (info)**: Document that hardcoded game type lists in OPCMv2's `_assertValidFullConfig` and Migrator's `_migratePortal` are intentional and must be kept in sync when new types are added.\n- **Finding 8 (low)**: Document that `migrate()` does not enforce a SuperchainConfig version floor (unlike deploy/upgrade). The caller is responsible for ensuring the SuperchainConfig is upgraded beforehand.\n- **Finding 13 (low)**: Document why migration game config validation is deliberately minimal (privileged one-off action, type-level guards exist, non-super types naturally rejected by chain ID mismatch).\n- **Finding 19 (info)**: Document theoretical risk in `AnchorStateRegistry.isGameRegistered` if the ASR proxy is replaced (not upgraded in-place) non-atomically with an invalid game in the old ASR.\n\n### Findings not addressed in this PR\n- **Finding 1**: Acknowledged — our revert behavior is safer for users\n- **Findings 21, 22**: Deferred to separate PRs\n\n## Test plan\n\n- [x] `just pr` — all 17 checks pass\n- [x] `just test-dev` — all OPCMv2 tests pass (19 passed, 3 skipped)\n- [x] Migrate tests pass with interop enabled (4/4)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-02-23T18:14:45Z",
+      "mergedAt": null,
+      "additions": 41,
+      "deletions": 28
+    }
+  ],
+  "codeChanges": {
+    "additions": 135,
+    "deletions": 61,
+    "files": 3,
+    "commitCount": 50
+  },
+  "completedItems": [
+    {
+      "title": "ci: fix kona-publish-prestates triggering on scheduled builds",
+      "prNumber": 19270,
+      "type": "bugfix",
+      "body": "## Summary\n- `kona-publish-prestates` workflow used `or` logic in its `when` condition, causing it to run on any scheduled pipeline where the branch is `develop`, and also on any webhook push to any branch\n- Changed `or` to `and` so the wor",
+      "files": [
+        ".circleci/continue/rust-ci.yml"
+      ]
+    },
+    {
+      "title": "ci: Remove the cannon-kona-host job",
+      "prNumber": 19279,
+      "type": "other",
+      "body": "kona-host is built in the kona-build-release job already.\r\n",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "test(contracts): improve DelayedWETH test coverage with fuzz tests",
+      "prNumber": 19275,
+      "type": "tests",
+      "body": "# test(contracts): improve DelayedWETH test coverage with fuzz tests\n\n## Summary\n\nEnhances `test/dispute/DelayedWETH.t.sol` by converting 9 focused tests to fuzz tests and adding 3 new tests to fill coverage gaps.\n\n**Fuzz conversions (9 tes",
+      "files": [
+        "packages/contracts-bedrock/test/dispute/DelayedWETH.t.sol"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 105.18813018651748,
+      "prScore": 104.75013018651748,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 77.61463109887178,
+      "prScore": 72.41463109887178,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "theochap",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
+      "totalScore": 62.85000321503713,
+      "prScore": 56.85000321503713,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "devin-ai-integration",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/811515?v=4",
+      "totalScore": 33.81617791253916,
+      "prScore": 33.61617791253916,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 29,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 29,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "axelKingsley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7201941?u=d3ed75b38d5b3079dfa593a217632ccb30b93610&v=4",
+      "totalScore": 16.679348061489414,
+      "prScore": 12.679348061489412,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 14.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "scx1332",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/27012161?u=8197e829133a3f46252605b932c175fa51c2d220&v=4",
+      "totalScore": 14.589053830347945,
+      "prScore": 14.589053830347945,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 5.701306144334055,
+      "prScore": 5.701306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Chavrzp28",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/214783910?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 4.409573590279972,
+      "prScore": 4.409573590279972,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sentientpanic",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263352631?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nktaushanov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1835700?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Himess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/95512809?u=159d4c6004f721f2a9844a1cbed95e5928106267&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 15,
+  "mergedPRs": 3,
+  "newIssues": 2,
+  "closedIssues": 1,
+  "activeContributors": 20
+}
