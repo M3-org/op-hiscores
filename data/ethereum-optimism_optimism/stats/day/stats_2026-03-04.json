@@ -1,0 +1,452 @@
+{
+  "interval": {
+    "intervalStart": "2026-03-04T00:00:00.000Z",
+    "intervalEnd": "2026-03-05T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-03-04 to 2026-03-05, ethereum-optimism/optimism had 9 new PRs (4 merged), 7 new issues, and 43 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7v0T-K",
+      "title": "[L2CM] Document no-storage-variables convention for L2ContractsManager",
+      "author": "aliersh",
+      "number": 19391,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**FMA follow-up (FM2):** `L2ContractsManager` executes via `DELEGATECALL` in the `L2ProxyAdmin`'s storage context. If it declares storage variables, they collide with `ProxyAdmin` slots (e.g., `_owner`), potentially locking out admin access permanently.\nPR #19111 already follows this convention (all addresses stored as immutables), but the convention is not explicitly documented. It should be documented via natspec on the contract or as an acceptance criterion on the L2CM implementation.\n### Acceptance Criteria\n- Convention documented in `L2ContractsManager` contract natspec (e.g., `@dev This contract must not declare storage variables...`)\n- Convention documented in the L2CM spec or design doc\n### References\n- [L2CM FMA — FM2: Storage Layout Corruption](https://github.com/ethereum-optimism/design-docs/blob/main/security/fma-l2cm.md)\n- PR #19111 (L2CM implementation — already follows convention)",
+      "createdAt": "2026-03-04T18:30:52Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7vTLoX",
+      "title": "kona: BlobSource wraps all errors as Temporary, losing Reset classification on L1 reorg",
+      "author": "ajsutton",
+      "number": 19354,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`BlobSource::load_blobs` in `rust/kona/crates/protocol/derive/src/sources/blobs.rs` wraps all errors from `chain_provider.block_info_and_transactions_by_hash` using `BlobProviderError::Backend(e.to_string()).into()`, which forces every error to `PipelineErrorKind::Temporary`. This loses the proper error classification from the underlying `ChainProvider::Error`'s `Into<PipelineErrorKind>` implementation.\n\n## Impact\n\nDuring an L1 reorg, when a blob-bearing L1 block hash disappears, `AlloyChainProvider::block_info_and_transactions_by_hash` returns `AlloyChainProviderError::BlockNotFound(hash)`, which maps to `ResetError::BlockNotFound` → `PipelineErrorKind::Reset`. However, the `Backend` wrapping in `BlobSource` downgrades this to `Temporary`, causing kona to spin retrying indefinitely instead of triggering a pipeline reset. This is a liveness bug: the derivation pipeline stalls rather than resetting and recovering.\n\n## Regression Context\n\n`AlloyChainProvider` was explicitly fixed in commit [`ee4d492a87`](https://github.com/ethereum-optimism/optimism/commit/ee4d492a87) to properly emit `Reset` for hash-based `BlockNotFound` errors. However, `BlobSource` bypasses that fix by wrapping the error in `Backend` before propagating it.\n\n## Reference Implementation\n\nThe Go reference in [`op-node/rollup/derive/blob_data_source.go:82-85`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/op-node/rollup/derive/blob_data_source.go#L82) explicitly branches on `errors.Is(err, ethereum.NotFound)` and wraps it as `NewResetError`, ensuring a pipeline reset is triggered on block-not-found.\n\n## Affected Code\n\n**Subject (bug):** [`rust/kona/crates/protocol/derive/src/sources/blobs.rs:119-122`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/rust/kona/crates/protocol/derive/src/sources/blobs.rs#L119)\n\n```rust\nlet info =\n    self.chain_provider.block_info_and_transactions_by_hash(block_ref.hash).await.map_err(\n        |e| -> PipelineErrorKind { BlobProviderError::Backend(e.to_string()).into() },\n    )?;\n```\n\n**Reference (correct):** [`op-node/rollup/derive/blob_data_source.go:82-85`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/op-node/rollup/derive/blob_data_source.go#L82)\n\n```go\nif errors.Is(err, ethereum.NotFound) {\n    return nil, NewResetError(fmt.Errorf(\"failed to fetch receipts of L1 block %s: %w\", id, err))\n}\n```\n\n## Unaffected Code\n\n`CalldataSource` is unaffected — it correctly propagates error kind by returning `CP::Error` directly from `load_calldata` and calling `.map_err(Into::into)?` at the call site in `next()`, which preserves the Reset/Temporary/Critical classification from the underlying provider.\n\n## Fix\n\nChange the `map_err` closure on the `chain_provider` call in `BlobSource::load_blobs` from:\n\n```rust\n.map_err(|e| -> PipelineErrorKind { BlobProviderError::Backend(e.to_string()).into() })\n```\n\nto:\n\n```rust\n.map_err(Into::into)\n```\n\nThis mirrors the pattern used by `CalldataSource` and preserves the error classification from the underlying `ChainProvider::Error` implementation.",
+      "createdAt": "2026-03-03T05:27:29Z",
+      "closedAt": "2026-03-04T14:52:15Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7v0Vz-",
+      "title": "[L2CM] Review L2ContractsManager for error swallowing patterns",
+      "author": "aliersh",
+      "number": 19392,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**FMA follow-up (FM6):** `L2ContractsManager` upgrades multiple predeploys in a single delegatecall. If individual upgrades fail silently (e.g., via try/catch or low-level calls that don't check return values), the system could be left with a mix of old and new contract versions.\nThe L2CM implementation (PR #19111) should be explicitly reviewed to confirm that all individual upgrade calls revert on failure and propagate up to ensure atomicity.\n### Acceptance Criteria\n- PR #19111 reviewed for error swallowing patterns (try/catch, unchecked low-level calls)\n- Review outcome recorded (confirm no error swallowing, or fix identified issues)\n### References\n- [L2CM FMA — FM6: Upgrade Atomicity Failure](https://github.com/ethereum-optimism/design-docs/blob/main/security/fma-l2cm.md)\n- PR #19111 (L2CM implementation)",
+      "createdAt": "2026-03-04T18:32:33Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7vzU3X",
+      "title": "op-acceptance-tests: Add test with light CL as sequencing node",
+      "author": "wwared",
+      "number": 19389,
+      "repository": "ethereum-optimism/optimism",
+      "body": "One followup I think we should knock out is set up a system where the light CL is actually the sequencing node because that's how it is used in our infra. The general setup is\r\n\r\n* A bunch of Light CLs doing sequencing, rpc serving, etc\r\n* Two supernodes (for redundancy) deriving the safe chain so that the light CLs can focus on p2p / the unsafe chain \r\n\r\n_Originally posted by @karlfloersch in https://github.com/ethereum-optimism/optimism/pull/19378#pullrequestreview-3890608136_\r\n            ",
+      "createdAt": "2026-03-04T17:31:41Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7vnQqO",
+      "title": "the flashblock websocket endpoint seems broken",
+      "author": "unclezoro",
+      "number": 19382,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Hi, Op team:\nI tried to connect to wss://op-mainnet-fb-ws-pub.optimism.io/ws, it report: handshake failed. \nHow can I avoid such issue or any guide to use the websocket properly?\n\n",
+      "createdAt": "2026-03-04T05:00:27Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7H4_1j",
+      "title": "chore(rust): reth/claude experiment",
+      "author": "smartcontracts",
+      "number": 19383,
+      "body": "## Summary\n- Experiment with native payload builder extensions in op-reth\n- Internal channel-based communication pattern\n- Feature-gating for optional dependencies in kona-engine\n\n## Test plan\n- [x] All existing tests pass (207 tests, 0 failures)\n- [x] Clippy clean on affected crates\n- [x] Full workspace compiles\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-04T14:16:29Z",
+      "mergedAt": null,
+      "additions": 2110,
+      "deletions": 808
+    },
+    {
+      "id": "PR_kwDODjvEJM7H6D3b",
+      "title": "chore(contracts,deployer): remove OPCMv1 and make OPCMv2 the sole OPCM",
+      "author": "smartcontracts",
+      "number": 19385,
+      "body": "## Summary\n\n- Delete `OPContractsManager.sol` (v1, 2203 lines) and all v1-only contracts, tests, scripts, interfaces, and snapshots\n- Remove `DevFeatures.OPCM_V2` feature flag and all ~52 v1/v2 branch points across Solidity and Go\n- Remove `OPCM_V2` from CI feature matrix (~50% matrix size reduction)\n- Remove Go v1-specific types (`MigrateInputV1`, `GameParameters`, `OPChainConfig`), CLI flags, and dev feature flag\n- Clean up `ReadSuperchainDeployment` to remove OPCM address input and ProtocolVersions output (matching Solidity changes)\n- Remove stale v1 forge artifact mappings from `verify/artifacts.go`\n- Net: 75 files changed, ~540 additions, ~12,600 deletions\n\n## Test plan\n\n- [x] `go build ./...` passes (full monorepo)\n- [x] `go vet ./op-deployer/...` passes\n- [x] `mise exec -- just pr` passes (17/17 checks: build, lint, semgrep, snapshots, semver-diff, unused-imports, opcm-upgrade-checks, interfaces, etc.)\n- [ ] CI pipeline passes\n- [ ] Fork upgrade tests pass (`just test-upgrade` — needs `ETH_RPC_URL`)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-04T15:21:52Z",
+      "mergedAt": null,
+      "additions": 528,
+      "deletions": 13481
+    },
+    {
+      "id": "PR_kwDODjvEJM7H5_eT",
+      "title": "fix(op-node): pipeline reset to handle EL restarts gracefully",
+      "author": "bitwiseguy",
+      "number": 19384,
+      "body": "## Summary\r\n\r\n- When `op-reth` is restarted, it loses in-memory chain state and returns `SYNCING` to forkchoice updates\r\n- Previously, `tryUpdateEngineInternal` unconditionally set `needFCUCall=false` even for `SYNCING` responses, causing a permanent stall\r\n- This fix validates the FCU response status using the existing `checkForkchoiceUpdatedStatus` method, triggering a pipeline reset in CL-sync mode when `SYNCING` is returned\r\n- The reset runs `FindL2Heads` to re-discover the EL's actual chain state, resolving the stall in a single reset cycle\r\n- EL-sync mode behavior is unchanged (SYNCING remains accepted)\r\n\r\n## Root Cause\r\n\r\n`tryUpdateEngineInternal` unconditionally set `needFCUCall = false` after any successful FCU RPC call, regardless of the payload status. When the EL returned `SYNCING` (which is not an RPC error), the flag was cleared, and since no new events set it back to `true`, op-node never retried the forkchoice update. This doesn't affect op-geth because geth persists the head block hash synchronously, so its head survives restarts. op-reth uses async persistence with an in-memory canonical state, so restarts can cause the head to revert.\r\n\r\n## Tests Added\r\n\r\n- unit tests: \r\n    - `TestTryUpdateEngine_SyncingInCLModeTriggersReset` verifies SYNCING triggers reset in CL-sync mode\r\n    - `TestTryUpdateEngine_SyncingInELSyncModeIsAccepted` verifies SYNCING is still accepted in EL-sync mode\r\n- integration tests:\r\n    - op-acceptance-tests/tests/sync/el_restart\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-04T15:17:28Z",
+      "mergedAt": null,
+      "additions": 233,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7HtQpT",
+      "title": "exp: remove OPCMv1 entirely, make v2 the only path",
+      "author": "smartcontracts",
+      "number": 19370,
+      "body": "## Summary\n\n- Strip OPCMv1 contracts (OPContractsManagerBase, OPContractsManagerGameTypeAdder, OPContractsManagerUpgrader, OPContractsManagerDeployer, OPContractsManagerInteropMigrator, OPContractsManager facade, OPContractsManagerContractsContainer) to type-only shells, keeping only struct/error definitions as a type namespace\n- Remove all `DevFeatures.OPCM_V2` conditional branches -- v2 is now unconditionally enabled\n- Remove v1-only test files (OPContractsManager.t.sol, OPContractsManagerContractsContainer.t.sol) and v1 test code paths\n- Clean up unused imports across deploy scripts, test setup, and production contracts\n- Update semver-lock and ABI snapshots to reflect the changes\n\n## Decisions Made\n\n- **Kept struct/error type definitions**: OPCMv1's interface types (structs, errors, enums) are still referenced by v2 code and external consumers. Only the implementation code was removed.\n- **Made OPCM_V2 always-on in FeatureFlags**: Rather than removing the bit entirely (which could break op-deployer bitmap compatibility), the bit is set unconditionally in `resolveFeaturesFromEnv()` and the constant is marked `@custom:legacy`.\n- **Removed `Config.devFeatureOpcmV2()`**: Dead code after FeatureFlags change.\n- **Removed `ForkLive._doUpgrade` (v1 path)**: Dead code after always-v2 change.\n- **Removed v1-only test** `test_verifyOpcmImmutableVariables_mismatch_fails` in VerifyOPCM.t.sol since it was gated behind `skipIfDevFeatureEnabled(OPCM_V2)`.\n\n## Complexity Report\n\nThe change touched 51 files with -6,435 / +4,863 lines (net deletion of ~1,572 lines). The main complexity was the sheer number of files with `DevFeatures.OPCM_V2` conditionals -- 30+ files across deploy scripts, test files, and production code. Each conditional needed to be analyzed to determine whether to keep the v2 branch, the v1 branch, or neither.\n\nSurprisingly, nothing broke in unexpected ways -- once the feature flag was made always-on, all the v1 test paths simply became dead code that could be removed cleanly.\n\n## Side Effects\n\n- `OPContractsManager` removed from `semver-lock.json` (no longer a deployable contract)\n- ABI snapshot `snapshots/abi/OPContractsManager.json` deleted (type-only shell has no ABI)\n- 90 tests now skip fewer (tests previously gated behind `skipIfDevFeatureDisabled(OPCM_V2)` now always run)\n\n## Validation\n\n- `just build-dev`: passing\n- `just test-dev`: 2206 passed, 0 failed, 90 skipped\n- `just pr`: all 17/17 checks passing",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-03T20:41:00Z",
+      "mergedAt": null,
+      "additions": 218,
+      "deletions": 6164
+    },
+    {
+      "id": "PR_kwDODjvEJM7G5ky0",
+      "title": "op-node: copy LocalSafeL2 in follow source mode",
+      "author": "axelKingsley",
+      "number": 19330,
+      "body": "# Tool Use Notice\r\nGenerated and Self Reviewed. May compact the testing.\r\n\r\n# What\r\n\r\nWhen op-node runs in light-node/follow-source mode, it follows an upstream node's sync status. Previously, FollowClient.GetFollowStatus() only copied SafeL2, FinalizedL2, and CurrentL1 - but not LocalSafeL2.\r\n\r\nThe FollowSource() function was incorrectly using SafeL2 (cross-safe) for updating the local-safe head, when it should use the upstream's LocalSafeL2 instead.\r\n\r\nChanges:\r\n- Add LocalSafeL2 field to FollowStatus struct\r\n- Copy LocalSafeL2 from upstream sync status in GetFollowStatus()\r\n- Update FollowSource() to accept separate LocalSafe parameter\r\n- Pass LocalSafeL2 through followUpstream() to FollowSource()\r\n\r\n# Tests\r\n- Add test for FollowClient to verify LocalSafeL2 is copied. This also verifies _all_ fields are correctly copied.\r\n\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-02-27T19:09:40Z",
+      "mergedAt": "2026-03-04T22:07:29Z",
+      "additions": 212,
+      "deletions": 15
+    }
+  ],
+  "codeChanges": {
+    "additions": 428,
+    "deletions": 29,
+    "files": 22,
+    "commitCount": 71
+  },
+  "completedItems": [
+    {
+      "title": "refactor(op-devstack): add generic component access to Network/System (Phase 5)",
+      "prNumber": 18876,
+      "type": "refactor",
+      "body": "This PR implements Phase 5 of the ID type system refactor: the \"Simplified Network Interface\" design. It adds a `ComponentRegistry` interface that provides generic component access, reducing interface bloat by enabling new component types t",
+      "files": [
+        "op-devstack/shim/l1_network.go",
+        "op-devstack/shim/l2_network.go",
+        "op-devstack/shim/network.go",
+        "op-devstack/shim/system.go",
+        "op-devstack/stack/component_registry.go",
+        "op-devstack/stack/network.go",
+        "op-devstack/stack/system.go",
+        "op-devstack/sysgo/orchestrator.go",
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        ".circleci/rust-nightly-bump.yml",
+        "ops/ai-eng/contracts-test-maintenance/docs/runbook.md"
+      ]
+    },
+    {
+      "title": "op-node: copy LocalSafeL2 in follow source mode",
+      "prNumber": 19330,
+      "type": "other",
+      "body": "# Tool Use Notice\r\nGenerated and Self Reviewed. May compact the testing.\r\n\r\n# What\r\n\r\nWhen op-node runs in light-node/follow-source mode, it follows an upstream node's sync status. Previously, FollowClient.GetFollowStatus() only copied Safe",
+      "files": [
+        "op-node/rollup/driver/driver.go",
+        "op-node/rollup/engine/engine_controller.go",
+        "op-service/sources/follow_client.go",
+        "op-service/sources/follow_client_test.go",
+        "op-node/rollup/engine/engine_controller_test.go"
+      ]
+    },
+    {
+      "title": "chore(op-acceptor): v3.9.0",
+      "prNumber": 19368,
+      "type": "other",
+      "body": "Updates op-acceptor to [v3.9.0](https://github.com/ethereum-optimism/infra/releases/tag/op-acceptor%2Fv3.9.0) which adds test duration caching and ordering.",
+      "files": [
+        "mise.toml",
+        "op-acceptance-tests/justfile"
+      ]
+    },
+    {
+      "title": "fix(kona/derive): preserve error kind from chain provider in BlobSource",
+      "prNumber": 19357,
+      "type": "bugfix",
+      "body": "## Summary\n\n`BlobSource::load_blobs` was wrapping all errors from `chain_provider.block_info_and_transactions_by_hash` with `BlobProviderError::Backend(e.to_string()).into()`, which forced every error to `PipelineErrorKind::Temporary` regar",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/sources/blobs.rs"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 94.7418028439389,
+      "prScore": 94.7418028439389,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 84.98254779315221,
+      "prScore": 71.48254779315221,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "scharissis",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/376382?u=21da38bcf55ef6712398ef67e8c7d96096c4a045&v=4",
+      "totalScore": 70.46467132459607,
+      "prScore": 70.26467132459607,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 49.85423761417307,
+      "prScore": 17.35423761417307,
+      "issueScore": 0,
+      "reviewScore": 32.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 42.19859714951414,
+      "prScore": 37.19859714951414,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 27.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 23.938,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 19.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 23,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 23,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 15.750306144334054,
+      "prScore": 4.750306144334054,
+      "issueScore": 0,
+      "reviewScore": 11,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 14.7,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 10.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xChin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/77933451?u=a76de7bffe1b1d8fb41313e36c4ba53d9d65109b&v=4",
+      "totalScore": 14.324330683884977,
+      "prScore": 14.324330683884977,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xniha",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/205694301?u=40549cc9822668a94e580372e47c3350107eb9aa&v=4",
+      "totalScore": 9.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "kien-rise",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/157339831?u=afa0e8ad10cf506e136b6d349070142ce58969a9&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "antonleviathan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/4776110?u=7acbb26ab3b7a9eba7e67f0c44ea4d15d71ddbbb&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Joxess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aliersh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/65925295?u=ca33e5aab17ee0622941543bbe9c34db4690216b&v=4",
+      "totalScore": 8.799999999999999,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "volkTRhacV",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/252938195?u=60f1d43239d597360050c43668b6a755001492a5&v=4",
+      "totalScore": 6.045,
+      "prScore": 5.845,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 4.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "unclezoro",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7310198?u=eaf41550557c925d113cf7b854ac650588d210d6&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    }
+  ],
+  "newPRs": 9,
+  "mergedPRs": 4,
+  "newIssues": 7,
+  "closedIssues": 1,
+  "activeContributors": 43
+}
