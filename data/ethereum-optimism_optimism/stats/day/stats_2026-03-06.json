@@ -5,20 +5,580 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-03-06 to 2026-03-07, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-03-06 to 2026-03-07, ethereum-optimism/optimism had 15 new PRs (10 merged), 3 new issues, and 32 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7webFd",
+      "title": "Integrate ZK_DISPUTE_GAME dev feature flag into OPCM/OPD pipeline",
+      "author": "0xChin",
+      "number": 19432,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe `ZK_DISPUTE_GAME` dev feature flag has been registered across the stack (PR #19388), but is not yet used in the op-deployer pipeline.\n\n## Work needed\n\n- Use `ZKDisputeGameDevFlag` in `op-deployer/pkg/deployer/pipeline/` to conditionally deploy ZK dispute game contracts\n- Add OPCM integration for the ZK game type (implementation tracking, `_makeGameArgs()` encoding, `validGameTypes` inclusion)\n- Wire up any necessary CLI flags or intent configuration for the ZK game type\n\n## Context\n\nThis follows the same pattern as OPCM_V2 (`OPCMV2DevFlag` in `pipeline/opchain.go`) and L2CM (`L2CMDevFlag` in `pipeline/l2genesis.go`).",
+      "createdAt": "2026-03-06T14:27:15Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7wTpql",
+      "title": "Remove gas introspection from CrossL2Inbox",
+      "author": "pauldowman",
+      "number": 19422,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Glamsterdam will likely have several EIPs that change gas pricing. EIP-8037 changes state _creation_ cost in a dynamic way, which shouldn't matter here, and EIP-8038 changes state _access_ cost in a constant way, so it may be enough to just adjust `_WARM_READ_THRESHOLD`.\n\nBut as I understand it this method of validation isn't meant to be permanent and should be replaced with a precompile.",
+      "createdAt": "2026-03-06T01:42:25Z",
+      "closedAt": "2026-03-06T01:44:04Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7wS-Y5",
+      "title": "supernode: add L1 consistency verification to cross-safety validation",
+      "author": "karlfloersch",
+      "number": 19420,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Problem\n\nThe supernode's cross-safety validation operates over a global view of multiple L2 chains, but each chain is individually asynchronous and unsynchronized. Currently, the interop verification pipeline (`progressInterop()`) processes timestamps sequentially:\n\n1. `checkChainsReady(ts)` — wait for all chains to have blocks at the timestamp\n2. `loadLogs(ts)` — download and persist cross-chain execution logs\n3. `verifyInteropMessages()` — validate executing messages exist on source chains\n4. Cycle detection — check for circular same-timestamp dependencies\n5. Commit `VerifiedResult` with `L1Inclusion` (max L1 block number across chains) and `L2Heads`\n\nThe `VerifiedResult` stores the L1 block hash alongside the L2 heads, but **there is no verification that:**\n\n- The previously recorded `L1Inclusion` is still on the canonical L1 chain (L1 reorg detection)\n- All L2 chains' source L1 blocks are on the **same** L1 chain (cross-chain L1 consistency)\n- The new frontier's L1 blocks are on the same chain as the previously stored L1 (pre-post consistency link)\n\nWithout these checks, the verifiedDB could contain results that reference reorged L1 blocks, or results where different chains were derived from different L1 forks.\n\n## Relevant Code\n\n- **Verification pipeline**: `op-supernode/supernode/activity/interop/interop.go` — `progressInterop()` (line ~253)\n- **L1 inclusion calculation**: `op-supernode/supernode/activity/interop/algo.go` — `l1Inclusion()` (line ~34)\n- **Verified DB**: `op-supernode/supernode/activity/interop/verified_db.go` — sequential-only BBolt store with `VerifiedResult{Timestamp, L1Inclusion, L2Heads}`\n- **Reorg/rewind**: `op-supernode/supernode/activity/interop/interop.go` — `resetVerifiedDB()`, `resetLogsDB()`\n- **Verifier interface**: `op-supernode/supernode/activity/activity.go` — `VerificationActivity`\n- **Super authority**: `op-supernode/supernode/chain_container/super_authority.go` — `FullyVerifiedL2Head()`, `FinalizedL2Head()`\n\n## Approaches\n\n### Approach A: Synchronous L1 Consistency Check (recommended)\n\nAdd L1 consistency verification directly into the `progressInterop()` loop, before committing any new verified results. This ensures the verifiedDB is consistent **by construction**.\n\n#### Algorithm\n\n**Step 1 — Reorg detection (backward check):**\nAt the start of each verification round, verify the previously stored `VerifiedResult.L1Inclusion` is still on the canonical L1 chain. If L1 has reorged, travel backward through timestamps, rewinding the verifiedDB until we find a timestamp whose `L1Inclusion` is still canonical.\n\n**Step 2 — Frontier consistency (forward check):**\nWhen building the new frontier (all L2 heads at the next timestamp), query each chain's source L1 block. Verify that:\n1. All chains' L1 source blocks are on the **same L1 chain** (they may be different block numbers, but must share ancestry)\n2. The frontier's L1 blocks are on the **same chain as the previously recorded `L1Inclusion`** — this is the pre-post link\n\nThis pre-post link provides a recursive guarantee: if timestamp N is consistent, and timestamp N+1's L1 is on the same chain as N's L1, then N+1 is also consistent. The consistency proof is inductive.\n\n**Step 3 — Proceed with verification:**\nOnly after both checks pass, proceed with the existing `loadLogs()` → `verifyInteropMessages()` → cycle detection → commit pipeline.\n\n**If the frontier check fails:**\nStop and wait. On the next attempt, the L1 reorg detection (Step 1) will catch the canonical chain change and rewind appropriately.\n\n#### Edge cases\n\n- **L1 reorgs between check and L2 pull:** The frontier consistency check catches this — L2s will show L1 sources from the old fork, which won't match the new canonical chain.\n- **L2 hasn't caught up to L1 reorg:** `checkChainsReady()` returns stale data derived from the old L1 fork. The frontier consistency check detects the mismatch.\n- **All L2s stale but internally consistent:** The L1 reorg detection at the start of the next round catches this, since the previously stored `L1Inclusion` will no longer be canonical.\n\n#### Why this approach\n\n- **Consistency by construction.** The verifiedDB never contains inconsistent data. No window of vulnerability.\n- **Fits existing architecture.** Sequential timestamp processing in `progressInterop()` — this is just an additional gate before the existing pipeline. No new goroutines or coordination primitives.\n- **The pre-post link is provably correct.** Recursive consistency guarantee via induction on timestamps.\n- **Performance is acceptable.** Checking L1 chain consistency requires verifying parent hashes on a small number of headers. The L1 ETH client caches headers. An in-memory cache could be added but likely isn't needed initially.\n\n### Approach B: Async Self-Healing\n\nA background process periodically walks the verifiedDB, re-checks that stored `L1Inclusion` values are still canonical and L2 heads still match, and rewinds if inconsistency is found.\n\n#### Tradeoffs vs Approach A\n\n- **Pro:** Defense-in-depth — catches bugs in the synchronous verification logic itself\n- **Con:** Window of inconsistency between commit and detection\n- **Con:** Requires coordination with `progressInterop()` to avoid concurrent writes/rewinds — adds locking complexity\n- **Con:** Harder to reason about correctness — the system is eventually consistent rather than always consistent\n\nCould be useful as a **read-only audit/monitoring layer** on top of Approach A, but not recommended as the primary consistency mechanism.\n\n## Implementation Notes\n\nThe L1 chain consistency check needs a function like:\n\n```go\n// AreOnSameL1Chain checks whether two L1 block IDs are on the same chain\n// by verifying parent hash ancestry from the higher block to the lower block.\nfunc AreOnSameL1Chain(ctx context.Context, l1Client ethclient.Client, a, b eth.BlockID) (bool, error)\n```\n\nThis function should be usable in a \"dumb\" way (called for each pair) with the L1 client's header cache absorbing repeated lookups. Can add an explicit in-memory cache later if needed.\n\nThe check integrates into `progressInterop()` roughly as:\n\n```\n// Pseudocode\nlastResult := verifiedDB.Latest()\n\n// Step 1: L1 reorg detection\nif !isCanonical(lastResult.L1Inclusion) {\n    rewindUntilConsistent()\n    lastResult = verifiedDB.Latest()\n}\n\n// Step 2: Build frontier and check consistency  \nfrontier := getAllL2HeadsAndL1Sources(nextTimestamp)\nif !allOnSameL1Chain(frontier.l1Sources) {\n    return // wait and retry\n}\nif !onSameL1Chain(frontier.maxL1, lastResult.L1Inclusion) {\n    return // wait and retry  \n}\n\n// Step 3: Existing verification pipeline\nloadLogs(nextTimestamp)\nverifyInteropMessages(...)\n...\ncommit(VerifiedResult{...})\n```",
+      "createdAt": "2026-03-06T00:49:49Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7EWjtX",
+      "title": "feat: Add Kailua Contracts and Boundless Support Part 3",
+      "author": "hashcashier",
+      "number": 19210,
+      "body": "**Description**\r\nThis PR introduces support for the new Kailua game type.\r\n\r\nThis is one of the PRs (opened not in order) aimed at enabling Kailua and Boundless support across the OP Stack’s onchain and offchain components, and will help advance the broader effort to generalize and standardize infrastructure for multiple zk proof systems.\r\n\r\nTogether with related efforts such as[ https://github.com/ethereum-optimism/optimism/pull/18277](https://github.com/ethereum-optimism/optimism/pull/18277), this work contributes to standardizing key components and interfaces across game types, enabling a more modular and extensible approach to integrating multiple zk proof systems.\r\n\r\nTo follow-up supporting OP-Succinct Lite game type with Risc0 verifier and tests.\r\n\r\n**Tests**\r\nIn a follow-up up PR\r\n\r\n**Additional context**\r\n[ZK Proofs Design Doc](https://github.com/ethereum-optimism/design-docs/pull/356/changes#diff-7fdc71685f6f487bb61ea06185f35924658d0aba4d7e13b4d8d60e1c6022e148R60)\r\n[Support for Risc0 Verifier](https://github.com/ethereum-optimism/optimism/pull/19171)\r\n\r\n**Metadata**\r\n\r\n--",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-02-17T12:54:59Z",
+      "mergedAt": null,
+      "additions": 2060,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM6-Swiz",
+      "title": "stack: remove backward compatibility type aliases for Phase 6 cleanup",
+      "author": "teddyknox",
+      "number": 18877,
+      "body": "Phase 6 completes the ID type system refactor by removing all backward compatibility code. This is a **breaking change** that removes ~1,200 net lines of code (2,578 deletions, 1,385 additions), leaving only the unified `ComponentID` type system.\r\n\r\n## What This Phase Removes\r\n\r\n### 1. Type Aliases for Backward Compatibility\r\n\r\nFrom `stack/component_id.go`, removed 19 type aliases:\r\n```go\r\n// REMOVED - these aliases allowed old code to compile during migration\r\ntype (\r\n    L1ELNodeID     = ComponentID\r\n    L1CLNodeID     = ComponentID\r\n    L2BatcherID    = ComponentID\r\n    L2ELNodeID     = ComponentID\r\n    // ... 15 more\r\n)\r\n```\r\n\r\n### 2. `Kind` Type Alias\r\n\r\nFrom `stack/component_id.go`:\r\n```go\r\n// REMOVED\r\ntype Kind = ComponentKind\r\n```\r\n\r\n### 3. Old Base Types from `stack/id.go`\r\n\r\nRemoved the original ID infrastructure (~150 lines):\r\n```go\r\n// REMOVED - old Kind type and methods\r\ntype Kind string\r\nfunc (k Kind) LogValue() slog.Value { ... }\r\nfunc (k Kind) String() string { ... }\r\nfunc (k Kind) MarshalText() ([]byte, error) { ... }\r\nfunc (k *Kind) UnmarshalText(data []byte) error { ... }\r\n\r\n// REMOVED - base struct types\r\ntype idWithChain struct { key string; chainID eth.ChainID }\r\ntype idOnlyChainID struct { chainID eth.ChainID }\r\ntype genericID struct { key string }\r\n\r\n// REMOVED - interfaces\r\ntype IDWithChain interface { ... }\r\ntype IDOnlyChainID interface { ... }\r\ntype GenericID interface { ... }\r\n\r\n// REMOVED - helper functions\r\nfunc lessIDWithChain[T IDWithChain](a, b T) bool { ... }\r\nfunc lessIDOnlyChainID[T IDOnlyChainID](a, b T) bool { ... }\r\nfunc lessElemOrdered[E any, ID cmp.Ordered](...) bool { ... }\r\nfunc copyAndSortCmp[V ~[]E, E any](vs V, cmp func(a, b E) int) V { ... }\r\n```\r\n\r\n### 4. Old ID Type Definitions from Component Files\r\n\r\nRemoved ID type definitions from 19 component files. Example from `stack/l2_batcher.go`:\r\n```go\r\n// REMOVED (~50 lines per file)\r\nconst L2BatcherKind Kind = \"L2Batcher\"\r\n\r\ntype L2BatcherID idWithChain\r\n\r\nfunc NewL2BatcherID(key string, chainID eth.ChainID) L2BatcherID { ... }\r\nfunc (id L2BatcherID) Kind() Kind { return L2BatcherKind }\r\nfunc (id L2BatcherID) Key() string { return id.key }\r\nfunc (id L2BatcherID) ChainID() eth.ChainID { return id.chainID }\r\nfunc (id L2BatcherID) String() string { ... }\r\nfunc (id L2BatcherID) LogValue() slog.Value { ... }\r\nfunc (id L2BatcherID) MarshalText() ([]byte, error) { ... }\r\nfunc (id *L2BatcherID) UnmarshalText(data []byte) error { ... }\r\nfunc SortL2BatcherIDs(ids []L2BatcherID) []L2BatcherID { ... }\r\n```\r\n\r\nFiles affected: `l1_el.go`, `l1_cl.go`, `l1_network.go`, `l2_el.go`, `l2_cl.go`, `l2_network.go`, `l2_batcher.go`, `l2_proposer.go`, `l2_challenger.go`, `rollup_boost.go`, `op_rbuilder.go`, `faucet.go`, `sync_tester.go`, `supervisor.go`, `conductor.go`, `cluster.go`, `superchain.go`, `test_sequencer.go`, `fb_ws_client.go`\r\n\r\n### 5. Old Matcher Type Aliases\r\n\r\nFrom `stack/matcher.go`, removed two-parameter matcher aliases:\r\n```go\r\n// REMOVED\r\ntype L2BatcherMatcher = Matcher[L2BatcherID, L2Batcher]\r\ntype L2ELMatcher = Matcher[L2ELNodeID, L2ELNode]\r\n// ... etc\r\n```\r\n\r\n### 6. Sort Functions\r\n\r\nRemoved 19 sort functions from component files:\r\n```go\r\n// REMOVED\r\nfunc SortL2BatcherIDs(ids []L2BatcherID) []L2BatcherID { ... }\r\nfunc SortL1NetworkIDs(ids []L1NetworkID) []L1NetworkID { ... }\r\n// ... etc\r\n```\r\n\r\nNow use `ComponentID.Less()` method with standard sorting.\r\n\r\n## What This Phase Updates\r\n\r\n### 1. Interface Return Types\r\n\r\nUpdated `KindProvider` interface to use `ComponentKind`:\r\n```go\r\n// stack/id.go\r\ntype KindProvider interface {\r\n    Kind() ComponentKind  // was: Kind() Kind\r\n}\r\n```\r\n\r\n### 2. Context Functions\r\n\r\nUpdated `stack/context.go`:\r\n```go\r\nfunc ContextWithKind(ctx context.Context, kind ComponentKind) context.Context\r\nfunc KindFromContext(ctx context.Context) ComponentKind\r\nfunc KindSelector(kind ComponentKind) logfilter.Selector\r\n```\r\n\r\n### 3. Matcher Interface\r\n\r\nSimplified from two type parameters to one:\r\n```go\r\n// Before\r\ntype Matcher[ID, E any] interface {\r\n    Match(elems []E) ([]E, ID)\r\n}\r\n\r\n// After\r\ntype Matcher[E] interface {\r\n    Match(elems []E) []E\r\n}\r\n\r\n// New helper for ID-based matching\r\nfunc ByID[E Identifiable](id ComponentID) Matcher[E]\r\n```\r\n\r\n### 4. Shim and Sysgo Updates\r\n\r\nAll files updated to use `ComponentID` directly with typed constructors:\r\n```go\r\n// Example usage\r\nid := stack.NewL2BatcherID(\"mynode\", chainID)  // Returns ComponentID\r\nbatcher := network.L2Batcher(stack.ByID[stack.L2Batcher](id))\r\n```\r\n\r\n### 5. Test Files\r\n\r\n- `stack/capabilities_test.go` - Updated constructor calls\r\n- `stack/component_id_test.go` - Use typed constructors directly\r\n- `stack/context_test.go` - Changed `Kind(\"\")` to `ComponentKind(\"\")`\r\n- `stack/registry_test.go` - Updated type patterns\r\n\r\n## Type System After Phase 6\r\n\r\n### Single ID Type\r\n```go\r\n// Unified ID type - no wrappers or aliases\r\ntype ComponentID struct {\r\n    kind    ComponentKind\r\n    shape   IDShape\r\n    key     string\r\n    chainID eth.ChainID\r\n}\r\n\r\n// Typed constructor functions (return ComponentID directly)\r\nfunc NewL2BatcherID(key string, chainID eth.ChainID) ComponentID\r\nfunc NewL2ELNodeID(key string, chainID eth.ChainID) ComponentID\r\nfunc NewL1NetworkID(chainID eth.ChainID) ComponentID\r\nfunc NewSupervisorID(key string) ComponentID\r\n// ... etc\r\n```\r\n\r\n### Simplified Matcher\r\n```go\r\ntype Matcher[E] interface {\r\n    Match(elems []E) []E\r\n}\r\n\r\n// Non-generic Identifiable\r\ntype Identifiable interface {\r\n    ID() ComponentID\r\n}\r\n\r\n// Create matcher from ID\r\nfunc ByID[E Identifiable](id ComponentID) Matcher[E]\r\n```\r\n\r\n### Clean Interfaces\r\n```go\r\ntype L2Network interface {\r\n    ID() ComponentID\r\n    L2Batcher(m Matcher[L2Batcher]) L2Batcher\r\n    L2BatcherIDs() []ComponentID\r\n    // ...\r\n}\r\n```\r\n\r\n## Related\r\n\r\n- Phase 1-5 PRs: Prior phases of this refactor\r\n- [Design document](https://www.notion.so/oplabs/Devstack-ID-Type-System-Refactor-2eef153ee1628048bb7ade1030fe6e9b)\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-01-20T19:59:02Z",
+      "mergedAt": "2026-03-06T16:41:15Z",
+      "additions": 1798,
+      "deletions": 3269
+    },
+    {
+      "id": "PR_kwDODjvEJM7ISIlC",
+      "title": "op-acceptance-tests: Add PE MVP tests",
+      "author": "pcw109550",
+      "number": 19404,
+      "body": "Adds PE acceptance tests which are skipped by default.\r\n\r\nThese tests are not meant to be run at the monorepo.\r\n\r\nReviving https://github.com/ethereum-optimism/optimism/pull/18723 with addressing my own comments. \r\n\r\nLocally validated.\r\n```\r\n Acceptance Testing Results (network: in-memory)                                                                                                     \r\n TYPE     ID                                                                                       DURATION   TESTS  PASSED  FAILED  SKIPPED  STATUS \r\n Gate     rules                                                                                    1m51.278s      1       1       0        0  PASS   \r\n Package  └── github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/rules (package)      1m51.278s      1       1       0        0  PASS   \r\n Test         └── github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/rules (package)  1m51.278s      1       1       0        0  PASS   \r\n Subtest          ├── TestBoostPriorityOrdering                                                      20.662s      1       1       0        0  PASS   \r\n                  ├── TestBoostedVsNonBoostedOrdering                                                14.008s      1       1       0        0  PASS   \r\n                  ├── TestSameSenderNonceOrdering                                                    16.412s      1       1       0        0  PASS   \r\n                  ├── TestMultipleSendersWithMixedPriorities                                         29.683s      1       1       0        0  PASS   \r\n                  └── TestSingleSenderRandomNonceOrderWithRandomScores                               10.044s      1       1       0        0  PASS   \r\n TOTAL                                                                                             1M51.279S      5       5       0        0  PASS   \r\n```\r\n\r\nExample run cmd:\r\n```sh\r\ncd op-acceptance-tests\r\n# tweak acceptance-tests.yaml, adding the `rules` gate\r\n RUST_BINARY_PATH_OP_RBUILDER=/Users/changwan/Documents/op-rbuilder/target/release/op-rbuilder  \r\nOP_RBUILDER_RULES_TEST=1 just acceptance-test \"\" rules\r\n```\r\n\r\nCredits to @mininny for implementing the actual testing logic at `op-acceptance-tests/tests/rules/rules_test.go`",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-05T18:09:46Z",
+      "mergedAt": "2026-03-06T14:59:30Z",
+      "additions": 900,
+      "deletions": 26
+    },
+    {
+      "id": "PR_kwDODjvEJM7IaM6E",
+      "title": "op-deployer: remove RPC deps via anvil state snapshots",
+      "author": "ajsutton",
+      "number": 19428,
+      "body": "## Summary\n\nExploratory PR to remove `SEPOLIA_RPC_URL` dependency from op-deployer tests using an **RPC recording/replay** approach.\n\n### Approach: RPC Recording Proxy\n\nInstead of connecting to live Sepolia for every test run, this PR introduces an RPC recording proxy that:\n\n1. **Record mode** (first run with `SEPOLIA_RPC_URL`): Proxies all JSON-RPC requests to Sepolia, records request/response pairs keyed by `sha256(method + params)`, saves to gzip-compressed JSON files\n2. **Replay mode** (subsequent runs without `SEPOLIA_RPC_URL`): Serves responses from pre-recorded fixtures, no network access needed\n\nThis is transparent to the test code -- they just get an RPC endpoint URL, whether it's recording or replaying.\n\n### What Changed\n\n**New infrastructure** (`op-service/testutils/devnet/`):\n- `rpcrecorder.go` -- `RPCRecorder` (record mode) and `RPCReplayer` (replay mode) HTTP proxies\n- `testhelpers.go` -- `SepoliaRPCEndpoint()` convenience function for tests\n- `canned.go` -- `NewForkedSepoliaFromBlockWithReplay()` and `NewForkedSepoliaWithReplay()` for anvil-based tests\n- `anvil.go` -- `WithLoadState` and `WithDumpState` options (for future anvil state dump support)\n- `rpcrecorder_test.go` -- Unit tests for the recording/replay infrastructure\n\n**Modified tests** (3 of ~8 files):\n- `op-deployer/pkg/deployer/pipeline/init_test.go` -- 9 test functions converted (block-pinned and latest)\n- `op-deployer/pkg/deployer/integration_test/cli/upgrade_test.go` -- 6 test cases converted (all block-pinned)\n- `op-deployer/pkg/deployer/opcm/dispute_game_factory_test.go` -- 1 test function converted\n\n### Not Yet Converted\n\nThe following tests use `NewForkedSepolia` (latest block, not pinned) and need additional work to determine the right pinning block:\n- `integration_test/apply_test.go` (2 test cases)\n- `integration_test/cli/migrate_test.go` (2 test functions)\n- `integration_test/cli/manage_add_game_type_v2_test.go` (1 test)\n- `manage/migrate_test.go` (1 test)\n- `manage/add_game_type_test.go` (1 test)\n\n### Decisions Made\n\n1. **RPC recording over anvil state dumps**: State dumps are too large and miss lazily-loaded accounts. RPC recording captures exactly what tests need and compresses well.\n2. **Content-addressed caching**: Recordings are keyed by `sha256(method + normalized_params)`, so identical RPC calls always get the same response regardless of JSON-RPC request ID ordering.\n3. **Recording files are per-test**: Each test function gets its own recording file to avoid interference between tests.\n4. **Gzip compression**: Recordings are stored as `.json.gz` to minimize repo size.\n\n### Complexity Report\n\n**Medium complexity.** The infrastructure is straightforward, but the scope is larger than expected:\n- ~8 test files need modification (3 done, 5 remaining)\n- Tests using `NewForkedSepolia` (latest block) need block pinning decisions\n- Recording files need to be generated (requires one run with `SEPOLIA_RPC_URL`)\n- Some tests deploy contracts to the forked chain, which creates local state -- this works fine with the recording approach since only the initial fork RPC calls are recorded\n\n### Side Effects\n\n- No version bumps needed\n- Recording fixtures not yet generated (requires `SEPOLIA_RPC_URL` access)\n- Tests remain backward-compatible: they still work with `SEPOLIA_RPC_URL` set (recording mode)\n\n### How to Generate Recordings\n\n```bash\n# Run the modified tests with SEPOLIA_RPC_URL set -- recordings are auto-saved\nSEPOLIA_RPC_URL=<url> go test ./op-deployer/pkg/deployer/pipeline/ -run TestPopulateSuperchainState -v -timeout 5m\nSEPOLIA_RPC_URL=<url> go test ./op-deployer/pkg/deployer/integration_test/cli/ -run TestCLIUpgrade -v -timeout 10m\n```\n\nRecording files will be created at `testdata/rpc-recordings/*.json.gz` relative to each test file.\n\n## Test Plan\n\n- [x] RPCRecorder unit tests pass (`go test ./op-service/testutils/devnet/ -run TestRPCRecorder`)\n- [ ] Generate recordings by running tests with `SEPOLIA_RPC_URL`\n- [ ] Verify tests pass in replay mode (without `SEPOLIA_RPC_URL`)\n- [ ] Convert remaining 5 test files\n- [ ] Commit recording fixtures\n\n---\n\nThis is an **experiment** to reveal the true end-to-end complexity of removing `SEPOLIA_RPC_URL` from op-deployer tests. The recording/replay approach appears viable but recordings need to be generated and validated.\n\nGenerated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-06T06:00:31Z",
+      "mergedAt": null,
+      "additions": 775,
+      "deletions": 87
+    },
+    {
+      "id": "PR_kwDODjvEJM7IaJ5X",
+      "title": "op-deployer: remove RPC deps via JSON-RPC replay proxy",
+      "author": "ajsutton",
+      "number": 19427,
+      "body": "## Summary\n\nIntroduces a JSON-RPC Replay Proxy that records Sepolia RPC request/response pairs to fixture files during development, then replays them offline in CI. This removes the `SEPOLIA_RPC_URL` dependency from ~16 op-deployer test cases.\n\n### What Changed\n\n**New files:**\n- `op-service/testutils/devnet/rpcreplay.go` — RPCReplayProxy with record/replay modes, batch support, deterministic request keying\n- `op-service/testutils/devnet/rpcreplay_test.go` — Unit tests for the proxy\n- `op-service/testutils/devnet/fixtures/` — Directory for committed fixture files\n\n**Modified files:**\n- `op-service/testutils/devnet/canned.go` — Added helper functions: `RPCReplayOrRecord`, `NewForkedSepoliaFromBlockWithReplay`, `RPCReplayFixturePath`\n- `op-deployer/pkg/deployer/pipeline/init_test.go` — 9 test functions: replaced `RetryProxy` + `SEPOLIA_RPC_URL` with replay proxy\n- `op-deployer/pkg/deployer/integration_test/cli/upgrade_test.go` — 6 test cases: replaced `NewForkedSepoliaFromBlock` with `NewForkedSepoliaFromBlockWithReplay`\n- `op-deployer/pkg/deployer/opcm/dispute_game_factory_test.go` — 1 test function: replaced direct `rpc.Dial(SEPOLIA_RPC_URL)` with replay proxy\n\n### How It Works\n\nThe replay proxy is an HTTP server that sits between tests and Sepolia:\n\n1. **Record mode** (`SEPOLIA_RPC_URL=<url> RPC_REPLAY_RECORD=true`): Forwards requests to real Sepolia, saves request/response pairs to a JSON fixture file keyed by `sha256(method + canonical_params)`\n2. **Replay mode** (no `SEPOLIA_RPC_URL`): Serves responses from fixture files, no network calls\n3. **Pass-through mode** (`SEPOLIA_RPC_URL=<url>` without `RPC_REPLAY_RECORD`): Forwards and records (useful for updating fixtures)\n\n### Decisions Made\n\n- **One fixture file per test function** — Each test gets its own fixture file to keep recordings isolated and debuggable\n- **Deterministic keying** — `method:sha256(method+params)[:16]` ensures the same RPC call always maps to the same cache entry\n- **ID stripping** — JSON-RPC `id` is stripped from cached responses and reconstructed on replay, so different request IDs don't cause cache misses\n- **Batch support** — The proxy handles JSON-RPC batch requests (array of requests) correctly\n\n### Complexity Report\n\n- **Moderate complexity** — The proxy itself is straightforward (~300 lines). The main work was updating 16 test cases across 3 files.\n- **Key risk**: Fixture files need to be generated before CI can run in replay mode. This PR sets up the infrastructure but **fixture files are not yet generated** — that requires a one-time recording pass with `SEPOLIA_RPC_URL` set.\n- **Anvil interaction**: For `upgrade_test.go`, anvil makes its own RPC calls to the fork URL. The replay proxy sits between anvil and Sepolia, intercepting all those calls.\n\n### Side Effects\n\n- No version bumps needed\n- No snapshot changes\n- Test behavior is identical when `SEPOLIA_RPC_URL` is set (backward compatible)\n\n### Next Steps\n\n1. Run tests with `SEPOLIA_RPC_URL` set + `RPC_REPLAY_RECORD=true` to generate fixture files\n2. Commit the generated fixture files\n3. Verify tests pass without `SEPOLIA_RPC_URL` (replay mode)\n\n## Test plan\n\n- [x] Unit tests for RPCReplayProxy (record/replay/batch/deterministic keys)\n- [ ] Record fixtures with real Sepolia RPC\n- [ ] Verify all 16 test cases pass in replay mode\n- [ ] Verify CI passes without SEPOLIA_RPC_URL\n\nGenerated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-06T05:56:05Z",
+      "mergedAt": null,
+      "additions": 739,
+      "deletions": 101
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 3640,
+    "deletions": 1302,
+    "files": 109,
+    "commitCount": 56
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "stack: remove backward compatibility type aliases for Phase 6 cleanup",
+      "prNumber": 18877,
+      "type": "refactor",
+      "body": "Phase 6 completes the ID type system refactor by removing all backward compatibility code. This is a **breaking change** that removes ~1,200 net lines of code (2,578 deletions, 1,385 additions), leaving only the unified `ComponentID` type s",
+      "files": [
+        "kona/tests/node/common/conductor_test.go",
+        "kona/tests/node/utils/mixed_preset.go",
+        "kona/tests/node/utils/mixed_preset_with_conductor.go",
+        "kona/tests/node/utils/test_sequencer_preset.go",
+        "kona/tests/supervisor/presets/interop_minimal.go",
+        "op-acceptance-tests/tests/base/conductor/leadership_transfer_test.go",
+        "op-acceptance-tests/tests/batcher/init_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/clsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/divergence/divergence_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/elsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/init_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/clsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/elsync/init_test.go",
+        "op-acceptance-tests/tests/fusaka/init_test.go",
+        "op-acceptance-tests/tests/interop/seqwindow/init_test.go",
+        "op-acceptance-tests/tests/interop/sync/multisupervisor_interop/init_test.go",
+        "op-acceptance-tests/tests/sync/clsync/gap_clp2p/init_test.go",
+        "op-acceptance-tests/tests/sync/elsync/gap_clp2p/init_test.go",
+        "op-acceptance-tests/tests/sync/elsync/gap_elp2p/init_test.go",
+        "op-acceptance-tests/tests/sync/manual/init_test.go",
+        "op-acceptance-tests/tests/sync_tester/sync_tester_elsync_multi/init_test.go",
+        "op-acceptance-tests/tests/sync_tester/sync_tester_hfs/init_test.go",
+        "op-devstack/dsl/l2_cl.go",
+        "op-devstack/dsl/l2_el.go",
+        "op-devstack/example/init_test.go",
+        "op-devstack/presets/cl_config.go",
+        "op-devstack/presets/minimal_with_conductors.go",
+        "op-devstack/presets/proof.go",
+        "op-devstack/presets/singlechain_multinode.go",
+        "op-devstack/presets/singlechain_twoverifiers.go",
+        "op-devstack/presets/sync_tester_config.go",
+        "op-devstack/shim/cluster.go",
+        "op-devstack/shim/conductor.go",
+        "op-devstack/shim/faucet.go",
+        "op-devstack/shim/fb_ws_client.go",
+        "op-devstack/shim/l1_cl.go",
+        "op-devstack/shim/l1_el.go",
+        "op-devstack/shim/l1_network.go",
+        "op-devstack/shim/l2_batcher.go",
+        "op-devstack/shim/l2_challenger.go",
+        "op-devstack/shim/l2_cl.go",
+        "op-devstack/shim/l2_el.go",
+        "op-devstack/shim/l2_network.go",
+        "op-devstack/shim/l2_proposer.go",
+        "op-devstack/shim/matcher.go",
+        "op-devstack/shim/network.go",
+        "op-devstack/shim/op_rbuilder.go",
+        "op-devstack/shim/rollup_boost.go",
+        "op-devstack/shim/superchain.go",
+        "op-devstack/shim/supervisor.go",
+        "op-acceptance-tests/tests/batcher/throttling/init_test.go",
+        "op-devstack/shim/sync_tester.go",
+        "op-devstack/shim/system.go",
+        "op-devstack/shim/test_sequencer.go",
+        "op-devstack/stack/capabilities.go",
+        "op-devstack/presets/op_rbuilder_rules.go",
+        "op-devstack/presets/twol2_follow_l2.go"
+      ]
+    },
+    {
+      "title": "op-reth: bump reth/op-reth to v1.11.1 and MSRV to 1.92",
+      "prNumber": 19292,
+      "type": "other",
+      "body": "## Summary\n- Bumps all 72 reth git dependencies from `v1.11.0` to `v1.11.1`\n- Bumps all 16 op-reth crate versions from `1.11.0` to `1.11.1`\n- Bumps Rust MSRV from `1.88` to `1.92` across all configs, Dockerfiles, and docs\n\n## Test plan\n- [x",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        ".github/workflows/branches.yaml",
+        "docker-bake.hcl",
+        "ops/docker/op-stack-go/Dockerfile",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-hardforks/Cargo.toml",
+        "rust/clippy.toml",
+        "rust/kona/CLAUDE.md",
+        "rust/kona/README.md",
+        "rust/kona/bin/client/justfile",
+        "rust/kona/docker/apps/kona_app_generic.dockerfile",
+        "rust/kona/docker/cannon/cannon.dockerfile",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile",
+        "rust/kona/justfile",
+        "rust/op-reth/DockerfileOp",
+        "rust/op-reth/README.md",
+        "rust/op-reth/bin/Cargo.toml",
+        "rust/op-reth/crates/chainspec/Cargo.toml",
+        "rust/op-reth/crates/cli/Cargo.toml",
+        "rust/op-reth/crates/consensus/Cargo.toml",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/exex/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/hardforks/Cargo.toml",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/tests/e2e-testsuite/p2p.rs",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/primitives/Cargo.toml",
+        "rust/op-reth/crates/reth/Cargo.toml",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/storage/Cargo.toml",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/txpool/Cargo.toml",
+        "rust/rust-toolchain.toml"
+      ]
+    },
+    {
+      "title": "fix(depreqres): stabilize L2CLB snapshot after disconnect to fix ELSync triple-failure flake",
+      "prNumber": 19418,
+      "type": "bugfix",
+      "body": "## Root Cause\n\nThree tests in `syncmodereqressync/elsync` always co-fail in CI with the pattern:\n\n```\nssB_before=3, ssB_after=4\nrequire.Equal(ssB_after.UnsafeL2.Number, ssB_before.UnsafeL2.Number) → FAIL\n```\n\n**Why they fail:**\n\n`init_test.",
+      "files": [
+        "op-acceptance-tests/tests/depreqres/common/common.go"
+      ]
+    },
+    {
+      "title": "chore(op-acceptance-tests): add TestSupernodeInteropChainLag to flake-shake",
+      "prNumber": 19413,
+      "type": "tests",
+      "body": "## Summary\n\n`TestSupernodeInteropChainLag` has shown consistent flakiness in `memory-all`: 3 failures across 3 separate branches in the last 7 days. Adding it to flake-shake to quarantine it while the root cause is investigated.\n\n## Context",
+      "files": [
+        "op-acceptance-tests/acceptance-tests.yaml"
+      ]
+    },
+    {
+      "title": "test(contracts): fix testFuzz_params_validValues_succeeds rejection rate",
+      "prNumber": 19410,
+      "type": "bugfix",
+      "body": "## Summary\n\n`testFuzz_params_validValues_succeeds` was exhausting Foundry's 65,536-rejection limit, causing the test to frequently fail or skip. Two `vm.assume` calls were responsible:\n\n- **Divisibility filter** (`vm.assume(r / e * e == r)`",
+      "files": [
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol"
+      ]
+    },
+    {
+      "title": "docs(contracts): move l2 upgrade contracts spec from specs repo",
+      "prNumber": 19409,
+      "type": "docs",
+      "body": "This PR moves `l2-upgrades-2-contracts.md` from the specs repo into `packages/contracts-bedrock/specs/` as the first step of the specs colocation trial.\r\n\r\n## Reason\r\n\r\nContract specifications maintained in a [separate repository](https://g",
+      "files": [
+        "packages/contracts-bedrock/specs/l2-upgrades-2-contracts.md"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests: Add PE MVP tests",
+      "prNumber": 19404,
+      "type": "tests",
+      "body": "Adds PE acceptance tests which are skipped by default.\r\n\r\nThese tests are not meant to be run at the monorepo.\r\n\r\nReviving https://github.com/ethereum-optimism/optimism/pull/18723 with addressing my own comments. \r\n\r\nLocally validated.\r\n```",
+      "files": [
+        "op-acceptance-tests/tests/flashblocks/flashblocks_stream_test.go",
+        "op-acceptance-tests/tests/flashblocks/flashblocks_transfer_test.go",
+        "op-acceptance-tests/tests/flashblocks/utils.go",
+        "op-acceptance-tests/tests/rules/init_test.go",
+        "op-acceptance-tests/tests/rules/rules_test.go",
+        "op-devstack/dsl/fb_ws_client.go",
+        "op-devstack/presets/op_rbuilder_rules.go",
+        "op-devstack/sysgo/op_rbuilder.go",
+        "op-devstack/sysgo/orchestrator.go"
+      ]
+    },
+    {
+      "title": "chore(op-acceptance-tests): op-acceptor v3.10.2",
+      "prNumber": 19430,
+      "type": "tests",
+      "body": "## Summary\n- Bump op-acceptor to v3.10.2 in mise.toml and op-acceptance-tests justfile\n\n## Test plan\n- [ ] CI passes with the updated op-acceptor version\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "files": [
+        "mise.toml",
+        "op-acceptance-tests/justfile"
+      ]
+    },
+    {
+      "title": "fix(op-service): increase Anvil startup timeout 5s → 30s",
+      "prNumber": 19424,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Increases the Anvil startup timeout in `op-service/testutils/devnet/anvil.go` from **5 seconds to 30 seconds**\n- Fixes `TestImplementations` and `TestSuperchain` in `op-deployer/pkg/deployer/bootstrap` — the **#2 and #3 most f",
+      "files": [
+        "op-service/testutils/devnet/anvil.go"
+      ]
+    },
+    {
+      "title": "fix(ci): retry L1 archive RPC call in print-pinned-block-number",
+      "prNumber": 19421,
+      "type": "bugfix",
+      "body": "## Problem\n\n`ci-mainnet-l1-archive.optimism.io` returns transient 5xx errors (Cloudflare 502) occasionally. When this happens, the `print-pinned-block-number` step fails immediately, killing **all** `contracts-bedrock-coverage` and `contrac",
+      "files": [
+        "packages/contracts-bedrock/justfile"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 159.53984072925732,
+      "prScore": 149.33984072925733,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 146.11470264398613,
+      "prScore": 126.27470264398615,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 87.48650759219456,
+      "prScore": 72.98650759219456,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 57.641232177345216,
+      "prScore": 47.44123217734521,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "scharissis",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/376382?u=21da38bcf55ef6712398ef67e8c7d96096c4a045&v=4",
+      "totalScore": 51.88412373082921,
+      "prScore": 46.88412373082921,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 33.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 33.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "chuxinh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30974572?u=9deea51a72fff78c5e3ff435b1abe1b6a5cd78a3&v=4",
+      "totalScore": 28.530289259775273,
+      "prScore": 28.530289259775273,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aliersh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/65925295?u=ca33e5aab17ee0622941543bbe9c34db4690216b&v=4",
+      "totalScore": 26.553268334643736,
+      "prScore": 26.353268334643737,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 22.39807870876113,
+      "prScore": 17.19807870876113,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "gpgarner",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/20133520?v=4",
+      "totalScore": 11,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 11,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xChin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/77933451?u=a76de7bffe1b1d8fb41313e36c4ba53d9d65109b&v=4",
+      "totalScore": 11,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 9.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wiz-inc-a178a98b5d",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "antonleviathan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/4776110?u=7acbb26ab3b7a9eba7e67f0c44ea4d15d71ddbbb&v=4",
+      "totalScore": 8.989,
+      "prScore": 4.489,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 6.76971895621705,
+      "prScore": 6.76971895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "alcueca",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/38806121?u=05446d587fca577d19ea91499b0ae9ce4d66c3ae&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "kansas1295",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31484605?u=f6206f21f36e613d793db6f2e79ba187694aed63&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 4.34,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xVasconcelos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5625067?u=a461d3dd51ece612bdb37159e4633155a562c9d0&v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "pandainzoo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/164832029?u=d23b23edd95caf6555d14edc08082677e75c3da6&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "binarycryptodev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/237978594?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 15,
+  "mergedPRs": 10,
+  "newIssues": 3,
+  "closedIssues": 1,
+  "activeContributors": 32
 }
