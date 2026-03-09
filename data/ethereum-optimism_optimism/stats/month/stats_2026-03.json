@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-03-01 to 2026-04-01, ethereum-optimism/optimism had 78 new PRs (47 merged), 27 new issues, and 68 active contributors.",
+  "overview": "From 2026-03-01 to 2026-04-01, ethereum-optimism/optimism had 96 new PRs (56 merged), 30 new issues, and 69 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM7viViE",
@@ -78,8 +78,44 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-03-07T02:03:46Z",
       "mergedAt": null,
-      "additions": 12198,
+      "additions": 13012,
       "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7JKvYC",
+      "title": "refactor(op-devstack): simplify acceptance testing around direct preset constructors",
+      "author": "teddyknox",
+      "number": 19452,
+      "body": "## Summary\r\n\r\nThis PR completes the acceptance-test spike to simplify `op-devstack` around direct preset constructors and per-test isolated environments.\r\n\r\nThe main architectural change is that acceptance tests now construct their own system-under-test directly from preset constructors. The old orchestrator/system/registry model has been removed in favor of explicit constructor DAGs, typed runtime families, and direct references.\r\n\r\nThis also removes the remaining legacy “network target polymorphism” infrastructure, including external/live-network acceptance paths.\r\n\r\nNet effect:\r\n- each acceptance test gets its own fresh target\r\n- presets are constructor-driven instead of orchestrator-driven\r\n- tests interact with the concrete preset shape they asked for\r\n- a large amount of legacy compatibility and ID-based plumbing is deleted\r\n\r\nThis branch is a large net deletion:\r\n- `383 files changed`\r\n- `9,536 insertions`\r\n- `17,724 deletions`\r\n\r\n## Motivation\r\n\r\n`op-devstack` had accumulated several layers that made acceptance testing harder to reason about:\r\n\r\n- shared package-level test environments\r\n- generic network-target abstractions\r\n- orchestrator/system/control-plane plumbing\r\n- ID/registry/matcher-based lookup\r\n- shim/sysext compatibility layers\r\n- preset implementations that were effectively wrappers over legacy internals\r\n\r\nThat model made simple test setup complicated, encouraged cross-test coupling, and obscured how systems were actually constructed.\r\n\r\nThis PR replaces that with a simpler model:\r\n\r\n- tests call preset constructors directly\r\n- constructors compose lower-level constructors in a clear hierarchy\r\n- presets return concrete system shapes\r\n- runtime assembly uses direct references instead of IDs and registry lookups\r\n\r\n## What Changed\r\n\r\n### 1. Acceptance tests now use per-test isolated preset constructors\r\n\r\nAcceptance suites were migrated away from shared `init_test.go` package setup and onto direct preset construction in the tests or test-local helpers.\r\n\r\nThis migration covers the major acceptance families, including:\r\n- base\r\n- batcher\r\n- sync\r\n- sync tester\r\n- conductor\r\n- interop\r\n- proofs\r\n- supernode\r\n- fusaka / jovian / isthmus\r\n- Rust `kona` supervisor/node tests\r\n- mixed `op`/`kona` and `op-reth` proof presets\r\n\r\nThis makes test setup explicit and ensures each test runs against its own fresh network target.\r\n\r\n### 2. External/live-network support was removed\r\n\r\nThe external network target / external EL acceptance paths were deleted.\r\n\r\nRemoved examples include:\r\n- `op-devstack/presets/minimal_external_el.go`\r\n- `op-devstack/sysgo/system_synctester_ext.go`\r\n- external sync-tester acceptance suites\r\n\r\nThis narrows the framework to the local constructor-driven model and removes a large amount of branching and compatibility code.\r\n\r\n### 3. Presets are now clean constructor frontends\r\n\r\nPreset constructors were migrated off legacy option/orchestrator paths and onto runtime-backed construction.\r\n\r\nExamples:\r\n- `NewMinimal`\r\n- `NewSimpleInterop`\r\n- `NewSingleChainInterop`\r\n- two-L2 supernode presets\r\n- flashblocks\r\n- sync-tester\r\n- conductor variants\r\n- proof/superproof variants\r\n\r\nThe old “isolated” naming was dropped because it is no longer a special mode; it is now the default implementation model.\r\n\r\n### 4. Orchestrator/system/control-plane architecture was removed\r\n\r\nThis PR deletes the legacy construction stack, including:\r\n- `sysgo.Orchestrator`\r\n- preset-side orchestrator wrappers\r\n- control-plane bridge\r\n- hydration path\r\n- `ExtensibleSystem`\r\n- `Registry`\r\n- matcher-driven system lookup\r\n- shim frontends\r\n- `sysext`\r\n- component ID plumbing\r\n- remaining default-system ID bundles\r\n\r\nThe resulting framework is structurally constructor-first instead of “cleanroom layered on top of orchestrator.”\r\n\r\n### 5. Preset/runtime APIs were simplified\r\n\r\nPreset options are now cleanroom-native instead of `stack.Option[*sysgo.Orchestrator]`.\r\n\r\nRuntime access also became more direct:\r\n- runtime fields are public where presets need them\r\n- preset assembly reads those fields directly\r\n- a large number of runtime accessor/helper methods were removed\r\n\r\n`devtest.P` was removed from the cleanroom option path in favor of `devtest.T`.\r\n\r\n### 6. DSL and preset assembly moved to direct references\r\n\r\nThe DSL and preset layer no longer depend on registry/matcher lookup for normal construction:\r\n\r\n- explicit primary refs are carried in DSL networks\r\n- public RPC is explicit instead of looked up via matcher logic\r\n- lifecycle is direct on the wrapped services/nodes\r\n- mixed preset assembly uses explicit node/runtime data rather than synthetic CL/EL ID catalogs\r\n\r\n### 7. Runtime layer was consolidated\r\n\r\nThe runtime layer was collapsed into a smaller set of shared families instead of 1:1 preset-shaped runtime roots.\r\n\r\nCurrent runtime families:\r\n- `SingleChainRuntime`\r\n- `MultiChainRuntime`\r\n- `MixedSingleChainRuntime`\r\n\r\nMulti-chain internals were reorganized by the real axis of variation:\r\n- supervisor-backed multichain runtime\r\n- supernode-backed multichain runtime\r\n- proofs as an overlay, not a separate topology root\r\n\r\nSingle-chain internals were reorganized around:\r\n- a shared single-chain base runtime\r\n- focused overlays for:\r\n  - flashblocks\r\n  - no-supervisor interop\r\n  - follower/multinode variants\r\n  - sync tester\r\n  - conductors\r\n\r\n## Notable Deletions\r\n\r\nThis PR removes a substantial amount of legacy framework code, including:\r\n- `op-devstack/shim/*`\r\n- `op-devstack/sysext/*`\r\n- `op-devstack/stack/registry.go`\r\n- `op-devstack/stack/component_id.go`\r\n- `op-devstack/stack/orchestrator.go`\r\n- `op-devstack/sysgo/orchestrator.go`\r\n- `op-devstack/sysgo/system.go`\r\n- legacy `system_*` constructor files\r\n- external EL sync-tester paths\r\n- many package-level `init_test.go` acceptance setup files\r\n\r\n## Testing\r\n\r\nRepresentative validation performed during this migration included:\r\n\r\n```bash\r\ngo test ./op-devstack/presets ./op-devstack/sysgo -run '^$' -count=1\r\ngo test ./op-acceptance-tests/tests/... ./rust/kona/tests/... -run '^$' -count=1\r\ngo test ./op-acceptance-tests/tests/sync_tester/sync_tester_elsync -run TestSyncTesterELSync -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/base/conductor -run TestConductorLeadershipTransfer -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/flashblocks -run TestFlashblocksTransfer -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/interop/message -run TestInteropSystemSupervisor -count=1 -timeout 8m\r\ngo test ./rust/kona/tests/node/restart -run TestRestartSync -count=1 -timeout 8m\r\n```\r\n\r\n## Result\r\n\r\nAfter this PR:\r\n\r\n- acceptance tests instantiate their own target directly\r\n- `op-devstack` no longer centers around orchestrator/system/registry abstractions\r\n- constructor DAGs and direct references are the primary model\r\n- legacy external/live-target and compatibility paths are removed\r\n- the codebase is materially smaller and simpler\r\n\r\n## Follow-up Work\r\n\r\nThis PR is intended as the architectural cutover. Follow-up cleanup can focus on smaller surface-level simplifications rather than major model changes. In particular:\r\n- further tightening preset assembly where frontend construction still duplicates logic\r\n- continued simplification of remaining `stack` interfaces that are now just thin compatibility shells\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-09T19:21:42Z",
+      "mergedAt": null,
+      "additions": 10700,
+      "deletions": 17754
+    },
+    {
+      "id": "PR_kwDODjvEJM7IhbMl",
+      "title": "all: upgrade op-geth",
+      "author": "joshklop",
+      "number": 19433,
+      "body": "[op-geth PR](https://github.com/ethereum-optimism/op-geth/pull/774)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-06T14:46:31Z",
+      "mergedAt": null,
+      "additions": 9198,
+      "deletions": 5627
+    },
+    {
+      "id": "PR_kwDODjvEJM7I7lA8",
+      "title": "fix(op-program): regenerate vm-compat baseline for geth v1.17.1",
+      "author": "ajsutton",
+      "number": 19443,
+      "body": "## Summary\n\n- Regenerates the `cannon-multithreaded-64` vm-compat baseline after the geth v1.17.1 upgrade\n- Baseline regenerated from scratch (not merged with old) to remove stale entries from old code paths\n- Old: 281 entries → New: 333 entries\n- Verified: `vm-compat analyze` with the new baseline produces zero findings\n\n### New findings\n\nAll new findings fall into two categories:\n\n**1. Unreachable paths through `pathdb.New` (194 findings via two call stack variants)**\n\nBoth variants pass through `mpt.ReadTrie` → `triedb.NewDatabase` → `pathdb.New`. `mpt.ReadTrie` always passes a `HashDB` config to `triedb.NewDatabase`, so the `pathdb.New` branch is never executed. Everything downstream of `pathdb.New` (freezer operations, file I/O, etc.) is unreachable.\n\nVariant A (97 findings):\n```\nmain.main\n  → client.Main\n    → client.RunProgram\n      → interop.runInteropProgram\n        → interop.stateTransition\n          → interop.RunConsolidation\n            → interop.singleRoundConsolidation\n              → interop.(*ConsolidateOracle).ReceiptsByBlockHash\n                → mpt.ReadTrie\n                  → triedb.NewDatabase\n                    → pathdb.New  ← UNREACHABLE\n```\n\nVariant B (97 findings):\n```\nmain.main\n  → client.Main\n    → client.RunProgram\n      → interop.runInteropProgram\n        → interop.stateTransition\n          → interop.RunConsolidation\n            → interop.singleRoundConsolidation\n              → interop.(*ConsolidateOracle).ReceiptsByBlockHash\n                → interop.(*ConsolidateOracle).consolidatedBlockByHash\n                  → interop.(*ConsolidateOracle).loadTransactions\n                    → mpt.ReadTrie\n                      → triedb.NewDatabase\n                        → pathdb.New  ← UNREACHABLE\n```\n\n**2. New pyroscope-go dependency (2 findings)**\n\nBoth are NOOP syscalls (Cannon returns zero values) triggered by `pyroscope-go.init` reading the hostname at package initialization:\n\n```\npyroscope-go.init\n  → pyroscope-go.newSessionIDGenerator\n    → pyroscope-go.sessionIDHostSeed\n      → os.hostname\n        → syscall.Uname                    ← NOOP Syscall 5061\n```\n\n```\npyroscope-go.init\n  → pyroscope-go.newSessionIDGenerator\n    → pyroscope-go.sessionIDHostSeed\n      → os.hostname\n        → os.OpenFile\n          → os.openFileNolog\n            → os.open\n              → syscall.openat              ← NOOP Syscall 5247\n```\n\n## Test plan\n\n- [x] Ran `vm-compat analyze` locally with no baseline to generate the full report\n- [x] Normalized output (stripped `line`, `file`, `absPath` fields per README)\n- [x] Verified zero findings when running with the new baseline\n\nStacked on #19433\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-09T01:35:33Z",
+      "mergedAt": "2026-03-09T17:05:24Z",
+      "additions": 9002,
+      "deletions": 5434
     },
     {
       "id": "PR_kwDODjvEJM7HacRm",
@@ -92,49 +128,13 @@
       "mergedAt": null,
       "additions": 5229,
       "deletions": 2
-    },
-    {
-      "id": "PR_kwDODjvEJM7H4_1j",
-      "title": "chore(rust): reth/claude experiment",
-      "author": "smartcontracts",
-      "number": 19383,
-      "body": "## Summary\n- Experiment with native payload builder extensions in op-reth\n- Internal channel-based communication pattern\n- Feature-gating for optional dependencies in kona-engine\n\n## Test plan\n- [x] All existing tests pass (207 tests, 0 failures)\n- [x] Clippy clean on affected crates\n- [x] Full workspace compiles\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-03-04T14:16:29Z",
-      "mergedAt": null,
-      "additions": 2110,
-      "deletions": 808
-    },
-    {
-      "id": "PR_kwDODjvEJM7EWjtX",
-      "title": "feat: Add Kailua Contracts and Boundless Support Part 3",
-      "author": "hashcashier",
-      "number": 19210,
-      "body": "**Description**\r\nThis PR introduces support for the new Kailua game type.\r\n\r\nThis is one of the PRs (opened not in order) aimed at enabling Kailua and Boundless support across the OP Stack’s onchain and offchain components, and will help advance the broader effort to generalize and standardize infrastructure for multiple zk proof systems.\r\n\r\nTogether with related efforts such as[ https://github.com/ethereum-optimism/optimism/pull/18277](https://github.com/ethereum-optimism/optimism/pull/18277), this work contributes to standardizing key components and interfaces across game types, enabling a more modular and extensible approach to integrating multiple zk proof systems.\r\n\r\nTo follow-up supporting OP-Succinct Lite game type with Risc0 verifier and tests.\r\n\r\n**Tests**\r\nIn a follow-up up PR\r\n\r\n**Additional context**\r\n[ZK Proofs Design Doc](https://github.com/ethereum-optimism/design-docs/pull/356/changes#diff-7fdc71685f6f487bb61ea06185f35924658d0aba4d7e13b4d8d60e1c6022e148R60)\r\n[Support for Risc0 Verifier](https://github.com/ethereum-optimism/optimism/pull/19171)\r\n\r\n**Metadata**\r\n\r\n--",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-02-17T12:54:59Z",
-      "mergedAt": null,
-      "additions": 2060,
-      "deletions": 0
-    },
-    {
-      "id": "PR_kwDODjvEJM6-Swiz",
-      "title": "stack: remove backward compatibility type aliases for Phase 6 cleanup",
-      "author": "teddyknox",
-      "number": 18877,
-      "body": "Phase 6 completes the ID type system refactor by removing all backward compatibility code. This is a **breaking change** that removes ~1,200 net lines of code (2,578 deletions, 1,385 additions), leaving only the unified `ComponentID` type system.\r\n\r\n## What This Phase Removes\r\n\r\n### 1. Type Aliases for Backward Compatibility\r\n\r\nFrom `stack/component_id.go`, removed 19 type aliases:\r\n```go\r\n// REMOVED - these aliases allowed old code to compile during migration\r\ntype (\r\n    L1ELNodeID     = ComponentID\r\n    L1CLNodeID     = ComponentID\r\n    L2BatcherID    = ComponentID\r\n    L2ELNodeID     = ComponentID\r\n    // ... 15 more\r\n)\r\n```\r\n\r\n### 2. `Kind` Type Alias\r\n\r\nFrom `stack/component_id.go`:\r\n```go\r\n// REMOVED\r\ntype Kind = ComponentKind\r\n```\r\n\r\n### 3. Old Base Types from `stack/id.go`\r\n\r\nRemoved the original ID infrastructure (~150 lines):\r\n```go\r\n// REMOVED - old Kind type and methods\r\ntype Kind string\r\nfunc (k Kind) LogValue() slog.Value { ... }\r\nfunc (k Kind) String() string { ... }\r\nfunc (k Kind) MarshalText() ([]byte, error) { ... }\r\nfunc (k *Kind) UnmarshalText(data []byte) error { ... }\r\n\r\n// REMOVED - base struct types\r\ntype idWithChain struct { key string; chainID eth.ChainID }\r\ntype idOnlyChainID struct { chainID eth.ChainID }\r\ntype genericID struct { key string }\r\n\r\n// REMOVED - interfaces\r\ntype IDWithChain interface { ... }\r\ntype IDOnlyChainID interface { ... }\r\ntype GenericID interface { ... }\r\n\r\n// REMOVED - helper functions\r\nfunc lessIDWithChain[T IDWithChain](a, b T) bool { ... }\r\nfunc lessIDOnlyChainID[T IDOnlyChainID](a, b T) bool { ... }\r\nfunc lessElemOrdered[E any, ID cmp.Ordered](...) bool { ... }\r\nfunc copyAndSortCmp[V ~[]E, E any](vs V, cmp func(a, b E) int) V { ... }\r\n```\r\n\r\n### 4. Old ID Type Definitions from Component Files\r\n\r\nRemoved ID type definitions from 19 component files. Example from `stack/l2_batcher.go`:\r\n```go\r\n// REMOVED (~50 lines per file)\r\nconst L2BatcherKind Kind = \"L2Batcher\"\r\n\r\ntype L2BatcherID idWithChain\r\n\r\nfunc NewL2BatcherID(key string, chainID eth.ChainID) L2BatcherID { ... }\r\nfunc (id L2BatcherID) Kind() Kind { return L2BatcherKind }\r\nfunc (id L2BatcherID) Key() string { return id.key }\r\nfunc (id L2BatcherID) ChainID() eth.ChainID { return id.chainID }\r\nfunc (id L2BatcherID) String() string { ... }\r\nfunc (id L2BatcherID) LogValue() slog.Value { ... }\r\nfunc (id L2BatcherID) MarshalText() ([]byte, error) { ... }\r\nfunc (id *L2BatcherID) UnmarshalText(data []byte) error { ... }\r\nfunc SortL2BatcherIDs(ids []L2BatcherID) []L2BatcherID { ... }\r\n```\r\n\r\nFiles affected: `l1_el.go`, `l1_cl.go`, `l1_network.go`, `l2_el.go`, `l2_cl.go`, `l2_network.go`, `l2_batcher.go`, `l2_proposer.go`, `l2_challenger.go`, `rollup_boost.go`, `op_rbuilder.go`, `faucet.go`, `sync_tester.go`, `supervisor.go`, `conductor.go`, `cluster.go`, `superchain.go`, `test_sequencer.go`, `fb_ws_client.go`\r\n\r\n### 5. Old Matcher Type Aliases\r\n\r\nFrom `stack/matcher.go`, removed two-parameter matcher aliases:\r\n```go\r\n// REMOVED\r\ntype L2BatcherMatcher = Matcher[L2BatcherID, L2Batcher]\r\ntype L2ELMatcher = Matcher[L2ELNodeID, L2ELNode]\r\n// ... etc\r\n```\r\n\r\n### 6. Sort Functions\r\n\r\nRemoved 19 sort functions from component files:\r\n```go\r\n// REMOVED\r\nfunc SortL2BatcherIDs(ids []L2BatcherID) []L2BatcherID { ... }\r\nfunc SortL1NetworkIDs(ids []L1NetworkID) []L1NetworkID { ... }\r\n// ... etc\r\n```\r\n\r\nNow use `ComponentID.Less()` method with standard sorting.\r\n\r\n## What This Phase Updates\r\n\r\n### 1. Interface Return Types\r\n\r\nUpdated `KindProvider` interface to use `ComponentKind`:\r\n```go\r\n// stack/id.go\r\ntype KindProvider interface {\r\n    Kind() ComponentKind  // was: Kind() Kind\r\n}\r\n```\r\n\r\n### 2. Context Functions\r\n\r\nUpdated `stack/context.go`:\r\n```go\r\nfunc ContextWithKind(ctx context.Context, kind ComponentKind) context.Context\r\nfunc KindFromContext(ctx context.Context) ComponentKind\r\nfunc KindSelector(kind ComponentKind) logfilter.Selector\r\n```\r\n\r\n### 3. Matcher Interface\r\n\r\nSimplified from two type parameters to one:\r\n```go\r\n// Before\r\ntype Matcher[ID, E any] interface {\r\n    Match(elems []E) ([]E, ID)\r\n}\r\n\r\n// After\r\ntype Matcher[E] interface {\r\n    Match(elems []E) []E\r\n}\r\n\r\n// New helper for ID-based matching\r\nfunc ByID[E Identifiable](id ComponentID) Matcher[E]\r\n```\r\n\r\n### 4. Shim and Sysgo Updates\r\n\r\nAll files updated to use `ComponentID` directly with typed constructors:\r\n```go\r\n// Example usage\r\nid := stack.NewL2BatcherID(\"mynode\", chainID)  // Returns ComponentID\r\nbatcher := network.L2Batcher(stack.ByID[stack.L2Batcher](id))\r\n```\r\n\r\n### 5. Test Files\r\n\r\n- `stack/capabilities_test.go` - Updated constructor calls\r\n- `stack/component_id_test.go` - Use typed constructors directly\r\n- `stack/context_test.go` - Changed `Kind(\"\")` to `ComponentKind(\"\")`\r\n- `stack/registry_test.go` - Updated type patterns\r\n\r\n## Type System After Phase 6\r\n\r\n### Single ID Type\r\n```go\r\n// Unified ID type - no wrappers or aliases\r\ntype ComponentID struct {\r\n    kind    ComponentKind\r\n    shape   IDShape\r\n    key     string\r\n    chainID eth.ChainID\r\n}\r\n\r\n// Typed constructor functions (return ComponentID directly)\r\nfunc NewL2BatcherID(key string, chainID eth.ChainID) ComponentID\r\nfunc NewL2ELNodeID(key string, chainID eth.ChainID) ComponentID\r\nfunc NewL1NetworkID(chainID eth.ChainID) ComponentID\r\nfunc NewSupervisorID(key string) ComponentID\r\n// ... etc\r\n```\r\n\r\n### Simplified Matcher\r\n```go\r\ntype Matcher[E] interface {\r\n    Match(elems []E) []E\r\n}\r\n\r\n// Non-generic Identifiable\r\ntype Identifiable interface {\r\n    ID() ComponentID\r\n}\r\n\r\n// Create matcher from ID\r\nfunc ByID[E Identifiable](id ComponentID) Matcher[E]\r\n```\r\n\r\n### Clean Interfaces\r\n```go\r\ntype L2Network interface {\r\n    ID() ComponentID\r\n    L2Batcher(m Matcher[L2Batcher]) L2Batcher\r\n    L2BatcherIDs() []ComponentID\r\n    // ...\r\n}\r\n```\r\n\r\n## Related\r\n\r\n- Phase 1-5 PRs: Prior phases of this refactor\r\n- [Design document](https://www.notion.so/oplabs/Devstack-ID-Type-System-Refactor-2eef153ee1628048bb7ade1030fe6e9b)\r\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-01-20T19:59:02Z",
-      "mergedAt": "2026-03-06T16:41:15Z",
-      "additions": 1798,
-      "deletions": 3269
     }
   ],
   "codeChanges": {
-    "additions": 9099,
-    "deletions": 3417,
-    "files": 294,
-    "commitCount": 477
+    "additions": 22042,
+    "deletions": 17548,
+    "files": 397,
+    "commitCount": 587
   },
   "completedItems": [
     {
@@ -316,6 +316,51 @@
       ]
     },
     {
+      "title": "feat: add NUT Bundle generation",
+      "prNumber": 19248,
+      "type": "feature",
+      "body": "**Description**\r\n\r\nAdds infrastructure for generating Network Upgrade Transaction (NUT) bundles for L2 hardfork upgrades.\r\n\r\n- `GenerateNUTBundle`: Script that generates deterministic upgrade transaction bundles.\r\n- `GenerateNUTBundleUtils`",
+      "files": [
+        "packages/contracts-bedrock/.gitignore",
+        "packages/contracts-bedrock/scripts/libraries/UpgradeConfig.sol",
+        "packages/contracts-bedrock/scripts/upgrade/GenerateNUTBundle.s.sol",
+        "packages/contracts-bedrock/scripts/upgrade/GenerateNUTBundleUtils.s.sol",
+        "packages/contracts-bedrock/src/libraries/L2ContractsManagerTypes.sol",
+        "packages/contracts-bedrock/src/libraries/NetworkUpgradeTxns.sol",
+        "packages/contracts-bedrock/test/libraries/NetworkUpgradeTxns.t.sol",
+        "packages/contracts-bedrock/test/scripts/GenerateNUTBundle.t.sol",
+        "packages/contracts-bedrock/test/scripts/GenerateNUTBundleUtils.t.sol",
+        "packages/contracts-bedrock/scripts/upgrade/GenerateNUTBundleUtils.sol",
+        "packages/contracts-bedrock/scripts/L2Genesis.s.sol",
+        "packages/contracts-bedrock/scripts/libraries/UpgradeUtils.sol",
+        "packages/contracts-bedrock/interfaces/L2/IOptimismMintableERC721Factory.sol",
+        "packages/contracts-bedrock/snapshots/abi/OptimismMintableERC721Factory.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/OptimismMintableERC721Factory.json",
+        "packages/contracts-bedrock/src/L2/L2ContractsManager.sol",
+        "packages/contracts-bedrock/src/L2/OptimismMintableERC721Factory.sol",
+        "packages/contracts-bedrock/test/L2/L2ContractsManager.t.sol",
+        "packages/contracts-bedrock/test/L2/OptimismMintableERC721Factory.t.sol",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        ".circleci/continue/main.yml",
+        "packages/contracts-bedrock/justfile",
+        "packages/contracts-bedrock/scripts/checks/nut-bundle-check/main.go",
+        "packages/contracts-bedrock/snapshots/abi/OptimismMintableERC721FactoryLegacyMapping.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/OptimismMintableERC721FactoryLegacyMapping.json",
+        "packages/contracts-bedrock/snapshots/upgrades/.gitkeep",
+        "packages/contracts-bedrock/snapshots/upgrades/karst-upgrade-bundle.json",
+        "packages/contracts-bedrock/interfaces/L2/IOptimismMintableERC721FactoryLegacyMapping.sol",
+        "packages/contracts-bedrock/interfaces/periphery/staking/IPolicyEngineStaking.sol",
+        "packages/contracts-bedrock/interfaces/L2/IL2ProxyAdmin.sol",
+        "packages/contracts-bedrock/scripts/checks/interfaces/main.go",
+        "packages/contracts-bedrock/snapshots/abi/L2ProxyAdmin.json",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/L2/L2ProxyAdmin.sol",
+        "packages/contracts-bedrock/test/L2/L2ProxyAdmin.t.sol",
+        "packages/contracts-bedrock/test/scripts/L2Genesis.t.sol"
+      ]
+    },
+    {
       "title": "chore(contracts): add non-idempotent initializer review rules",
       "prNumber": 19273,
       "type": "other",
@@ -353,6 +398,67 @@
         "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
         "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
         "packages/contracts-bedrock/src/libraries/Constants.sol"
+      ]
+    },
+    {
+      "title": "chore(kona): remove deprecated supervisor crates",
+      "prNumber": 19290,
+      "type": "other",
+      "body": "## Summary\n\n- Remove all kona supervisor Rust crates (`crates/supervisor/`), the supervisor binary (`bin/supervisor/`), Go e2e tests (`tests/supervisor/`), and Grafana dashboard recipe\n- Update workspace `Cargo.toml`, justfiles, and documen",
+      "files": [
+        "AGENTS.md",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/justfile",
+        "rust/kona/CLAUDE.md",
+        "rust/kona/README.md",
+        "rust/kona/bin/supervisor/Architecture.md",
+        "rust/kona/bin/supervisor/Cargo.toml",
+        "rust/kona/bin/supervisor/README.md",
+        "rust/kona/bin/supervisor/build.rs",
+        "rust/kona/bin/supervisor/src/cli.rs",
+        "rust/kona/bin/supervisor/src/flags/mod.rs",
+        "rust/kona/bin/supervisor/src/flags/supervisor.rs",
+        "rust/kona/bin/supervisor/src/main.rs",
+        "rust/kona/bin/supervisor/src/metrics/mod.rs",
+        "rust/kona/bin/supervisor/src/metrics/version.rs",
+        "rust/kona/bin/supervisor/src/version.rs",
+        "rust/kona/crates/supervisor/core/Cargo.toml",
+        "rust/kona/crates/supervisor/core/src/chain_processor/chain.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/error.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/handlers/cross_chain.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/handlers/finalized.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/handlers/invalidation.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/handlers/mod.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/handlers/origin.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/handlers/safe_block.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/handlers/unsafe_block.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/metrics.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/mod.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/state/mod.rs",
+        "rust/kona/crates/supervisor/core/src/chain_processor/state/processor.rs",
+        "rust/kona/crates/supervisor/core/src/config/core_config.rs",
+        "rust/kona/crates/supervisor/core/src/config/mod.rs",
+        "rust/kona/crates/supervisor/core/src/config/rollup_config_set.rs",
+        "rust/kona/crates/supervisor/core/src/error.rs",
+        "rust/kona/crates/supervisor/core/src/event/chain.rs",
+        "rust/kona/crates/supervisor/core/src/event/mod.rs",
+        "rust/kona/crates/supervisor/core/src/l1_watcher/mod.rs",
+        "rust/kona/crates/supervisor/core/src/l1_watcher/watcher.rs",
+        "rust/kona/crates/supervisor/core/src/lib.rs",
+        "rust/kona/crates/supervisor/core/src/logindexer/indexer.rs",
+        "rust/kona/crates/supervisor/core/src/logindexer/mod.rs",
+        "rust/kona/crates/supervisor/core/src/logindexer/util.rs",
+        "rust/kona/crates/supervisor/core/src/reorg/error.rs",
+        "rust/kona/crates/supervisor/core/src/reorg/handler.rs",
+        "rust/kona/crates/supervisor/core/src/reorg/metrics.rs",
+        "rust/kona/crates/supervisor/core/src/reorg/mod.rs",
+        "rust/kona/crates/supervisor/core/src/reorg/task.rs",
+        "rust/kona/crates/supervisor/core/src/rpc/admin.rs",
+        "rust/kona/crates/supervisor/core/src/rpc/metrics.rs",
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
       ]
     },
     {
@@ -597,6 +703,21 @@
       ]
     },
     {
+      "title": "Claude/partial optimistic blocks rpc lu ba g",
+      "prNumber": 19348,
+      "type": "other",
+      "body": "**Description**\r\n\r\nInclude available optimistic blocks in superroot_atTimestamp response, even if not all blocks are available.\r\n\r\n**Tests**\r\n\r\nUnskips challenger tests that were affected by this.\r\n\r\n\r\n**Metadata**\r\n\r\nPart of #19180\r\n",
+      "files": [
+        "op-acceptance-tests/tests/interop/proofs/fpp/fpp_test.go",
+        "op-acceptance-tests/tests/interop/proofs/serial/interop_fault_proofs_test.go",
+        "op-supernode/supernode/activity/superroot/superroot.go",
+        "op-supernode/supernode/activity/superroot/superroot_test.go",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-acceptance-tests/tests/superfaultproofs/singlechain.go",
+        "op-devstack/dsl/l2_cl.go"
+      ]
+    },
+    {
       "title": "fix(kona-node): Map BlockNotFound errors to ResetError for reorg recovery",
       "prNumber": 19344,
       "type": "bugfix",
@@ -637,6 +758,32 @@
       "files": [
         "packages/contracts-bedrock/test/L2/L2ProxyAdmin.t.sol",
         "packages/contracts-bedrock/test/universal/ProxyAdmin.t.sol"
+      ]
+    },
+    {
+      "title": "feat(kona): add Karst hardfork support",
+      "prNumber": 19372,
+      "type": "feature",
+      "body": "## Summary\n- Add Karst hardfork between Jovian and Interop in the fork ordering\n- Karst has an empty NUT bundle (no upgrade transactions) and enforces empty activation blocks\n- Matches the Go implementation added in #19250\n\n## Changes (14 f",
+      "files": [
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/kona/bin/node/src/flags/overrides.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/actor.rs",
+        "rust/kona/crates/protocol/derive/src/attributes/stateful.rs",
+        "rust/kona/crates/protocol/genesis/src/chain/hardfork.rs",
+        "rust/kona/crates/protocol/genesis/src/rollup.rs",
+        "rust/kona/crates/protocol/genesis/src/superchain/chain.rs",
+        "rust/kona/crates/protocol/genesis/src/superchain/chains.rs",
+        "rust/kona/crates/protocol/genesis/src/superchain/config.rs",
+        "rust/kona/crates/protocol/hardforks/src/forks.rs",
+        "rust/kona/crates/protocol/hardforks/src/karst.rs",
+        "rust/kona/crates/protocol/hardforks/src/lib.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/single.rs",
+        "rust/kona/crates/utilities/cli/src/flags/overrides.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/base_mainnet.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/base_sepolia.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/op_mainnet.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/op_sepolia.rs"
       ]
     },
     {
@@ -859,28 +1006,90 @@
       "files": [
         "packages/contracts-bedrock/justfile"
       ]
+    },
+    {
+      "title": "chore(ci): add op to chain-specific upgrade test matrix, remove base",
+      "prNumber": 19448,
+      "type": "tests",
+      "body": "## Summary\n\n- Add `\"op\"` to the `fork_op_chain` matrix for chain-specific upgrade tests (PR + develop jobs)\n- Remove `\"base\"` from upgrade test matrix and `\"base-mainnet\"`/`\"base-sepolia\"` from sync test matrix\n- Supersedes #19447 — this PR",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "revert(op-e2e): Revert \"Simplify output game creation by auto-deriving rootClaim\"",
+      "prNumber": 19445,
+      "type": "other",
+      "body": "## Summary\n\nReverts #19294 (`cb794fb85e`), which broke `TestOutputCannon_ChallengeAllZeroClaim/mt-cannon` on develop.\n\nThe refactor merged `StartOutputCannonGame` and `StartOutputCannonGameWithCorrectRoot` into a single function using a `Wi",
+      "files": [
+        "op-e2e/e2eutils/disputegame/helper.go",
+        "op-e2e/faultproofs/multi_test.go",
+        "op-e2e/faultproofs/output_alphabet_test.go",
+        "op-e2e/faultproofs/output_cannon_test.go",
+        "op-e2e/faultproofs/permissioned_test.go",
+        "op-e2e/faultproofs/precompile_test.go",
+        "op-e2e/faultproofs/preimages_test.go",
+        "op-e2e/faultproofs/response_delay_test.go"
+      ]
+    },
+    {
+      "title": "feat(op-program): add vm-compat-triage skill",
+      "prNumber": 19444,
+      "type": "feature",
+      "body": "## Summary\n\n- Adds a Claude Code skill for triaging `analyze-op-program-client` CI failures\n- Guides interactive review of new syscall/opcode findings from `vm-compat`\n- Walks through each finding one at a time with full call stacks and sou",
+      "files": [
+        ".claude/skills/vm-compat-triage/SKILL.md"
+      ]
+    },
+    {
+      "title": "fix(op-program): regenerate vm-compat baseline for geth v1.17.1",
+      "prNumber": 19443,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Regenerates the `cannon-multithreaded-64` vm-compat baseline after the geth v1.17.1 upgrade\n- Baseline regenerated from scratch (not merged with old) to remove stale entries from old code paths\n- Old: 281 entries → New: 333 en",
+      "files": [
+        "op-program/compatibility-test/baseline-cannon-multithreaded-64.json"
+      ]
+    },
+    {
+      "title": "fix(supernode): consider verifier L1 progress in superroot CurrentL1",
+      "prNumber": 19441,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Adds `VerifierCurrentL1s()` to the `ChainContainer` interface so superroot can query verifier L1 progress\n- Updates `superroot_atTimestamp` to take the minimum of both derivation and verifier `CurrentL1` values\n- Removes the T",
+      "files": [
+        "op-acceptance-tests/tests/interop/proofs/fpp/fpp_test.go",
+        "op-acceptance-tests/tests/interop/proofs/serial/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/superfaultproofs/singlechain.go",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-devstack/dsl/l2_cl.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/logdb_test.go",
+        "op-supernode/supernode/activity/superroot/superroot.go",
+        "op-supernode/supernode/activity/superroot/superroot_test.go",
+        "op-supernode/supernode/chain_container/chain_container.go"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 465.3831294521556,
-      "prScore": 295.5511294521556,
+      "totalScore": 590.5299225561917,
+      "prScore": 416.19792255619166,
       "issueScore": 22.2,
-      "reviewScore": 145,
+      "reviewScore": 149.5,
       "commentScore": 2.6319999999999997,
       "summary": "ajsutton: Focused on codebase maintenance and technical debt reduction within the Kona derivation logic, specifically identifying and addressing orphaned source files. They initiated a cleanup by reporting a reference issue in ethereum-optimism/optimism (#19340) and subsequently submitted a pull request to remove the dead EthereumDataSourceVariant file (#19341). This work resulted in a net reduction of nearly 200 lines of code, streamlining the repository's structure. Their primary focus this month was on general maintenance and bugfix tasks to improve the clarity of the derivation pipeline."
     },
     {
       "username": "smartcontracts",
       "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
-      "totalScore": 465.0410676365136,
-      "prScore": 416.64106763651364,
+      "totalScore": 545.118282722289,
+      "prScore": 491.718282722289,
       "issueScore": 0,
-      "reviewScore": 48,
+      "reviewScore": 53,
       "commentScore": 0.4,
-      "summary": null
+      "summary": "smartcontracts: Focused on enhancing the reliability and efficiency of the Optimism testing infrastructure and CI pipelines, merging critical fixes to stabilize L2CLB snapshots (#19418) and increasing Anvil startup timeouts to prevent environment flakes (#19424). They made significant contributions to the acceptance testing suite by adding comprehensive interop chain lag tests (#19413) and optimizing the test runner to skip excluded packages (#565). Beyond their 104 commits, they actively supported the team through 10 code reviews and initiated high-impact work to drastically reduce CI runtimes and transition to OPCMv2. Their primary focus this month was on bug fixes and test engineering, evidenced by a high volume of modifications across 817 files to improve system stability."
     },
     {
       "username": "geoknee",
@@ -895,22 +1104,32 @@
     {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 190.3469249033425,
-      "prScore": 82.50892490334252,
-      "issueScore": 0,
-      "reviewScore": 107,
+      "totalScore": 225.62823104767656,
+      "prScore": 87.79023104767657,
+      "issueScore": 2,
+      "reviewScore": 135,
       "commentScore": 0.838,
       "summary": "maurelian: Focused on a balanced mix of system maintenance and enhancement, contributing 12 commits that addressed bug fixes, refactoring, and new feature development. Their work involved modifying 27 files with a total of 443 line changes, demonstrating a steady cadence of code improvements despite no formal pull request or issue activity. The month’s efforts were primarily centered on stabilizing the codebase and refining existing logic through targeted refactors and functional updates."
     },
     {
       "username": "karlfloersch",
       "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 146.07698573718577,
+      "totalScore": 156.27698573718575,
       "prScore": 87.63898573718575,
       "issueScore": 6.1,
-      "reviewScore": 51.5,
-      "commentScore": 0.838,
-      "summary": null
+      "reviewScore": 61.5,
+      "commentScore": 1.038,
+      "summary": "karlfloersch: Focused on strengthening the stability and reliability of interoperability features, merging critical fixes for transaction pool reorg handling in op-geth (#772) and chain ID validation in proxyd (#564). They addressed edge cases in the supernode by implementing early returns for zero-value block verifications (#19405) and proposed architectural improvements for L1 consistency and cross-safety validation (#19420). Beyond their technical contributions, they remained highly active in the review process with 11 total reviews, ensuring code quality across the optimism stack. Their primary focus this month was on bugfix work (88%) and enhancing the robustness of interop-related infrastructure and testing."
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 145.43241774124988,
+      "prScore": 94.93241774124986,
+      "issueScore": 0,
+      "reviewScore": 50.5,
+      "commentScore": 0,
+      "summary": "joshklop: Focused on maintaining core infrastructure stability by managing critical dependency updates, notably merging the op-geth update in optimism#19414 and initiating the upgrade to go-ethereum v1.17.1. They demonstrated strong technical oversight by identifying a blob fetching failure in Kona that led to safe head stalls (optimism#18716) and providing six code reviews to support team velocity. Their contributions involved modifying 27 files with a balanced focus on code and testing across the optimism ecosystem. This month’s activity centered on ensuring the reliability of the execution layer and addressing synchronization vulnerabilities."
     },
     {
       "username": "scharissis",
@@ -920,17 +1139,7 @@
       "issueScore": 0,
       "reviewScore": 20,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 124.43241774124986,
-      "prScore": 94.93241774124986,
-      "issueScore": 0,
-      "reviewScore": 29.5,
-      "commentScore": 0,
-      "summary": null
+      "summary": "scharissis: Focused on stabilizing and maintaining the op-acceptor infrastructure, notably improving test reliability by implementing named test exclusions in ethereum-optimism/infra #560. They managed several version releases for op-acceptor and op-acceptance-tests while addressing CI bottlenecks, such as fixing archive extraction dependencies in ethereum-optimism/infra #561 and initiating sccache integration for Rust builds. Their contributions, spanning 38 files and 13 commits, demonstrate a balanced commitment to bug fixes, testing, and configuration management. This month’s work highlights a primary focus on enhancing CI/CD pipelines and ensuring the robustness of the acceptance testing framework."
     },
     {
       "username": "mds1",
@@ -940,7 +1149,17 @@
       "issueScore": 0,
       "reviewScore": 49,
       "commentScore": 0.6379999999999999,
-      "summary": null
+      "summary": "mds1: Focused on optimizing the codebase and improving test infrastructure within the ethereum-optimism/optimism repository, notably executing a significant refactor to deduplicate test helpers in PR #19434 which impacted over 260 files. They also addressed technical debt by streamlining mock logic in PR #19349 and maintained high code quality through 10 pull request reviews. Their work this month was characterized by a strong emphasis on bug fixes and test suite maintenance, resulting in a net reduction of over 700 lines of code. Their primary focus areas were centered on enhancing the efficiency and reliability of the contracts-bedrock testing environment."
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 111.08832138125423,
+      "prScore": 81.68832138125424,
+      "issueScore": 4,
+      "reviewScore": 25,
+      "commentScore": 0.4,
+      "summary": "wwared: Focused on enhancing the reliability and configuration of the Optimism supernode architecture, notably merging a significant update to the acceptance tests to support L2 light CL follow source functionality (#19378). They further drove development in this area by opening PRs to refine P2P configurations for supernodes (#19439) and streamlining the VM runner by replacing the supervisor component (#19438). Beyond their 1,200+ lines of code changes, they actively shaped the project through three code reviews and by identifying critical follow-up tasks for sequencing nodes and P2P connectivity (#19389, #19379). Their primary focus this month was split between infrastructure testing and core system configuration."
     },
     {
       "username": "sbvegan",
@@ -950,17 +1169,17 @@
       "issueScore": 0,
       "reviewScore": 21,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "sbvegan: Focused on documentation maintenance and repository health, notably performing a significant cleanup of the ethereum-optimism/docs codebase by removing over 2,400 lines of unreferenced assets and dead files in PR #1994. They also improved technical accuracy and ecosystem visibility by updating guardian risk disclosures (#1993) and integrating DIA into the oracles documentation (#1995). Beyond their direct contributions, they supported the team through four code reviews and one PR comment, maintaining a high velocity with an average merge time of zero hours. Their primary focus this month was on documentation infrastructure and testing, resulting in a net reduction of nearly 3,800 lines of code across 63 files."
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 101.38832138125423,
-      "prScore": 81.68832138125424,
-      "issueScore": 4,
-      "reviewScore": 15.5,
-      "commentScore": 0.2,
-      "summary": null
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 96.72372897110375,
+      "prScore": 50.22372897110375,
+      "issueScore": 0,
+      "reviewScore": 46.5,
+      "commentScore": 0,
+      "summary": "teddyknox: Focused heavily on large-scale codebase maintenance and stability, executing 16 commits that modified 825 files with a significant volume of over 31,000 total lines changed. Their work was primarily dedicated to bugfix efforts, which accounted for 81% of their activity, ensuring the integrity of the existing system through extensive code modifications. Additionally, they contributed to the development lifecycle by providing 10 technical reviews, including 3 approvals, to support peer contributions. Overall, their primary impact this month centered on broad bug remediation and high-volume code refinement across various file types."
     },
     {
       "username": "Wazabie",
@@ -970,7 +1189,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "Wazabie: Focused on critical operational updates for the Superchain ecosystem, successfully merging PR #1379 to execute revenue sharing mainnet tasks for the Ink and Soneium networks. This work involved substantial modifications across 60 files, totaling over 1,700 lines of code and documentation changes to ensure accurate protocol configurations. They also initiated further infrastructure improvements by opening PRs #1380 and #1378 to address additional revenue sharing tasks on Sepolia and update dispute game templates. Their primary focus this month was centered on protocol operations and documentation within the superchain-ops repository."
     },
     {
       "username": "falcorocks",
@@ -980,7 +1199,7 @@
       "issueScore": 0,
       "reviewScore": 16,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "falcorocks: Focused on infrastructure maintenance and security hardening within the ethereum-optimism/infra repository, successfully merging two targeted bugfix PRs. They improved the security posture of the op-conductor-mon service by hardening its container image with a DHI base (#562) and addressed technical debt by updating Go dependencies (#563). Beyond their own code changes, they actively contributed to team quality standards by performing three pull request reviews and providing two technical comments. Their primary focus this month was on enhancing the stability and security of monitoring infrastructure through dependency management and container optimization."
     },
     {
       "username": "aliersh",
@@ -990,7 +1209,7 @@
       "issueScore": 6.1,
       "reviewScore": 4.5,
       "commentScore": 0.4,
-      "summary": null
+      "summary": "aliersh: Focused on strengthening the L2 Contracts Manager (L2CM) framework, notably centralizing documentation by migrating the L2 upgrade contracts specification into the monorepo via PR #19409 and PR #895. They improved system reliability by reusing ProxyAdmin tests on L2ProxyAdmin to ensure backwards compatibility (#19377) and initiated critical tracking for FMA action items and error-swallowing patterns in issues #19345 and #19392. Their contributions involved significant documentation and testing efforts, totaling over 1,200 lines of code changes across nine files. This month’s work primarily centered on documentation, refactoring, and enhancing test coverage for L2 contract infrastructure."
     },
     {
       "username": "pcw109550",
@@ -1000,27 +1219,47 @@
       "issueScore": 0,
       "reviewScore": 19.5,
       "commentScore": 0.4,
-      "summary": null
+      "summary": "pcw109550: Focused on enhancing the testing infrastructure for the Optimism ecosystem, notably by implementing the PE MVP tests in PR #19404 (+913/-39 lines). This significant contribution involved modifying 22 files to strengthen the op-acceptance-tests suite, ensuring better validation for core protocol components. Beyond their primary development work, they actively supported the team by providing four code reviews and two PR comments to maintain code quality. Their efforts this month were evenly split between bug fixes and feature development, with a heavy emphasis on expanding test coverage."
     },
     {
-      "username": "teddyknox",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
-      "totalScore": 46.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 46.5,
+      "username": "0xChin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/77933451?u=a76de7bffe1b1d8fb41313e36c4ba53d9d65109b&v=4",
+      "totalScore": 54.78717799332392,
+      "prScore": 43.78717799332392,
+      "issueScore": 2,
+      "reviewScore": 9,
       "commentScore": 0,
-      "summary": null
+      "summary": "0xChin: Focused on advancing zero-knowledge infrastructure by implementing a feature flag to register ZK proofs within the optimism repository (PR #19388). This significant contribution involved modifying 163 files and was followed by the creation of a strategic issue to integrate this flag into the OPCM/OPD pipeline (#19432). Beyond feature development, they supported the codebase through two technical reviews and extensive testing, which accounted for a third of their total file changes. Their work this month centered on a balanced mix of feature implementation and foundational configuration, primarily focused on the ZK dispute game framework."
+    },
+    {
+      "username": "theochap",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
+      "totalScore": 48.732597031800125,
+      "prScore": 48.29459703180012,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": "theochap: Focused on broad codebase maintenance and structural adjustments, contributing two commits that modified 36 files with a total of 1,503 lines of code changes. While no pull requests were finalized this month, the scale of the modifications across various file types indicates a significant effort toward general system updates. Their primary focus remained on foundational \"other\" work, ensuring consistency across a wide range of project files."
     },
     {
       "username": "pauldowman",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 43.28427477843843,
+      "totalScore": 47.28427477843843,
       "prScore": 18.44427477843843,
-      "issueScore": 6,
+      "issueScore": 10,
       "reviewScore": 18.5,
       "commentScore": 0.33999999999999997,
-      "summary": null
+      "summary": "pauldowman: Focused on advancing interoperability and system monitoring within the Optimism ecosystem, notably initiating the implementation of the L2PayloadWitness hint for Kona (#19408, #19407). They played a key role in refining system architecture by identifying and closing issues related to multi-supervisor support in dispute-mon (#18204), gas introspection in CrossL2Inbox (#19422), and supernode API support for the VM runner (#19008). Despite having no merged pull requests this month, their high-volume code modifications—totaling nearly 2,000 lines of additions and 2,600 lines of deletions—reflect a significant effort in refactoring and bug fixing. Their primary focus areas spanned feature development for interop, enhancing acceptance tests, and streamlining core system components."
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 42.44750942255483,
+      "prScore": 22.607509422554827,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0.33999999999999997,
+      "summary": "stevennevins: Focused primarily on stability and maintenance this month, contributing 41 commits that modified 108 files with a significant volume of code changes (+1,919/-711 lines). While no pull requests were merged during this period, they remained active in the development lifecycle by providing three code reviews and engaging in technical discussions via issue and pull request comments. Their work demonstrated a strong emphasis on quality assurance, with nearly half of their activity dedicated to bugfixes alongside meaningful contributions to feature development and testing. Overall, their efforts centered on resolving technical debt and refining existing functionality to improve the codebase's reliability."
     },
     {
       "username": "bitwiseguy",
@@ -1030,7 +1269,7 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
-      "summary": null
+      "summary": "bitwiseguy: Focused on enhancing the resilience of the Ethereum Optimism stack by addressing synchronization edge cases between the execution and consensus layers. They authored two critical bug fixes currently in progress, including a fix for the kona-engine to handle SYNCING responses (#19386) and a graceful pipeline reset mechanism for op-node during EL restarts (#19384). Their work involved modifying seven files with a strong emphasis on reliability, supported by a significant addition of test coverage to validate these recovery paths. Overall, their primary focus this month was on bugfix development and testing to improve system stability during execution layer disruptions."
     },
     {
       "username": "Joxess",
@@ -1040,7 +1279,27 @@
       "issueScore": 0,
       "reviewScore": 40.5,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "Joxess: Focused on enhancing project documentation and addressing technical debt, contributing 17 commits that modified 17 files with a net addition of over 600 lines of code. While no pull requests were merged this month, they remained active in the development lifecycle by providing 9 technical reviews and comments to support peer contributions. Their work demonstrated a strong commitment to maintainability, with a primary focus on documentation improvements and bugfix activities."
+    },
+    {
+      "username": "devin-ai-integration",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/811515?v=4",
+      "totalScore": 40.268799098133826,
+      "prScore": 38.92879909813383,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.34,
+      "summary": "devin-ai-integration: Focused on enhancing CI monitoring and contract test coverage within the optimism repository, notably merging PR #19367 to integrate security-oncall mentions into the contracts-bedrock CI job. They are currently driving efforts to improve the robustness of the codebase through open PRs #19342 and #19397, which target increased test coverage for LegacyMintableERC20 and OptimismMintableERC721Factory. Throughout the month, they remained active in technical discussions, contributing 6 comments across their pull requests. Their primary focus areas included CI infrastructure security and expanding the testing suite for core smart contract components."
+    },
+    {
+      "username": "wiz-inc-a178a98b5d",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 37.513999999999996,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 36,
+      "commentScore": 1.5139999999999998,
+      "summary": "wiz-inc-a178a98b5d: During this period, the contributor's activity was limited to providing a single review comment on an open pull request. There were no merged code changes, created issues, or other development activities recorded. Consequently, their primary focus remained on peer review participation rather than direct code implementation or task management."
     },
     {
       "username": "cuiweixie",
@@ -1050,7 +1309,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "cuiweixie: Focused on infrastructure performance optimization by initiating a pull request to improve proxyd's handling of large JSON responses in ethereum-optimism/infra (#559). This work aims to enhance system efficiency when processing substantial data payloads. Their primary focus this month was on backend performance tuning within the infrastructure layer."
     },
     {
       "username": "asavienko",
@@ -1060,27 +1319,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "wiz-inc-a178a98b5d",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 32.576,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 31.5,
-      "commentScore": 1.0759999999999998,
-      "summary": "wiz-inc-a178a98b5d: During this period, the contributor's activity was limited to providing a single review comment on an open pull request. There were no merged code changes, created issues, or other development activities recorded. Consequently, their primary focus remained on peer review participation rather than direct code implementation or task management."
-    },
-    {
-      "username": "devin-ai-integration",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/811515?v=4",
-      "totalScore": 30.790537879272115,
-      "prScore": 29.650537879272118,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.1400000000000001,
-      "summary": null
+      "summary": "asavienko: Focused on enhancing the robustness of the supervisor component within the ethereum-optimism/optimism repository, specifically through the development of fuzz testing. Their primary contribution involves an open pull request (#19347) that introduces \"Rv supervisor fuzzing,\" a task requiring significant code changes with over 500 lines added across five files. This work demonstrates a balanced commitment to both refactoring existing logic and expanding the test suite to ensure system reliability. Overall, their activity this month was centered on improving code quality and security through rigorous testing and structural refinements."
     },
     {
       "username": "chuxinh",
@@ -1090,17 +1329,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "0xChin",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/77933451?u=a76de7bffe1b1d8fb41313e36c4ba53d9d65109b&v=4",
-      "totalScore": 25.324330683884977,
-      "prScore": 14.324330683884977,
-      "issueScore": 2,
-      "reviewScore": 9,
-      "commentScore": 0,
-      "summary": null
+      "summary": "chuxinh: Focused on enhancing data reliability and pipeline stability by implementing a critical hotfix for the ethereum-optimism/op-analytics repository. They successfully integrated BigQuery upload functionality for chain metadata into the Dagster pipeline via PR #1795, ensuring accurate data ingestion across nine modified files. This work, consisting of six commits and over 200 lines of code changes, was evenly split between urgent bugfix tasks and pipeline enhancements. Their primary focus this month was on strengthening data infrastructure and metadata management within the analytics ecosystem."
     },
     {
       "username": "fakedev9999",
@@ -1110,7 +1339,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "fakedev9999: Focused on enhancing the protocol's data availability capabilities by initiating a feature to allow Keccak256 commitments without DA challenges in ethereum-optimism/optimism (#19395). This work involved modifying five files with a balanced focus on core code and supporting tests (+102/-11 lines) to ensure robust implementation. Their activity this month was dedicated entirely to feature development within the op-alt-da component."
     },
     {
       "username": "ashitakah",
@@ -1120,7 +1349,7 @@
       "issueScore": 0,
       "reviewScore": 22.5,
       "commentScore": 0,
-      "summary": null
+      "summary": "ashitakah: Focused on collaborative quality assurance by providing five reviews and one pull request comment this month. While they did not submit code changes or open new issues, their primary impact was centered on offering feedback and technical oversight during the peer review process. Their activity indicates a focus on supporting the development lifecycle through code review rather than direct implementation."
     },
     {
       "username": "kansas1295",
@@ -1140,27 +1369,27 @@
       "issueScore": 0,
       "reviewScore": 14.5,
       "commentScore": 0,
-      "summary": null
+      "summary": "serpixel: Focused on organizational maintenance and peer review within the ethereum-optimism/optimism repository. They initiated a team-related feature update to rename a core team in PR #19436 and contributed to project quality by providing three code reviews, including two approvals. Their primary focus this month was on administrative feature work and supporting the team's development workflow through active peer feedback."
     },
     {
       "username": "antonleviathan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/4776110?u=7acbb26ab3b7a9eba7e67f0c44ea4d15d71ddbbb&v=4",
-      "totalScore": 17.989,
+      "totalScore": 18.189,
       "prScore": 4.489,
       "issueScore": 0,
       "reviewScore": 13.5,
-      "commentScore": 0,
-      "summary": null
+      "commentScore": 0.2,
+      "summary": "antonleviathan: This month, the contributor focused on administrative and maintenance tasks, notably initiating a request to be formally recognized as a contributor in the optimism repository via PR #19435. Their technical activity involved 16 commits across 19 files, resulting in a net reduction of 320 lines of code, which suggests a focus on codebase cleanup or optimization. Additionally, they provided 3 code reviews to support team workflows and peer feedback. Their primary efforts were centered on general project maintenance and bugfix work."
     },
     {
       "username": "0xniha",
       "avatarUrl": "https://avatars.githubusercontent.com/u/205694301?u=40549cc9822668a94e580372e47c3350107eb9aa&v=4",
-      "totalScore": 17.678,
+      "totalScore": 18.018,
       "prScore": 0,
       "issueScore": 2,
       "reviewScore": 14.5,
-      "commentScore": 1.178,
-      "summary": null
+      "commentScore": 1.5179999999999998,
+      "summary": "0xniha: Focused on codebase maintenance and technical debt reduction within the ethereum-optimism/optimism repository, notably initiating the removal of Karst-specific upgrade transactions from the network upgrade tool via issue #19369. While their primary output this month centered on bugfixes and feature development across 21 files (+629/-109 lines), they also played a key role in the peer review process by providing 3 reviews and 7 detailed PR comments. Their activity demonstrates a balanced commitment to system stability and collaborative code quality, with a primary technical focus on bugfix and feature-related work."
     },
     {
       "username": "pandainzoo",
@@ -1170,7 +1399,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "pandainzoo: Focused on enhancing the reliability and efficiency of the Optimism network's core components, specifically targeting the op-batcher and P2P modules. They addressed a synchronization issue regarding L1 origin updates in the batcher (#19399) and proposed a fix for incomplete topic closures within the P2P publisher (#19398). Additionally, they worked on optimizing parameter passing in the BatchSubmitter (#19400) to streamline internal operations. Their activity this month was centered on bug fixes and code optimizations within critical infrastructure files."
     },
     {
       "username": "alcueca",
@@ -1180,17 +1409,7 @@
       "issueScore": 0,
       "reviewScore": 15,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "stevennevins",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
-      "totalScore": 14.84,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 14.5,
-      "commentScore": 0.33999999999999997,
-      "summary": null
+      "summary": "alcueca: This month, the contributor focused on supporting the development workflow through peer code reviews. They provided three approvals on pull requests to facilitate the merging of team contributions. Their primary impact was centered on quality assurance and maintaining project momentum through the review process."
     },
     {
       "username": "0xiamflux",
@@ -1200,7 +1419,7 @@
       "issueScore": 0,
       "reviewScore": 13.5,
       "commentScore": 0,
-      "summary": null
+      "summary": "0xiamflux: Focused primarily on codebase maintenance and structural improvements, contributing 13 commits that modified 36 files (+279/-145 lines). While no pull requests were merged this month, they remained active in the development lifecycle by providing 6 technical reviews to support peer contributions. Their work was largely centered on refactoring existing logic and implementing new features, with additional efforts dedicated to enhancing the project's test suite."
     },
     {
       "username": "opsuperchain",
@@ -1210,7 +1429,7 @@
       "issueScore": 2,
       "reviewScore": 9,
       "commentScore": 0,
-      "summary": null
+      "summary": "opsuperchain: Focused on refining interoperability specifications and testing frameworks within the optimism repository. They contributed to the project's technical roadmap by initiating documentation on interop transaction pool eviction behavior during reorgs (#19351) and addressing devstack presets for acceptance tests (#19331). Additionally, they provided technical oversight through two pull request reviews, maintaining a focus on system stability and interop protocol design."
     },
     {
       "username": "gpgarner",
@@ -1220,7 +1439,7 @@
       "issueScore": 0,
       "reviewScore": 11,
       "commentScore": 0,
-      "summary": null
+      "summary": "gpgarner: Focused on maintaining code quality and project standards through peer code reviews. They completed 2 total reviews this month, providing critical feedback through both an approval and a change request. Their primary impact centered on technical oversight and ensuring the integrity of incoming contributions."
     },
     {
       "username": "yashvardhan-kukreja",
@@ -1230,7 +1449,7 @@
       "issueScore": 0,
       "reviewScore": 9.5,
       "commentScore": 0.43799999999999994,
-      "summary": null
+      "summary": "yashvardhan-kukreja: Focused on maintaining code quality and project velocity through peer feedback and technical oversight. They provided three pull request reviews, including two approvals and one detailed comment, alongside four additional PR comments to guide ongoing development. This activity demonstrates a commitment to collaborative code review and ensuring the integrity of incoming contributions."
     },
     {
       "username": "0xOneTony",
@@ -1240,7 +1459,7 @@
       "issueScore": 0,
       "reviewScore": 9.5,
       "commentScore": 0.4,
-      "summary": null
+      "summary": "0xOneTony: Focused on quality assurance and peer feedback this month, contributing two code reviews to the development workflow. Their activity included providing one formal approval and engaging in technical discussions through PR comments to ensure code standards were met. This collaborative effort supported the team's review process despite no direct code changes or pull request submissions."
     },
     {
       "username": "sebastianst",
@@ -1250,7 +1469,7 @@
       "issueScore": 0,
       "reviewScore": 9.5,
       "commentScore": 0,
-      "summary": null
+      "summary": "sebastianst: Focused on foundational system updates and maintenance, contributing over 2,500 lines of code changes across 24 files. While no pull requests were merged this month, they provided technical oversight through two code reviews and maintained a steady cadence of commits. Their work primarily centered on general system improvements, bug fixes, and documentation updates."
     },
     {
       "username": "kien-rise",
@@ -1260,7 +1479,7 @@
       "issueScore": 0,
       "reviewScore": 9,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "kien-rise: This month, the contributor focused on providing feedback and maintaining project quality through peer reviews. They conducted 2 reviews and provided a pull request comment to assist with ongoing development efforts. Their primary focus was on collaborative oversight and code review rather than direct implementation."
     },
     {
       "username": "turanalmammadov",
@@ -1270,13 +1489,23 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "turanalmammadov: Focused on improving technical documentation accuracy within the ethereum-optimism/optimism repository. They initiated a documentation update in PR #19373 to align the op-batcher environment variable names with current Data Availability throttling configurations. This work ensures that developer resources remain synchronized with the codebase, specifically focusing on documentation maintenance."
     },
     {
       "username": "apetro2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/230973479?u=4ba675a9665991c2de7ec13545ffe88edc163bcb&v=4",
       "totalScore": 6.75171895621705,
       "prScore": 6.75171895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "apetro2: Focused on infrastructure maintenance within the ethereum-optimism/optimism repository, specifically addressing a bug in log processing. They authored a fix for failed-log glob quoting in PR #19401 to ensure more reliable log handling. This work centered entirely on bugfix tasks within configuration files to improve system stability."
+    },
+    {
+      "username": "TRiLeZ",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/566899?u=cdb03a3966416e700b691ad598645d85d8634bbb&v=4",
+      "totalScore": 6.644224577336219,
+      "prScore": 6.644224577336219,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -1290,7 +1519,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "volkTRhacV: Focused on documentation maintenance within the ethereum-optimism/docs repository, specifically initiating a file reorganization task. They opened PR #1992 to rename the glossary file, signaling an effort toward improving the project's internal file structure. Their activity this month was exclusively centered on documentation management."
     },
     {
       "username": "zhwrd",
@@ -1300,7 +1529,7 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
-      "summary": null
+      "summary": "zhwrd: This month, the contributor's activity was limited to providing a single pull request approval. No code was authored or merged, and no issues were created or closed during this period. Their primary engagement focused on peer review within the development workflow."
     },
     {
       "username": "JosepBove",
@@ -1310,7 +1539,7 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
-      "summary": null
+      "summary": "JosepBove: Focused on a balanced mix of feature development and bug fixes, contributing seven commits that modified 65 files with a significant volume of code changes (+1,250/-478 lines). While no pull requests were merged this month, they supported the team's progress by providing a formal approval on a peer review. Their activity demonstrates a high level of technical effort across various file types, primarily centered on advancing new functionality and maintaining system stability."
     },
     {
       "username": "piersy",
@@ -1320,7 +1549,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "piersy: Focused on refining backend configurations within the ethereum-optimism/op-geth repository. They initiated a targeted update to ensure the karst override is correctly set via PR #773. This work demonstrates a specific focus on maintaining the integrity of the eth/backend code through precise configuration adjustments."
     },
     {
       "username": "unclezoro",
@@ -1330,7 +1559,7 @@
       "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "unclezoro: Focused on identifying and reporting infrastructure reliability issues within the optimism ecosystem. They contributed by flagging a potential outage in the flashblock websocket endpoint through issue #19382, providing necessary feedback to the development team. Their activity this month was centered on system monitoring and issue reporting for the ethereum-optimism/optimism repository."
     },
     {
       "username": "lvxiao1",
@@ -1340,7 +1569,7 @@
       "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "lvxiao1: Focused on identifying and reporting infrastructure reliability issues within the ethereum-optimism/optimism repository. They contributed by documenting an unexpected behavior regarding the flashblocks WebSocket endpoint in issue #19366. Their primary focus this month was on system monitoring and reporting potential regressions in network communication tools."
     },
     {
       "username": "jwhetz624",
@@ -1350,7 +1579,7 @@
       "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "jwhetz624: Focused on documentation standards by initiating a proposal to improve pull request titling conventions within the ethereum-optimism/docs repository. This contribution, tracked in issue #1996, aims to enhance project organization and clarity for future contributors. Their primary focus this month was on documentation governance and process improvement."
     },
     {
       "username": "opgitgovernance",
@@ -1370,7 +1599,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.33999999999999997,
-      "summary": null
+      "summary": "0xVasconcelos: Maintained a presence in the codebase through targeted feedback, contributing two pull request comments to support ongoing development. Their technical activity included a single commit involving a minor modification to one file. This month, their primary focus was centered on providing peer feedback and performing minor administrative code updates."
     },
     {
       "username": "manuelbarbas",
@@ -1390,7 +1619,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
+      "summary": "karlb: Focused on targeted maintenance and bugfix work this month, contributing two commits that modified six files. Their activity included providing technical feedback via a pull request comment to support ongoing development efforts. Overall, their work was evenly split between addressing bugs and general codebase improvements across various file types."
     },
     {
       "username": "julio4",
@@ -1423,9 +1652,9 @@
       "summary": null
     }
   ],
-  "newPRs": 78,
-  "mergedPRs": 47,
-  "newIssues": 27,
-  "closedIssues": 14,
-  "activeContributors": 68
+  "newPRs": 96,
+  "mergedPRs": 56,
+  "newIssues": 30,
+  "closedIssues": 17,
+  "activeContributors": 69
 }
