@@ -1,0 +1,407 @@
+{
+  "interval": {
+    "intervalStart": "2026-03-10T00:00:00.000Z",
+    "intervalEnd": "2026-03-11T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-03-10 to 2026-03-11, ethereum-optimism/optimism had 16 new PRs (11 merged), 1 new issues, and 30 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7u7E7K",
+      "title": "kona: orphaned sources/variant.rs in kona-derive references non-existent AsyncIterator and stale API",
+      "author": "ajsutton",
+      "number": 19340,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`rust/kona/crates/protocol/derive/src/sources/variant.rs` exists in the kona-derive sources directory but is **not included in `sources/mod.rs`** and is therefore dead code. The file references:\n\n- A non-existent `AsyncIterator` trait (not defined anywhere in the kona codebase)\n- An outdated `CalldataSource::new(chain, block_ref, batcher_address)` 4-argument API that no longer matches the current 2-argument API\n\nThe file appears to be a leftover from the workspace migration (commit `48a7a09b`). It will fail to compile if added to the module tree. There is no runtime impact, but the file is misleading to developers browsing the source.\n\n## Location\n\n[`rust/kona/crates/protocol/derive/src/sources/variant.rs`](https://github.com/ethereum-optimism/optimism/blob/a8a2956e695f18f53309ff0c30587a2a42961329/rust/kona/crates/protocol/derive/src/sources/variant.rs)\n\n## Fix\n\nDelete the file, or if there is a plan to restore it, update it to compile against the current API first.\n\n## Context\n\nFound during kona-node-vs-op-node conformance review (component: L1 Retrieval, finding LR-C05). Low priority — no runtime impact.",
+      "createdAt": "2026-03-01T22:40:34Z",
+      "closedAt": "2026-03-10T20:22:18Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7vTIwK",
+      "title": "kona: CalldataSource silently drops EIP-4844 (type 3) batcher transactions pre-Ecotone",
+      "author": "ajsutton",
+      "number": 19352,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Finding\n\n**Review:** kona-node-vs-op-node  \n**Component:** data-sources  \n**Severity:** consensus-critical (low priority — Ecotone now activated on all supported chains)  \n**Batcher:** honest  \n**Confidence:** likely\n\n## Description\n\n`CalldataSource::load_calldata` in kona uses `_ => return None` as the catch-all arm, which silently skips EIP-4844 (type 3) batcher transactions. In contrast, op-node's `isValidBatchTx` explicitly allows transaction types 0–3 and 0x7E, and `DataFromEVMTransactions` extracts calldata from valid EIP-4844 batcher txs via `tx.Data()`.\n\nIn the pre-Ecotone window — where L1 has Cancun/EIP-4844 available but L2 Ecotone is not yet activated — an honest batcher could submit an EIP-4844 tx with calldata to the batch inbox. Op-node would include that calldata in the derivation stream; kona would skip the transaction entirely, producing divergent L2 chain state.\n\nNote: the op-batcher has an explicit startup guard (`service.go:297-299`) preventing the reference op-batcher from reaching this case. However, the base derivation spec (`derivation.md:504`) explicitly lists type 3 as a valid batcher tx type with no pre-Ecotone exclusion, so the discrepancy is reachable by any spec-compliant alternative batcher and represents a genuine protocol-level gap in kona's calldata path.\n\n**Priority note:** Ecotone is now activated on all supported chains, so this cannot be triggered on mainnet/testnets today. However it is a latent protocol conformance issue.\n\n## Locations\n\n| | Location |\n|---|---|\n| Reference (op-node) | [`op-node/rollup/derive/data_source.go#L99`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/op-node/rollup/derive/data_source.go#L99) |\n| Reference (op-node) | [`op-node/rollup/derive/calldata_source.go#L82`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/op-node/rollup/derive/calldata_source.go#L82) |\n| Subject (kona) | [`rust/kona/crates/protocol/derive/src/sources/calldata.rs#L52`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/rust/kona/crates/protocol/derive/src/sources/calldata.rs#L52) |\n\n## Fix\n\nIn `calldata.rs`, add type 3 (EIP-4844) to the accepted transaction types list alongside types 0, 1, 2, and 0x7E.",
+      "createdAt": "2026-03-03T05:23:26Z",
+      "closedAt": "2026-03-10T23:14:17Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7xfJ_I",
+      "title": "Remove Legacy Interface Calls in L2ContractsManager",
+      "author": "0xniha",
+      "number": 19468,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Description**\n\nThe `_loadFullConfig()` method currently uses legacy interface methods (all-caps function names) to maintain compatibility with production predeploys. After the Karst Upgrade updates the predeploys, these should be replaced with the newer camelCase interface methods.\n\n**File**: `packages/contracts-bedrock/src/L2/L2ContractsManager.sol`\n\n**Changes Required**\n\nReplace the following legacy calls in `_loadFullConfig()`:\n\n1. **L2CrossDomainMessenger**\n   - `ICrossDomainMessenger(Predeploys.L2_CROSS_DOMAIN_MESSENGER).OTHER_MESSENGER()`\n   - → `ICrossDomainMessenger(Predeploys.L2_CROSS_DOMAIN_MESSENGER).otherMessenger()`\n\n2. **L2StandardBridge**\n   - `IStandardBridge(payable(Predeploys.L2_STANDARD_BRIDGE)).OTHER_BRIDGE()`\n   - → `IStandardBridge(payable(Predeploys.L2_STANDARD_BRIDGE)).otherBridge()`\n\n3. **L2ERC721Bridge**\n   - `IERC721Bridge(Predeploys.L2_ERC721_BRIDGE).OTHER_BRIDGE()`\n   - → `IERC721Bridge(Predeploys.L2_ERC721_BRIDGE).otherBridge()`\n\n4. **OptimismMintableERC20Factory**\n   - `IOptimismMintableERC20Factory(Predeploys.OPTIMISM_MINTABLE_ERC20_FACTORY).BRIDGE()`\n   - → `IOptimismMintableERC20Factory(Predeploys.OPTIMISM_MINTABLE_ERC20_FACTORY).bridge()`\n\n5. **OptimismMintableERC721Factory**\n   - `IOptimismMintableERC721Factory(Predeploys.OPTIMISM_MINTABLE_ERC721_FACTORY).BRIDGE()`\n   - → `IOptimismMintableERC721Factory(Predeploys.OPTIMISM_MINTABLE_ERC721_FACTORY).bridge()`\n   - `IOptimismMintableERC721Factory(Predeploys.OPTIMISM_MINTABLE_ERC721_FACTORY).REMOTE_CHAIN_ID()`\n   - → `IOptimismMintableERC721Factory(Predeploys.OPTIMISM_MINTABLE_ERC721_FACTORY).remoteChainID()`\n\n**When**: After Karst Upgrade.",
+      "createdAt": "2026-03-10T12:30:45Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7JfHb3",
+      "title": "feat(rust): add derivation pipeline test framework",
+      "author": "ajsutton",
+      "number": 19471,
+      "body": "## Summary\n\n- Add `rust/derivation-tests` crate — a framework for AI agents to construct deterministic L1+L2 chains and test the OP Stack derivation pipeline\n- Provides L1/L2 chain builders, batch encoding (singular batches, zlib/brotli compression, channel framing), in-memory EVM state with trie root computation, and JSON-RPC + beacon API servers\n- Targets testing across op-program, kona-proofs, op-node, and kona-node using the same synthetic chain data\n\n### Modules\n\n| Module | Purpose |\n|--------|---------|\n| `config` | Deterministic rollup configuration with all hardforks active from genesis |\n| `state` | In-memory EVM state DB (revm CacheDB) with Merkle trie root computation and EIP-1186 proofs |\n| `l1` / `l2` | Chain builders for constructing valid block sequences with proper parent hashing |\n| `batch` | Channel encoding: singular batches → compress → frame → calldata |\n| `server` | jsonrpsee L1/L2 RPC servers + axum beacon blob API on random ports |\n| `harness` | High-level `DerivationTest` entry point, runner stubs for op-program/kona |\n| `roots` | Output root (V0) and super root (V1) computation via kona-protocol |\n\n## Test plan\n\n- [x] 10 unit tests pass (config determinism, state roots, batch encoding roundtrip, channel framing)\n- [x] 5 integration tests pass (empty blocks, batch submission, multi-block L2, L1 chain structure)\n- [x] 1 ignored test stub for op-program invocation (requires external binary)\n- [x] `cargo clippy -p derivation-tests -- -D warnings` clean\n- [x] `cargo test -p derivation-tests` — 16 pass, 0 fail\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-10T19:33:18Z",
+      "mergedAt": null,
+      "additions": 4713,
+      "deletions": 9
+    },
+    {
+      "id": "PR_kwDODjvEJM7JPq3n",
+      "title": "feat: add l2 fork testing framework",
+      "author": "0xniha",
+      "number": 19464,
+      "body": "**Description**\r\nAdds L2 Fork Testing Framework.\r\n\r\nCloses https://github.com/ethereum-optimism/optimism/issues/18837",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-10T02:23:32Z",
+      "mergedAt": null,
+      "additions": 965,
+      "deletions": 75
+    },
+    {
+      "id": "PR_kwDODjvEJM7FdP4h",
+      "title": "op-acceptance-tests: Switch to using a devnet per test",
+      "author": "ajsutton",
+      "number": 19267,
+      "body": "**Description**\r\n\r\nThis is a pretty brute force approach that's entirely AI generated. But WCPGW?\r\n\r\nAlso we don't currently parallelise tests and I don't think any of the SerialT have been changed to ParallelT so the runtime will be significantly worse (for now).",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-02-22T12:27:03Z",
+      "mergedAt": null,
+      "additions": 807,
+      "deletions": 1240
+    },
+    {
+      "id": "PR_kwDODjvEJM7JQKfg",
+      "title": "fix(op-node): carry attributes in deposits-only request event",
+      "author": "ajsutton",
+      "number": 19465,
+      "body": "## Summary\n\nMakes `DepositsOnlyPayloadAttributesRequestEvent` self-contained by carrying the original `AttributesWithParent`, eliminating the race condition where a pipeline reset clears `lastAttribs` between `BuildStartEvent` and `PayloadProcessEvent`.\n\nThis is an alternative to #19417 which changes `CriticalErrorEvent` to `ResetEvent`. That fix papers over the race by retrying; this fix eliminates the root cause by removing the dependence on mutable pipeline state.\n\n### What changed\n\n- `DepositsOnlyPayloadAttributesRequestEvent` now carries an `Attributes` field\n- `EngineController` stores attributes from `BuildStartEvent` in `lastBuildAttribs` (survives pipeline resets)\n- All emit sites pass attributes through: `build_invalid.go` uses `ev.Attributes` directly, `payload_process.go` uses `e.lastBuildAttribs`\n- New `ApplyDepositsOnly` method on `AttributesQueue`/`DerivationPipeline` accepts provided attributes, flushes channels, and returns deposits-only version — without reading `lastAttribs`\n- Missing or mismatched attributes is a `CriticalErrorEvent` — no fallback\n\n### Emit site verification\n\nThere is exactly one place the event is constructed: `emitDepositsOnlyPayloadAttributesRequest`. All three call sites go through it:\n\n1. **`build_invalid.go:47`** — passes `ev.Attributes` directly from `BuildInvalidEvent`. Always correct — same build cycle.\n2. **`payload_process.go:46`** — SuperAuthority deny path. Passes `e.lastBuildAttribs`.\n3. **`payload_process.go:65`** — Holocene `ExecutionInvalid`. Passes `e.lastBuildAttribs`.\n\n### Staleness analysis for `lastBuildAttribs`\n\n`lastBuildAttribs` is set in `onBuildStart` and read in `onPayloadProcess`. Could a second `BuildStartEvent` overwrite it before the first build's `PayloadProcessEvent` fires?\n\n**The `AttributesHandler` prevents concurrent builds.** Its `sentAttributes` flag (set `true` before emitting `BuildStartEvent`, checked at line 167) prevents emitting a second `BuildStartEvent` while one is in flight. The flag is only cleared on reset, temporary error, or when attributes are consumed.\n\n**After a reset, stale builds fail at the EL.** If a `ResetEvent` interleaves and eventually produces a new `BuildStartEvent` (overwriting `lastBuildAttribs`), the stale build's `BuildSealEvent` calls `engine.GetPayload` — but `forceReset` has already changed the EL's forkchoice via `tryUpdateEngine`, invalidating the old payload ID. The EL returns `UnknownPayload`, producing `PayloadSealExpiredErrorEvent` instead of `PayloadProcessEvent`. The deny check never fires for the stale build.\n\n**Defense-in-depth validation catches any remaining edge case.** Both `emitDepositsOnlyPayloadAttributesRequest` and the handler in `PipelineDeriver` validate that the carried attributes match the event's `Parent` and `DerivedFrom`. If `lastBuildAttribs` is stale (wrong parent or derivation origin), the mismatch check fires a `CriticalErrorEvent` rather than silently using wrong attributes. This prevents incorrect derivation.\n\n### Why the race exists\n\nEvents are queued, not inline. Between `BuildStartEvent` (which queues `ForkchoiceUpdateEvent` + `BuildStartedEvent`) and `PayloadProcessEvent` (where the deny check fires), a `ResetEvent` can interleave and clear `lastAttribs` on the `AttributesQueue`. The deny check then emits `DepositsOnlyPayloadAttributesRequestEvent`, whose handler previously read `lastAttribs` — which was nil.\n\nThe `EngineController`'s `lastBuildAttribs` field survives pipeline resets (only the pipeline's internal `AttributesQueue.lastAttribs` is cleared), bridging the gap.\n\n## Test plan\n\n- [x] New unit tests: `TestApplyDepositsOnly_WithNilLastAttribs` and `TestApplyDepositsOnly_PreservesParentAndDerivedFrom`\n- [x] Updated `TestSuperAuthority/DeniedPayload_EmitsDepositsOnlyRequest` to set `lastBuildAttribs`\n- [x] All `derive`, `engine`, and `attributes` tests pass\n- [x] Full `op-node` build succeeds\n- [ ] Should be validated with the supernode interop reorg acceptance tests from #19346\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-10T03:20:44Z",
+      "mergedAt": null,
+      "additions": 479,
+      "deletions": 9
+    },
+    {
+      "id": "PR_kwDODjvEJM7JQX1w",
+      "title": "test(op-node): reproduce DepositsOnlyAttributes race condition",
+      "author": "ajsutton",
+      "number": 19466,
+      "body": "## Summary\n\n- Adds tests reproducing a race condition in `DepositsOnlyPayloadAttributesRequestEvent` handling where a pipeline reset clears `lastAttribs` between `BuildStartEvent` and `PayloadProcessEvent`\n- When this race occurs, `DepositsOnlyAttributes()` fails with \"no attributes generated yet\" and the `PipelineDeriver` emits a `CriticalErrorEvent` that kills the node\n- Two test levels: `AttributesQueue` (data layer) and `PipelineDeriver` (event system integration)\n\n### The Race Sequence\n\n1. Pipeline derives attributes → `lastAttribs` is set\n2. `BuildStartEvent` → `onBuildStart` → queues `ForkchoiceUpdateEvent` + `BuildStartedEvent`\n3. `ForkchoiceUpdateEvent` processing triggers a `ResetEvent`\n4. `ResetEvent` → pipeline reset → stages reset → `lastAttribs = nil`\n5. `BuildStartedEvent` → `BuildSealEvent` → `BuildSealedEvent` → `PayloadProcessEvent`\n6. Payload deemed invalid (Holocene active) → `DepositsOnlyPayloadAttributesRequestEvent`\n7. `DepositsOnlyAttributes()` → `lastAttribs == nil` → error → `CriticalErrorEvent` → node crash\n\n## Test plan\n\n- [x] `TestDepositsOnlyRace_AttributesQueueResetClearsLastAttribs` — verifies `reset()` clears `lastAttribs` and `DepositsOnlyAttributes` returns the expected error\n- [x] `TestDepositsOnlyRace_PipelineDeriverEmitsCriticalError` — verifies the full event path emits `CriticalErrorEvent` when the race occurs\n- [x] Tests pass on unmodified develop branch (demonstrating the bug exists)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-10T03:39:33Z",
+      "mergedAt": null,
+      "additions": 364,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 566,
+    "deletions": 348,
+    "files": 28,
+    "commitCount": 104
+  },
+  "completedItems": [
+    {
+      "title": "feat: add scaffolding for making kona the default respected game type",
+      "prNumber": 19117,
+      "type": "feature",
+      "body": " **Description**                                                                                                                                                                                                               \r\n   \r\n  Adds the",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerV2.sol",
+        "packages/contracts-bedrock/scripts/libraries/Config.sol",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerV2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/src/libraries/DevFeatures.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/setup/FeatureFlags.sol",
+        "packages/contracts-bedrock/src/libraries/Constants.sol",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "ci: run acceptance tests against rust stack (kona/op-reth)",
+      "prNumber": 19222,
+      "type": "tests",
+      "body": "## Summary\n- Adds `stack_type` parameter to acceptance test CI jobs to support running against the rust stack (kona/op-reth)\n- Consolidates `cannon-kona-host` and `kona-build-release` into a single `rust-workspace-binaries` build step\n- Add",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "op-acceptance-tests/acceptance-tests.yaml",
+        "op-acceptance-tests/tests/base/eth_simulate_test.go",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "op-devstack/sysgo/l1_nodes_subprocess.go"
+      ]
+    },
+    {
+      "title": "kona(derive): remove dead EthereumDataSourceVariant file",
+      "prNumber": 19341,
+      "type": "other",
+      "body": "## Summary\n\n- Removes `rust/kona/crates/protocol/derive/src/sources/variant.rs`, which is dead code\n- `EthereumDataSourceVariant` implemented `AsyncIterator`, a trait that is not defined anywhere in the kona codebase\n- The file was never in",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/sources/variant.rs"
+      ]
+    },
+    {
+      "title": "fix(kona/derive): accept EIP-4844 type-3 batcher txs in CalldataSource",
+      "prNumber": 19355,
+      "type": "bugfix",
+      "body": "## Summary\n\n`CalldataSource::load_calldata` uses `_ => return None` as the catch-all arm, silently dropping EIP-4844 (type 3) batcher transactions. This diverges from op-node which explicitly handles types 0–3 and 0x7E.\n\nIn the pre-Ecotone ",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/sources/calldata.rs"
+      ]
+    },
+    {
+      "title": "chore(ci): skip kona-build-release on PRs that don't touch Rust",
+      "prNumber": 19459,
+      "type": "other",
+      "body": "## Summary\n\n- `kona-build-release` takes ~9 minutes on every PR, even when no Rust files changed — cargo rebuilds from scratch because fresh checkouts defeat mtime-based fingerprinting\n- Uses CircleCI path-filtering to detect `rust/` change",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "op-devstack: fix flashblocks preset sequencer EL selection",
+      "prNumber": 19458,
+      "type": "bugfix",
+      "body": "## Summary\n- fix `op-devstack/presets/flashblocks.go` to choose the sequencer EL node by sequencer key, instead of relying on `match.EngineFor(sequencerCL)`\n- this handles flashblocks setups where the active CL can be wired through rollup-b",
+      "files": [
+        "op-devstack/presets/flashblocks.go"
+      ]
+    },
+    {
+      "title": "feat(ci): add required gate jobs for Rust CI",
+      "prNumber": 19453,
+      "type": "feature",
+      "body": "## Summary\n\n- Always include `rust-ci.yml` and `rust-e2e.yml` in the continuation pipeline (changed path-filtering from conditional inclusion to always-include)\n- Add `c-rust_changes_detected` boolean parameter, set to `true` only when `(ru",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
+      "title": "fix(ci): capture vm-compat findings JSON as CI artifact",
+      "prNumber": 19442,
+      "type": "bugfix",
+      "body": "## Summary\n- When the `analyze-op-program-client` CI job fails, CircleCI truncates the Docker build log output, losing the beginning of the vm-compat findings JSON array\n- This change captures the full findings JSON as a downloadable CI art",
+      "files": [
+        ".circleci/continue/main.yml",
+        "op-program/Dockerfile.vmcompat",
+        "op-program/Makefile",
+        "op-program/scripts/run-static-analysis.sh"
+      ]
+    },
+    {
+      "title": "chore: Remove remnants of kona-supervisor",
+      "prNumber": 19470,
+      "type": "other",
+      "body": "**Description**\r\n\r\nRemoves the `kona-supervisor` build from the `justfile` at the repo root.\r\n\r\nWhile I'm at it, removed `op-devstack`'s `KonaSupervisor` type and replaced its usage with a panic. We'll remove the rest from sysgo when the go",
+      "files": [
+        "justfile",
+        "op-acceptance-tests/justfile",
+        "op-devstack/sysgo/supervisor.go",
+        "op-devstack/sysgo/supervisor_kona.go"
+      ]
+    },
+    {
+      "title": "chore: bump just to 1.46.0",
+      "prNumber": 19469,
+      "type": "other",
+      "body": "## Summary\n- Bumps `just` from 1.37.0 to 1.46.0 in `mise.toml`\n\n## Test plan\n- [ ] CI passes with the new version",
+      "files": [
+        "mise.toml"
+      ]
+    },
+    {
+      "title": "fix(ci): fix SIGPIPE in kona-build-release skip logic",
+      "prNumber": 19467,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Fixes `kona-build-release` CI failure (exit code 141) on PRs that don't touch Rust files\n- The skip logic from #19459 works correctly but `ls -lh | head -20` triggers SIGPIPE when the directory listing exceeds 20 lines, and Ci",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 289.8518205582765,
+      "prScore": 257.0118205582765,
+      "issueScore": 0,
+      "reviewScore": 32.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "theochap",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
+      "totalScore": 65.15228459464008,
+      "prScore": 39.95228459464008,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 57.9467738965761,
+      "prScore": 53.4467738965761,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 56.131536691711034,
+      "prScore": 51.631536691711034,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 41.085990744055565,
+      "prScore": 36.585990744055565,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 39.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 39,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "aliersh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/65925295?u=ca33e5aab17ee0622941543bbe9c34db4690216b&v=4",
+      "totalScore": 37.7743177825133,
+      "prScore": 37.7743177825133,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xniha",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/205694301?u=40549cc9822668a94e580372e47c3350107eb9aa&v=4",
+      "totalScore": 35.8947738965761,
+      "prScore": 33.8947738965761,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 27,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 26.832598410330984,
+      "prScore": 26.632598410330985,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "scharissis",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/376382?u=21da38bcf55ef6712398ef67e8c7d96096c4a045&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "6ar8nas",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/86420873?u=8fea79bd692e65944976d06302a823c3418ad9b8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 16,
+  "mergedPRs": 11,
+  "newIssues": 1,
+  "closedIssues": 2,
+  "activeContributors": 30
+}
