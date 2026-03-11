@@ -1,0 +1,471 @@
+{
+  "interval": {
+    "intervalStart": "2026-03-11T00:00:00.000Z",
+    "intervalEnd": "2026-03-12T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-03-11 to 2026-03-12, ethereum-optimism/optimism had 9 new PRs (11 merged), 0 new issues, and 23 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7XnYKL",
+      "title": "oncall: Acceptance tests timing out sporadically",
+      "author": "janjakubnanista",
+      "number": 18261,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Description**\n\n[Failing run](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/107391/workflows/76c03e18-2d8a-4f85-9363-bf4930cf90c4/jobs/4090084)",
+      "createdAt": "2025-11-12T17:02:52Z",
+      "closedAt": "2026-03-11T21:19:31Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7dQO08",
+      "title": "oncall: Remove Sign step from docker publishing",
+      "author": "janjakubnanista",
+      "number": 18558,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Description**\n\nThe _Sign_ step in the docker publishing workflow in CircleCI is no longer necessary and can be dropped",
+      "createdAt": "2025-12-09T17:49:47Z",
+      "closedAt": "2026-03-11T21:18:01Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7foQI2",
+      "title": "op-challenger: Update vm-runner to use super node",
+      "author": "ajsutton",
+      "number": 18669,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Update vm runner (run-trace) to use super node instead of supervisor. No need to maintain backwards compatibility on this as the supervisor support was never released and isn't used in tests.\n\nWe will likely need some form of syncStatus API from op-supernode to enable this so that vm runner can find the L1 head and L2 finalized block.",
+      "createdAt": "2025-12-22T00:57:44Z",
+      "closedAt": "2026-03-11T09:59:45Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7l9olM",
+      "title": "op-supernode: Introduce SyncStatus API",
+      "author": "Inphi",
+      "number": 18947,
+      "repository": "ethereum-optimism/optimism",
+      "body": "I'm not sure what should be in there. But it should at least cover the op-proposer usecase.",
+      "createdAt": "2026-01-26T23:38:01Z",
+      "closedAt": "2026-03-11T09:59:46Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7vTOAK",
+      "title": "kona: BlobData::fill returns Critical on blob under-fill instead of Reset, causing permanent pipeline halt",
+      "author": "ajsutton",
+      "number": 19359,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nIn kona's derivation pipeline, when the blob provider returns fewer blobs than there are blob-hash placeholders (\"under-fill\"), `BlobData::fill` returns `BlobDecodingError::InvalidLength`. This error maps through `BlobProviderError::BlobDecoding(_)` to `PipelineErrorKind::Critical` — a non-recoverable error that permanently terminates the pipeline and requires operator intervention to restart.\n\nThe Go implementation (`op-node`) wraps the equivalent condition as `NewResetError`, which is auto-recoverable: the pipeline automatically retries at the last safe L1 block.\n\n## Under-fill is Common in Practice\n\nThis is not merely a theoretical concern. L1 providers commonly return fewer blobs than requested in two real-world scenarios:\n\n1. **Blobs not yet available**: The provider may not have all blobs cached/synced when the pipeline first tries to fetch them for a newly confirmed L1 block.\n2. **L1 block reorged out**: If the L1 block containing the blob transactions has been reorged away, the provider may return fewer (or zero) blobs. The pipeline should reset to discover the new canonical chain, not halt permanently.\n\nIn both cases the correct behavior is to reset and retry — exactly what Go does.\n\n## Current Behavior\n\n**kona (Rust):**\n- [`blob_data.rs:155-157`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/rust/kona/crates/protocol/derive/src/sources/blob_data.rs#L155): `if index >= blobs.len() { return Err(BlobDecodingError::InvalidLength); }`\n- [`sources.rs:54-56`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/rust/kona/crates/protocol/derive/src/errors/sources.rs#L54): `BlobProviderError::BlobDecoding(_) => PipelineError::Provider(val.to_string()).crit()`\n- Result: **Critical** — pipeline terminates permanently, operator must restart\n\n**op-node (Go):**\n- [`blob_data_source.go:108-111`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/op-node/rollup/derive/blob_data_source.go#L108): under-fill is returned as `NewResetError`\n- [`blob_data_source.go:153-155`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/op-node/rollup/derive/blob_data_source.go#L153): wrapping as reset error\n- Result: **Reset** — pipeline rewinds to last safe point and retries automatically\n\n## Proposed Fix\n\nChange the under-fill path in `BlobData::fill` to return a Reset-level error rather than a `BlobDecodingError` (which always maps to Critical). The cleanest approach is either:\n\n1. Return a new `BlobProviderError` variant (e.g. `BlobsUnavailable`) that maps to `Reset` in the `From<BlobProviderError> for PipelineErrorKind` impl — consistent with how `BlobNotFound` already maps to Reset, or\n2. Change `BlobData::fill` to return a `PipelineErrorKind` directly for the under-fill case (bypassing `BlobDecodingError`).\n\nNote that `BlobNotFound` already sets the correct precedent: a 404 from the beacon node maps to `ResetError::BlobsUnavailable(slot).reset()`. Under-fill should be treated similarly.\n\n## Impact\n\n- **Severity:** Liveness — kona derivation pipeline halts permanently on blob under-fill; op-node recovers automatically\n- **Affected component:** `kona/crates/protocol/derive` — `BlobData::fill` and error mapping in `sources.rs`\n\n## References\n\nFound during conformance review `kona-node-vs-op-node` (issue LR-13).",
+      "createdAt": "2026-03-03T05:30:48Z",
+      "closedAt": "2026-03-11T03:08:42Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7JrpZ9",
+      "title": "Rv fuzzing setup",
+      "author": "asavienko",
+      "number": 19484,
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\n<!--\r\nA clear and concise description of the features you're adding in this pull request.\r\n-->\r\n\r\n**Tests**\r\n\r\n<!--\r\nPlease describe any tests you've added. If you've added no tests, or left important behavior untested, please explain why not.\r\n-->\r\n\r\n**Additional context**\r\n\r\n<!--\r\nAdd any other context about the problem you're solving.\r\n-->\r\n\r\n**Metadata**\r\n\r\n<!-- \r\nInclude a link to any github issues that this may close in the following form:\r\n- Fixes #[Link to Issue]\r\n-->\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-11T11:35:35Z",
+      "mergedAt": null,
+      "additions": 3639,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDODjvEJM7J1SI7",
+      "title": "feat(rust): karst-derive inlined derivation pipeline",
+      "author": "theochap",
+      "number": 19487,
+      "body": "## Summary\n\n- Adds `kona-karst-derive`, a flat, inlined OP Stack derivation pipeline that replaces the staged `kona-derive` architecture\n- Single `Pipeline` struct holds all intermediate state as fields; all derivation steps are direct method calls (no trait-based stage composition)\n- Only supports **Holocene+**, removing all hardfork branching: always uses channel assembler, batch validator, Fjord size limits, and Holocene frame pruning\n- Re-exports traits and error types from `kona-derive` for compatibility\n\n### Key simplifications vs kona-derive\n\n| kona-derive | karst-derive |\n|---|---|\n| `ChannelProvider` mux (bank vs assembler) | Always assembler (inline) |\n| `BatchProvider` mux (queue vs validator) | Always validator (inline) |\n| `BatchStream.is_active()` guard | Always active |\n| `FrameQueue` conditional Holocene pruning | Always prune |\n| Fjord vs Bedrock `MAX_RLP_BYTES_PER_CHANNEL` | Always Fjord (`100_000_000`) |\n| Recursive signal-based reset | Single flat `reset()` method |\n\n## Test plan\n\n- [x] `cargo check -p kona-karst-derive` compiles\n- [x] `cargo clippy -p kona-karst-derive` passes with zero warnings\n- [ ] Port key unit tests from kona-derive stages\n- [ ] Integration testing with rollup node\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-11T20:53:13Z",
+      "mergedAt": null,
+      "additions": 993,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7Ioggs",
+      "title": "op-challenger: Replace supervisor with supernode in vm runner",
+      "author": "wwared",
+      "number": 19438,
+      "body": "**Description**\r\n\r\nAdds a new supernode RPC endpoint `superroot_syncStatus` which returns the aggregate values of all individual op-node's current `SyncStatus`es.\r\n\r\nThe new method is very similar to `superroot_atTimestamp` but this keeps them separate for now, though they could be combined in the future.\r\n\r\nThe response includes timestamps that could be used to call the `superroot_atTimestamp` method, but does not include the corresponding super root or optimistic L2 block data. I chose to make a simpler change for now, because I feel like these methods should be combined later, but if this is awkward let me know what other fields I should add (or remove) from the response.\r\n\r\nI found #18947 as well, and the information mentioned in https://github.com/ethereum-optimism/optimism/issues/18947#issuecomment-3814030980 is there, but I'm not 100% sure about \"sync status of every verification activity\" - would appreciate if someone else can confirm/explain what that is.\r\n\r\n**Tests**\r\n\r\nAdds basic tests for the method and updates the vm runner test to use a `SuperNodeClient` instead.\r\n\r\n**Metadata**\r\n\r\n- Fixes #18669\r\n- Fixes #18947 ",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-07T00:24:20Z",
+      "mergedAt": "2026-03-11T13:11:55Z",
+      "additions": 524,
+      "deletions": 77
+    },
+    {
+      "id": "PR_kwDODjvEJM7JOpPi",
+      "title": "fix(ci): add passthrough params to fix manual pipeline dispatch",
+      "author": "ajsutton",
+      "number": 19462,
+      "body": "## Summary\n\nFixes manual pipeline dispatch (both UI and API) which has been broken since #19142 introduced the `c-` prefix for continuation config parameters.\n\n**Root cause:** CircleCI forwards all explicitly-passed pipeline parameters to continuation configs during dynamic config (`setup: true`). When you trigger a pipeline with e.g. `fault_proofs_dispatch=true`, CircleCI:\n1. Accepts it in the setup config (where it's declared) ✅\n2. Runs path-filtering which maps it to `c-fault_proofs_dispatch` for continuation ✅\n3. Also forwards the original `fault_proofs_dispatch` to the continuation config ❌\n4. Continuation only declares `c-fault_proofs_dispatch`, rejects `fault_proofs_dispatch` as \"Unexpected argument(s)\" ❌\n\nThis is a [known CircleCI limitation](https://discuss.circleci.com/t/unexpected-argument-error-when-calling-continuation-pipeline/42355) with dynamic configuration.\n\n**Fix:** Add all setup config parameters as passthrough declarations in each continuation config (`main.yml`, `rust-ci.yml`, `rust-e2e.yml`). These are not referenced by any job — the `c-` prefixed versions remain in use. They exist solely to accept the forwarded parameters without error.\n\n## Test plan\n\n- [ ] Verify normal webhook-triggered CI still passes (parameters at defaults, no change in behavior)\n- [ ] Verify manual dispatch via API works: `curl -X POST \"https://circleci.com/api/v2/project/gh/ethereum-optimism/optimism/pipeline\" -H \"Content-Type: application/json\" -H \"Circle-Token: $CITOKEN\" -d '{\"branch\": \"aj/fix-ci-dispatch-params\", \"parameters\": {\"fault_proofs_dispatch\": true}}'`\n- [ ] Verify manual dispatch via CircleCI UI \"Trigger Pipeline\" works\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-10T00:25:54Z",
+      "mergedAt": "2026-03-11T03:25:13Z",
+      "additions": 228,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7JfOo2",
+      "title": "chore(rust/op-reth): bump op-reth to 1.11.2",
+      "author": "theochap",
+      "number": 19472,
+      "body": "## Description\r\n\r\nThis PR bumps the reth dependency to version 1.11.2 after they released an important security patch. See https://github.com/paradigmxyz/reth/releases/tag/v1.11.2\r\n\r\nBump op-reth to version 1.11.2. ",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-10T19:39:49Z",
+      "mergedAt": "2026-03-11T13:43:23Z",
+      "additions": 214,
+      "deletions": 214
+    }
+  ],
+  "codeChanges": {
+    "additions": 1583,
+    "deletions": 464,
+    "files": 62,
+    "commitCount": 89
+  },
+  "completedItems": [
+    {
+      "title": "fix(kona/derive): return Reset instead of Critical on blob under-fill in BlobData::fill",
+      "prNumber": 19362,
+      "type": "bugfix",
+      "body": "## Summary\n\nWhen a blob provider returns fewer blobs than there are blob-hash placeholders (under-fill), `BlobData::fill` currently returns `BlobDecodingError::InvalidLength` which maps to `PipelineErrorKind::Critical` — permanently termina",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/errors/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/errors/sources.rs",
+        "rust/kona/crates/protocol/derive/src/sources/blob_data.rs",
+        "rust/kona/crates/protocol/derive/src/sources/blobs.rs"
+      ]
+    },
+    {
+      "title": "fix(kona/protocol): add bounds checks in span batch decode to prevent panics on truncated input",
+      "prNumber": 19361,
+      "type": "bugfix",
+      "body": "## Summary\n\nMultiple span batch decode functions in kona panic (process abort) on truncated input instead of returning an error. This PR adds explicit bounds checks before each unsafe slice operation, matching the Go op-node behaviour of re",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/errors/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/sources/blobs.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/blob_provider.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/prefix.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/transactions.rs"
+      ]
+    },
+    {
+      "title": "fix(kona/derive): copy origin field during Holocene BatchQueue→BatchValidator transition",
+      "prNumber": 19360,
+      "type": "bugfix",
+      "body": "## Description\n\nWhen kona's derivation pipeline transitions from `BatchQueue` to `BatchValidator` at Holocene activation, `BatchProvider::attempt_update()` copies `l1_blocks` from the old `BatchQueue` but does **not** copy the `origin` fiel",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_provider.rs"
+      ]
+    },
+    {
+      "title": "fix(kona/derive): make syscfg update failure non-fatal in L1Traversal",
+      "prNumber": 19358,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes https://github.com/ethereum-optimism/optimism/issues/19353\n\nWhen `update_with_receipts` fails to apply system config changes from L1 receipts (e.g. due to malformed logs), both `PollingTraversal::advance_origin` and `Index",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/stages/traversal/indexed.rs",
+        "rust/kona/crates/protocol/derive/src/stages/traversal/polling.rs"
+      ]
+    },
+    {
+      "title": "feat(teams): rename core team",
+      "prNumber": 19436,
+      "type": "feature",
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\nRenames platforms-team to core-team.\r\n\r\n<!--\r\nA clear and concise description of the features you're adding",
+      "files": [
+        ".github/CODEOWNERS"
+      ]
+    },
+    {
+      "title": "op-devstack: Add P2P config for supernode follow mode CLs",
+      "prNumber": 19439,
+      "type": "other",
+      "body": "**Description**\r\n\r\nFactors out the P2P config to a common devstack helper, and uses the same config function for both cases.\r\n\r\n**Tests**\r\n\r\nModifies the test added in #19378 to also check that the unsafe head is advancing correctly and tha",
+      "files": [
+        "op-acceptance-tests/tests/supernode/interop/follow_l2/sync_test.go",
+        "op-devstack/sysgo/l2_cl_opnode.go",
+        "op-devstack/sysgo/l2_cl_p2p_config.go",
+        "op-devstack/sysgo/l2_cl_supernode.go",
+        "op-devstack/sysgo/system_two_l2_follow_l2.go"
+      ]
+    },
+    {
+      "title": "op-challenger: Replace supervisor with supernode in vm runner",
+      "prNumber": 19438,
+      "type": "other",
+      "body": "**Description**\r\n\r\nAdds a new supernode RPC endpoint `superroot_syncStatus` which returns the aggregate values of all individual op-node's current `SyncStatus`es.\r\n\r\nThe new method is very similar to `superroot_atTimestamp` but this keeps t",
+      "files": [
+        "op-challenger/runner/game_inputs.go",
+        "op-challenger/runner/runner.go",
+        "op-service/apis/supernode.go",
+        "op-service/eth/super_root.go",
+        "op-service/sources/supernode_client.go",
+        "op-service/sources/supernode_client_test.go",
+        "op-supernode/supernode/activity/superroot/superroot.go",
+        "op-supernode/supernode/activity/superroot/superroot_test.go",
+        "op-acceptance-tests/tests/interop/proofs/fpp/fpp_test.go",
+        "op-acceptance-tests/tests/interop/proofs/serial/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/superfaultproofs/singlechain.go",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-devstack/dsl/l2_cl.go",
+        "op-service/eth/supernode_status.go",
+        "op-service/eth/superroot_at_timestamp.go",
+        "op-supernode/README.md",
+        "op-supernode/supernode/activity/internal/syncstatus/syncstatus.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/logdb_test.go",
+        "op-supernode/supernode/activity/supernode/supernode.go",
+        "op-supernode/supernode/activity/supernode/supernode_test.go",
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/supernode.go"
+      ]
+    },
+    {
+      "title": "chore(rust/op-reth): bump op-reth to 1.11.2",
+      "prNumber": 19472,
+      "type": "other",
+      "body": "## Description\r\n\r\nThis PR bumps the reth dependency to version 1.11.2 after they released an important security patch. See https://github.com/paradigmxyz/reth/releases/tag/v1.11.2\r\n\r\nBump op-reth to version 1.11.2. ",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/op-reth/bin/Cargo.toml",
+        "rust/op-reth/crates/chainspec/Cargo.toml",
+        "rust/op-reth/crates/cli/Cargo.toml",
+        "rust/op-reth/crates/consensus/Cargo.toml",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/exex/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/hardforks/Cargo.toml",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/primitives/Cargo.toml",
+        "rust/op-reth/crates/reth/Cargo.toml",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/storage/Cargo.toml",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/txpool/Cargo.toml"
+      ]
+    },
+    {
+      "title": "fix(ci): add passthrough params to fix manual pipeline dispatch",
+      "prNumber": 19462,
+      "type": "bugfix",
+      "body": "## Summary\n\nFixes manual pipeline dispatch (both UI and API) which has been broken since #19142 introduced the `c-` prefix for continuation config parameters.\n\n**Root cause:** CircleCI forwards all explicitly-passed pipeline parameters to c",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
+      "title": "README: Document monorepo downloading & shallow cloning",
+      "prNumber": 19485,
+      "type": "docs",
+      "body": "Document download & shallow clone options",
+      "files": [
+        "README.md"
+      ]
+    },
+    {
+      "title": "refactor(kona/derive): rename blob_index to expected_blobs",
+      "prNumber": 19480,
+      "type": "refactor",
+      "body": "## Summary\n\n- Renames `blob_index` to `expected_blobs` in `BlobSource::load_blobs` for clarity, as the variable tracks the number of expected blobs rather than serving as a traditional index.\n\nAddresses [review feedback](https://github.com/",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/sources/blobs.rs"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 90.96451793643188,
+      "prScore": 71.76451793643187,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 49.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 49.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "theochap",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
+      "totalScore": 42.38168603328287,
+      "prScore": 42.38168603328287,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "asavienko",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19416734?u=d0e1b49489be832390af66a65f5cc189ae074df6&v=4",
+      "totalScore": 35.3887738965761,
+      "prScore": 35.3887738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ashitakah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
+      "totalScore": 27.23646040410177,
+      "prScore": 27.23646040410177,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 26.289102255087602,
+      "prScore": 21.789102255087602,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 20.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 19,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xChin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/77933451?u=a76de7bffe1b1d8fb41313e36c4ba53d9d65109b&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 5.54861228866811,
+      "prScore": 5.54861228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "alcueca",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/38806121?u=05446d587fca577d19ea91499b0ae9ce4d66c3ae&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "manuelbarbas",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/132930012?u=d5940aff33df08ec553161a27d386b67ab25f8dc&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 9,
+  "mergedPRs": 11,
+  "newIssues": 0,
+  "closedIssues": 8,
+  "activeContributors": 23
+}
