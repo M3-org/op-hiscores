@@ -1,0 +1,670 @@
+{
+  "interval": {
+    "intervalStart": "2026-03-12T00:00:00.000Z",
+    "intervalEnd": "2026-03-13T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-03-12 to 2026-03-13, ethereum-optimism/optimism had 20 new PRs (16 merged), 10 new issues, and 34 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7ybC-q",
+      "title": "op-node: CriticalErrorEvent for deposits-only attributes failure causes permanent node crash loop",
+      "author": "ajsutton",
+      "number": 19509,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Description\n\n`DepositsOnlyPayloadAttributesRequestEvent` error handling emits `CriticalErrorEvent`, which kills the node permanently. Under certain conditions — particularly involving the SuperAuthority deny path — this error is hit due to a transient state mismatch, not a true critical failure. Because the deny list is persistent, every restart hits the same crash, creating an infinite crash loop.\n\n## Root Cause\n\n`DepositsOnlyAttributes()` has sanity checks that assume `lastAttribs` is always populated when called. This held for the original Holocene invalid-payload flow, where `DepositsOnlyPayloadAttributesRequestEvent` is only emitted immediately after `NextAttributes` sets `lastAttribs`.\n\nHowever, `DepositsOnlyPayloadAttributesRequestEvent` can also be emitted from `PayloadProcessEvent` via the SuperAuthority deny path (`payload_process.go`). In this path, a `ResetEvent` can be processed between the `BuildStartEvent` that initiated the payload and the `PayloadProcessEvent` that checks the deny list — because events are queued, not inline. When that happens, the pipeline reset clears `lastAttribs` to nil, and `DepositsOnlyAttributes()` fails with `\"no attributes generated yet\"`.\n\n## Event Ordering Leading to Crash\n\n1. `ForkchoiceUpdateEvent` → triggers `ResetEvent` (queued)\n2. `ResetEvent` → pipeline reset, **`lastAttribs = nil`**\n3. `BuildStartedEvent` → `BuildSealEvent` → `PayloadProcessEvent`\n4. Deny check fires → `DepositsOnlyPayloadAttributesRequestEvent`\n5. `DepositsOnlyAttributes()` → `lastAttribs == nil` → **crash** (`CriticalErrorEvent`)\n\n## Impact\n\n- The node crashes permanently with `\"deriving deposits-only attributes: no attributes generated yet\"`\n- Since the deny list persists across restarts, every new node instance re-derives the same denied block and hits the same crash\n- This creates an unrecoverable crash loop requiring manual intervention\n\n## Supernode Context\n\nThis is particularly problematic in the supernode, where chain containers manage virtual nodes (VNs). After multiple reorg cycles, the chain accumulates deposits-only blocks from prior cycles. When a new VN re-derives and encounters one of these prior deposits-only blocks, the event ordering race described above can occur, permanently crashing the VN.\n\n## Expected Behavior\n\nThe error should be treated as a transient state mismatch (like other similar cases in the derivation pipeline) and trigger a `ResetEvent` instead of `CriticalErrorEvent`. On reset, the pipeline re-derives from L1, re-populates `lastAttribs` via `NextAttributes`, and the deny check succeeds on retry.\n\n## References\n\n- Fix PR: ethereum-optimism/optimism#19417\n- Discovered via supernode interop reorg/eviction tests: ethereum-optimism/optimism#19346",
+      "createdAt": "2026-03-12T20:49:06Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7e9bfP",
+      "title": "Set default respected game type to CANNON_KONA",
+      "author": "pauldowman",
+      "number": 18640,
+      "repository": "ethereum-optimism/optimism",
+      "body": "With Upgrade 18 the CANNON_KONA game type will become available but is intended to be a fallback only, in the case of a problem with op-program. \n\nThis issue is to change the default so that CANNON_KONA is the primary game type.",
+      "createdAt": "2025-12-17T21:55:06Z",
+      "closedAt": "2026-03-12T20:30:33Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7vTTmc",
+      "title": "kona: BlobSource::load_blobs silently ignores over-fill instead of returning Reset error",
+      "author": "ajsutton",
+      "number": 19363,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`BlobSource::load_blobs` in kona's derivation pipeline is missing a post-loop over-fill check. After the fill loop completes, if the blob provider returned more blobs than were requested (i.e. `blob_index < blobs.len()`), kona silently discards the extra blobs with no error. The Go op-node reference implementation treats this condition as a Reset-level error.\n\n## Go Reference Behaviour\n\nIn `op-node`, `fillBlobPointers` at [`blob_data_source.go:162-164`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/op-node/rollup/derive/blob_data_source.go#L162) performs this check after the fill loop:\n\n```go\nif blobIndex != len(blobs) {\n    return fmt.Errorf(\"got too many blobs\")\n}\n```\n\nThis error is then wrapped as `NewResetError` at the call site (`blob_data_source.go:110`), causing the pipeline to reset and retry rather than silently accepting a malformed provider response.\n\n## Kona Subject Location\n\n[`blobs.rs:164-173`](https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/rust/kona/crates/protocol/derive/src/sources/blobs.rs#L164) — the fill loop ends at line 173 with no subsequent check:\n\n```rust\n// Fill the blob pointers.\nlet mut blob_index = 0;\nfor blob in &mut data {\n    let should_increment = blob\n        .fill(&blobs, blob_index)\n        .map_err(|e| -> PipelineErrorKind { e.into() })?;\n    if should_increment {\n        blob_index += 1;\n    }\n}\n// ← no check that blob_index == blobs.len() here\n```\n\n## When This Can Occur\n\nWhile uncommon, this situation can arise in practice:\n\n- **Buggy L1 providers**: A beacon/blob provider that returns more blobs than requested (not spec-compliant but not unheard-of with third-party providers).\n- **L1 reorgs**: In rare reorg scenarios the set of blob transactions referenced by an L1 block can shift between the time the hashes are collected and the time the blobs are fetched, resulting in a count mismatch.\n\n## Proposed Fix\n\nAfter the fill loop in `load_blobs`, add a post-loop check:\n\n```rust\nif blob_index < blobs.len() {\n    return Err(ResetError::BlobsOverFill(blob_index, blobs.len()).reset());\n}\n```\n\nA new `ResetError::BlobsOverFill(usize, usize)` variant should be added (symmetric to the existing `BlobsUnderFill` variant), mapping to `PipelineErrorKind::Reset`. This mirrors `op-node`'s `NewResetError` wrapping and ensures the pipeline resets and retries rather than silently accepting an inconsistent provider response.\n\n## References\n\n- Subject: https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/rust/kona/crates/protocol/derive/src/sources/blobs.rs#L164\n- Reference: https://github.com/ethereum-optimism/optimism/blob/9eaad92f7f2f8a5f9687b6a703d4afc3dad1d347/op-node/rollup/derive/blob_data_source.go#L162",
+      "createdAt": "2026-03-03T05:39:48Z",
+      "closedAt": "2026-03-12T00:33:44Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7ydM0t",
+      "title": "op-challenger-runner uses op-reth for OP Mainnet",
+      "author": "pauldowman",
+      "number": 19517,
+      "repository": "ethereum-optimism/optimism",
+      "body": "To ensure readiness of op-reth's historical proofs support (and kona's support for the `L2PayloadWitness` hint) we need to set up op-challenger-runner with kona using an op-reth node for OP Mainnet.",
+      "createdAt": "2026-03-12T22:53:34Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7ycH_Q",
+      "title": "kona/derive: system config update errors in StatefulAttributesBuilder return Critical instead of being ignored",
+      "author": "sebastianst",
+      "number": 19512,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Problem\n\nIn [`stateful.rs:114-120`](https://github.com/ethereum-optimism/optimism/blob/48b31f0b1b1e9afcf4d07f75c28771f602cc6a1b/rust/kona/crates/protocol/derive/src/attributes/stateful.rs#L114-L120), errors from `update_with_receipts` are mapped to `Critical`:\n\n```rust\nsys_config\n    .update_with_receipts(\n        &receipts,\n        self.rollup_cfg.l1_system_config_address,\n        self.rollup_cfg.is_ecotone_active(header.timestamp),\n    )\n    .map_err(|e| PipelineError::SystemConfigUpdate(e).crit())?; // ← wrong\n```\n\n[`update_with_receipts`](https://github.com/ethereum-optimism/optimism/blob/48b31f0b1b1e9afcf4d07f75c28771f602cc6a1b/rust/kona/crates/protocol/genesis/src/system/config.rs#L122-L148) uses `try_for_each` with `?`, meaning the **first malformed `ConfigUpdate` log** aborts the scan and returns an error. That error then halts derivation via `Critical`.\n\nAll `SystemConfigUpdateError` variants are triggered by **bad external L1 data**: invalid log structure, unknown update type, bad ABI encoding, etc.\n\n## Why it matters\n\nAny L1 transaction that emits a malformed `ConfigUpdate` event at the `SystemConfig` contract address would permanently halt kona derivation.\n\n## Correct behaviour\n\nThe Go op-node intentionally **ignores** all system config update errors in the attributes builder:\n\n```go\n// errors from UpdateSystemConfigWithL1Receipts are ignored as they represent malformed or invalid updates\n// and there is no recovery mechanism for malformed updates, we must process past them.\n_ = UpdateSystemConfigWithL1Receipts(&sysConfig, receipts, ba.rollupCfg, info.Time())\n```\n\nNote: the traversal stage in kona **already handles this correctly** — it logs a warning and continues on `update_with_receipts` errors. Only the attributes builder has the wrong behaviour.\n\n## Fix\n\n```rust\nif let Err(e) = sys_config.update_with_receipts(\n    &receipts,\n    self.rollup_cfg.l1_system_config_address,\n    self.rollup_cfg.is_ecotone_active(header.timestamp),\n) {\n    warn!(target: \"attributes_builder\", ?e, \"Failed to update system config from L1 receipts, ignoring\");\n}\n```\n\n## Parent issue\n\nPart of #19510\n\n---\n🤖 Generated by [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-03-12T21:46:20Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7KLrti",
+      "title": "feat(rust/tests): add derivation pipeline equivalence test harness",
+      "author": "theochap",
+      "number": 19515,
+      "body": "## Summary\r\n\r\n  - Adds a new `derivation-tests` crate at `rust/tests/derivation/` for testing the kona-node-service derivation pipeline with mock providers\r\n  - Implements MockL1Chain (ChainProvider + BlobProvider), MockBatcher (batch encoding/frame splitting), MockSequencer, and TestNodeActor wrapping the real DerivationActor\r\n  - Includes 5 passing tests: L1 block production, batcher encoding roundtrip, and derivation actor integration\r\n\r\n  ## Test plan\r\n\r\n  - [x] `cargo check -p derivation-tests` compiles cleanly\r\n  - [x] `cargo test -p derivation-tests` — all 5 tests pass\r\n  - [ ] Future: implement fault proof actor path (phase 5) and equivalence assertion (phase 6)\r\n\r\n  🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-12T22:01:01Z",
+      "mergedAt": null,
+      "additions": 2641,
+      "deletions": 1017
+    },
+    {
+      "id": "PR_kwDODjvEJM7KIUFa",
+      "title": "interop: add strong consistency guarantees ",
+      "author": "karlfloersch",
+      "number": 19505,
+      "body": "Closes https://github.com/ethereum-optimism/optimism/issues/19420\n\n## Summary\n\nThis PR refactors the supernode interop activity around a single persisted transition model so that normal execution and crash recovery use the same apply path.\n\nFor a new reader, the important mental model is:\n\n1. `progressAndRecord()` is the top-level interop tick.\n2. If a `PendingTransition` already exists in `VerifiedDB`, interop replays it.\n3. Otherwise interop observes the world, verifies the next timestamp, builds a `PendingTransition`, persists it, and applies it immediately.\n4. The transition stays in the WAL until all of its side effects succeed.\n\nThis is the minimal-diff version of the stronger consistency work: it keeps the existing package structure, but makes the state transitions explicit and replayable.\n\nContext: this work is informed by the Runtime Verification audit writeup here:\n- https://github.com/runtimeverification/_audits_Ethereum-optimism_optimism_interopv2/issues/8\n\n## What Changed\n\n### 1. Unified normal execution and recovery\n\nInterop no longer has separate \"normal apply\" and \"startup recovery\" logic for the important state transitions.\n\nInstead, effectful decisions are represented as a generic `PendingTransition` stored in `VerifiedDB`, and both steady-state execution and restart recovery go through the same `applyPendingTransition()` path.\n\nThis covers:\n- `DecisionAdvance`\n- `DecisionInvalidate`\n- `DecisionRewind`\n\n### 2. Verification is now read-only\n\n`verify()` no longer mutates `logsDB` while deciding whether a frontier is valid.\n\nInstead:\n- frontier verification uses an in-memory `frontierView`\n- accepted-history lookups still come from `logsDB`\n- frontier logs are only persisted later, during `DecisionAdvance` transition apply\n\nThat makes the WAL the real boundary for stateful changes.\n\n### 3. Advance / invalidate / rewind are explicit transition kinds\n\n`buildPendingTransition()` now constructs explicit transition payloads.\n\nNotably:\n- rewind uses an explicit `RewindPlan`\n- advance persists exact frontier blocks during apply\n- invalidation preserves the WAL until all invalidation side effects succeed\n\n### 4. Replays are idempotent where they need to be\n\nTo support \"persist first, clear last\":\n- `VerifiedDB.Commit()` is idempotent for exact duplicate replays\n- rewind apply reports all failures, but keeps the WAL until the transition converges\n- invalidation and rewind failures preserve the transition for retry\n- invalid rewind WAL state now fails closed instead of being silently cleared\n\n### 5. Top-level interop flow is easier to read again\n\nThe orchestration is back to a simpler shape:\n- `progressAndRecord()` owns the transition lifecycle\n- `progressInterop()` computes the next action\n- `checkPreconditions()` gates verification\n- `decideVerifiedResult()` interprets verification output\n\nDead wrappers and stale helper paths were removed along the way.\n\n### 6. Reset callbacks are no longer part of interop correctness\n\nInterop now treats `Reset()` as a no-op interface shim. The actual correctness path is the persisted transition apply logic.\n\nThe broader chain-container rewind/invalidation APIs are still powerful footguns, so this PR adds explicit comments/TODOs documenting that they should only be used from interop transition application until that interface is narrowed further.\n\n### 7. Small cleanup and reviewability improvements\n\nAlso included in this branch:\n- removed dead denylist clearing APIs (`ClearDenied`, `DenyList.Clear`)\n- removed dead helpers/wrappers (`loadLogs`, `rewindAccepted`, `RewindAfter`, etc.)\n- clarified the logsDB warning for chains with block times greater than one second\n- cleaned up stale comments and compatibility artifacts\n\n## Current Top-Level Flow\n\n```text\nStart\n  -> progressAndRecord\n     -> if pending transition exists:\n          applyPendingTransition\n     -> else:\n          progressInterop\n            -> observeRound\n            -> checkPreconditions\n            -> verify\n            -> decideVerifiedResult\n          -> if wait (DecisionWait):\n               refreshCurrentL1OnWait\n          -> if rewind with no prior verified state:\n               return early (nothing to rewind)\n          -> else (advance, invalidate, or rewind):\n               buildPendingTransition\n               SetPendingTransition\n               applyPendingTransition\n```\n\n## Follow-Up\n\nA follow-up PR should remove the ability to trigger rewinds/reorg side effects from outside interop until cross-activity concurrency between these stateful operations is fully designed and enforced.\n\nToday the code documents those APIs as dangerous footguns, but the safer end state is to narrow that surface so interop transition application is the only place allowed to drive rewinds.\n\n## Why This Is Better\n\nCompared with `develop`, this branch moves the interop activity closer to an explicit transaction model:\n- decisions are separated from side effects\n- recovery and steady-state share the same apply path\n- frontier verification no longer mutates durable state\n- WAL clearing happens only after the transition has been applied\n\nThat makes the database/control-flow behavior much easier to review in one place.\n\nJust as importantly, the consistency checks (L1 fork verification, accepted snapshot re-verification, stale logsDB detection) ensure that each virtual node's local data is internally consistent before interop cross-validates across chains. This means cross-validation only ever operates on trustworthy inputs.\n\n## Files To Read First\n\nIf you are new to this diff, start here:\n- `op-supernode/supernode/activity/interop/interop.go`\n- `op-supernode/supernode/activity/interop/verified_db.go`\n- `op-supernode/supernode/activity/interop/logdb.go`\n- `op-supernode/supernode/activity/interop/verification_view.go`\n- `op-supernode/supernode/chain_container/invalidation.go`\n\n## Test Plan\n\nRerun coverage I checked while updating this branch:\n- [x] `go test ./op-supernode/supernode/activity/interop/... -count=1`\n- [x] `go test ./op-supernode/supernode/activity/superroot -count=1`\n\nFocused regressions added/updated on this branch include:\n- pending advance replay after commit succeeds idempotently\n- pending invalidate/rewind transitions are preserved on failure\n- rewind apply reports all failures\n- invalid rewind WAL state fails closed\n- frontier verification does not persist frontier logs",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-12T18:31:20Z",
+      "mergedAt": null,
+      "additions": 1977,
+      "deletions": 646
+    },
+    {
+      "id": "PR_kwDODjvEJM7J_QHY",
+      "title": "feat(rust): scenario-oriented DSL for derivation-tests",
+      "author": "ajsutton",
+      "number": 19496,
+      "body": "## Summary\n\n- Adds high-level DSL methods to `DerivationTest` (`advance_l1`, `derive_empty_block`, `submit_batch`, `finalize`) that describe test scenarios rather than implementation details\n- Adds `BatchConfig` with sensible defaults and `BlockBuilder` with `with_funded_transfer()` for simple ETH transfers\n- Rewrites all happy-path tests to 3-5 lines; adversarial tests use DSL for setup, drop to low-level only for the adversarial part\n- Deletes `tests/helpers/` — both `default_test()` and `funded_signer()` are replaced by DSL methods\n\nBefore:\n```rust\ntest.l1.emit_empty_block();\ntest.l1.emit_empty_block();\nlet l1_block = test.l1.block_at(1).unwrap().clone();\ntest.l2.set_epoch(&l1_block);\nlet block_ref = test.l2.build_empty_block().unwrap();\nlet batch = test.singular_batch_calldata(&[block_ref], &l1_block);\ntest.l1.emit_block_with_batches(vec![batch]);\n```\n\nAfter:\n```rust\ntest.advance_l1(2);\ntest.derive_empty_block();\ntest.submit_batch_with(BatchConfig::singular_calldata());\n```\n\n## Test plan\n\n- [x] All 41 non-integration tests pass (`cargo test -p derivation-tests --test simple --test invalid --test server --lib`)\n- [x] `cargo clippy -p derivation-tests --tests -- -D warnings` passes clean\n- [x] `cargo fmt -p derivation-tests -- --check` passes clean\n- [x] Golden super root values updated (auto-epoch to genesis changes roots)\n- [ ] Integration tests with op-program and kona-host (requires binary builds)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-12T10:39:04Z",
+      "mergedAt": "2026-03-12T11:35:39Z",
+      "additions": 587,
+      "deletions": 291
+    },
+    {
+      "id": "PR_kwDODjvEJM7KEJfR",
+      "title": "chore(rust/op-reth): bump reth to v1.11.3",
+      "author": "theochap",
+      "number": 19498,
+      "body": "## Summary\n- Bump all reth dependencies from v1.11.2 to v1.11.3 in the rust workspace\n- Update op-reth crate versions to 1.11.3\n- Update Cargo.lock\n\n## Test plan\n- [x] `cargo check --workspace` passes\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-12T14:50:16Z",
+      "mergedAt": "2026-03-12T19:48:38Z",
+      "additions": 325,
+      "deletions": 325
+    },
+    {
+      "id": "PR_kwDODjvEJM7Jh5iu",
+      "title": "chore(op-e2e): migrate Makefile to justfile",
+      "author": "ajsutton",
+      "number": 19475,
+      "body": "## Summary\n- Migrates op-e2e build targets from Make to Just, following the same pattern used by other packages (op-node, op-batcher, etc.)\n- Replaces the 73-line Makefile with a justfile that preserves all targets: test, test-ws, test-actions, test-http, test-cannon, test-fault-proofs, fuzz, clean, gen-binding, cannon-prestates, and test-external (now parameterized)\n- The Makefile becomes a deprecated shim that delegates to just with a deprecation warning, preserving backwards compatibility\n\n## Key changes\n- `JUNIT_FILE` conditional logic uses just's `env()` and `if` expressions\n- `test-external-%` Make pattern becomes `test-external NAME` with a parameter\n- `pre-test-cannon` directory check uses a shebang script\n- `gen-binding` requires `CONTRACT` as a just parameter instead of Make variable\n- `num_cores` uses just's built-in `num_cpus()`\n- `clean` uses `rm -rf` (safe flag) instead of `rm -r`\n\n## Test plan\n- [x] `just --list` shows all expected targets\n- [x] `just --dry-run test-ws` produces correct command (go test -v)\n- [x] `JUNIT_FILE=/tmp/t.xml JSON_LOG_FILE=/tmp/t.json just --dry-run test-ws` produces gotestsum command with correct flags\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-10T22:57:01Z",
+      "mergedAt": "2026-03-12T22:48:44Z",
+      "additions": 230,
+      "deletions": 209
+    }
+  ],
+  "codeChanges": {
+    "additions": 1909,
+    "deletions": 8467,
+    "files": 109,
+    "commitCount": 190
+  },
+  "completedItems": [
+    {
+      "title": "fix(kona/derive): add over-fill check in BlobSource::load_blobs",
+      "prNumber": 19364,
+      "type": "bugfix",
+      "body": "## Summary\n\n`BlobSource::load_blobs` was missing a post-loop over-fill check. After the blob-pointer fill loop completes, if `blob_index < blobs.len()` the blob provider returned more blobs than were requested. Previously kona silently disc",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/errors/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/sources/blobs.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/blob_provider.rs"
+      ]
+    },
+    {
+      "title": "chore(op-e2e): migrate Makefile to justfile",
+      "prNumber": 19475,
+      "type": "other",
+      "body": "## Summary\n- Migrates op-e2e build targets from Make to Just, following the same pattern used by other packages (op-node, op-batcher, etc.)\n- Replaces the 73-line Makefile with a justfile that preserves all targets: test, test-ws, test-acti",
+      "files": [
+        "op-e2e/Makefile",
+        "op-e2e/justfile",
+        "op-program/Makefile",
+        "op-program/justfile",
+        "op-e2e/README.md",
+        "cannon/Dockerfile.diff",
+        "cannon/Makefile",
+        "cannon/README.md",
+        "cannon/justfile",
+        "op-program/Dockerfile.repro.dockerignore",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile"
+      ]
+    },
+    {
+      "title": "chore(cannon): migrate Makefile to justfile",
+      "prNumber": 19474,
+      "type": "other",
+      "body": "## Summary\n- Migrate all cannon build targets from Make to Just, following the established pattern used by op-challenger and other directories\n- Replace the Makefile with a deprecated shim that delegates to `just` with a deprecation warning",
+      "files": [
+        "cannon/Makefile",
+        "cannon/justfile",
+        "cannon/Dockerfile.diff",
+        "cannon/README.md",
+        "op-program/Dockerfile.repro.dockerignore",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile"
+      ]
+    },
+    {
+      "title": "chore(linter): migrate Makefile to justfile",
+      "prNumber": 19473,
+      "type": "other",
+      "body": "## Summary\n- Migrates `linter/Makefile` build targets (`build`, `test`, `clean`) to a new `linter/justfile` using the shared `go.just` recipes\n- Replaces the original Makefile with a deprecation shim that delegates to `just`, preserving bac",
+      "files": [
+        "cannon/Makefile",
+        "cannon/justfile",
+        "linter/Makefile",
+        "linter/justfile",
+        "op-program/Dockerfile.repro.dockerignore",
+        "justfiles/deprecated.mk",
+        "justfiles/uptodate.sh"
+      ]
+    },
+    {
+      "title": "docs: add default branch and build system info to AGENTS.md",
+      "prNumber": 19508,
+      "type": "docs",
+      "body": "## Summary\n- Documents that the default branch is `develop` (not `main`) to prevent AI agents from failing on `git diff main..HEAD`\n- Notes the ongoing Make → Just migration and the `justfiles/` shared infra directory\n\n## Test plan\n- [x] Co",
+      "files": [
+        "AGENTS.md"
+      ]
+    },
+    {
+      "title": "chore: remove devnet-sdk and kurtosis-devnet",
+      "prNumber": 19506,
+      "type": "other",
+      "body": "## Summary\n- remove the in-repo `devnet-sdk` and `kurtosis-devnet` trees\n- re-home the remaining live pieces into `op-service`, `op-core`, and `op-devstack` before deleting them\n- update CI, build config, and docs to stop referencing the re",
+      "files": [
+        ".circleci/continue/main.yml",
+        "AGENTS.md",
+        "Makefile",
+        "README.md",
+        "devnet-sdk/book/.gitignore",
+        "devnet-sdk/book/book.toml",
+        "devnet-sdk/book/custom.css",
+        "devnet-sdk/book/src/README.md",
+        "devnet-sdk/book/src/SUMMARY.md",
+        "devnet-sdk/book/src/descriptors.md",
+        "devnet-sdk/book/src/dsl/intro.md",
+        "devnet-sdk/book/src/dsl/style_guide.md",
+        "devnet-sdk/book/src/shell.md",
+        "devnet-sdk/book/src/system.md",
+        "devnet-sdk/book/src/testing.md",
+        "devnet-sdk/book/theme/css/footer.css",
+        "devnet-sdk/book/theme/js/footer.js",
+        "devnet-sdk/cmd/mf2kt/main.go",
+        "devnet-sdk/constraints/constraints.go",
+        "devnet-sdk/constraints/constraints_test.go",
+        "devnet-sdk/contracts/bindings/eventlogger.go",
+        "devnet-sdk/contracts/bindings/l2tol2crossdomainmessenger.go",
+        "devnet-sdk/contracts/bindings/superchainweth.go",
+        "devnet-sdk/contracts/constants/constants.go",
+        "devnet-sdk/contracts/contracts.go",
+        "devnet-sdk/contracts/registry/client/client.go",
+        "devnet-sdk/contracts/registry/client/l2tol2crossdomainmessenger.go",
+        "devnet-sdk/contracts/registry/client/weth.go",
+        "devnet-sdk/contracts/registry/empty/empty.go",
+        "devnet-sdk/controller/kt/kt.go",
+        "devnet-sdk/controller/kt/kt_test.go",
+        "devnet-sdk/controller/kt/mutate_env.go",
+        "devnet-sdk/controller/kt/mutate_env_test.go",
+        "devnet-sdk/controller/kt/test_helpers.go",
+        "devnet-sdk/controller/surface/surface.go",
+        "devnet-sdk/descriptors/deployment.go",
+        "devnet-sdk/images/repository.go",
+        "devnet-sdk/interfaces/registry.go",
+        "devnet-sdk/kt/fs/devnet_fs.go",
+        "devnet-sdk/kt/fs/devnet_fs_test.go",
+        "devnet-sdk/kt/fs/fs.go",
+        "devnet-sdk/kt/fs/fs_test.go",
+        "devnet-sdk/kt/params.go",
+        "devnet-sdk/kt/visitor.go",
+        "devnet-sdk/kt/visitor_test.go",
+        "devnet-sdk/manifest/acceptor.go",
+        "devnet-sdk/manifest/manifest.go",
+        "devnet-sdk/manifest/visitor.go",
+        "devnet-sdk/proofs/prestate/cmd/main.go",
+        "devnet-sdk/shell/cmd/ctrl/main.go"
+      ]
+    },
+    {
+      "title": "op-node/derive: drop malformed span batch tx data as NotEnoughData",
+      "prNumber": 19502,
+      "type": "other",
+      "body": "## Summary\n\n- Fixes unclassified error propagation from `DeriveSpanBatch` in `ChannelInReader.NextBatch`\n- Malformed span batch data (bad tx type, invalid encoding) now returns `NotEnoughData` for immediate drop instead of triggering O(N×ba",
+      "files": [
+        "op-node/rollup/derive/channel_in_reader.go"
+      ]
+    },
+    {
+      "title": "op-node/derive: CriticalError for missing beacon endpoint after Ecotone",
+      "prNumber": 19501,
+      "type": "other",
+      "body": "## Summary\n\n- Fixes misconfiguration handling in `DataSourceFactory.OpenData`: wraps the \"beacon endpoint not configured\" error with `NewCriticalError` so the node stops with a clear fatal error instead of retrying indefinitely\n\nRunning a p",
+      "files": [
+        "op-node/rollup/derive/data_source.go"
+      ]
+    },
+    {
+      "title": "op-node/derive: drop pre-Delta span batch as NotEnoughData",
+      "prNumber": 19500,
+      "type": "other",
+      "body": "## Summary\n\n- Fixes pre-Delta span batch handling in `ChannelInReader.NextBatch`: returns `NotEnoughData` (immediate continue, no backoff) instead of `NewTemporaryError`\n- A channel with N span batches in a pre-Delta block previously requir",
+      "files": [
+        "op-node/rollup/derive/channel_in_reader.go"
+      ]
+    },
+    {
+      "title": "op-node/derive: drop bad channel decompression as NotEnoughData",
+      "prNumber": 19499,
+      "type": "other",
+      "body": "## Summary\n\n- Fixes `WriteChannel` error classification in `ChannelInReader.NextBatch`: returns `NotEnoughData` (immediate continue, no backoff) instead of `NewTemporaryError` when channel data fails to decompress\n- Downgrades the `log.Erro",
+      "files": [
+        "op-node/rollup/derive/channel_in_reader.go"
+      ]
+    },
+    {
+      "title": "chore(rust/op-reth): bump reth to v1.11.3",
+      "prNumber": 19498,
+      "type": "other",
+      "body": "## Summary\n- Bump all reth dependencies from v1.11.2 to v1.11.3 in the rust workspace\n- Update op-reth crate versions to 1.11.3\n- Update Cargo.lock\n\n## Test plan\n- [x] `cargo check --workspace` passes\n\n🤖 Generated with [Claude Code](https:",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/op-reth/bin/Cargo.toml",
+        "rust/op-reth/crates/chainspec/Cargo.toml",
+        "rust/op-reth/crates/cli/Cargo.toml",
+        "rust/op-reth/crates/consensus/Cargo.toml",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/exex/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/hardforks/Cargo.toml",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/primitives/Cargo.toml",
+        "rust/op-reth/crates/reth/Cargo.toml",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/storage/Cargo.toml",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/txpool/Cargo.toml"
+      ]
+    },
+    {
+      "title": "Remove accidental `PR.md` from repository root",
+      "prNumber": 19497,
+      "type": "other",
+      "body": "This removes the stray `PR.md` file that was added at the repository root by mistake. The repo already has canonical PR/contribution guidance elsewhere, so this change keeps the root clean and avoids duplicate or misleading documentation.\n\n",
+      "files": [
+        "PR.md"
+      ]
+    },
+    {
+      "title": "feat(rust): scenario-oriented DSL for derivation-tests",
+      "prNumber": 19496,
+      "type": "feature",
+      "body": "## Summary\n\n- Adds high-level DSL methods to `DerivationTest` (`advance_l1`, `derive_empty_block`, `submit_batch`, `finalize`) that describe test scenarios rather than implementation details\n- Adds `BatchConfig` with sensible defaults and `",
+      "files": [
+        "rust/derivation-tests/CLAUDE.md",
+        "rust/derivation-tests/DSL_STYLE_GUIDE.md",
+        "rust/derivation-tests/README.md",
+        "rust/derivation-tests/src/harness/dsl.rs",
+        "rust/derivation-tests/src/harness/mod.rs",
+        "rust/derivation-tests/src/harness/runner.rs",
+        "rust/derivation-tests/src/harness/test.rs",
+        "rust/derivation-tests/src/l2/builder.rs",
+        "rust/derivation-tests/src/server/l2_rpc.rs",
+        "rust/derivation-tests/src/state/db.rs",
+        "rust/derivation-tests/tests/helpers/mod.rs",
+        "rust/derivation-tests/tests/integration.rs",
+        "rust/derivation-tests/tests/invalid.rs",
+        "rust/derivation-tests/tests/server.rs",
+        "rust/derivation-tests/tests/simple.rs"
+      ]
+    },
+    {
+      "title": "test(contracts): convert GovernanceToken tests to fuzz tests",
+      "prNumber": 19490,
+      "type": "tests",
+      "body": "# test(contracts): convert GovernanceToken tests to fuzz tests\n\n## Summary\n\nConverts 9 hardcoded tests in `GovernanceToken.t.sol` to fuzz tests for broader input coverage. Previously, all tests used fixed values (100, 50). Now each test fuz",
+      "files": [
+        "packages/contracts-bedrock/test/governance/GovernanceToken.t.sol"
+      ]
+    },
+    {
+      "title": "refactor(rust): replace #[ignore] with nextest binary filtering",
+      "prNumber": 19489,
+      "type": "refactor",
+      "body": "## Summary\n\n- Remove `#[ignore]` from derivation-tests integration tests\n- Replace silent env-var skip with hard `panic!` when binaries are missing\n- Switch all derivation test just targets from `cargo test` to `cargo nextest run` with bina",
+      "files": [
+        "rust/derivation-tests/README.md",
+        "rust/derivation-tests/tests/helpers/mod.rs",
+        "rust/derivation-tests/tests/integration.rs",
+        "rust/justfile"
+      ]
+    },
+    {
+      "title": "chore: add fix-rust-fmt Claude Code skill",
+      "prNumber": 19488,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Adds a `/fix-rust-fmt` Claude Code skill that fixes Rust formatting CI failures\n- Runs `mise install` + `just install-nightly` + `just fmt-fix` with the correct pinned nightly toolchain\n- No need to inspect CI errors — just ru",
+      "files": [
+        ".claude/skills/fix-rust-fmt/SKILL.md",
+        "docs/ai/rust-dev.md",
+        "rust/kona/CLAUDE.md"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 212.16382086342892,
+      "prScore": 125.82382086342892,
+      "issueScore": 24,
+      "reviewScore": 62,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 186.4181714973799,
+      "prScore": 126.8801714973799,
+      "issueScore": 2.1,
+      "reviewScore": 57,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "theochap",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
+      "totalScore": 98.17232210761894,
+      "prScore": 88.97232210761894,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 76.61320648335484,
+      "prScore": 67.11320648335484,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "devin-ai-integration",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/811515?v=4",
+      "totalScore": 63.973516306061114,
+      "prScore": 63.63351630606111,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 59.26500126718309,
+      "prScore": 36.76500126718309,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ashitakah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
+      "totalScore": 54,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 54,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 48.0437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 33.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 33.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 33.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "charlesma4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/22969108?v=4",
+      "totalScore": 26.21302300542815,
+      "prScore": 26.21302300542815,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "copilot-swe-agent",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1143301?v=4",
+      "totalScore": 24.36329974657663,
+      "prScore": 24.36329974657663,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xChin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/77933451?u=a76de7bffe1b1d8fb41313e36c4ba53d9d65109b&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "red-marble",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/102086923?v=4",
+      "totalScore": 9.452213344056215,
+      "prScore": 9.452213344056215,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 6.75171895621705,
+      "prScore": 6.75171895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 6.5,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "romanito0410",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/247900485?v=4",
+      "totalScore": 6.048453324894,
+      "prScore": 5.848453324894,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xniha",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/205694301?u=40549cc9822668a94e580372e47c3350107eb9aa&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 20,
+  "mergedPRs": 16,
+  "newIssues": 10,
+  "closedIssues": 6,
+  "activeContributors": 34
+}

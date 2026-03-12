@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-03-08 to 2026-03-15, ethereum-optimism/optimism had 43 new PRs (34 merged), 4 new issues, and 48 active contributors.",
+  "overview": "From 2026-03-08 to 2026-03-15, ethereum-optimism/optimism had 63 new PRs (51 merged), 14 new issues, and 55 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM7xNCUz",
@@ -15,6 +15,18 @@
       "repository": "ethereum-optimism/optimism",
       "body": "Follow-up items identified during review of #19372 (Karst hardfork support) that were out of scope for that PR. All originally flagged by @geoknee.\n\n## 1. Use `is_first_karst_block()` helper in derive and sequencer code\n\n- **File:** `rust/kona/crates/protocol/derive/src/attributes/stateful.rs`\n- [PR comment](https://github.com/ethereum-optimism/optimism/pull/19372#discussion_r2882953293)\n\nThe first-block detection currently uses the manual pattern:\n\n```rust\nif self.rollup_cfg.is_karst_active(next_l2_time) &&\n    !self.rollup_cfg.is_karst_active(l2_parent.block_info.timestamp)\n```\n\nThis could use self.rollup_cfg.is_first_karst_block(next_l2_time) instead, which already exists and is more readable. Same pattern applies to the other hardfork\nfirst-block checks above it.\n\n\n## 2. Simplify test override timestamps in CLI flag tests\n\n- File: rust/kona/bin/node/src/flags/overrides.rs\n- [PR comment](https://github.com/ethereum-optimism/optimism/pull/19372#discussion_r2882922734)\n\nThe test uses realistic-looking timestamps (1740000000, 1745000001, 1750000000, 1755000000) which make it hard to visually verify time ordering. Using simple sequential\n values like 10, 20, 30, ... would be clearer.\n\n \n## 3. Fork activation chaining semantics differ from op-node/op-geth\n\n- File: `rust/kona/crates/protocol/genesis/src/rollup.rs` (is_jovian_active() and similar)\n- [PR comment](https://github.com/ethereum-optimism/optimism/pull/19372#discussion_r2882959407)\n\nIn kona, `is_jovian_active()` returns true when Karst is active even if `jovian_time` is not explicitly set (because it chains to the next fork). This differs from how\n`op-node` + `op-geth` handle hardfork activation, where each fork's activation is independent.\n\nConcern: this could be a footgun — a fork reports as \"active\" even when it was never explicitly scheduled. It also raises questions about portability of hardfork\nconfigs between `op-node` and `kona-node` (e.g. from the superchain registry).\n\nIn practice this is safe today because hardforks are always scheduled in order and never skipped, but aligning the semantics would be more robust.\n\ncc @theochap @sebastianst",
       "createdAt": "2026-03-09T16:53:15Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7ybC-q",
+      "title": "op-node: CriticalErrorEvent for deposits-only attributes failure causes permanent node crash loop",
+      "author": "ajsutton",
+      "number": 19509,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Description\n\n`DepositsOnlyPayloadAttributesRequestEvent` error handling emits `CriticalErrorEvent`, which kills the node permanently. Under certain conditions — particularly involving the SuperAuthority deny path — this error is hit due to a transient state mismatch, not a true critical failure. Because the deny list is persistent, every restart hits the same crash, creating an infinite crash loop.\n\n## Root Cause\n\n`DepositsOnlyAttributes()` has sanity checks that assume `lastAttribs` is always populated when called. This held for the original Holocene invalid-payload flow, where `DepositsOnlyPayloadAttributesRequestEvent` is only emitted immediately after `NextAttributes` sets `lastAttribs`.\n\nHowever, `DepositsOnlyPayloadAttributesRequestEvent` can also be emitted from `PayloadProcessEvent` via the SuperAuthority deny path (`payload_process.go`). In this path, a `ResetEvent` can be processed between the `BuildStartEvent` that initiated the payload and the `PayloadProcessEvent` that checks the deny list — because events are queued, not inline. When that happens, the pipeline reset clears `lastAttribs` to nil, and `DepositsOnlyAttributes()` fails with `\"no attributes generated yet\"`.\n\n## Event Ordering Leading to Crash\n\n1. `ForkchoiceUpdateEvent` → triggers `ResetEvent` (queued)\n2. `ResetEvent` → pipeline reset, **`lastAttribs = nil`**\n3. `BuildStartedEvent` → `BuildSealEvent` → `PayloadProcessEvent`\n4. Deny check fires → `DepositsOnlyPayloadAttributesRequestEvent`\n5. `DepositsOnlyAttributes()` → `lastAttribs == nil` → **crash** (`CriticalErrorEvent`)\n\n## Impact\n\n- The node crashes permanently with `\"deriving deposits-only attributes: no attributes generated yet\"`\n- Since the deny list persists across restarts, every new node instance re-derives the same denied block and hits the same crash\n- This creates an unrecoverable crash loop requiring manual intervention\n\n## Supernode Context\n\nThis is particularly problematic in the supernode, where chain containers manage virtual nodes (VNs). After multiple reorg cycles, the chain accumulates deposits-only blocks from prior cycles. When a new VN re-derives and encounters one of these prior deposits-only blocks, the event ordering race described above can occur, permanently crashing the VN.\n\n## Expected Behavior\n\nThe error should be treated as a transient state mismatch (like other similar cases in the derivation pipeline) and trigger a `ResetEvent` instead of `CriticalErrorEvent`. On reset, the pipeline re-derives from L1, re-populates `lastAttribs` via `NextAttributes`, and the deny check succeeds on retry.\n\n## References\n\n- Fix PR: ethereum-optimism/optimism#19417\n- Discovered via supernode interop reorg/eviction tests: ethereum-optimism/optimism#19346",
+      "createdAt": "2026-03-12T20:49:06Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 1
@@ -44,26 +56,14 @@
       "commentCount": 0
     },
     {
-      "id": "I_kwDODjvEJM7foQI2",
-      "title": "op-challenger: Update vm-runner to use super node",
-      "author": "ajsutton",
-      "number": 18669,
+      "id": "I_kwDODjvEJM7e9bfP",
+      "title": "Set default respected game type to CANNON_KONA",
+      "author": "pauldowman",
+      "number": 18640,
       "repository": "ethereum-optimism/optimism",
-      "body": "Update vm runner (run-trace) to use super node instead of supervisor. No need to maintain backwards compatibility on this as the supervisor support was never released and isn't used in tests.\n\nWe will likely need some form of syncStatus API from op-supernode to enable this so that vm runner can find the L1 head and L2 finalized block.",
-      "createdAt": "2025-12-22T00:57:44Z",
-      "closedAt": "2026-03-11T09:59:45Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDODjvEJM7j7CwP",
-      "title": "[L2CM Upgrades] Implement additional upgrade gas mechanism in op-node (go client)",
-      "author": "maurelian",
-      "number": 18832,
-      "repository": "ethereum-optimism/optimism",
-      "body": "### Description\nModify op-node/rollup/derive/attributes.go to handle upgrade gas allocation beyond systemTxMaxGas limit.\n\n### References\nhttps://github.com/ethereum-optimism/design-docs/blob/8f49778644d4a16cc8c7ec73ed80ae8290a709e7/protocol/l2-contract-upgrades.md?plain=1#L142-L154\nhttps://github.com/ethereum-optimism/optimism/pull/14797\n\n### Acceptance Criteria / Definition of Done\nUpgrade transactions no longer constrained by 1M gas systemTxMaxGas limit.",
-      "createdAt": "2026-01-16T22:40:43Z",
-      "closedAt": "2026-03-09T20:55:30Z",
+      "body": "With Upgrade 18 the CANNON_KONA game type will become available but is intended to be a fallback only, in the case of a problem with op-program. \n\nThis issue is to change the default so that CANNON_KONA is the primary game type.",
+      "createdAt": "2025-12-17T21:55:06Z",
+      "closedAt": "2026-03-12T20:30:33Z",
       "state": "CLOSED",
       "commentCount": 0
     }
@@ -77,7 +77,7 @@
       "body": "## Summary\r\n\r\nThis PR completes the acceptance-test spike to simplify `op-devstack` around direct preset constructors and per-test isolated environments.\r\n\r\nThe main architectural change is that acceptance tests now construct their own system-under-test directly from preset constructors. The old orchestrator/system/registry model has been removed in favor of explicit constructor DAGs, typed runtime families, and direct references.\r\n\r\nThis also removes the remaining legacy “network target polymorphism” infrastructure, including external/live-network acceptance paths.\r\n\r\nNet effect:\r\n- each acceptance test gets its own fresh target\r\n- presets are constructor-driven instead of orchestrator-driven\r\n- tests interact with the concrete preset shape they asked for\r\n- a large amount of legacy compatibility and ID-based plumbing is deleted\r\n\r\nThis branch is a large net deletion:\r\n- `383 files changed`\r\n- `9,536 insertions`\r\n- `17,724 deletions`\r\n\r\n## Motivation\r\n\r\n`op-devstack` had accumulated several layers that made acceptance testing harder to reason about:\r\n\r\n- shared package-level test environments\r\n- generic network-target abstractions\r\n- orchestrator/system/control-plane plumbing\r\n- ID/registry/matcher-based lookup\r\n- shim/sysext compatibility layers\r\n- preset implementations that were effectively wrappers over legacy internals\r\n\r\nThat model made simple test setup complicated, encouraged cross-test coupling, and obscured how systems were actually constructed.\r\n\r\nThis PR replaces that with a simpler model:\r\n\r\n- tests call preset constructors directly\r\n- constructors compose lower-level constructors in a clear hierarchy\r\n- presets return concrete system shapes\r\n- runtime assembly uses direct references instead of IDs and registry lookups\r\n\r\n## What Changed\r\n\r\n### 1. Acceptance tests now use per-test isolated preset constructors\r\n\r\nAcceptance suites were migrated away from shared `init_test.go` package setup and onto direct preset construction in the tests or test-local helpers.\r\n\r\nThis migration covers the major acceptance families, including:\r\n- base\r\n- batcher\r\n- sync\r\n- sync tester\r\n- conductor\r\n- interop\r\n- proofs\r\n- supernode\r\n- fusaka / jovian / isthmus\r\n- Rust `kona` supervisor/node tests\r\n- mixed `op`/`kona` and `op-reth` proof presets\r\n\r\nThis makes test setup explicit and ensures each test runs against its own fresh network target.\r\n\r\n### 2. External/live-network support was removed\r\n\r\nThe external network target / external EL acceptance paths were deleted.\r\n\r\nRemoved examples include:\r\n- `op-devstack/presets/minimal_external_el.go`\r\n- `op-devstack/sysgo/system_synctester_ext.go`\r\n- external sync-tester acceptance suites\r\n\r\nThis narrows the framework to the local constructor-driven model and removes a large amount of branching and compatibility code.\r\n\r\n### 3. Presets are now clean constructor frontends\r\n\r\nPreset constructors were migrated off legacy option/orchestrator paths and onto runtime-backed construction.\r\n\r\nExamples:\r\n- `NewMinimal`\r\n- `NewSimpleInterop`\r\n- `NewSingleChainInterop`\r\n- two-L2 supernode presets\r\n- flashblocks\r\n- sync-tester\r\n- conductor variants\r\n- proof/superproof variants\r\n\r\nThe old “isolated” naming was dropped because it is no longer a special mode; it is now the default implementation model.\r\n\r\n### 4. Orchestrator/system/control-plane architecture was removed\r\n\r\nThis PR deletes the legacy construction stack, including:\r\n- `sysgo.Orchestrator`\r\n- preset-side orchestrator wrappers\r\n- control-plane bridge\r\n- hydration path\r\n- `ExtensibleSystem`\r\n- `Registry`\r\n- matcher-driven system lookup\r\n- shim frontends\r\n- `sysext`\r\n- component ID plumbing\r\n- remaining default-system ID bundles\r\n\r\nThe resulting framework is structurally constructor-first instead of “cleanroom layered on top of orchestrator.”\r\n\r\n### 5. Preset/runtime APIs were simplified\r\n\r\nPreset options are now cleanroom-native instead of `stack.Option[*sysgo.Orchestrator]`.\r\n\r\nRuntime access also became more direct:\r\n- runtime fields are public where presets need them\r\n- preset assembly reads those fields directly\r\n- a large number of runtime accessor/helper methods were removed\r\n\r\n`devtest.P` was removed from the cleanroom option path in favor of `devtest.T`.\r\n\r\n### 6. DSL and preset assembly moved to direct references\r\n\r\nThe DSL and preset layer no longer depend on registry/matcher lookup for normal construction:\r\n\r\n- explicit primary refs are carried in DSL networks\r\n- public RPC is explicit instead of looked up via matcher logic\r\n- lifecycle is direct on the wrapped services/nodes\r\n- mixed preset assembly uses explicit node/runtime data rather than synthetic CL/EL ID catalogs\r\n\r\n### 7. Runtime layer was consolidated\r\n\r\nThe runtime layer was collapsed into a smaller set of shared families instead of 1:1 preset-shaped runtime roots.\r\n\r\nCurrent runtime families:\r\n- `SingleChainRuntime`\r\n- `MultiChainRuntime`\r\n- `MixedSingleChainRuntime`\r\n\r\nMulti-chain internals were reorganized by the real axis of variation:\r\n- supervisor-backed multichain runtime\r\n- supernode-backed multichain runtime\r\n- proofs as an overlay, not a separate topology root\r\n\r\nSingle-chain internals were reorganized around:\r\n- a shared single-chain base runtime\r\n- focused overlays for:\r\n  - flashblocks\r\n  - no-supervisor interop\r\n  - follower/multinode variants\r\n  - sync tester\r\n  - conductors\r\n\r\n## Notable Deletions\r\n\r\nThis PR removes a substantial amount of legacy framework code, including:\r\n- `op-devstack/shim/*`\r\n- `op-devstack/sysext/*`\r\n- `op-devstack/stack/registry.go`\r\n- `op-devstack/stack/component_id.go`\r\n- `op-devstack/stack/orchestrator.go`\r\n- `op-devstack/sysgo/orchestrator.go`\r\n- `op-devstack/sysgo/system.go`\r\n- legacy `system_*` constructor files\r\n- external EL sync-tester paths\r\n- many package-level `init_test.go` acceptance setup files\r\n\r\n## Testing\r\n\r\nRepresentative validation performed during this migration included:\r\n\r\n```bash\r\ngo test ./op-devstack/presets ./op-devstack/sysgo -run '^$' -count=1\r\ngo test ./op-acceptance-tests/tests/... ./rust/kona/tests/... -run '^$' -count=1\r\ngo test ./op-acceptance-tests/tests/sync_tester/sync_tester_elsync -run TestSyncTesterELSync -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/base/conductor -run TestConductorLeadershipTransfer -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/flashblocks -run TestFlashblocksTransfer -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/interop/message -run TestInteropSystemSupervisor -count=1 -timeout 8m\r\ngo test ./rust/kona/tests/node/restart -run TestRestartSync -count=1 -timeout 8m\r\n```\r\n\r\n## Result\r\n\r\nAfter this PR:\r\n\r\n- acceptance tests instantiate their own target directly\r\n- `op-devstack` no longer centers around orchestrator/system/registry abstractions\r\n- constructor DAGs and direct references are the primary model\r\n- legacy external/live-target and compatibility paths are removed\r\n- the codebase is materially smaller and simpler\r\n\r\n## Follow-up Work\r\n\r\nThis PR is intended as the architectural cutover. Follow-up cleanup can focus on smaller surface-level simplifications rather than major model changes. In particular:\r\n- further tightening preset assembly where frontend construction still duplicates logic\r\n- continued simplification of remaining `stack` interfaces that are now just thin compatibility shells\r\n",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-03-09T19:21:42Z",
-      "mergedAt": null,
+      "mergedAt": "2026-03-11T23:37:59Z",
       "additions": 11271,
       "deletions": 17843
     },
@@ -102,8 +102,8 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-03-10T19:33:18Z",
       "mergedAt": null,
-      "additions": 5457,
-      "deletions": 9
+      "additions": 5730,
+      "deletions": 11
     },
     {
       "id": "PR_kwDODjvEJM7JrpZ9",
@@ -118,23 +118,23 @@
       "deletions": 1
     },
     {
-      "id": "PR_kwDODjvEJM7E_Zzv",
-      "title": "feat: add NUT Bundle generation",
-      "author": "0xniha",
-      "number": 19248,
-      "body": "**Description**\r\n\r\nAdds infrastructure for generating Network Upgrade Transaction (NUT) bundles for L2 hardfork upgrades.\r\n\r\n- `GenerateNUTBundle`: Script that generates deterministic upgrade transaction bundles.\r\n- `GenerateNUTBundleUtils`: Helper contract for constructing deployment and upgrade transactions.\r\n- `NetworkUpgradeTxns`: Library for serializing/deserializing NUT artifacts to JSON with DepositTx-compatible metadata\r\n\r\nCloses [18834](https://github.com/ethereum-optimism/optimism/issues/18834)\r\n\r\n**Pending**\r\n\r\n- [ ] L2CM deployment and upgrade steps are currently commented out pending L2CM merge.\r\n- [ ] Tests for GenerateNUTBundleUtils.\r\n",
+      "id": "PR_kwDODjvEJM7KLrti",
+      "title": "feat(rust/tests): add derivation pipeline equivalence test harness",
+      "author": "theochap",
+      "number": 19515,
+      "body": "## Summary\r\n\r\n  - Adds a new `derivation-tests` crate at `rust/tests/derivation/` for testing the kona-node-service derivation pipeline with mock providers\r\n  - Implements MockL1Chain (ChainProvider + BlobProvider), MockBatcher (batch encoding/frame splitting), MockSequencer, and TestNodeActor wrapping the real DerivationActor\r\n  - Includes 5 passing tests: L1 block production, batcher encoding roundtrip, and derivation actor integration\r\n\r\n  ## Test plan\r\n\r\n  - [x] `cargo check -p derivation-tests` compiles cleanly\r\n  - [x] `cargo test -p derivation-tests` — all 5 tests pass\r\n  - [ ] Future: implement fault proof actor path (phase 5) and equivalence assertion (phase 6)\r\n\r\n  🤖 Generated with [Claude Code](https://claude.com/claude-code)",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-02-19T21:05:19Z",
-      "mergedAt": "2026-03-09T19:37:12Z",
-      "additions": 2115,
-      "deletions": 120
+      "createdAt": "2026-03-12T22:01:01Z",
+      "mergedAt": null,
+      "additions": 2641,
+      "deletions": 1017
     }
   ],
   "codeChanges": {
-    "additions": 15260,
-    "deletions": 15006,
-    "files": 201,
-    "commitCount": 345
+    "additions": 17542,
+    "deletions": 24558,
+    "files": 328,
+    "commitCount": 539
   },
   "completedItems": [
     {
@@ -343,6 +343,17 @@
       ]
     },
     {
+      "title": "fix(kona/derive): add over-fill check in BlobSource::load_blobs",
+      "prNumber": 19364,
+      "type": "bugfix",
+      "body": "## Summary\n\n`BlobSource::load_blobs` was missing a post-loop over-fill check. After the blob-pointer fill loop completes, if `blob_index < blobs.len()` the blob provider returned more blobs than were requested. Previously kona silently disc",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/errors/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/sources/blobs.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/blob_provider.rs"
+      ]
+    },
+    {
       "title": "fix(kona/derive): return Reset instead of Critical on blob under-fill in BlobData::fill",
       "prNumber": 19362,
       "type": "bugfix",
@@ -504,6 +515,65 @@
       ]
     },
     {
+      "title": "refactor(op-devstack): simplify acceptance testing around direct preset constructors",
+      "prNumber": 19452,
+      "type": "refactor",
+      "body": "## Summary\r\n\r\nThis PR completes the acceptance-test spike to simplify `op-devstack` around direct preset constructors and per-test isolated environments.\r\n\r\nThe main architectural change is that acceptance tests now construct their own syst",
+      "files": [
+        ".circleci/continue/main.yml",
+        "PR.md",
+        "op-acceptance-tests/README.md",
+        "op-acceptance-tests/acceptance-tests.yaml",
+        "op-acceptance-tests/cmd/main.go",
+        "op-acceptance-tests/justfile",
+        "op-acceptance-tests/tests/base/advance_test.go",
+        "op-acceptance-tests/tests/base/chain/init_test.go",
+        "op-acceptance-tests/tests/base/conductor/init_test.go",
+        "op-acceptance-tests/tests/base/conductor/leadership_transfer_test.go",
+        "op-acceptance-tests/tests/base/deposit/init_test.go",
+        "op-acceptance-tests/tests/base/eth_simulate_test.go",
+        "op-acceptance-tests/tests/base/init_test.go",
+        "op-acceptance-tests/tests/base/public_rpc_advance_test.go",
+        "op-acceptance-tests/tests/base/withdrawal/cannon/init_test.go",
+        "op-acceptance-tests/tests/base/withdrawal/cannon_kona/init_test.go",
+        "op-acceptance-tests/tests/base/withdrawal/permissioned/init_test.go",
+        "op-acceptance-tests/tests/base/withdrawal/withdrawal_test_helper.go",
+        "op-acceptance-tests/tests/batcher/batcher_test.go",
+        "op-acceptance-tests/tests/batcher/init_test.go",
+        "op-acceptance-tests/tests/batcher/throttling/init_test.go",
+        "op-acceptance-tests/tests/batcher/throttling/throttling_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_introspection_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_l1_portal_introspection_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_native_payment_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_portal_reverts_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_reverts_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_systemconfig_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/helpers.go",
+        "op-acceptance-tests/tests/custom_gas_token/init_test.go",
+        "op-acceptance-tests/tests/depreqres/common/common.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/clsync/clsync_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/clsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/depreqres_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/divergence/divergence_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/elsync/elsync_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/elsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/init_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/clsync/clsync_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/clsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/elsync/elsync_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/elsync/init_test.go",
+        "op-acceptance-tests/tests/ecotone/init_test.go",
+        "op-acceptance-tests/tests/fjord/init_test.go",
+        "op-acceptance-tests/tests/flashblocks/flashblocks_stream_test.go",
+        "op-acceptance-tests/tests/flashblocks/init_test.go",
+        "op-acceptance-tests/tests/fusaka/fusaka_test.go",
+        "op-acceptance-tests/tests/fusaka/helpers.go",
+        "op-acceptance-tests/tests/fusaka/setup_test.go",
+        "op-acceptance-tests/tests/interop/contract/init_test.go",
+        ".circleci/config.yml"
+      ]
+    },
+    {
       "title": "chore(ci): add op to chain-specific upgrade test matrix, remove base",
       "prNumber": 19448,
       "type": "tests",
@@ -575,6 +645,54 @@
         "op-supernode/supernode/activity/superroot/superroot.go",
         "op-supernode/supernode/activity/superroot/superroot_test.go",
         "op-supernode/supernode/chain_container/chain_container.go"
+      ]
+    },
+    {
+      "title": "chore(op-e2e): migrate Makefile to justfile",
+      "prNumber": 19475,
+      "type": "other",
+      "body": "## Summary\n- Migrates op-e2e build targets from Make to Just, following the same pattern used by other packages (op-node, op-batcher, etc.)\n- Replaces the 73-line Makefile with a justfile that preserves all targets: test, test-ws, test-acti",
+      "files": [
+        "op-e2e/Makefile",
+        "op-e2e/justfile",
+        "op-program/Makefile",
+        "op-program/justfile",
+        "op-e2e/README.md",
+        "cannon/Dockerfile.diff",
+        "cannon/Makefile",
+        "cannon/README.md",
+        "cannon/justfile",
+        "op-program/Dockerfile.repro.dockerignore",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile"
+      ]
+    },
+    {
+      "title": "chore(cannon): migrate Makefile to justfile",
+      "prNumber": 19474,
+      "type": "other",
+      "body": "## Summary\n- Migrate all cannon build targets from Make to Just, following the established pattern used by op-challenger and other directories\n- Replace the Makefile with a deprecated shim that delegates to `just` with a deprecation warning",
+      "files": [
+        "cannon/Makefile",
+        "cannon/justfile",
+        "cannon/Dockerfile.diff",
+        "cannon/README.md",
+        "op-program/Dockerfile.repro.dockerignore",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile"
+      ]
+    },
+    {
+      "title": "chore(linter): migrate Makefile to justfile",
+      "prNumber": 19473,
+      "type": "other",
+      "body": "## Summary\n- Migrates `linter/Makefile` build targets (`build`, `test`, `clean`) to a new `linter/justfile` using the shared `go.just` recipes\n- Replaces the original Makefile with a deprecation shim that delegates to `just`, preserving bac",
+      "files": [
+        "cannon/Makefile",
+        "cannon/justfile",
+        "linter/Makefile",
+        "linter/justfile",
+        "op-program/Dockerfile.repro.dockerignore",
+        "justfiles/deprecated.mk",
+        "justfiles/uptodate.sh"
       ]
     },
     {
@@ -661,77 +779,310 @@
       "files": [
         "rust/kona/crates/protocol/derive/src/sources/blobs.rs"
       ]
+    },
+    {
+      "title": "docs: add default branch and build system info to AGENTS.md",
+      "prNumber": 19508,
+      "type": "docs",
+      "body": "## Summary\n- Documents that the default branch is `develop` (not `main`) to prevent AI agents from failing on `git diff main..HEAD`\n- Notes the ongoing Make → Just migration and the `justfiles/` shared infra directory\n\n## Test plan\n- [x] Co",
+      "files": [
+        "AGENTS.md"
+      ]
+    },
+    {
+      "title": "chore: remove devnet-sdk and kurtosis-devnet",
+      "prNumber": 19506,
+      "type": "other",
+      "body": "## Summary\n- remove the in-repo `devnet-sdk` and `kurtosis-devnet` trees\n- re-home the remaining live pieces into `op-service`, `op-core`, and `op-devstack` before deleting them\n- update CI, build config, and docs to stop referencing the re",
+      "files": [
+        ".circleci/continue/main.yml",
+        "AGENTS.md",
+        "Makefile",
+        "README.md",
+        "devnet-sdk/book/.gitignore",
+        "devnet-sdk/book/book.toml",
+        "devnet-sdk/book/custom.css",
+        "devnet-sdk/book/src/README.md",
+        "devnet-sdk/book/src/SUMMARY.md",
+        "devnet-sdk/book/src/descriptors.md",
+        "devnet-sdk/book/src/dsl/intro.md",
+        "devnet-sdk/book/src/dsl/style_guide.md",
+        "devnet-sdk/book/src/shell.md",
+        "devnet-sdk/book/src/system.md",
+        "devnet-sdk/book/src/testing.md",
+        "devnet-sdk/book/theme/css/footer.css",
+        "devnet-sdk/book/theme/js/footer.js",
+        "devnet-sdk/cmd/mf2kt/main.go",
+        "devnet-sdk/constraints/constraints.go",
+        "devnet-sdk/constraints/constraints_test.go",
+        "devnet-sdk/contracts/bindings/eventlogger.go",
+        "devnet-sdk/contracts/bindings/l2tol2crossdomainmessenger.go",
+        "devnet-sdk/contracts/bindings/superchainweth.go",
+        "devnet-sdk/contracts/constants/constants.go",
+        "devnet-sdk/contracts/contracts.go",
+        "devnet-sdk/contracts/registry/client/client.go",
+        "devnet-sdk/contracts/registry/client/l2tol2crossdomainmessenger.go",
+        "devnet-sdk/contracts/registry/client/weth.go",
+        "devnet-sdk/contracts/registry/empty/empty.go",
+        "devnet-sdk/controller/kt/kt.go",
+        "devnet-sdk/controller/kt/kt_test.go",
+        "devnet-sdk/controller/kt/mutate_env.go",
+        "devnet-sdk/controller/kt/mutate_env_test.go",
+        "devnet-sdk/controller/kt/test_helpers.go",
+        "devnet-sdk/controller/surface/surface.go",
+        "devnet-sdk/descriptors/deployment.go",
+        "devnet-sdk/images/repository.go",
+        "devnet-sdk/interfaces/registry.go",
+        "devnet-sdk/kt/fs/devnet_fs.go",
+        "devnet-sdk/kt/fs/devnet_fs_test.go",
+        "devnet-sdk/kt/fs/fs.go",
+        "devnet-sdk/kt/fs/fs_test.go",
+        "devnet-sdk/kt/params.go",
+        "devnet-sdk/kt/visitor.go",
+        "devnet-sdk/kt/visitor_test.go",
+        "devnet-sdk/manifest/acceptor.go",
+        "devnet-sdk/manifest/manifest.go",
+        "devnet-sdk/manifest/visitor.go",
+        "devnet-sdk/proofs/prestate/cmd/main.go",
+        "devnet-sdk/shell/cmd/ctrl/main.go"
+      ]
+    },
+    {
+      "title": "op-node/derive: drop malformed span batch tx data as NotEnoughData",
+      "prNumber": 19502,
+      "type": "other",
+      "body": "## Summary\n\n- Fixes unclassified error propagation from `DeriveSpanBatch` in `ChannelInReader.NextBatch`\n- Malformed span batch data (bad tx type, invalid encoding) now returns `NotEnoughData` for immediate drop instead of triggering O(N×ba",
+      "files": [
+        "op-node/rollup/derive/channel_in_reader.go"
+      ]
+    },
+    {
+      "title": "op-node/derive: CriticalError for missing beacon endpoint after Ecotone",
+      "prNumber": 19501,
+      "type": "other",
+      "body": "## Summary\n\n- Fixes misconfiguration handling in `DataSourceFactory.OpenData`: wraps the \"beacon endpoint not configured\" error with `NewCriticalError` so the node stops with a clear fatal error instead of retrying indefinitely\n\nRunning a p",
+      "files": [
+        "op-node/rollup/derive/data_source.go"
+      ]
+    },
+    {
+      "title": "op-node/derive: drop pre-Delta span batch as NotEnoughData",
+      "prNumber": 19500,
+      "type": "other",
+      "body": "## Summary\n\n- Fixes pre-Delta span batch handling in `ChannelInReader.NextBatch`: returns `NotEnoughData` (immediate continue, no backoff) instead of `NewTemporaryError`\n- A channel with N span batches in a pre-Delta block previously requir",
+      "files": [
+        "op-node/rollup/derive/channel_in_reader.go"
+      ]
+    },
+    {
+      "title": "op-node/derive: drop bad channel decompression as NotEnoughData",
+      "prNumber": 19499,
+      "type": "other",
+      "body": "## Summary\n\n- Fixes `WriteChannel` error classification in `ChannelInReader.NextBatch`: returns `NotEnoughData` (immediate continue, no backoff) instead of `NewTemporaryError` when channel data fails to decompress\n- Downgrades the `log.Erro",
+      "files": [
+        "op-node/rollup/derive/channel_in_reader.go"
+      ]
+    },
+    {
+      "title": "chore(rust/op-reth): bump reth to v1.11.3",
+      "prNumber": 19498,
+      "type": "other",
+      "body": "## Summary\n- Bump all reth dependencies from v1.11.2 to v1.11.3 in the rust workspace\n- Update op-reth crate versions to 1.11.3\n- Update Cargo.lock\n\n## Test plan\n- [x] `cargo check --workspace` passes\n\n🤖 Generated with [Claude Code](https:",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/op-reth/bin/Cargo.toml",
+        "rust/op-reth/crates/chainspec/Cargo.toml",
+        "rust/op-reth/crates/cli/Cargo.toml",
+        "rust/op-reth/crates/consensus/Cargo.toml",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/exex/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/hardforks/Cargo.toml",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/primitives/Cargo.toml",
+        "rust/op-reth/crates/reth/Cargo.toml",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/storage/Cargo.toml",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/txpool/Cargo.toml"
+      ]
+    },
+    {
+      "title": "Remove accidental `PR.md` from repository root",
+      "prNumber": 19497,
+      "type": "other",
+      "body": "This removes the stray `PR.md` file that was added at the repository root by mistake. The repo already has canonical PR/contribution guidance elsewhere, so this change keeps the root clean and avoids duplicate or misleading documentation.\n\n",
+      "files": [
+        "PR.md"
+      ]
+    },
+    {
+      "title": "feat(rust): scenario-oriented DSL for derivation-tests",
+      "prNumber": 19496,
+      "type": "feature",
+      "body": "## Summary\n\n- Adds high-level DSL methods to `DerivationTest` (`advance_l1`, `derive_empty_block`, `submit_batch`, `finalize`) that describe test scenarios rather than implementation details\n- Adds `BatchConfig` with sensible defaults and `",
+      "files": [
+        "rust/derivation-tests/CLAUDE.md",
+        "rust/derivation-tests/DSL_STYLE_GUIDE.md",
+        "rust/derivation-tests/README.md",
+        "rust/derivation-tests/src/harness/dsl.rs",
+        "rust/derivation-tests/src/harness/mod.rs",
+        "rust/derivation-tests/src/harness/runner.rs",
+        "rust/derivation-tests/src/harness/test.rs",
+        "rust/derivation-tests/src/l2/builder.rs",
+        "rust/derivation-tests/src/server/l2_rpc.rs",
+        "rust/derivation-tests/src/state/db.rs",
+        "rust/derivation-tests/tests/helpers/mod.rs",
+        "rust/derivation-tests/tests/integration.rs",
+        "rust/derivation-tests/tests/invalid.rs",
+        "rust/derivation-tests/tests/server.rs",
+        "rust/derivation-tests/tests/simple.rs"
+      ]
+    },
+    {
+      "title": "test(contracts): convert GovernanceToken tests to fuzz tests",
+      "prNumber": 19490,
+      "type": "tests",
+      "body": "# test(contracts): convert GovernanceToken tests to fuzz tests\n\n## Summary\n\nConverts 9 hardcoded tests in `GovernanceToken.t.sol` to fuzz tests for broader input coverage. Previously, all tests used fixed values (100, 50). Now each test fuz",
+      "files": [
+        "packages/contracts-bedrock/test/governance/GovernanceToken.t.sol"
+      ]
+    },
+    {
+      "title": "refactor(rust): replace #[ignore] with nextest binary filtering",
+      "prNumber": 19489,
+      "type": "refactor",
+      "body": "## Summary\n\n- Remove `#[ignore]` from derivation-tests integration tests\n- Replace silent env-var skip with hard `panic!` when binaries are missing\n- Switch all derivation test just targets from `cargo test` to `cargo nextest run` with bina",
+      "files": [
+        "rust/derivation-tests/README.md",
+        "rust/derivation-tests/tests/helpers/mod.rs",
+        "rust/derivation-tests/tests/integration.rs",
+        "rust/justfile"
+      ]
+    },
+    {
+      "title": "chore: add fix-rust-fmt Claude Code skill",
+      "prNumber": 19488,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Adds a `/fix-rust-fmt` Claude Code skill that fixes Rust formatting CI failures\n- Runs `mise install` + `just install-nightly` + `just fmt-fix` with the correct pinned nightly toolchain\n- No need to inspect CI errors — just ru",
+      "files": [
+        ".claude/skills/fix-rust-fmt/SKILL.md",
+        "docs/ai/rust-dev.md",
+        "rust/kona/CLAUDE.md"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 533.4631315987444,
-      "prScore": 449.4231315987445,
-      "issueScore": 0,
-      "reviewScore": 83.5,
-      "commentScore": 0.54,
+      "totalScore": 719.8813030961243,
+      "prScore": 576.3033030961244,
+      "issueScore": 2.1,
+      "reviewScore": 140.5,
+      "commentScore": 0.978,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 277.7929231185165,
+      "prScore": 147.61292311851653,
+      "issueScore": 24,
+      "reviewScore": 105.5,
+      "commentScore": 0.6799999999999999,
       "summary": null
     },
     {
       "username": "theochap",
       "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
-      "totalScore": 156.26656765972308,
-      "prScore": 130.62856765972307,
+      "totalScore": 254.438889767342,
+      "prScore": 219.600889767342,
       "issueScore": 0,
-      "reviewScore": 25,
-      "commentScore": 0.6379999999999999,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 110.41284283604509,
-      "prScore": 56.91284283604509,
-      "issueScore": 2,
-      "reviewScore": 51.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "smartcontracts",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
-      "totalScore": 85.0772150857754,
-      "prScore": 75.0772150857754,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
+      "reviewScore": 34,
+      "commentScore": 0.838,
       "summary": null
     },
     {
       "username": "teddyknox",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
-      "totalScore": 81.72372897110375,
-      "prScore": 50.22372897110375,
+      "totalScore": 158.3369354544586,
+      "prScore": 117.3369354544586,
       "issueScore": 0,
-      "reviewScore": 31.5,
+      "reviewScore": 41,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 143.9128428360451,
+      "prScore": 56.91284283604509,
+      "issueScore": 2,
+      "reviewScore": 85,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 75.5,
-      "prScore": 0,
+      "totalScore": 119.0437738965761,
+      "prScore": 33.5437738965761,
       "issueScore": 0,
-      "reviewScore": 75.5,
+      "reviewScore": 85.5,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 65.6291022550876,
-      "prScore": 21.789102255087602,
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 90.0772150857754,
+      "prScore": 75.0772150857754,
       "issueScore": 0,
-      "reviewScore": 43.5,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ashitakah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
+      "totalScore": 81.23646040410176,
+      "prScore": 27.23646040410177,
+      "issueScore": 0,
+      "reviewScore": 54,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "devin-ai-integration",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/811515?v=4",
+      "totalScore": 73.65177752492282,
+      "prScore": 72.91177752492283,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.74,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 59.46500126718309,
+      "prScore": 36.76500126718309,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 58.2437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -747,18 +1098,8 @@
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 50.78599074405557,
+      "totalScore": 55.28599074405557,
       "prScore": 36.585990744055565,
-      "issueScore": 0,
-      "reviewScore": 14,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 45.33259841033099,
-      "prScore": 26.632598410330985,
       "issueScore": 0,
       "reviewScore": 18.5,
       "commentScore": 0.2,
@@ -767,11 +1108,31 @@
     {
       "username": "0xChin",
       "avatarUrl": "https://avatars.githubusercontent.com/u/77933451?u=a76de7bffe1b1d8fb41313e36c4ba53d9d65109b&v=4",
-      "totalScore": 38.46284730943895,
+      "totalScore": 51.96284730943895,
       "prScore": 29.46284730943895,
       "issueScore": 0,
-      "reviewScore": 9,
+      "reviewScore": 22.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 50.53259841033098,
+      "prScore": 26.632598410330985,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "0xniha",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/205694301?u=40549cc9822668a94e580372e47c3350107eb9aa&v=4",
+      "totalScore": 40.9347738965761,
+      "prScore": 33.8947738965761,
+      "issueScore": 2,
+      "reviewScore": 4.5,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -782,16 +1143,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "0xniha",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/205694301?u=40549cc9822668a94e580372e47c3350107eb9aa&v=4",
-      "totalScore": 36.2347738965761,
-      "prScore": 33.8947738965761,
-      "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -807,60 +1158,90 @@
     {
       "username": "stevennevins",
       "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
-      "totalScore": 27.807509422554826,
+      "totalScore": 32.80750942255483,
       "prScore": 22.607509422554827,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "ashitakah",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
-      "totalScore": 27.23646040410177,
-      "prScore": 27.23646040410177,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "0xOneTony",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 20.84,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 20.5,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 10.2,
-      "prScore": 0,
       "issueScore": 0,
       "reviewScore": 10,
       "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "devin-ai-integration",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/811515?v=4",
-      "totalScore": 9.67826121886171,
-      "prScore": 9.278261218861712,
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 26.278,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 25.5,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "charlesma4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/22969108?v=4",
+      "totalScore": 26.21302300542815,
+      "prScore": 26.21302300542815,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.4,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "copilot-swe-agent",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1143301?v=4",
+      "totalScore": 24.36329974657663,
+      "prScore": 24.36329974657663,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "pauldowman",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 8.5,
+      "totalScore": 15,
       "prScore": 0,
-      "issueScore": 4,
+      "issueScore": 6,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 10.24861228866811,
+      "prScore": 5.54861228866811,
+      "issueScore": 0,
       "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "red-marble",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/102086923?v=4",
+      "totalScore": 9.452213344056215,
+      "prScore": 9.452213344056215,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 6.75171895621705,
+      "prScore": 6.75171895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -875,13 +1256,23 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 5.54861228866811,
-      "prScore": 5.54861228866811,
+      "username": "romanito0410",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/247900485?v=4",
+      "totalScore": 6.048453324894,
+      "prScore": 5.848453324894,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -925,8 +1316,8 @@
       "summary": null
     },
     {
-      "username": "JosepBove",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -985,9 +1376,9 @@
       "summary": null
     }
   ],
-  "newPRs": 43,
-  "mergedPRs": 34,
-  "newIssues": 4,
-  "closedIssues": 13,
-  "activeContributors": 48
+  "newPRs": 63,
+  "mergedPRs": 51,
+  "newIssues": 14,
+  "closedIssues": 19,
+  "activeContributors": 55
 }

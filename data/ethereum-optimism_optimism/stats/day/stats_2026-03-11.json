@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-03-11 to 2026-03-12, ethereum-optimism/optimism had 9 new PRs (11 merged), 0 new issues, and 23 active contributors.",
+  "overview": "From 2026-03-11 to 2026-03-12, ethereum-optimism/optimism had 9 new PRs (12 merged), 0 new issues, and 23 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM7XnYKL",
@@ -70,6 +70,18 @@
   ],
   "topPRs": [
     {
+      "id": "PR_kwDODjvEJM7JKvYC",
+      "title": "refactor(op-devstack): simplify acceptance testing around direct preset constructors",
+      "author": "teddyknox",
+      "number": 19452,
+      "body": "## Summary\r\n\r\nThis PR completes the acceptance-test spike to simplify `op-devstack` around direct preset constructors and per-test isolated environments.\r\n\r\nThe main architectural change is that acceptance tests now construct their own system-under-test directly from preset constructors. The old orchestrator/system/registry model has been removed in favor of explicit constructor DAGs, typed runtime families, and direct references.\r\n\r\nThis also removes the remaining legacy “network target polymorphism” infrastructure, including external/live-network acceptance paths.\r\n\r\nNet effect:\r\n- each acceptance test gets its own fresh target\r\n- presets are constructor-driven instead of orchestrator-driven\r\n- tests interact with the concrete preset shape they asked for\r\n- a large amount of legacy compatibility and ID-based plumbing is deleted\r\n\r\nThis branch is a large net deletion:\r\n- `383 files changed`\r\n- `9,536 insertions`\r\n- `17,724 deletions`\r\n\r\n## Motivation\r\n\r\n`op-devstack` had accumulated several layers that made acceptance testing harder to reason about:\r\n\r\n- shared package-level test environments\r\n- generic network-target abstractions\r\n- orchestrator/system/control-plane plumbing\r\n- ID/registry/matcher-based lookup\r\n- shim/sysext compatibility layers\r\n- preset implementations that were effectively wrappers over legacy internals\r\n\r\nThat model made simple test setup complicated, encouraged cross-test coupling, and obscured how systems were actually constructed.\r\n\r\nThis PR replaces that with a simpler model:\r\n\r\n- tests call preset constructors directly\r\n- constructors compose lower-level constructors in a clear hierarchy\r\n- presets return concrete system shapes\r\n- runtime assembly uses direct references instead of IDs and registry lookups\r\n\r\n## What Changed\r\n\r\n### 1. Acceptance tests now use per-test isolated preset constructors\r\n\r\nAcceptance suites were migrated away from shared `init_test.go` package setup and onto direct preset construction in the tests or test-local helpers.\r\n\r\nThis migration covers the major acceptance families, including:\r\n- base\r\n- batcher\r\n- sync\r\n- sync tester\r\n- conductor\r\n- interop\r\n- proofs\r\n- supernode\r\n- fusaka / jovian / isthmus\r\n- Rust `kona` supervisor/node tests\r\n- mixed `op`/`kona` and `op-reth` proof presets\r\n\r\nThis makes test setup explicit and ensures each test runs against its own fresh network target.\r\n\r\n### 2. External/live-network support was removed\r\n\r\nThe external network target / external EL acceptance paths were deleted.\r\n\r\nRemoved examples include:\r\n- `op-devstack/presets/minimal_external_el.go`\r\n- `op-devstack/sysgo/system_synctester_ext.go`\r\n- external sync-tester acceptance suites\r\n\r\nThis narrows the framework to the local constructor-driven model and removes a large amount of branching and compatibility code.\r\n\r\n### 3. Presets are now clean constructor frontends\r\n\r\nPreset constructors were migrated off legacy option/orchestrator paths and onto runtime-backed construction.\r\n\r\nExamples:\r\n- `NewMinimal`\r\n- `NewSimpleInterop`\r\n- `NewSingleChainInterop`\r\n- two-L2 supernode presets\r\n- flashblocks\r\n- sync-tester\r\n- conductor variants\r\n- proof/superproof variants\r\n\r\nThe old “isolated” naming was dropped because it is no longer a special mode; it is now the default implementation model.\r\n\r\n### 4. Orchestrator/system/control-plane architecture was removed\r\n\r\nThis PR deletes the legacy construction stack, including:\r\n- `sysgo.Orchestrator`\r\n- preset-side orchestrator wrappers\r\n- control-plane bridge\r\n- hydration path\r\n- `ExtensibleSystem`\r\n- `Registry`\r\n- matcher-driven system lookup\r\n- shim frontends\r\n- `sysext`\r\n- component ID plumbing\r\n- remaining default-system ID bundles\r\n\r\nThe resulting framework is structurally constructor-first instead of “cleanroom layered on top of orchestrator.”\r\n\r\n### 5. Preset/runtime APIs were simplified\r\n\r\nPreset options are now cleanroom-native instead of `stack.Option[*sysgo.Orchestrator]`.\r\n\r\nRuntime access also became more direct:\r\n- runtime fields are public where presets need them\r\n- preset assembly reads those fields directly\r\n- a large number of runtime accessor/helper methods were removed\r\n\r\n`devtest.P` was removed from the cleanroom option path in favor of `devtest.T`.\r\n\r\n### 6. DSL and preset assembly moved to direct references\r\n\r\nThe DSL and preset layer no longer depend on registry/matcher lookup for normal construction:\r\n\r\n- explicit primary refs are carried in DSL networks\r\n- public RPC is explicit instead of looked up via matcher logic\r\n- lifecycle is direct on the wrapped services/nodes\r\n- mixed preset assembly uses explicit node/runtime data rather than synthetic CL/EL ID catalogs\r\n\r\n### 7. Runtime layer was consolidated\r\n\r\nThe runtime layer was collapsed into a smaller set of shared families instead of 1:1 preset-shaped runtime roots.\r\n\r\nCurrent runtime families:\r\n- `SingleChainRuntime`\r\n- `MultiChainRuntime`\r\n- `MixedSingleChainRuntime`\r\n\r\nMulti-chain internals were reorganized by the real axis of variation:\r\n- supervisor-backed multichain runtime\r\n- supernode-backed multichain runtime\r\n- proofs as an overlay, not a separate topology root\r\n\r\nSingle-chain internals were reorganized around:\r\n- a shared single-chain base runtime\r\n- focused overlays for:\r\n  - flashblocks\r\n  - no-supervisor interop\r\n  - follower/multinode variants\r\n  - sync tester\r\n  - conductors\r\n\r\n## Notable Deletions\r\n\r\nThis PR removes a substantial amount of legacy framework code, including:\r\n- `op-devstack/shim/*`\r\n- `op-devstack/sysext/*`\r\n- `op-devstack/stack/registry.go`\r\n- `op-devstack/stack/component_id.go`\r\n- `op-devstack/stack/orchestrator.go`\r\n- `op-devstack/sysgo/orchestrator.go`\r\n- `op-devstack/sysgo/system.go`\r\n- legacy `system_*` constructor files\r\n- external EL sync-tester paths\r\n- many package-level `init_test.go` acceptance setup files\r\n\r\n## Testing\r\n\r\nRepresentative validation performed during this migration included:\r\n\r\n```bash\r\ngo test ./op-devstack/presets ./op-devstack/sysgo -run '^$' -count=1\r\ngo test ./op-acceptance-tests/tests/... ./rust/kona/tests/... -run '^$' -count=1\r\ngo test ./op-acceptance-tests/tests/sync_tester/sync_tester_elsync -run TestSyncTesterELSync -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/base/conductor -run TestConductorLeadershipTransfer -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/flashblocks -run TestFlashblocksTransfer -count=1 -timeout 8m\r\ngo test ./op-acceptance-tests/tests/interop/message -run TestInteropSystemSupervisor -count=1 -timeout 8m\r\ngo test ./rust/kona/tests/node/restart -run TestRestartSync -count=1 -timeout 8m\r\n```\r\n\r\n## Result\r\n\r\nAfter this PR:\r\n\r\n- acceptance tests instantiate their own target directly\r\n- `op-devstack` no longer centers around orchestrator/system/registry abstractions\r\n- constructor DAGs and direct references are the primary model\r\n- legacy external/live-target and compatibility paths are removed\r\n- the codebase is materially smaller and simpler\r\n\r\n## Follow-up Work\r\n\r\nThis PR is intended as the architectural cutover. Follow-up cleanup can focus on smaller surface-level simplifications rather than major model changes. In particular:\r\n- further tightening preset assembly where frontend construction still duplicates logic\r\n- continued simplification of remaining `stack` interfaces that are now just thin compatibility shells\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-09T19:21:42Z",
+      "mergedAt": "2026-03-11T23:37:59Z",
+      "additions": 11271,
+      "deletions": 17843
+    },
+    {
       "id": "PR_kwDODjvEJM7JrpZ9",
       "title": "Rv fuzzing setup",
       "author": "asavienko",
@@ -90,8 +102,8 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-03-11T20:53:13Z",
       "mergedAt": null,
-      "additions": 993,
-      "deletions": 0
+      "additions": 1287,
+      "deletions": 352
     },
     {
       "id": "PR_kwDODjvEJM7Ioggs",
@@ -116,25 +128,13 @@
       "mergedAt": "2026-03-11T03:25:13Z",
       "additions": 228,
       "deletions": 0
-    },
-    {
-      "id": "PR_kwDODjvEJM7JfOo2",
-      "title": "chore(rust/op-reth): bump op-reth to 1.11.2",
-      "author": "theochap",
-      "number": 19472,
-      "body": "## Description\r\n\r\nThis PR bumps the reth dependency to version 1.11.2 after they released an important security patch. See https://github.com/paradigmxyz/reth/releases/tag/v1.11.2\r\n\r\nBump op-reth to version 1.11.2. ",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-03-10T19:39:49Z",
-      "mergedAt": "2026-03-11T13:43:23Z",
-      "additions": 214,
-      "deletions": 214
     }
   ],
   "codeChanges": {
-    "additions": 1583,
-    "deletions": 464,
-    "files": 62,
-    "commitCount": 89
+    "additions": 1956,
+    "deletions": 1549,
+    "files": 112,
+    "commitCount": 93
   },
   "completedItems": [
     {
@@ -233,6 +233,65 @@
         "op-supernode/supernode/activity/supernode/supernode_test.go",
         "op-supernode/supernode/chain_container/chain_container.go",
         "op-supernode/supernode/supernode.go"
+      ]
+    },
+    {
+      "title": "refactor(op-devstack): simplify acceptance testing around direct preset constructors",
+      "prNumber": 19452,
+      "type": "refactor",
+      "body": "## Summary\r\n\r\nThis PR completes the acceptance-test spike to simplify `op-devstack` around direct preset constructors and per-test isolated environments.\r\n\r\nThe main architectural change is that acceptance tests now construct their own syst",
+      "files": [
+        ".circleci/continue/main.yml",
+        "PR.md",
+        "op-acceptance-tests/README.md",
+        "op-acceptance-tests/acceptance-tests.yaml",
+        "op-acceptance-tests/cmd/main.go",
+        "op-acceptance-tests/justfile",
+        "op-acceptance-tests/tests/base/advance_test.go",
+        "op-acceptance-tests/tests/base/chain/init_test.go",
+        "op-acceptance-tests/tests/base/conductor/init_test.go",
+        "op-acceptance-tests/tests/base/conductor/leadership_transfer_test.go",
+        "op-acceptance-tests/tests/base/deposit/init_test.go",
+        "op-acceptance-tests/tests/base/eth_simulate_test.go",
+        "op-acceptance-tests/tests/base/init_test.go",
+        "op-acceptance-tests/tests/base/public_rpc_advance_test.go",
+        "op-acceptance-tests/tests/base/withdrawal/cannon/init_test.go",
+        "op-acceptance-tests/tests/base/withdrawal/cannon_kona/init_test.go",
+        "op-acceptance-tests/tests/base/withdrawal/permissioned/init_test.go",
+        "op-acceptance-tests/tests/base/withdrawal/withdrawal_test_helper.go",
+        "op-acceptance-tests/tests/batcher/batcher_test.go",
+        "op-acceptance-tests/tests/batcher/init_test.go",
+        "op-acceptance-tests/tests/batcher/throttling/init_test.go",
+        "op-acceptance-tests/tests/batcher/throttling/throttling_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_introspection_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_l1_portal_introspection_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_native_payment_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_portal_reverts_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_reverts_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/cgt_systemconfig_test.go",
+        "op-acceptance-tests/tests/custom_gas_token/helpers.go",
+        "op-acceptance-tests/tests/custom_gas_token/init_test.go",
+        "op-acceptance-tests/tests/depreqres/common/common.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/clsync/clsync_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/clsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/depreqres_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/divergence/divergence_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/elsync/elsync_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/elsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/init_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/clsync/clsync_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/clsync/init_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/elsync/elsync_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/elsync/init_test.go",
+        "op-acceptance-tests/tests/ecotone/init_test.go",
+        "op-acceptance-tests/tests/fjord/init_test.go",
+        "op-acceptance-tests/tests/flashblocks/flashblocks_stream_test.go",
+        "op-acceptance-tests/tests/flashblocks/init_test.go",
+        "op-acceptance-tests/tests/fusaka/fusaka_test.go",
+        "op-acceptance-tests/tests/fusaka/helpers.go",
+        "op-acceptance-tests/tests/fusaka/setup_test.go",
+        "op-acceptance-tests/tests/interop/contract/init_test.go",
+        ".circleci/config.yml"
       ]
     },
     {
@@ -461,10 +520,20 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
   "newPRs": 9,
-  "mergedPRs": 11,
+  "mergedPRs": 12,
   "newIssues": 0,
   "closedIssues": 8,
   "activeContributors": 23
