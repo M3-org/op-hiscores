@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-03-30 to 2026-03-31, ethereum-optimism/optimism had 17 new PRs (11 merged), 3 new issues, and 23 active contributors.",
+  "overview": "From 2026-03-30 to 2026-03-31, ethereum-optimism/optimism had 17 new PRs (11 merged), 3 new issues, and 24 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM74xy7a",
@@ -77,9 +77,9 @@
       "body": "**Description**\r\n\r\nThis PR adds a wrapper type `OpPool` around reth's `Pool` type that allows overriding specific behaviors.\r\n\r\nIn particular, the code snippet that we're overriding here is the following: https://github.com/paradigmxyz/reth/blob/930f2a6eb257854138bb9e291c7013586fcd0223/crates/transaction-pool/src/maintain.rs#L412-L431\r\n\r\nInside `maintain_transaction_pool`, after handling a Reorg, the node reinjects the dropped transactions back into the transaction pool. When interop is enabled, this can lead to an infinite loop that prevents the chain from recovering, since if the dropped transactions are the interop transactions that caused the reorg in the first place, the node never recovers and keeps trying to re-add the invalid transactions back to a new block.\r\n\r\nThe problem: `pool.add_external_transactions` by itself does not allow us to know when a reorg has happened. For this we have `pool.on_canonical_state_change`, which tells us when a reorg has happened but not which transactions were dropped from the old chain.\r\n\r\nAdditionally, because `pool.add_external_transactions` is an async function, it's possible (even if extremely unlikely) that between the two function calls, some other task is scheduled to run and calls `pool.add_external_transactions` before the `maintain_transaction_pool` task can do it. If we only filtered once, this could lead to a scenario where the interop transactions don't get filtered after a reorg and lead to more reorgs.\r\n\r\nThis PR does the following:\r\n1. When `pool.on_canonical_state_change` is called with a `PoolUpdateKind::Reorg` argument, we set a flag in the pool's state that a reorg has happened, and record the current time\r\n2. Inside `pool.add_external_transactions`, if the flag is active, we filter out interop transactions (see `is_interop_tx`)\r\n3. After filtering, clear the flag\r\n4. If the flag was not set, but we're within `REORG_WINDOW` seconds since the last reorg happened, filter the transactions anyway\r\n\r\nThis ensures that:\r\n- Even if the `pool.add_external_transactions` task ends up getting delayed and scheduled after `REORG_WINDOW` seconds, we will still filter it at least once: from the code, we **know** that there will be a call to it afterwards that we need to filter, at least\r\n- If other tasks race the maintenance task and clear the flag, but then the task gets scheduled within `REORG_WINDOW`, the interop transactions being reinjected are filtered correctly anyway and we have no issues\r\n\r\nThe only remaining scenario where the filter wouldn't work is: a reorg happens, some other tokio task calls `add_external_transactions` without interop transactions to clear the filter flag, then `REORG_WINDOW` seconds pass before the original maintenance task calls `add_external_transactions`.\r\n\r\nIn this PR, I've set `REORG_WINDOW` to 30 seconds. This value is pretty high in comparison to the block times, and we could definitely set it much lower without much issues. I've chosen a higher value to be on the safe side.\r\n\r\nDropping the interop transactions like this is safe because the relayer can re-submit them after the reorg has settled.\r\n\r\nThe filter is enabled on op-reth startup by checking if interop is enabled in the chain config. This check is only done once, so a change from interop disabled to interop enabled is not handled by this PR.\r\n\r\n**Tests**\r\n\r\nTests added to `pool.rs` and unskip `TestSupernodeInteropInvalidMessageReplacement` which now passes correctly with op-reth\r\n\r\n**Additional context**\r\n\r\nSee also #19411\r\n\r\n**Metadata**\r\n\r\n- Fixes #19567\r\n- Supersedes #19642 (this approach vendors the entire `maintain_transaction_pool` logic into op-reth to add the filter in-line, but this creates too much maintenance burden)\r\n\r\n**Future work**\r\n\r\nIdeally, reth's trait infrastructure would enable us to set an arbitrary transaction filter at different spots inside `maintain_task` so we could achieve this without potential race conditions and without needing to duplicate logic. Alternatively, we could modify some of the existing functions to pass more information to the pool functions so we could get rid of the `REORG_WINDOW` fallback.\r\n\r\nAdditionally, the existing `supervisor_client` filter located in op-reth's [`maintain_transaction_pool_interop`](https://github.com/ethereum-optimism/optimism/blob/7c57cf9837850bc94625f73f5fee93cfcad58da2/rust/op-reth/crates/txpool/src/maintain.rs#L153) should probably be adapted to run via the `OpPool` type when `add_external_transactions`, `add_transaction`, `add_transactions`, `add_transactions_with_origins`, `add_transaction_and_subscribe` (etc) run instead. This would mean the pool can filter transactions out *before* they even get added to the pool in the first place.\r\n",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-03-30T17:04:45Z",
-      "mergedAt": null,
-      "additions": 658,
-      "deletions": 12
+      "mergedAt": "2026-03-31T07:35:19Z",
+      "additions": 665,
+      "deletions": 16
     },
     {
       "id": "PR_kwDODjvEJM7Ll69w",
@@ -134,7 +134,7 @@
     "additions": 422,
     "deletions": 138,
     "files": 29,
-    "commitCount": 122
+    "commitCount": 151
   },
   "completedItems": [
     {
@@ -464,5 +464,5 @@
   "mergedPRs": 11,
   "newIssues": 3,
   "closedIssues": 4,
-  "activeContributors": 23
+  "activeContributors": 24
 }
