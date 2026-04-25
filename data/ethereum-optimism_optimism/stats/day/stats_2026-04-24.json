@@ -5,20 +5,734 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-04-24 to 2026-04-25, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-04-24 to 2026-04-25, ethereum-optimism/optimism had 35 new PRs (19 merged), 9 new issues, and 33 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABAH1fjA",
+      "title": "op-conductor: support reorgs",
+      "author": "axelKingsley",
+      "number": 20214,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Conductor currently *never* expects a chain regression from the Sequencers.\n\nThis means that if there is ever a protocol-caused regression of the chain, the Conductor will deem all sequencers unhealthy, causing a chain stall.\n\nWe need to upgrade conductor to follow reorgs. This is especially important for Interop, where experiencing and recovering from an invalid message is paramount.",
+      "createdAt": "2026-04-21T14:12:21Z",
+      "closedAt": "2026-04-24T13:58:41Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM7s5FF1",
+      "title": "kona-interop: Review access of blocks created internally",
+      "author": "ajsutton",
+      "number": 19266,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Currently when Kona-proofs interop performs the interop validation step, if the first validation pass identifies blocks that need to be replaced, it builds them and sets them as chain head then does another validation pass to see if that has caused other chains to become invalid.  But in the second pass it loads the deposit-only block it just generated from the preimage oracle. This block will be canonical so the load will work, but given the block was just built this is a suspicious design choice.\n\nIf it ever asks the preimage oracle from a block that isn't canonical (eg an optimistic block it just derived which is later replaced), it would cause failures.  We should review for safety and consider prioritising first checking if the block is already known before loading from the oracle.",
+      "createdAt": "2026-02-22T12:24:26Z",
+      "closedAt": "2026-04-24T05:32:40Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM77Dc1E",
+      "title": "flaky CI: `rust-tests` OOM during `reth-optimism-node` compilation",
+      "author": "wwared",
+      "number": 19935,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Reporting CI infrastructure flake — `rust-tests` job fails due to OOM (SIGKILL) during compilation.\n\n## CI Run\n- **Job (`rust-tests`):** https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/121908/workflows/16fa037f-90c8-47af-9a3e-8247b2e619b9/jobs/4751423\n  - Branch: `aj/fix/unskip-invalidblock-test` (pipeline 121908)\n  - Exit code 101, runtime ~1370s\n\n## Error\n```\nerror: could not compile `reth-optimism-node` (lib)\n\nCaused by:\n  process didn't exit successfully: `.../rustc --crate-name reth_optimism_node ...` (signal: 9, SIGKILL: kill)\nerror: Recipe `test-docs` failed on line 54 with exit code 101\n```\n\n## Date\n2026-04-06\n\n## Notes\n- The compiler is killed with SIGKILL (signal 9), which is the OOM killer. The CI runner appears to not have enough memory to compile the full workspace with `--all-features`.\n- This is an infrastructure/resource issue rather than a code bug.",
+      "createdAt": "2026-04-06T13:46:50Z",
+      "closedAt": "2026-04-24T23:13:06Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABAZwdXw",
+      "title": "op-acceptance-tests: add real regression guard for EL restart SYNCING recovery",
+      "author": "sebastianst",
+      "number": 20307,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Context\n\nPR #19384 fixes a stall in `EngineController.tryUpdateEngineInternal`: when an EL returns `SYNCING` to a forkchoice update (e.g. after an op-reth restart that loses in-memory canonical state), op-node previously recorded the FCU as accepted and never retried. The fix triggers a pipeline reset in CL-sync mode so `FindL2Heads` can re-discover the EL's actual chain state.\n\nThe PR originally included an acceptance test at `op-acceptance-tests/tests/sync/el_restart/TestELRestartRecovery` that exercised this flow end-to-end: stop the verifier op-reth, let the sequencer advance ~10 blocks, restart op-reth, and verify the verifier catches up.\n\n## Problem\n\nEmpirical validation (with and without the op-node fix applied locally against current `develop`):\n\n| Check | With fix | Without fix |\n|---|---|---|\n| Unit test `TestTryUpdateEngine_SyncingInCLModeTriggersReset` | PASS | **FAIL** — `An error is expected but got nil` |\n| Unit test `TestTryUpdateEngine_SyncingInELSyncModeIsAccepted` | PASS | PASS (preserved behavior) |\n| Acceptance test `TestELRestartRecovery` | PASS (~40s) | **PASS** (~41s) |\n\nThe unit tests are real regression guards. The acceptance test, as written, is not — it passes identically whether or not the fix is applied. The observed recovery path does not appear to exercise the SYNCING-response-from-cached-FCU scenario that the fix addresses. Likely explanations:\n\n- op-reth's persistence on clean shutdown is sufficient that its canonical head survives restart, so FCU returns VALID rather than SYNCING.\n- CL P2P gossip delivers newer blocks that op-reth imports via `NewPayload` before op-node's FCU with the cached heads hits the EL, so op-reth already \"knows\" the chain when FCU arrives.\n- The 10-block gap is too small or the restart too clean to reproduce the in-memory state loss the fix assumes.\n\nBecause the acceptance test did not reliably demonstrate the bug, it has been dropped from the replayed PR (see below). The op-node fix ships with unit-test coverage only.\n\n## What's needed\n\nAn acceptance test that **deterministically** reproduces the SYNCING-on-FCU condition after an EL event, so it FAILs on the pre-fix `engine_controller.go` and PASSes with the fix. Possible directions:\n\n1. **Force op-reth to drop canonical state on restart** — e.g. wipe or bypass the on-disk head marker via a sysgo helper that simulates the async-persistence-lost-on-crash case.\n2. **Directly drive the engine** — bypass the full restart and use a testing hook or mock EL that returns `SYNCING` to the next FCU; assert op-node emits a ResetEvent and recovers.\n3. **Ungraceful restart** — if op-reth has a code path where killing the process mid-write leaves in-memory state unpersisted, reproduce that via `Kill()` rather than `Stop()`.\n\nOption (1) or (3) is closest to the production failure mode. Option (2) is cheaper but further from reality.\n\n## References\n\n- PR #19384 — original fix + acceptance test (acceptance test later dropped)\n- Replayed PR on current `develop`: _to be linked_\n- op-node change: `op-node/rollup/engine/engine_controller.go` — added `checkForkchoiceUpdatedStatus` gate before recording `lastForkchoice`\n\n🤖 *Generated by Claude Code*",
+      "createdAt": "2026-04-24T09:28:59Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7enEgk",
+      "title": "follow-up issue to activate blob tip oracle",
+      "author": "nonsense",
+      "number": 18618,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Address all `TODO(18618)` markers from our codebase.",
+      "createdAt": "2025-12-16T13:24:51Z",
+      "closedAt": "2026-04-24T15:52:59Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7VbjRz",
+      "title": "chore(kona): fix clippy pedantic+nursery warnings in protocol/proof/bins/utilities",
+      "author": "theochap",
+      "number": 20331,
+      "body": "## Summary\n\nClears `cargo clippy -W clippy::pedantic -W clippy::nursery` warnings across the kona protocol, proof, bin, and utilities crates so the full workspace can pass `-D warnings` under those lint groups.\n\n- Added `#[must_use]` attributes on eligible public functions.\n- Added `# Errors` / `# Panics` doc sections to public fns that return `Result` or may panic.\n- Rewrote numeric literals with `_`-separated forms, replaced `Default::default()` with concrete-type defaults where safe, and fixed `Ok(_) => {}` → `Ok(()) => {}` for explicit unit matching.\n- Added crate-level `#![allow(...)]` blocks to each `lib.rs`/bench/test/example for lints that would require large architectural rewrites (numeric casts around byte offsets, large async futures, domain-specific similar naming, etc.). Each allow carries a one-line `//` justification.\n\n## Crates covered\n\n`kona-host`, `kona-client`, `kona-protocol`, `kona-derive`, `kona-genesis`, `kona-hardforks`, `kona-interop`, `kona-registry`, `kona-proof`, `kona-proof-interop`, `kona-driver`, `kona-preimage`, `kona-executor`, `kona-mpt`, `kona-std-fpvm`, `kona-std-fpvm-proc`, `kona-cli`, `kona-serde`, `kona-macros`.\n\n## Test plan\n\n- [x] `cargo clippy -p <assigned> --all-features --all-targets --tests -- -W clippy::pedantic -W clippy::nursery` reports 0 warnings for the above crates.\n- [x] `cargo check -p <assigned> --all-features --all-targets --tests` compiles clean.\n- [x] `cargo +nightly fmt -p <assigned>` formatting applied.\n- [x] `cargo test -p <assigned> --lib` passes (pre-existing failures in `kona-proof::l1::blob_provider` and `kona-derive::batch_stream::test_span_batch_extraction_error_flushes_stage` are unrelated to this change — confirmed by running on `develop`).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-24T18:29:55Z",
+      "mergedAt": null,
+      "additions": 2815,
+      "deletions": 318
+    },
+    {
+      "id": "PR_kwDODjvEJM7VbRRs",
+      "title": "chore(reth-optimism): fix clippy pedantic+nursery warnings",
+      "author": "theochap",
+      "number": 20327,
+      "body": "## Summary\n\nCleans up the ~757 warnings that `cargo clippy -W clippy::pedantic -W clippy::nursery` surfaces across the op-reth crate tree.\n\n- `cargo clippy --fix` auto-applied the mechanical rewrites (literal separators, `#[must_use]`, `Default::default()` -> explicit types, `map_or`, `is_some_and`, etc.).\n- Added a per-crate `#![allow(...)]` block at each entry point for cosmetic/architectural-cost pedantic+nursery lints (`missing_errors_doc`, `must_use_candidate`, `unreadable_literal`, `needless_pass_by_value`, `cast_*`, ...), so the remaining signal is real issues, not style noise. The allow block is adjacent to a comment explaining why each category is not worth fixing in bulk.\n- Reverted the autofixer's `pub(crate) -> pub` visibility escalations that tripped the `unreachable_pub` rustc lint (test utilities, flashblocks harness, legacy `OpTransactionSigned`).\n- Removed unused `tracing::{Subscriber, Callsite, Value}` imports that the autofixer inadvertently added while simplifying closures in `flashblocks/src/{cache,consensus,sequence,service}.rs`.\n- Added `#[allow(unnameable_types)]` on the legacy `OpTransactionSigned` struct (exposed only through a pub trait impl).\n- Added a module doc for `trie::db::models::kv`.\n\nAfter this change the op-reth subset is clean under:\n```\ncargo clippy --no-deps -p <every-op-reth-pkg> --all-targets --tests -- -W clippy::pedantic -W clippy::nursery -D warnings\n```\n\nSibling packages (op-alloy, op-revm, alloy-op-*) still emit warnings — those are handled by other branches in this clippy-cleanup effort.\n\n## Test plan\n\n- [x] `cargo clippy --no-deps -p <op-reth pkgs> --all-targets --tests -- -W clippy::pedantic -W clippy::nursery -D warnings` passes.\n- [x] `cargo +nightly fmt -p <op-reth pkgs>` produces no diff.\n- [x] `cargo build -p <op-reth pkgs>` succeeds.\n- [ ] Full workspace `cargo test` (delegated to CI; local run would need sibling worker branches merged first).",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-24T18:11:55Z",
+      "mergedAt": null,
+      "additions": 1842,
+      "deletions": 220
+    },
+    {
+      "id": "PR_kwDODjvEJM7Vbebw",
+      "title": "chore(kona): fix clippy pedantic+nursery warnings in node/providers",
+      "author": "theochap",
+      "number": 20329,
+      "body": "## Summary\n\nAddresses all warnings from `cargo clippy --workspace --all-targets -- -W clippy::pedantic -W clippy::nursery -D warnings` across the node and providers crates:\n\n- `kona-node`, `kona-node-service`, `kona-engine`\n- `kona-peers`, `kona-disc`, `kona-gossip`, `kona-rpc`, `kona-sources`\n- `kona-providers-alloy`, `kona-providers-local`\n\nMechanical fixes include unreadable literals (`1234567890` → `1_234_567_890`), `match` on booleans replaced with `if`/`else`, `_` unit patterns tightened to `()`, redundant closures converted to method references, and `Default::default()` replaced with explicit types where the inference was implicit.\n\nPer-crate `#![allow(...)]` blocks (with justification comments) suppress pedantic/nursery lints the workspace deliberately opts out of globally — e.g. `missing_errors_doc`, `missing_panics_doc`, `must_use_candidate`, `cast_possible_truncation`, `unused_async`, `future_not_send`.\n\n## Test plan\n\n- [x] `cargo clippy --no-deps -p kona-node -p kona-node-service -p kona-engine -p kona-peers -p kona-disc -p kona-gossip -p kona-rpc -p kona-sources -p kona-providers-alloy -p kona-providers-local --all-targets --tests -- -W clippy::pedantic -W clippy::nursery -D warnings` passes\n- [x] `cargo build` for the assigned crates\n- [x] `cargo test` for the assigned crates (the pre-existing `kona-disc::driver::tests::test_online_discv5_driver_bootstrap_testnet` network-dependent failure reproduces on `develop` and is unrelated)\n\nGenerated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-24T18:25:19Z",
+      "mergedAt": null,
+      "additions": 1112,
+      "deletions": 444
+    },
+    {
+      "id": "PR_kwDODjvEJM7VJzoo",
+      "title": "Revert \"chore(rust): bump revm to 38 (#20169)\"",
+      "author": "theochap",
+      "number": 20299,
+      "body": "This reverts commit 08f91c9ea329c245a74bd89f01e120289e24273b.\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-23T23:23:34Z",
+      "mergedAt": "2026-04-24T17:54:08Z",
+      "additions": 984,
+      "deletions": 146
+    },
+    {
+      "id": "PR_kwDODjvEJM7VbXG8",
+      "title": "chore(rust): fix clippy pedantic+nursery warnings in op-alloy/op-revm/alloy-op/examples",
+      "author": "theochap",
+      "number": 20328,
+      "body": "## Summary\n\nClear pedantic + nursery clippy warnings across the op-alloy, op-revm, alloy-op-*, and kona-examples crates (worker D of a parallel clean-up). After this change, `cargo clippy --all-targets --tests --no-deps -- -W clippy::pedantic -W clippy::nursery -D warnings` passes for all assigned packages.\n\n- Mechanical fixes applied in source: unreadable literals, missing/redundant semicolons, `Default::default()` replaced with explicit types, `as` casts swapped for infallible `From`, redundant closures dropped, `match` patterns converted to `let...else`, `ok_or` -> `ok_or_else`, `u8::from(bool)` and `usize::from(bool)`, items moved before statements in tests, etc.\n- API-boilerplate lints (`must_use_candidate`, `return_self_not_must_use`, `missing_errors_doc`, `missing_panics_doc`) are silenced with a crate-level `#![allow]` + short rationale so call sites stay focused on semantics.\n- Targeted `#[allow]` with a justifying comment for a handful of unavoidable lints: the `fast_lz` hot-loop casts, the FastLZ stack-resident hash table, the serde `serialize_with` `&Option<T>` signature, the wildcard `use super::*` required by the `eth_precompile_fn!` macro, the `NextEvmEnvAttributes`-by-value signature consumed by op-reth, and the infallible JSON round-trip `From` impls.\n- Fixed the `op-alloy-consensus` `pub(crate) fn TxDeposit::tx_type(&self)` to a true associated function and updated its single caller; similar pattern for `L1BlockInfo::tx_estimated_size_fjord`.\n\n## Test plan\n\n- [x] `cargo clippy -p <all assigned packages> --all-targets --tests --no-deps -- -W clippy::pedantic -W clippy::nursery -D warnings`\n- [x] `cargo test -p op-alloy-consensus -p op-alloy-rpc-types-engine -p op-alloy-rpc-types -p op-alloy-network -p op-revm -p alloy-op-evm -p alloy-op-hardforks`\n- [x] `cargo +nightly fmt` on assigned packages\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-24T18:17:50Z",
+      "mergedAt": null,
+      "additions": 749,
+      "deletions": 236
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 3652,
+    "deletions": 1613,
+    "files": 119,
+    "commitCount": 117
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "feat(op-node): add L2CM feature toggle for Karst NUT bundle",
+      "prNumber": 19888,
+      "type": "feature",
+      "body": "## Summary\n- Adds `IsL2CM` / `IsL2CMActivationBlock` toggle to `op-node/rollup/toggles.go`\n- Gates Karst NUT bundle execution in `attributes.go` behind the toggle\n- Toggle delegates to `IsKarst` — set to `return false` to disable during dev",
+      "files": [
+        "op-node/rollup/derive/attributes.go",
+        "op-node/rollup/toggles.go"
+      ]
+    },
+    {
+      "title": "U19 notice page draft",
+      "prNumber": 20128,
+      "type": "other",
+      "body": "U19 notice page first draft",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/notices/upgrade-19.mdx"
+      ]
+    },
+    {
+      "title": "test(op-reth): guard negotiated eth wire protocol version",
+      "prNumber": 20156,
+      "type": "tests",
+      "body": "Add an integration test that spins up two op-reth nodes, lets them complete the devp2p handshake, and asserts the negotiated eth subprotocol version is exactly 69.\r\n\r\nThe test is intentionally written to fail when upstream reth bumps the ne",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/tests/it/main.rs",
+        "rust/op-reth/crates/node/tests/it/p2p_version.rs"
+      ]
+    },
+    {
+      "title": "feat(op-reth): register eth_config RPC endpoint",
+      "prNumber": 20158,
+      "type": "feature",
+      "body": "Wire EthConfigHandler into OpAddOns so the eth_config method (EIP-7910) is served on the eth namespace. Extend the generic bounds on the NodeAddOns and RethRpcAddOns impls to satisfy EthConfigHandler::new: ChainSpec must also implement Hard",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/tests/it/rpc.rs",
+        "rust/op-reth/examples/custom-node/src/primitives/header.rs"
+      ]
+    },
+    {
+      "title": "test(op-acceptance-tests): single-chain interop super-games via opcm.upgrade",
+      "prNumber": 20248,
+      "type": "tests",
+      "body": "Routes the single-chain interop presets (`NewSingleChainInteropSupernodeProofs`, `NewSingleChainInteropIsthmusSuper`) through the standard `OPCMv2.upgrade` entrypoint for installing super-root dispute games. The OPCM is now deployed with `S",
+      "files": [
+        "op-acceptance-tests/tests/interop/super-via-upgrade/super_dispute_game_via_upgrade_test.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/opcm_upgrade.go",
+        "op-devstack/sysgo/superroot.go",
+        "op-devstack/sysgo/superroot_via_upgrade.go"
+      ]
+    },
+    {
+      "title": "test(contracts): cover VerifyOPCM runSingle lazy setup",
+      "prNumber": 20243,
+      "type": "tests",
+      "body": "## Summary\n- add a harness getter to expose VerifyOPCM initialization state in tests\n- add a regression test proving `runSingle()` lazily calls `setUp()` on a fresh script instance\n- verify the standalone-safe `PreimageOracle` path so the t",
+      "files": [
+        "packages/contracts-bedrock/test/scripts/VerifyOPCM.t.sol"
+      ]
+    },
+    {
+      "title": "feat(op-revm): bump revm 38",
+      "prNumber": 20300,
+      "type": "feature",
+      "body": "## Description\r\n\r\nReplays https://github.com/ethereum-optimism/optimism/pull/20169",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/alloy-op-evm/src/error.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/justfile",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/bls12_g1_add.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/bls12_g1_msm.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/bls12_g2_add.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/bls12_g2_msm.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/bls12_map_fp.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/bls12_map_fp2.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/bls12_pair.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/bn128_pair.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/ecrecover.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/kzg_point_eval.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/provider.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/test_utils.rs",
+        "rust/kona/bin/host/src/eth/precompiles.rs",
+        "rust/op-reth/crates/cli/src/commands/init_state.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/tests/it/builder.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/rpc/src/error.rs",
+        "rust/op-reth/examples/custom-node/src/engine.rs",
+        "rust/op-reth/examples/custom-node/src/evm/alloy.rs",
+        "rust/op-reth/examples/custom-node/src/evm/executor.rs",
+        "rust/op-revm/Cargo.toml",
+        "rust/op-revm/src/handler.rs",
+        "rust/op-revm/src/precompiles.rs"
+      ]
+    },
+    {
+      "title": "Revert \"chore(rust): bump revm to 38 (#20169)\"",
+      "prNumber": 20299,
+      "type": "other",
+      "body": "This reverts commit 08f91c9ea329c245a74bd89f01e120289e24273b.\r\n",
+      "files": [
+        ".circleci/Untitled",
+        "op-supernode/supernode/activity/interop/algo.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/checker.go",
+        "op-supernode/supernode/activity/interop/checker_test.go",
+        "op-supernode/supernode/activity/interop/cycle.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/log_backfill_test.go",
+        "op-supernode/supernode/activity/interop/types_test.go",
+        "op-supernode/supernode/activity/interop/verified_db.go",
+        "op-supernode/supernode/activity/interop/verified_db_test.go",
+        "op-supernode/supernode/activity/supernode/supernode_test.go",
+        "op-supernode/supernode/activity/superroot/superroot_test.go",
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/invalidation.go",
+        "op-supernode/supernode/supernode.go",
+        "packages/contracts-bedrock/scripts/checks/test-validation/exclusions.toml",
+        "packages/contracts-bedrock/test/dispute/zk/ZKDisputeGame.t.sol",
+        "packages/contracts-bedrock/test/dispute/zk/ZKDisputeGameIntegration.t.sol"
+      ]
+    },
+    {
+      "title": "fix(op-reth): raise supervisor RPC timeout default from 100ms to 2s",
+      "prNumber": 20296,
+      "type": "bugfix",
+      "body": "Fixes flaky `TestInteropFilter_IngressRejectsInvalid` — see #20291.\n\n## Root cause\n\n`SupervisorClient::DEFAULT_REQUEST_TIMEOUT` was 100 ms, applied via `tokio::time::timeout` to both `check_access_list` (ingress validation) and `query_fails",
+      "files": [
+        "rust/op-reth/crates/txpool/src/supervisor/client.rs"
+      ]
+    },
+    {
+      "title": "docs(opcm): acknowledge Initializable upgrade limitations",
+      "prNumber": 20289,
+      "type": "docs",
+      "body": "## Summary\n- add an in-code note in `OPContractsManagerUtils.upgrade()` documenting the current Initializable reset assumptions and edge cases\n- explicitly acknowledge the `_offset` single-slot assumption, the `_slot == ozV5Slot` clobber ri",
+      "files": [
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerUtils.sol"
+      ]
+    },
+    {
+      "title": "feat(op-acceptance): add pre-genesis super dispute game coverage",
+      "prNumber": 20287,
+      "type": "feature",
+      "body": "Fixes #19115\r\n\r\n## Summary\r\n\r\nThis adds coverage for super dispute games that are created before rollup L1 genesis in the supernode-backed interop proofs setup.\r\n\r\nThe change does three things:\r\n\r\n- adds preset support to seed a pre-genesis",
+      "files": [
+        "op-acceptance-tests/tests/interop/proofs/challenger_test.go",
+        "op-devstack/dsl/proofs/claim.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/presets/options_test.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/pre_genesis_super_game.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-devstack/sysgo/superroot.go"
+      ]
+    },
+    {
+      "title": "fix(op-devstack): extend preset CrossSafe budget for ELSync mode",
+      "prNumber": 20343,
+      "type": "bugfix",
+      "body": "The SingleChainMultiNode preset's initial sync check runs the same 30-attempt (60s) CrossSafe match for every verifier sync mode. In ELSync mode that is too tight: the verifier must finish P2P EL sync and emit its first forkchoice update be",
+      "files": [
+        "op-devstack/presets/singlechain_from_runtime.go",
+        "op-devstack/sysgo/l2_cl_opnode.go",
+        "op-devstack/sysgo/singlechain_build.go"
+      ]
+    },
+    {
+      "title": "fix(ci): bump rust-doctest to 2xlarge and unify with just test-docs",
+      "prNumber": 20337,
+      "type": "bugfix",
+      "body": "\r\n`rust-doctest` intermittently OOMs (rustc SIGKILL) compiling\r\n`reth-optimism-node` on the `xlarge` (16 GB) executor. Bumps to\r\n`2xlarge` (32 GB), matching #20100 which fixed the same OOM on the\r\nsibling `rust-ci-cargo-tests` job.\r\n\r\nAlso ",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        "rust/justfile"
+      ]
+    },
+    {
+      "title": "supernode: rewrite interop log backfill around backfillEndTimestamp",
+      "prNumber": 20326,
+      "type": "other",
+      "body": "# Tool Use Notice\r\n\r\nImplementation written by hand. Tests added via AI.\r\n\r\n# Summary\r\n\r\nRewrite of the convoluded generated backfill system. Identifying the Start/End of range is actually not that bad and I suspect this will keep us from f",
+      "files": [
+        "op-devstack/dsl/supernode.go",
+        "op-devstack/stack/supernode.go",
+        "op-node/rollup/types.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/interop_test_access.go",
+        "op-supernode/supernode/activity/interop/log_backfill.go",
+        "op-supernode/supernode/activity/interop/log_backfill_test.go",
+        "op-supernode/supernode/activity/interop/logdb.go",
+        "op-supernode/supernode/activity/interop/logdb_test.go",
+        "op-supernode/supernode/activity/supernode/supernode_test.go",
+        "op-supernode/supernode/activity/superroot/superroot_test.go",
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/invalidation.go"
+      ]
+    },
+    {
+      "title": "chore(op-revm): port changes from v107",
+      "prNumber": 20323,
+      "type": "other",
+      "body": "## Description\r\n\r\nPort the changes from the v107 of op-revm from blualloy/revm.\r\n\r\n\r\n## How to reproduce\r\n\r\n- Clone bluealloy/revm tag v107\r\n- `git filter-repo --force --path crates/op-revm --message-callback 'import re;\r\nreturn re.sub(rb\"\\",
+      "files": [
+        "rust/op-revm/CHANGELOG.md",
+        "rust/op-revm/src/handler.rs",
+        "rust/op-revm/src/l1block.rs",
+        "rust/op-revm/src/precompiles.rs"
+      ]
+    },
+    {
+      "title": "Revert \"Delete .circleci/Untitled (#20285)\"",
+      "prNumber": 20319,
+      "type": "other",
+      "body": "This reverts commit 793b3d8eece6cfd3b3eac557de6d5a64637ff568.\r\n",
+      "files": [
+        "packages/contracts-bedrock/scripts/upgrade/GenerateNUTBundle.s.sol",
+        "packages/contracts-bedrock/test/scripts/GenerateNUTBundle.t.sol"
+      ]
+    },
+    {
+      "title": "ai(rust): add rust code reviewer to claude skills",
+      "prNumber": 20318,
+      "type": "other",
+      "body": "## Description\r\n\r\nAdds a `rust-code-reviewer` to claude skills on the monorepo",
+      "files": [
+        ".claude/agents/rust-code-reviewer.md"
+      ]
+    },
+    {
+      "title": "chore(op-batcher): remove blob tip oracle TODO",
+      "prNumber": 20315,
+      "type": "other",
+      "body": "Fixes: https://github.com/ethereum-optimism/optimism/issues/18618",
+      "files": [
+        "op-batcher/batcher/channel_config_provider.go"
+      ]
+    },
+    {
+      "title": "op-node: remove deprecated ProtocolVersions watching",
+      "prNumber": 20311,
+      "type": "other",
+      "body": "## Summary\n\n- Removes the deprecated protocol-versions signalling mechanism from op-node so its op-geth types (`params.ProtocolVersion*`, `catalyst.SuperchainSignal`, `catalyst.LogProtocolVersionSupport`, `params.OPStackSupport`) don't need",
+      "files": [
+        "op-chain-ops/genesis/config.go",
+        "op-conductor/conductor/service_test.go",
+        "op-deployer/pkg/deployer/pipeline/superchain.go",
+        "op-deployer/pkg/deployer/pipeline/superchain_test.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-e2e/system/runcfg/protocol_versions_test.go",
+        "op-node/config/config.go",
+        "op-node/flags/flags.go",
+        "op-node/metrics/metrics.go",
+        "op-node/node/node.go",
+        "op-node/node/runcfg/runtime_config.go",
+        "op-node/node/superchain.go",
+        "op-node/node/superchain_test.go",
+        "op-node/rollup/chain_spec_test.go",
+        "op-node/rollup/superchain.go",
+        "op-node/rollup/types.go",
+        "op-node/service.go",
+        "op-program/chainconfig/test/configs/901-rollup.json",
+        "op-program/chainconfig/test/configs_typo/901-rollup.json",
+        "op-service/sources/engine_client.go",
+        "rust/kona/tests/node/common/rpc_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "theochap",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
+      "totalScore": 398.9005732227581,
+      "prScore": 375.06057322275814,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 241.12408167430854,
+      "prScore": 195.08608167430856,
+      "issueScore": 8.1,
+      "reviewScore": 37.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 126.19526638987848,
+      "prScore": 120.99526638987848,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 68.5914662623239,
+      "prScore": 43.0914662623239,
+      "issueScore": 2,
+      "reviewScore": 23.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 65.05730711955198,
+      "prScore": 53.619307119551976,
+      "issueScore": 6,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "axelKingsley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7201941?u=d3ed75b38d5b3079dfa593a217632ccb30b93610&v=4",
+      "totalScore": 59.51978445905333,
+      "prScore": 54.081784459053324,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 47,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 47,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 44.09087973461403,
+      "prScore": 21.090879734614028,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 33.07014389569406,
+      "prScore": 33.07014389569406,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 25.842700742200197,
+      "prScore": 21.342700742200197,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 25.154333059508026,
+      "prScore": 11.154333059508028,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 24.444581091193484,
+      "prScore": 24.444581091193484,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 20.479685239667294,
+      "prScore": 20.479685239667294,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 18.29061228866811,
+      "prScore": 17.852612288668112,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xniha",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/205694301?u=40549cc9822668a94e580372e47c3350107eb9aa&v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 10.992993734655478,
+      "prScore": 10.792993734655479,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 10.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 10.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "optibotpiper",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "GianBobarino",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/123008441?v=4",
+      "totalScore": 8,
+      "prScore": 0,
+      "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "scharissis",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/376382?u=21da38bcf55ef6712398ef67e8c7d96096c4a045&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ashitakah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 35,
+  "mergedPRs": 19,
+  "newIssues": 9,
+  "closedIssues": 12,
+  "activeContributors": 33
 }
