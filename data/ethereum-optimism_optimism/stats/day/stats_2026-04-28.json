@@ -5,20 +5,611 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-04-28 to 2026-04-29, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-04-28 to 2026-04-29, ethereum-optimism/optimism had 21 new PRs (15 merged), 10 new issues, and 27 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7tzTxF",
+      "title": "[L2CM Upgrades] Implement Bundle Canoniclization process",
+      "author": "maurelian",
+      "number": 19307,
+      "repository": "ethereum-optimism/optimism",
+      "body": "I’m proposing a solution between A and B. We want to have a manual trigger to update the bundled NUT per hardfork, but also want enough automation and CI checks to avoid human error. My proposed workflow:\n\n- Command `just update-nuts <fork>` ensures the latest nuts are built, then copies the `nuts-current.json`  to a predetermined location, e.g. `op-core/nuts/nuts-<fork>.json`\n    - This may update the NUTs for fork `<fork>`, overwriting the old one. This will clearly be visible in the PR diff.\n    - This script invocation can also do other sanity checks, e.g. that the `<fork>`  is a valid one defined in `op-core/forks`.\n    - We may also add to this script, and CI checks below, a way to freeze NUTs updates in some way, so nobody ever accidentally updates an old NUTs bundle. Could be something as simple as a `var FrozenFork` in the `forks` package, or a string in a file `frozen_fork.txt` in `op-core/nuts` that can be reused by the Rust stack as well.\n    - Even better, add a proper fork lock file `op-core/nuts/fock_lock.toml` with content like\n        \n        ```toml\n        jovian = 1ab2c3...\n        karst = 4d5e6f...\n        ...\n        ```\n        \n        - where every line commits to the bundle hash (tbd what that exactly is, maybe just file sha256)\n        - If a fork is not locked here yet, it’s allowed to be updated. once it’s locked, CI checks that it cannot be updated. Would require manual edits to the lock to update again.\n        - We’d set the lock once we write the gov post.\n- Implementation detail, but to sketch what’s happening with this file: it’s embedded into the Go build using `//go:embed` and the developers for `<fork>` have to call a `func generateNUTs(fork forks.Name) ([]hexutil.Bytes, error)` inside `~~FetchingAttributesBuilder~~.PreparePayloadAttributes` (where also the upgrade txs are currently built). We could in the future automate this further by iterating over all forks with `forks.From(<first-fork-with-NUTs>)`, but this is getting too detailed…\n- Note: has nothing to do with op-node release tags. An update is clearly visible in the PR and via git history. We can also add a code ownership rule that any changes to `op-core/nuts/` require EVM team & Consensus team approval.\n- CI actually checks the validity of this copied NUT:\n    - if the current PR *changes* any file in `op-core/nuts/nuts-<fork>.json`, this changed file has to be equal to the `nuts-current.json` that is built from the current commit.\n    - if the current PR doesn’t change anything in `op-core/nuts/`, it is guaranteed that a previous CI run has validated it, so nothing to check.\n- We can an option to use the latest, but we need a way to ensure we don’t actually ship a hard fork that’s still using current-nuts.json. Maybe just require a CLI flag is set in order to activate a hard fork that uses current-nuts.\n\n([Source](https://www.notion.so/oplabs/P-PS-How-to-Bundle-L2-Contracts-into-the-client-with-L2CM-2fcf153ee162807c9a65caf67ca7fdc9?source=copy_link))",
+      "createdAt": "2026-02-25T13:58:39Z",
+      "closedAt": "2026-04-28T17:26:15Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM756sXk",
+      "title": "bug(kona): kona-host-client-offline-cannon test crashes due to wrong target spec in cannon-builder:v1.0.0",
+      "author": "ajsutton",
+      "number": 19895,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Filed on behalf of @ajsutton.\n\n## Description\n\nThe `kona-host-client-offline-cannon` CI job uses `just build-cannon-client` which runs `docker run cannon-builder:v1.0.0 cargo build ...` to cross-compile `kona-client` for MIPS64. The `cannon-builder:v1.0.0` Docker image has a baked-in `mips64-unknown-none.json` target spec with `target-c-int-width: 64` (incorrect — should be `32`).\n\nThis causes the kona-client binary to crash immediately when run on cannon:\n\n```\nPanic: panicked at kona/crates/protocol/registry/src/superchain.rs:26:42:\nFailed to read chain list: Error(\"missing field `name`\", line: 23, column: 3)\n```\n\nThe test currently **passes** on `develop` because it only checks that cannon VM execution completes (`exited=true`), not that the exit code is successful. The client panics with exit code 2, which counts as \"exited\".\n\n## Evidence\n\nFrom the latest successful `kona-host-client-offline-cannon` run on `develop` (CircleCI job #4729278):\n\n```\nt=2026-04-02T04:54:03+0000 lvl=info msg=\"\" module=guest stream=stderr text=\"Panic: panicked at kona/crates/protocol/registry/src/superchain.rs:26:42:\\nFailed to read chain list: Error(\\\"missing field `name`\\\", line: 23, column: 3)\"\nt=2026-04-02T04:54:03+0000 lvl=info msg=\"Execution stopped\" module=vm exited=true code=2\n```\n\n## Root Cause\n\nThe `cannon-builder:v1.0.0` image at `us-docker.pkg.dev/oplabs-tools-artifacts/images/cannon-builder:v1.0.0` has `target-c-int-width: 64` in its baked-in `/mips64-unknown-none.json`. The corrected value (`32`) exists in the source tree at `rust/kona/docker/cannon/mips64-unknown-none.json`. The reproducible prestate Dockerfile (`cannon-repro.dockerfile`) already overrides the baked-in spec, but `build-cannon-client` in `rust/kona/justfile` uses `cannon-builder:v1.0.0` directly without the override.\n\n## Fix\n\nThe `build-cannon-client` target should use the corrected target spec from the source tree. This is being addressed as part of ethereum-optimism/optimism#19889 which refactors the kona prestate build to use a single definition. With that change, `build-cannon-client` calls `just build-kona-client-elf` which sets `CARGO_BUILD_TARGET` to the corrected spec.\n\nThe offline test's witness data and assertions should also be updated to expect a successful block validation (exit code 0) rather than a crash (exit code 2).\n",
+      "createdAt": "2026-04-02T08:40:44Z",
+      "closedAt": "2026-04-28T22:15:01Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7WuGJ5",
+      "title": "fusaka-on-l2: write acceptance tests for new EIPs",
+      "author": "joshklop",
+      "number": 18221,
+      "repository": "ethereum-optimism/optimism",
+      "body": "I plan to split these into sub-issues when we have a better idea of what we want to assert in each test.\n\n- [ ] [7642 eth/69](https://eips.ethereum.org/EIPS/eip-7642)\n- [ ] [7823 Upper-Bound MODEXP](https://eips.ethereum.org/EIPS/eip-7823)\n- [ ] [7825 Tx Gas Limit Cap](https://eips.ethereum.org/EIPS/eip-7825)\n- [ ] [7883 MODEXP Gas Cost Increase](https://eips.ethereum.org/EIPS/eip-7883)\n- [ ] [7910 eth_config Endpoint](https://eips.ethereum.org/EIPS/eip-7910)\n- [ ] [7939 CLZ Opcode](https://eips.ethereum.org/EIPS/eip-7939)\n- [ ] [7951 secp256r1 Precompile](https://eips.ethereum.org/EIPS/eip-7951)",
+      "createdAt": "2025-11-07T23:56:06Z",
+      "closedAt": "2026-04-28T15:54:59Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7byDOH",
+      "title": "Add op-reth snapshots to https://datadirs.optimism.io for verifiers/node operators using Reth",
+      "author": "wilschmor",
+      "number": 18473,
+      "repository": "ethereum-optimism/optimism",
+      "body": "<!--\nNeed help?\nRefer to our contributing guidelines for additional information about making a good issue:\nhttps://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\n-->\n\n**Is your feature request related to a problem? Please describe.**\n<!--\nYes - Coinbase Assets team was having troubles syncing their new reth node, as snap sync isn't supported and the current process is not simple\n-->\n\n**Describe the solution you'd like**\n<!--\nHaving a reth snapshot that is recent, smaller to download, and with clear instructions will help new node operators, and our overall Rust migration as we move away from op-geth\n-->\n\n**Describe alternatives you've considered**\n<!--\nFollow the current process, but this seems like a no brainer\n-->\n\n**Additional context**\n<!--\nAdditional context available from Wil, Soyboy, Seb and in Slack if needed\n-->",
+      "createdAt": "2025-12-02T19:54:43Z",
+      "closedAt": "2026-04-28T16:10:55Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7orTKh",
+      "title": "Add L2CM support for op-chain-ops",
+      "author": "0xniha",
+      "number": 19102,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Description:**\n`interopgen` currently hardcodes `UseL2CM: false` when building L2 genesis (`op-chain-ops/interopgen/deploy.go`, in `GenesisL2`).\n\nThis prevents interop/test deployments from enabling the L2 Contract Messenger (L2CM) feature, which gates inclusion of the **ConditionalDeployer** predeploy in L2 genesis.\n\n**Implementation notes**\n1. **Config**: Add a way to turn on L2CM for L2 genesis. Options:\n   - Add a field to `L2Config` (e.g. `UseL2CM bool`) or\n   - Add a world-level or superchain-level flag.\n2. **Wire-through**: In `GenesisL2`, pass the configured value into `opcm.L2GenesisInput.UseL2CM` instead of `false`.",
+      "createdAt": "2026-02-05T21:26:00Z",
+      "closedAt": "2026-04-28T18:14:26Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7WbWi-",
+      "title": "fix(op-reth): detect reth storage layout in InitializationJob",
+      "author": "dhyaniarun1993",
+      "number": 20396,
+      "body": "**Description**\r\n\r\nRunning op-reth proofs init on a production OP Mainnet node (synced before reth introduced v2 packed storage) panics with:\r\n\r\n\r\nindex out of bounds: the len is 1 but the index is 32\r\nThe panic is in PackedStoredNibbles::from_compact, which always reads buf[32] as the nibble count. On v1-storage nodes, AccountsTrie keys are variable-length (1 nibble per byte, 1–64 bytes). A 1-nibble path is 1 byte — indexing buf[32] panics.\r\n\r\n**Tests**\r\n\r\nTested v1 in op mainnet\r\nv2 is being tested in e2e\r\n\r\n**Additional context**\r\n\r\nNA\r\n\r\n**Metadata**\r\n\r\n- Fixes #20394 \r\n- Build on top of https://github.com/ethereum-optimism/optimism/pull/19928",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-28T17:19:49Z",
+      "mergedAt": null,
+      "additions": 8902,
+      "deletions": 231
+    },
+    {
+      "id": "PR_kwDODjvEJM7WMqGQ",
+      "title": "fix(kona): load DependencySet from embedded registry, oracle as fallback",
+      "author": "ajsutton",
+      "number": 20377,
+      "body": "`BootInfo::load` (kona-proof-interop) loaded the dependency set only from the preimage oracle, which the real on-chain `PreimageOracle` cannot supply (`local(8)`), so a fault-proof program couldn't complete once interop is active. This adds the embedded-first / oracle-fallback pattern already used for `rollup_configs` and `l1_config`: `kona_registry::DEPENDENCY_SETS` is now a `HashMap<u64, DependencySet>` keyed by L2 chain id and populated at compile time from `etc/depsets.json`. The build script aggregates one `DependencySet` per cluster from the superchain-registry's `[interop.dependencies]` blocks (validating cluster consistency and rejecting dangling members) and merges any custom depsets from `KONA_CUSTOM_CONFIGS_DIR/depsets.json` with cross-cluster collision detection. `BootInfo::load` does a single embedded lookup against the proof's first chain id and falls back to the oracle when the binary has no embedded depset for that chain. Cross-cluster and partial-coverage proofs aren't checked at boot — they fail downstream when interop message validation rejects messages whose source chain isn't in the chosen depset's `dependencies` map.\r\n\r\nTo break the `kona-interop ↔ kona-registry` dependency cycle, `DependencySet`/`ChainDependency`/`MESSAGE_EXPIRY_WINDOW` move to `kona-genesis` (re-exported by `kona-interop` for API compatibility). `ChainConfig` gains an optional `[interop]` field with `serde(skip_serializing_if = \"Option::is_none\")` so existing JSON round-trips are unchanged. Wire compatibility with op-supervisor's `StaticConfigDependencySet` is locked in by a fixture round-trip test.\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-28T04:02:44Z",
+      "mergedAt": null,
+      "additions": 808,
+      "deletions": 57
+    },
+    {
+      "id": "PR_kwDODjvEJM7UXQxw",
+      "title": "feat: zk go deployer",
+      "author": "ashitakah",
+      "number": 20219,
+      "body": "## Changed\r\n\r\n- **upgrade.go**  \r\n  Added support for `GameTypeZKDisputeGame` (type 10), including the `ZKDisputeGameConfig` struct and ABI encoding required for the OPCM V2 upgrade flow.\r\n\r\n- **add_game_type.go**  \r\n  Hooked `ZKDisputeGameType` into the game type registry for devstack environments.\r\n\r\n- **chain_intent.go**  \r\n  Introduced `ZKDisputeGameParams` and an optional `ZKDisputeGame` field on `AdditionalDisputeGame`.  \r\n  Added validation in `Check()` to reject any ZK game entry with:\r\n  - zero `Verifier` address  \r\n  - zero `AbsolutePrestate`  \r\n  This prevents silently broken game deployments.\r\n\r\n- **devfeatures.go**  \r\n  Added `ZKDisputeGameDevFlag`.  \r\n  The flag is automatically OR-ed into the `DevFeatureBitmap` in `pipeline/implementations.go` whenever any chain intent includes an `AdditionalDisputeGame` with `VMType == VMTypeZK`.  \r\n  This ensures `ZkDisputeGameImpl` is deployed without manual bitmap configuration.\r\n\r\n- **pipeline/implementations.go**  \r\n  Auto-enables `ZKDisputeGameDevFlag` when a ZK game is present in any chain’s `AdditionalDisputeGames`, then forwards it to `DeployImplementations`.\r\n\r\n- **DeployImplementations.s.sol / VerifyOPCM.s.sol**  \r\n  - Plumbed `zkDisputeGameImpl` through the deploy script `Implementations` struct.  \r\n  - Added it to `validatorGetterChecks` to ensure it is verified against the container during deployment.\r\n\r\n- **Remaining files**  \r\n  Added plumbing to read and persist `zkDisputeGameImpl` from `ReadImplementationAddresses` into state.\r\n\r\n---\r\n\r\n## Why the initial deployment files weren't touched\r\n\r\n- `DeployOPChain.s.sol` intentionally registers the ZK game slot with `enabled: false`.  \r\n- ZK is not intended to be activated for new chains at deployment time.  \r\n- Instead, it is enabled on existing chains through the OPCM V2 upgrade path.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-21T16:10:40Z",
+      "mergedAt": "2026-04-28T12:43:55Z",
+      "additions": 755,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDODjvEJM7TmUvH",
+      "title": "feat(kona): execute NUT bundles at Karst fork activation",
+      "author": "maurelian",
+      "number": 20157,
+      "body": "## Summary\n\nWires Karst NUT bundle execution into kona-node's payload derivation, matching op-node's behavior.\n\n- `kona-hardforks` gets a `build.rs` that reads `op-core/nuts/bundles/karst_nut_bundle.json` at compile time and emits Rust code constructing the `NutBundle` — keeps the crate `no_std` and serde-free at runtime.\n- The `Hardfork` trait grows `upgrade_gas()`; the stateful attributes builder adds that gas to the block gas limit when Karst activates, so upgrade transactions have headroom.\n- Test in `forks.rs` updated from `len() == 0` to `len() == 32` to reflect the populated bundle.\n\n## Stacking\n\nStacked on top of #20062 (PR 1 — NUT bundle types in `op-alloy-consensus`). The first two commits belong to that PR and will drop out on rebase once #20062 merges. Review only `c38d4300d8`.\n\n## Test plan\n\n- [x] `cargo nextest run` in `rust/kona` — 119 passed\n- [x] `test_karst_upgrade_txs` asserts 32 transactions\n- [x] `test_karst_upgrade_gas` asserts 51_600_000 gas\n- [ ] Waiting on #20062 to merge, then rebase onto develop",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-18T14:59:29Z",
+      "mergedAt": "2026-04-28T12:50:34Z",
+      "additions": 728,
+      "deletions": 71
+    },
+    {
+      "id": "PR_kwDODjvEJM7Wbjd7",
+      "title": "feat: migrate Interop activation to L2CM NUT bundle",
+      "author": "maurelian",
+      "number": 20397,
+      "body": "## Summary\n\nMigrates Interop hardfork activation toward the L2CM NUT bundle path. The branch currently includes:\n\n- Interop NUT bundle generation and committed `op-core/nuts/bundles/interop_nut_bundle.json`\n- op-core bundle embedding and fork lock entry\n- op-node activation wrappers for `setFeature(INTEROP)` and ETHLiquidity funding\n- kona Interop hardfork wrapper implementation over the generated bundle\n- removal of old hardcoded Interop upgrade transaction files and bytecode fixtures\n- op-e2e activation assertions for Interop state changes\n\n## Draft status / known follow-ups\n\nThis is intentionally opened as a draft. Current known blockers before marking ready:\n\n- `op-e2e/actions/proofs/nut_bundle_activation_test.go` still needs to compare against the full 30-tx Interop activation sequence, not just the 28 JSON bundle txs.\n- Go/kona source-hash intent casing needs to be resolved for byte-identical bundle transactions.\n- `go test ./op-e2e/actions/proofs -run \"TestActivationBlockNUTBundle\" -count=1` currently fails before reaching the new assertions because generated op-e2e contract bindings/artifacts are stale: `ReadImplementationAddressesOutput` has 19 Go fields while the ABI has 18.\n- Cleanup remains: remove the empty committed `test` file, fix `git diff --check` blank-line-at-EOF in `op-e2e/actions/interop/interop_fork_test.go`, and clean up the temporary `test commit` commits.\n\n## Verification so far\n\nPassed:\n\n```\ngo test ./op-node/rollup/derive/... -run \"TestUpgradeTransactionsInterop|TestInteropSetFeatureTx|TestInteropETHLiquidityFundingTx|TestPreparePayloadAttributes/interop\" -count=1\ngo test ./op-core/nuts/...\ngo test ./op-core/forks/...\n```\n\nFailed / blocked:\n\n```\ngo test ./op-e2e/actions/proofs -run \"TestActivationBlockNUTBundle\" -count=1\n```\n\nFailure: stale generated binding/artifact mismatch in `ReadImplementationAddressesOutput`.\n\nNot run: full contracts, kona, and full Go suites. `mise x` is blocked locally until this worktree's `mise.toml` is trusted.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-28T17:31:24Z",
+      "mergedAt": null,
+      "additions": 678,
+      "deletions": 1060
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 2986,
+    "deletions": 1978,
+    "files": 113,
+    "commitCount": 87
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "feat(kona): execute NUT bundles at Karst fork activation",
+      "prNumber": 20157,
+      "type": "feature",
+      "body": "## Summary\n\nWires Karst NUT bundle execution into kona-node's payload derivation, matching op-node's behavior.\n\n- `kona-hardforks` gets a `build.rs` that reads `op-core/nuts/bundles/karst_nut_bundle.json` at compile time and emits Rust code",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/crates/protocol/derive/src/attributes/stateful.rs",
+        "rust/kona/crates/protocol/hardforks/Cargo.toml",
+        "rust/kona/crates/protocol/hardforks/build.rs",
+        "rust/kona/crates/protocol/hardforks/src/forks.rs",
+        "rust/kona/crates/protocol/hardforks/src/karst.rs",
+        "rust/kona/crates/protocol/hardforks/src/lib.rs",
+        "rust/kona/crates/protocol/hardforks/src/traits.rs",
+        "rust/op-alloy/crates/consensus/src/lib.rs",
+        "rust/op-alloy/crates/consensus/src/nuts/mod.rs",
+        "op-e2e/actions/proofs/nut_bundle_activation_test.go",
+        "docker-bake.hcl",
+        "op-e2e/actions/proofs/karst_fork_test.go",
+        "rust/kona/crates/protocol/hardforks/build_helpers.rs",
+        "rust/kona/crates/protocol/hardforks/src/nut_bundle.rs",
+        "rust/kona/crates/protocol/hardforks/tests/build_codegen.rs",
+        "rust/kona/crates/protocol/hardforks/tests/fixtures/test_bundle.json",
+        "rust/kona/crates/protocol/hardforks/tests/fixtures/test_bundle_expected.rs",
+        "rust/kona/docker/apps/kona_app_generic.dockerfile",
+        "op-core/forks/forks.go",
+        "op-core/forks/forks_test.go",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile",
+        "rust/kona/justfile",
+        "op-core/nuts/bundles/karst_nut_bundle.json",
+        "op-core/nuts/fork_lock.toml",
+        "op-e2e/e2eutils/setup.go",
+        "ops/docker/op-stack-go/Dockerfile"
+      ]
+    },
+    {
+      "title": "feat: zk go deployer",
+      "prNumber": 20219,
+      "type": "feature",
+      "body": "## Changed\r\n\r\n- **upgrade.go**  \r\n  Added support for `GameTypeZKDisputeGame` (type 10), including the `ZKDisputeGameConfig` struct and ABI encoding required for the OPCM V2 upgrade flow.\r\n\r\n- **add_game_type.go**  \r\n  Hooked `ZKDisputeGame",
+      "files": [
+        "op-chain-ops/addresses/contracts.go",
+        "op-deployer/pkg/deployer/opcm/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/dispute_games.go",
+        "op-deployer/pkg/deployer/pipeline/dispute_games_test.go",
+        "op-deployer/pkg/deployer/pipeline/implementations.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/state/chain_intent.go",
+        "op-deployer/pkg/deployer/state/chain_intent_test.go",
+        "op-deployer/pkg/deployer/upgrade/embedded/upgrade.go",
+        "op-deployer/pkg/deployer/upgrade/embedded/upgrade_test.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "packages/contracts-bedrock/scripts/deploy/ReadImplementationAddresses.s.sol",
+        "op-acceptance-tests/tests/proofs/zk/setup_test.go",
+        "op-acceptance-tests/tests/proofs/zk/smoke_test.go",
+        "op-devstack/dsl/proofs/zk_dispute_game.go",
+        "op-challenger/game/fault/contracts/gameargs/gameargs.go",
+        "op-challenger/game/fault/contracts/gameargs/gameargs_test.go"
+      ]
+    },
+    {
+      "title": "refactor: replace implementations struct by implementations record array",
+      "prNumber": 20290,
+      "type": "refactor",
+      "body": "",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L2/IL2ContractsManager.sol",
+        "packages/contracts-bedrock/scripts/libraries/UpgradeUtils.sol",
+        "packages/contracts-bedrock/scripts/upgrade/GenerateNUTBundle.s.sol",
+        "packages/contracts-bedrock/snapshots/abi/L2ContractsManager.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/L2/L2ContractsManager.sol",
+        "packages/contracts-bedrock/src/libraries/L2ContractsManagerTypes.sol",
+        "packages/contracts-bedrock/src/libraries/Predeploys.sol",
+        "packages/contracts-bedrock/test/L2/L2ContractsManager.t.sol",
+        "packages/contracts-bedrock/test/scripts/GenerateNUTBundle.t.sol",
+        "packages/contracts-bedrock/src/libraries/L2ContractsManagerUtils.sol"
+      ]
+    },
+    {
+      "title": "contracts: fail closed resolving semver target branch",
+      "prNumber": 20374,
+      "type": "other",
+      "body": "## Summary\n- fail PR target branch resolution when GitHub does not return a non-empty `base.ref`\n- keep merge queue base parsing, but default non-PR/manual jobs to `develop` instead of `CIRCLE_BRANCH`\n- make `check-semver-diff.sh` fail when",
+      "files": [
+        "packages/contracts-bedrock/scripts/checks/check-semver-diff.sh",
+        "packages/contracts-bedrock/scripts/ops/get-target-branch.sh"
+      ]
+    },
+    {
+      "title": "fix(contracts): reject oz v5 initializable in opcm",
+      "prNumber": 20371,
+      "type": "bugfix",
+      "body": "## Summary\n- Remove OPCM's OZ v5 Initializable slot-clearing support path\n- Add an explicit unsupported revert when the OZ v5 ERC-7201 Initializable slot is passed or populated\n- Update OPCM utils tests and ABI snapshot for the new error\n\n#",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerUtils.sol",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerUtils.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerUtils.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerUtils.t.sol"
+      ]
+    },
+    {
+      "title": "chore(op-interop-filter): add ingestion diagnostics",
+      "prNumber": 20367,
+      "type": "other",
+      "body": "## Summary\n\nThis is a logging-only breakout from #19993. It keeps the low-risk diagnostic logging additions from that PR while leaving the ingestion pipeline, concurrency, and startup-scan changes out of scope.\n\nThe intent is to land the ob",
+      "files": [
+        "op-interop-filter/filter/backend.go",
+        "op-interop-filter/filter/logsdb_chain_ingester.go"
+      ]
+    },
+    {
+      "title": "chore(rust/scr): update superchain registry for rust crates",
+      "prNumber": 20366,
+      "type": "other",
+      "body": "## Description\r\n\r\nUpdate the scr for the rust binaries",
+      "files": [
+        "packages/contracts-bedrock/lib/superchain-registry",
+        "rust/kona/crates/protocol/registry/build.rs",
+        "rust/kona/crates/protocol/registry/etc/chainList.json",
+        "rust/kona/crates/protocol/registry/etc/configs.json",
+        "rust/kona/crates/protocol/registry/justfile",
+        "rust/op-reth/crates/chainspec/res/superchain-configs.tar",
+        "rust/op-reth/crates/chainspec/res/superchain_registry_commit",
+        "rust/op-reth/crates/chainspec/src/superchain/chain_specs.rs"
+      ]
+    },
+    {
+      "title": "fix(op-acceptance): default cannon-kona challenger on",
+      "prNumber": 20361,
+      "type": "bugfix",
+      "body": "## Summary\r\n\r\n- Default op-devstack challenger runtimes to cannon-kona enabled by replacing `EnableCannonKonaForChall` with `DisableCannonKonaForChall` that defaults to `false`.\r\n- Delete the now-dead `presets.WithChallengerCannonKonaEnable",
+      "files": [
+        "op-acceptance-tests/tests/base/withdrawal/withdrawal_test_helper.go",
+        "op-acceptance-tests/tests/interop/proofs-singlechain/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/interop/proofs/challenger_test.go",
+        "op-acceptance-tests/tests/interop/proofs/fpp/fpp_test.go",
+        "op-acceptance-tests/tests/interop/proofs/proposer_test.go",
+        "op-acceptance-tests/tests/interop/proofs/serial/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/interop/proofs/withdrawal/withdrawal_test.go",
+        "op-acceptance-tests/tests/isthmus/preinterop-singlechain/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/isthmus/preinterop/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/isthmus/preinterop/setup_test.go",
+        "op-acceptance-tests/tests/proofs/cannon/setup_test.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/presets/options_test.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/pre_genesis_super_game.go"
+      ]
+    },
+    {
+      "title": "fix(op-deployer): hydrate OpcmUtilsImpl and OpcmMigratorImpl in state",
+      "prNumber": 20403,
+      "type": "bugfix",
+      "body": "## Summary\n- `DeployImplementations` returns `OpcmUtils` and `OpcmMigrator` addresses from the deploy script, but these were not being mapped into the `ImplementationsContracts` struct written to `state.json`\n- Adds the two missing field as",
+      "files": [
+        "op-deployer/pkg/deployer/pipeline/implementations.go"
+      ]
+    },
+    {
+      "title": "fix(op-supernode): accept earliest SafeDB target",
+      "prNumber": 20400,
+      "type": "bugfix",
+      "body": "off by one bug where searching the safedb appears as not finding a result IF that result is the first item in the db.",
+      "files": [
+        "op-supernode/supernode/chain_container/virtual_node/virtual_node.go",
+        "op-supernode/supernode/chain_container/virtual_node/virtual_node_test.go"
+      ]
+    },
+    {
+      "title": "feat: add superdispute game implementations to  op-deployer output",
+      "prNumber": 20395,
+      "type": "feature",
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n* Add outputs for SuperFaultDispute Game to op-deployer\r\n\r\n**Tests**\r\n\r\n<!--\r\nPlease describe any tests you'v",
+      "files": [
+        "op-chain-ops/addresses/contracts.go",
+        "op-deployer/pkg/deployer/pipeline/implementations.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go"
+      ]
+    },
+    {
+      "title": "fix(kona): drop Base references from tests after upstream registry removal",
+      "prNumber": 20393,
+      "type": "bugfix",
+      "body": "## Summary\n\n- The superchain-registry submodule bump in #20366 crossed upstream PR [`#1212` (`superchain: remove base-mainnet|sepolia|sepolia-dev-0`)](https://github.com/ethereum-optimism/superchain-registry/pull/1212), which intentionally ",
+      "files": [
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_bank.rs",
+        "rust/kona/crates/protocol/registry/src/lib.rs",
+        "rust/kona/crates/protocol/registry/src/superchain.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/base_mainnet.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/base_sepolia.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/mod.rs"
+      ]
+    },
+    {
+      "title": "op-supernode: shared interop start from safe head",
+      "prNumber": 20392,
+      "type": "other",
+      "body": "## Tool Use Notice\r\nGenerated. In self-review.\r\n\r\n## Summary\r\n\r\nThis PR unifies interop startup around the `firstVerifiableTimestamp` path. Both backfill and non-backfill startup now consult the same safe-head-aware readiness gate before ve",
+      "files": [
+        "op-devstack/dsl/supernode.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/interop_test_access.go",
+        "op-supernode/supernode/activity/interop/log_backfill.go",
+        "op-supernode/supernode/activity/interop/log_backfill_test.go",
+        "op-supernode/supernode/activity/interop/logdb.go",
+        "op-supernode/supernode/activity/interop/verified_db.go",
+        "op-supernode/supernode/activity/interop/verified_db_test.go"
+      ]
+    },
+    {
+      "title": "feat: Make rollup config parsing non-strict",
+      "prNumber": 20379,
+      "type": "feature",
+      "body": "This allows unknown fields to be present in rollup config json files, which allows a smooth transition from the recent removal of the protocol versions field in #20317\r\n\r\nAlternative to https://github.com/ethereum-optimism/optimism/pull/203",
+      "files": [
+        "op-interop-filter/filter/config.go",
+        "op-node/rollup/types.go",
+        "op-node/service.go",
+        "rust/kona/crates/protocol/genesis/src/rollup.rs"
+      ]
+    },
+    {
+      "title": "chore(interopgen): remove stale todo comments",
+      "prNumber": 20378,
+      "type": "other",
+      "body": "## Summary\r\n\r\n`op-chain-ops/interopgen/deploy.go` carried two TODO(#19102) comments for including `L2CMFlag` support alongside the interop flag. \r\n\r\nWe're intentionally deferring this work. L2CM is on a short path to becoming the unconditio",
+      "files": [
+        "op-chain-ops/interopgen/deploy.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 138.74990185329017,
+      "prScore": 126.31190185329018,
+      "issueScore": 2,
+      "reviewScore": 10,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "axelKingsley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7201941?u=d3ed75b38d5b3079dfa593a217632ccb30b93610&v=4",
+      "totalScore": 131.7494875659005,
+      "prScore": 126.54948756590049,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 91.98442003208784,
+      "prScore": 68.04642003208784,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 76.10205147264158,
+      "prScore": 65.66405147264157,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 70.48652945447587,
+      "prScore": 70.48652945447587,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 69.7437738965761,
+      "prScore": 39.5437738965761,
+      "issueScore": 10,
+      "reviewScore": 20,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "theochap",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
+      "totalScore": 52.052406198887994,
+      "prScore": 46.61440619888799,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 46.864171367917024,
+      "prScore": 46.864171367917024,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 41,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 41,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 40.52047238406726,
+      "prScore": 35.52047238406726,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "dhyaniarun1993",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
+      "totalScore": 39.5087738965761,
+      "prScore": 35.5087738965761,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 29.702796072493232,
+      "prScore": 27.702796072493232,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 28,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 28,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 21.884147180559943,
+      "prScore": 21.884147180559943,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 19.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 18.113222148787134,
+      "prScore": 18.113222148787134,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 11.5,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 10.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "karlb",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/144773?v=4",
+      "totalScore": 8.976292546497023,
+      "prScore": 8.976292546497023,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 21,
+  "mergedPRs": 15,
+  "newIssues": 10,
+  "closedIssues": 11,
+  "activeContributors": 27
 }
