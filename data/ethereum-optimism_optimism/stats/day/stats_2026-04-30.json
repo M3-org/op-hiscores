@@ -5,20 +5,697 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-04-30 to 2026-05-01, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-04-30 to 2026-05-01, ethereum-optimism/optimism had 19 new PRs (14 merged), 11 new issues, and 32 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABAIILhw",
+      "title": "SDM: Review how to allow for multiple policies",
+      "author": "nonsense",
+      "number": 20218,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2026-04-21T15:02:06Z",
+      "closedAt": "2026-04-30T11:56:51Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABA7rYbw",
+      "title": "op-reth: ships zero default bootnodes for OP Stack chains; cannot bootstrap discv5 without --bootnodes",
+      "author": "sebastianst",
+      "number": 20453,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`op-reth` (in this monorepo at [`rust/op-reth/`](https://github.com/ethereum-optimism/optimism/tree/559c958d0746670420398195bd605c5c2055f02f/rust/op-reth)) ships **zero hardcoded P2P bootnodes for any OP Stack chain**. A fresh node started with `--chain optimism`, `--chain base`, or any other OP chain gets an empty discv5 bootnode list from the chainspec and cannot bootstrap unless the operator passes `--bootnodes` (or sets it in a config file, or supplies `--trusted-peers`).\n\nThis is a behavioural regression vs `op-geth`, which auto-applies a built-in OP-Stack bootnode pool to any chain selected via `--op-network`.\n\n## Evidence\n\n`OpChainSpec::bootnodes()` is a pure delegation to upstream `reth-chainspec`:\n\nhttps://github.com/ethereum-optimism/optimism/blob/559c958d0746670420398195bd605c5c2055f02f/rust/op-reth/crates/chainspec/src/lib.rs#L290-L292\n\n```rust\nfn bootnodes(&self) -> Option<Vec<NodeRecord>> {\n    self.inner.bootnodes()\n}\n```\n\nUpstream `reth-chainspec` is pinned in [`rust/Cargo.toml`](https://github.com/ethereum-optimism/optimism/blob/559c958d0746670420398195bd605c5c2055f02f/rust/Cargo.toml#L313-L322) at `paradigmxyz/reth` rev `27bfddeada3953edc22759080a3659ccea62ca1f`.\n\nAt that rev, `ChainSpec::bootnodes()` ([`crates/chainspec/src/spec.rs#L782-L792`](https://github.com/paradigmxyz/reth/blob/27bfddeada3953edc22759080a3659ccea62ca1f/crates/chainspec/src/spec.rs#L782-L792)) handles only Ethereum L1 chains:\n\n```rust\npub fn bootnodes(&self) -> Option<Vec<NodeRecord>> {\n    use NamedChain as C;\n    match self.chain.try_into().ok()? {\n        C::Mainnet => Some(mainnet_nodes()),\n        C::Sepolia => Some(sepolia_nodes()),\n        C::Holesky => Some(holesky_nodes()),\n        C::Hoodi   => Some(hoodi_nodes()),\n        _ => None,\n    }\n}\n```\n\nThere are no `OP_BOOTNODES`/`op_nodes()` constants at this rev — [`crates/net/peers/src/bootnodes.rs`](https://github.com/paradigmxyz/reth/blob/27bfddeada3953edc22759080a3659ccea62ca1f/crates/net/peers/src/bootnodes.rs) is a single-file Ethereum-only module.\n\nNetwork startup pulls bootnodes via:\n\nhttps://github.com/ethereum-optimism/optimism/blob/559c958d0746670420398195bd605c5c2055f02f/rust/op-reth/crates/node/src/node.rs#L1414-L1422\n\n```rust\n.discovery_v5(args.discovery.discovery_v5_builder(\n    rlpx_socket,\n    ctx.config()\n        .network\n        .resolved_bootnodes()\n        .or_else(|| ctx.chain_spec().bootnodes())\n        .unwrap_or_default(),\n))\n```\n\nFor any OP chain, layer 2 (`chain_spec().bootnodes()`) is `None`, so unless the operator supplies `--bootnodes` the discv5 bootnode set is empty.\n\nConfirmed not extracted from the embedded superchain-registry tarball either — [`crates/chainspec/src/superchain/configs.rs`](https://github.com/ethereum-optimism/optimism/blob/559c958d0746670420398195bd605c5c2055f02f/rust/op-reth/crates/chainspec/src/superchain/configs.rs) reads `genesis` and `ChainMetadata` (hardfork timestamps, chain id, batchInbox) only. Grepping the entire `superchain/` subtree for `bootnode|enode` returns zero matches.\n\n## Comparison with op-geth\n\nop-geth ships two static enode pools in [`params/bootnodes.go#L82-L111`](https://github.com/ethereum-optimism/op-geth/blob/df72b4274e121aff5b5e96b15620404d505372c2/params/bootnodes.go#L82-L111):\n\n- `V5OPBootnodes` — 11 enodes (3 OP Labs, 5 Base, 3 Uniswap Labs)\n- `V5OPTestnetBootnodes` — 8 enodes (3 OP Labs, 2 Base, 3 Uniswap Labs)\n\nSelection happens in [`cmd/utils/flags.go#L1407-L1422`](https://github.com/ethereum-optimism/op-geth/blob/df72b4274e121aff5b5e96b15620404d505372c2/cmd/utils/flags.go#L1407-L1422):\n\n```go\ncase ctx.IsSet(OPNetworkFlag.Name):\n    network := ctx.String(OPNetworkFlag.Name)\n    if strings.Contains(strings.ToLower(network), \"mainnet\") {\n        urls = params.V5OPBootnodes\n    } else {\n        urls = params.V5OPTestnetBootnodes\n    }\n```\n\n`--op-network` accepts any chain in `superchain.ChainNames()` (the embedded superchain registry — ~60+ chains). Selection between mainnet/testnet pool is purely a substring `mainnet` check; there's no per-chain customization. Same generic pool for every OP Stack chain known to the registry.\n\n## Comparison with the superchain-registry\n\nThe upstream `ethereum-optimism/superchain-registry` does **not** publish bootnode data per chain — verified by grepping `superchain/configs/` in the upstream repo. The registry's per-chain TOML files (`op.toml`, `base.toml`, `unichain.toml`, …) carry `name`, `public_rpc`, `chain_id`, `hardforks`, `genesis`, `roles`, `addresses` — no `bootnodes` field anywhere.\n\nSo a \"read bootnodes from the registry\" fix isn't just a wiring change in op-reth — it requires a schema extension to the registry first (and per-chain ownership to populate the data).\n\n## Two paths forward\n\n### Option A — Mirror op-geth's static pool (quick parity)\n\nReplace the pure delegation in [`rust/op-reth/crates/chainspec/src/lib.rs#L290-L292`](https://github.com/ethereum-optimism/optimism/blob/559c958d0746670420398195bd605c5c2055f02f/rust/op-reth/crates/chainspec/src/lib.rs#L290-L292) with a `match` that hardcodes the same V5OPBootnodes / V5OPTestnetBootnodes pool that op-geth ships, keyed off `Chain::is_optimism()` / `Chain::is_testnet()`:\n\n```rust\nfn bootnodes(&self) -> Option<Vec<NodeRecord>> {\n    if self.inner.chain.is_optimism() {\n        if self.inner.chain.is_testnet() {\n            return Some(op_testnet_nodes());\n        }\n        return Some(op_mainnet_nodes());\n    }\n    self.inner.bootnodes()\n}\n```\n\nwith a small companion module under `rust/op-reth/crates/chainspec/src/` containing the two enode lists, copied from op-geth as the source of truth (the lists are intentionally cross-referenced — op-geth is canonical).\n\n**Pros**\n\n- Single-file change, fully self-contained in the monorepo.\n- No upstream-reth or superchain-registry coordination.\n- Achieves immediate behavioural parity with op-geth.\n- Same generic-pool semantics op-geth already has (so users running op-reth get the same default, no better, no worse).\n\n**Cons**\n\n- Same coarse semantics as op-geth: one pool serves every OP Stack chain. Long-tail chains may not actually peer via these enodes.\n- Duplicates op-geth's hardcoded list. Drift risk: if op-geth bumps the pool (e.g. when a sequencer rotates IPs), op-reth needs a manual sync.\n\n### Option B — Add bootnodes to the superchain-registry schema (long-term)\n\n1. Extend the registry's per-chain config schema with an optional `bootnodes` field (array of enode URLs).\n2. Have chain operators populate it (OP, Base, Unichain, Worldchain, Zora, Mode, Ink, Fraxtal, Soneium, Celo, …).\n3. Bump op-reth's vendored `chain_metadata.rs` to surface the field, and have `OpChainSpec::bootnodes()` return it when present, falling back to `inner.bootnodes()` otherwise.\n4. Optionally retire op-geth's V5OPBootnodes lists in favour of the registry-driven list, with a transition window.\n\n**Pros**\n\n- Per-chain ownership: each chain operator controls its own bootnode list and can rotate without coordinating with EL clients.\n- Single source of truth across op-geth, op-reth, and any future OP-Stack EL.\n- Removes the OP-Labs / Base / Uniswap-only bias of the current static pool.\n\n**Cons**\n\n- Multi-repo, multi-team coordination: superchain-registry schema RFC, registry PRs from N chain operators, op-reth + op-geth wiring.\n- Not blocking on this issue — Option A can ship first and Option B can land independently later.\n\n## Recommendation\n\nShip **Option A** now to close the parity gap. It's a one-file, self-contained change with no external dependencies. Open a separate ecosystem RFC for Option B (registry schema + per-chain operator buy-in).\n\n## Test plan\n\n- Unit test: assert `OpChainSpec::for(Chain::optimism_mainnet()).bootnodes()` returns 11 enodes; same for `base`, `unichain`, `worldchain`, etc.\n- Unit test: `OpChainSpec::for(Chain::optimism_sepolia()).bootnodes()` returns 8 enodes; same for sepolia variants of each chain.\n- Smoke test: `op-reth node --chain optimism --discovery.disable-discovery=false` (no `--bootnodes`) connects to ≥1 peer within 60s on a fresh datadir.\n- Compare bootnode lists byte-for-byte with op-geth's `params.V5OPBootnodes` to prevent drift.\n\n## Verified against\n\n- `ethereum-optimism/optimism` `origin/develop` @ `559c958d0746670420398195bd605c5c2055f02f` (2026-04-30)\n- `paradigmxyz/reth` pinned rev `27bfddeada3953edc22759080a3659ccea62ca1f`\n- `ethereum-optimism/op-geth` `origin/optimism` @ `df72b4274e121aff5b5e96b15620404d505372c2` (2026-04-28)\n- `ethereum-optimism/superchain-registry` `main` (live, fetched 2026-04-30)\n\n🤖 *Generated by Claude Code*\n\n",
+      "createdAt": "2026-04-30T11:02:13Z",
+      "closedAt": "2026-04-30T13:44:05Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7zhngf",
+      "title": "op-supernode: simpleChainContainer.vn field accessed without synchronization",
+      "author": "ajsutton",
+      "number": 19573,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe `c.vn` field on `simpleChainContainer` is a plain pointer accessed from multiple goroutines without mutex protection or `atomic.Pointer`. This is a data race.\n\n## Details\n\n**Writers:**\n- `Start()` restart loop goroutine — assigns `c.vn` when creating a new VirtualNode\n\n**Readers (from other goroutines):**\n- `PauseAndStopVN()` — reads `c.vn` to call Stop\n- `Stop()` — reads `c.vn` to call Stop\n- `SyncStatus()` — reads `c.vn`\n\nThe flow control uses atomic bools (`pause`, `stop`) which create memory barriers, but there is a check-then-act window between setting the pause flag and reading `c.vn`. For example, in `PauseAndStopVN`:\n\n```go\nc.Pause(ctx)       // sets pause=true\nif c.vn == nil {   // reads c.vn — but Start() may have just assigned a new VN\n    return nil\n}\nreturn c.vn.Stop() // could be a different VN than what was checked\n```\n\nBetween `Pause()` and the `c.vn` read, the restart loop can create and assign a fresh VN (line 212 in `Start()`), then see the pause flag and sleep. The caller then stops this new VN, but the loop can wake and create yet another.\n\n## Why it hasn't caused failures yet\n\n1. `VirtualNode.Stop()` is idempotent (internal mutex, returns nil if already stopped)\n2. Go GC prevents use-after-free on the old pointer\n3. The window is very small in practice\n4. The restart loop checks pause immediately after VN creation\n\n## Suggested fix\n\nProtect `c.vn` with a `sync.Mutex` or use `atomic.Pointer[virtual_node.VirtualNode]` (Go 1.19+). The mutex approach is simpler since `Start()` already holds the only write path.\n\n## Context\n\nFound during review of #19571. The `Stop()` method has the same pre-existing pattern — `PauseAndStopVN` just inherits it. Not a regression, but worth fixing.\n\n**File:** `op-supernode/supernode/chain_container/chain_container.go`",
+      "createdAt": "2026-03-17T01:28:12Z",
+      "closedAt": "2026-04-30T08:37:25Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABAvnBWQ",
+      "title": "op-reth: proofs init panics on nodes synced with reth v1 storage format",
+      "author": "dhyaniarun1993",
+      "number": 20394,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Description \n\nRunning op-reth proofs init on a production OP Mainnet node panics with:\n\n```\nindex out of bounds: the len is 1 but the index is 32\n```\n\nThe panic originates in PackedStoredNibbles::from_compact (nibbles.rs:208), which reads buf[32] as the nibble count. On nodes that were first synced before reth introduced v2 packed storage, trie keys in the AccountsTrie MDBX table are stored in v1 format — 1 nibble per byte, variable length (1–64 bytes). A 1-nibble key is just 1 byte, so indexing buf[32] panics.\n\nRoot cause:\n`InitializationJob::initialize_accounts_trie` hardcodes `tables::PackedAccountsTrie` (v2 codec, 33-byte keys) regardless of which format the reth node actually uses. Reth records the active storage format in its `Metadata` table under `storage_settings`. The init job ignores this, always applying the v2 codec to what may be v1 data.",
+      "createdAt": "2026-04-28T16:59:34Z",
+      "closedAt": "2026-04-30T08:10:23Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABA_g7JA",
+      "title": "op-dispute-mon: ability to query supernode's VNs to get output roots",
+      "author": "pauldowman",
+      "number": 20476,
+      "repository": "ethereum-optimism/optimism",
+      "body": "The transition period for operators that run supernodes and op-dispute-mon will require running two instances of op-dispute-mon until the output root games have finalized. Currently, dispute-mon relies specifically on cl nodes to enrich FaultDisputeGames. And supernodes only to enrich SuperFaultDisputeGames. \n\nTo simplify dispute-mon configuration and the infra around it, it would make sense for dispute-mon to query supernode's VNs to get output roots. This way one can run a dispute-mon that specifies only supernode-rpcs to monitor super and non-super dispute games.",
+      "createdAt": "2026-04-30T22:10:52Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7P9mPR",
+      "title": "feat(op-reth): Proof store v2",
+      "author": "dhyaniarun1993",
+      "number": 19928,
+      "body": "**Description**\r\n\r\nThis PR introduces MdbxProofsStorageV2, an alternate MDBX backend for the op-proofs subsystem that replaces the v1 versioned-value schema with `3-table-per-domain pattern` (current state + changeset + sharded history bitmap).\r\n\r\n**Motivation**\r\n\r\nThe proof storage ExEx has two sync paths:\r\n- Fast path: block updates arrive in real-time from the ExEx notification stream and are persisted directly.\r\n- Slow path: used during catch-up, where the node re-executes blocks and recalculates state roots to reconstruct the proof data.\r\n\r\nThe primary motivation is improving slow-path throughput. One of the bottleneck in the slow path is state root calculation, which requires reading the current state of every modified trie node and account. In the v1 schema these are stored as versioned DupSort entries — reading the latest value requires seeking past all prior versions. Under v2, the current state table holds exactly one row per key, so every read during state root computation is a direct O(1) lookup, eliminating the version scan entirely.\r\n\r\n**Tests**\r\n\r\n`tests/lib.rs` and `tests/live.rs` refactored to `#[test_case]` parameterised tests — each scenario runs against inmemory, mdbx (v1), and mdbxv2 backends from a single test body.\r\n\r\nDevstack: `op-reth-with-proof-v2` EL kind\r\n`op-devstack/sysgo/mixed_runtime.go` and `tests/proofs/utils/preset.go` support a new `MixedL2ELOpRethV2` kind so integration tests can target the v2 backend via `OP_DEVSTACK_PROOF_VALIDATOR_EL=op-reth-with-proof-v2`.\r\n\r\n\r\n**Metadata**\r\n\r\nBlocked on https://github.com/ethereum-optimism/optimism/pull/19909",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-04T14:35:16Z",
+      "mergedAt": "2026-04-30T13:08:24Z",
+      "additions": 8695,
+      "deletions": 171
+    },
+    {
+      "id": "PR_kwDODjvEJM7XAOYE",
+      "title": "feat(op-reth): Wire up the Engine in Exex",
+      "author": "dhyaniarun1993",
+      "number": 20450,
+      "body": "## Description\r\n\r\n### Summary\r\n\r\nWires the proofs ExEx to `EngineHandle`, the channel-based engine introduced in earlier PRs in this series. The engine runs all trie state mutations on a dedicated background thread and exposes a typed message queue — making the serial-call invariant structural rather than enforced by convention.\r\n\r\n**Tests**\r\n\r\nUnit test cases updated\r\n\r\n**Additional context**\r\n\r\nNA\r\n\r\n**Metadata**\r\n\r\nDepends on https://github.com/ethereum-optimism/optimism/pull/20411, https://github.com/ethereum-optimism/optimism/pull/20414 and https://github.com/ethereum-optimism/optimism/pull/20419",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-30T07:33:41Z",
+      "mergedAt": null,
+      "additions": 2842,
+      "deletions": 1000
+    },
+    {
+      "id": "PR_kwDODjvEJM7XHVIe",
+      "title": "chore(rust): bump reth to v2.2.0",
+      "author": "sebastianst",
+      "number": 20459,
+      "body": "## Summary\n\n- Bumps reth from floating rev `27bfddeada` (~v2.1.0) to **v2.2.0** (`88505c7fcb`)\n- Adapts to alloy-evm 0.34 / alloy-* 2.0.4 API changes\n- Workspace `cargo check`, `clippy -D warnings`, and `cargo +nightly fmt --check` all pass\n\n## Dependency bumps\n\n| crate | old | new |\n|---|---|---|\n| `reth` (git rev) | `27bfddeada` | `88505c7fcb` (v2.2.0) |\n| `reth-codecs` / `-codecs-derive` / `-primitives-traits` / `-rpc-traits` / `-zstd-compressors` | 0.3.0 | 0.3.1 |\n| `alloy-evm` | 0.33.0 | 0.34.0 |\n| all `alloy-*` (consensus/eips/rpc-types/network/...) | 2.0.0 | 2.0.4 |\n| `alloy-eip7928` | 0.3.3 | 0.3.4 |\n| `roaring` (lockfile only) | 0.11.3 | 0.11.4 |\n\n`roaring` had to be bumped explicitly: reth v2.2.0's `IntegerList(RoaringTreemap)` derives `Eq`, and `RoaringTreemap: Eq` only landed in 0.11.4 (released 2026-04-24).\n\n## Upstream API changes adapted\n\n**`BlockExecutor::commit_transaction` is now infallible** (returns `GasOutput`, not `Result<GasOutput, _>`). All fallible work moved into `execute_transaction_without_commit`:\n- depositor account lookup → cached as `OpTxResult::depositor_nonce`\n- `apply_post_exec_refund_to_state` → applied to `result.state` in-place\n\n**`TxResult` trait** now requires `Send + 'static` on `Self` and `HaltReason`. Added matching bounds to `OpTxResult`'s impl and all relevant `BlockExecutorFactory` / `BlockExecutor` impls.\n\n**`BlockExecutorFactory`** gained two associated types:\n- `type TxExecutionResult: TxResult<HaltReason = ...>;`\n- `type Executor<'a, DB, I>: BlockExecutor<...>` (GAT)\n`create_executor` now returns `Self::Executor<'a, DB, I>` (concrete) instead of `impl BlockExecutorFor<...>`.\n\n**`BlockExecutorFor` is now a type alias**, not a trait — `<F as BlockExecutorFactory>::Executor<'a, DB, I>`. Replaced `impl BlockExecutorFor<...> + PostExecExecutorExt` usages with `impl BlockExecutor<Transaction=..., Receipt=...> + PostExecExecutorExt + 'a` and `BlockBuilder<Executor: PostExecExecutorExt>` associated-type bounds.\n\n**`ConsensusError::Other`** now wraps `Arc<dyn Error + Send + Sync>`. String call sites switched to the new `ConsensusError::msg(...)` constructor.\n\n**`TransactionPool`** gained `get_blobs_for_versioned_hashes_v4`. Delegated through the `OpPool` wrapper.\n\n**`TransactionSource::Block`** gained a `block_timestamp: u64` field. Populated from `meta.timestamp`.\n\n**`HeaderMut`** gained `set_mix_hash` / `set_extra_data` / `set_parent_beacon_block_root`. Implemented in the `CustomHeader` example.\n\n**`reth-rpc-eth-api`** internals required propagating `<R::Transaction as TransactionEnvelope>::TxType: Send + 'static` through `OpEvmConfig`'s `ConfigureEvm` and `ConfigureEngineEvm` impls.\n\n## Files changed (13)\n\n- `rust/Cargo.toml` (deps)\n- `rust/Cargo.lock` (resolution + roaring 0.11.4)\n- `rust/alloy-op-evm/src/block/mod.rs` (BlockExecutor + factory restructure)\n- `rust/op-reth/crates/consensus/src/lib.rs` (ConsensusError::msg)\n- `rust/op-reth/crates/evm/src/lib.rs` (Send bounds)\n- `rust/op-reth/crates/evm/src/post_exec_ext.rs` (BlockExecutorFor → BlockExecutor)\n- `rust/op-reth/crates/node/src/engine.rs` (ConsensusError::msg)\n- `rust/op-reth/crates/payload/src/builder.rs` (GasOutput unwrapping)\n- `rust/op-reth/crates/rpc/src/eth/transaction.rs` (block_timestamp)\n- `rust/op-reth/crates/txpool/src/pool.rs` (v4 blob delegation)\n- `rust/op-reth/examples/custom-node/src/evm/config.rs` (return types)\n- `rust/op-reth/examples/custom-node/src/evm/executor.rs` (factory + commit_transaction)\n- `rust/op-reth/examples/custom-node/src/primitives/header.rs` (new HeaderMut methods)\n\n## Test plan\n\n- [x] `cargo check --workspace --all-targets` passes (no errors, no warnings)\n- [x] `just lint-clippy` passes (`-D warnings`)\n- [x] `just fmt-check` passes\n- [ ] `just test-unit` — author's local box ran out of disk; running locally\n- [ ] CI\n\n## Notes\n\n- Replaces #20412 (which targeted v2.1.0 only).\n- The roaring bump in `Cargo.lock` is required — without it the workspace fails to compile against reth v2.2.0's `IntegerList`. No workspace-level constraint added; cargo's normal resolution picks 0.11.4 on a fresh lockfile.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-30T13:14:22Z",
+      "mergedAt": "2026-04-30T18:21:45Z",
+      "additions": 757,
+      "deletions": 614
+    },
+    {
+      "id": "PR_kwDODjvEJM7WbWi-",
+      "title": "fix(op-reth): detect reth storage layout in InitializationJob",
+      "author": "dhyaniarun1993",
+      "number": 20396,
+      "body": "**Description**\r\n\r\nRunning op-reth proofs init on a production OP Mainnet node (synced before reth introduced v2 packed storage) panics with:\r\n\r\n\r\nindex out of bounds: the len is 1 but the index is 32\r\nThe panic is in PackedStoredNibbles::from_compact, which always reads buf[32] as the nibble count. On v1-storage nodes, AccountsTrie keys are variable-length (1 nibble per byte, 1–64 bytes). A 1-nibble path is 1 byte — indexing buf[32] panics.\r\n\r\n**Tests**\r\n\r\nTested v1 in op mainnet\r\nv2 is being tested in e2e\r\n\r\n**Additional context**\r\n\r\nNA\r\n\r\n**Metadata**\r\n\r\n- Fixes #20394 \r\n- Build on top of https://github.com/ethereum-optimism/optimism/pull/19928",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-28T17:19:49Z",
+      "mergedAt": "2026-04-30T08:10:22Z",
+      "additions": 205,
+      "deletions": 64
+    },
+    {
+      "id": "PR_kwDODjvEJM7LZ9HD",
+      "title": "feat(op-acceptance): port MessageExpiry interop proof test",
+      "author": "ajsutton",
+      "number": 19632,
+      "body": "## Summary\n\n- Ports `TestInteropFaultProofs_MessageExpiry` from op-e2e to the acceptance test framework\n- Adds `RunMessageExpiryTest` in `superfaultproofs.go` with 2 subtests (Consolidate-ExpectInvalidPendingBlock, Consolidate-ReplaceInvalidBlocks)\n- Tests that expired cross-chain messages are detected and the invalid block is replaced\n- Adds `WithMessageExpiryWindow` preset option to configure a short (10s) expiry window for testing\n- Flow: send init message → pause interop → wait past expiry window → send exec message → capture optimistic state → resume interop → verify block replacement → verify consolidation\n\n## Test plan\n\n- [ ] CI: `TestInteropFaultProofs_MessageExpiry` passes both FPP and challenger variants\n- [ ] `WithMessageExpiryWindow` preset option works correctly with supernode proofs preset\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-03-18T02:57:08Z",
+      "mergedAt": null,
+      "additions": 172,
+      "deletions": 4
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 26928,
+    "deletions": 2227,
+    "files": 143,
+    "commitCount": 70
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "feat(op-reth): Proof store v2",
+      "prNumber": 19928,
+      "type": "feature",
+      "body": "**Description**\r\n\r\nThis PR introduces MdbxProofsStorageV2, an alternate MDBX backend for the op-proofs subsystem that replaces the v1 versioned-value schema with `3-table-per-domain pattern` (current state + changeset + sharded history bitm",
+      "files": [
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/init.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/prune.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/unwind.rs",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/proof_history.rs",
+        "rust/op-reth/crates/rpc/src/debug.rs",
+        "rust/op-reth/crates/rpc/src/state.rs",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/trie/src/api.rs",
+        "rust/op-reth/crates/trie/src/cursor.rs",
+        "rust/op-reth/crates/trie/src/cursor_factory.rs",
+        "rust/op-reth/crates/trie/src/db/cursor.rs",
+        "rust/op-reth/crates/trie/src/db/cursor_v2.rs",
+        "rust/op-reth/crates/trie/src/db/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/key.rs",
+        "rust/op-reth/crates/trie/src/db/models/kv.rs",
+        "rust/op-reth/crates/trie/src/db/models/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/value.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2.rs",
+        "rust/op-reth/crates/trie/src/in_memory.rs",
+        "rust/op-reth/crates/trie/src/initialize.rs",
+        "rust/op-reth/crates/trie/src/lib.rs",
+        "rust/op-reth/crates/trie/src/live.rs",
+        "rust/op-reth/crates/trie/src/metrics.rs",
+        "rust/op-reth/crates/trie/src/proof.rs",
+        "rust/op-reth/crates/trie/src/provider.rs",
+        "rust/op-reth/crates/trie/src/prune/pruner.rs",
+        "rust/op-reth/crates/trie/tests/lib.rs",
+        "rust/op-reth/crates/trie/tests/live.rs",
+        "rust/op-reth/tests/proofs/utils/preset.go",
+        "rust/op-reth/crates/trie/src/db/common.rs",
+        "rust/op-reth/crates/trie/src/error.rs",
+        "rust/op-reth/tests/justfile",
+        "rust/op-reth/bin/src/main.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/account.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/account_trie.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/storage.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/storage_trie.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/init.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/metrics.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/provider_ro.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/provider_rw.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/read.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/write.rs",
+        "op-devstack/sysgo/multichain_supernode_runtime.go"
+      ]
+    },
+    {
+      "title": "fix(op-supernode): guard chain container vn against torn interface read",
+      "prNumber": 20211,
+      "type": "bugfix",
+      "body": "Fixes panic at: https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/123123/workflows/65b0b312-f33d-4a35-b114-b5941ee8719b/jobs/4873005\r\n\r\n---\r\n\r\nSupernode.Start fires the Interop activity and chain-container goroutines in p",
+      "files": [
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/virtual_node/virtual_node.go"
+      ]
+    },
+    {
+      "title": "refactor(cannon-builder): reduce to apt-only MIPS64 cross-toolchain",
+      "prNumber": 20253,
+      "type": "refactor",
+      "body": "Reduces `cannon-builder` to its apt-only core: the MIPS64 cross-toolchain plus a handful of C/C++ build tools that can't be deterministically pinned outside a Docker image. Rust, target spec, and build env vars are dropped — consumers will ",
+      "files": [
+        "rust/kona/docker/cannon/cannon.dockerfile"
+      ]
+    },
+    {
+      "title": "fix(op-reth): detect reth storage layout in InitializationJob",
+      "prNumber": 20396,
+      "type": "bugfix",
+      "body": "**Description**\r\n\r\nRunning op-reth proofs init on a production OP Mainnet node (synced before reth introduced v2 packed storage) panics with:\r\n\r\n\r\nindex out of bounds: the len is 1 but the index is 32\r\nThe panic is in PackedStoredNibbles::f",
+      "files": [
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "rust/op-reth/bin/src/main.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/init.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/prune.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/unwind.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/proof_history.rs",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/trie/src/db/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/key.rs",
+        "rust/op-reth/crates/trie/src/db/models/kv.rs",
+        "rust/op-reth/crates/trie/src/db/models/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/value.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/account.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/account_trie.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/storage.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/storage_trie.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/init.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/metrics.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/provider_ro.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/provider_rw.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/read.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/write.rs",
+        "rust/op-reth/crates/trie/src/error.rs",
+        "rust/op-reth/crates/trie/src/initialize.rs",
+        "rust/op-reth/crates/trie/src/lib.rs",
+        "rust/op-reth/crates/trie/src/provider.rs",
+        "rust/op-reth/crates/trie/tests/lib.rs",
+        "rust/op-reth/crates/trie/tests/live.rs",
+        "rust/op-reth/tests/justfile",
+        "rust/op-reth/tests/proofs/utils/preset.go"
+      ]
+    },
+    {
+      "title": "docs: update permissionless migration guide for current op-challenger flags",
+      "prNumber": 20477,
+      "type": "docs",
+      "body": "Updates `docs/public-docs/chain-operators/tutorials/migrating-permissionless.mdx`:\r\n\r\n- Replaces stale `--trace-type` / `OP_CHALLENGER_TRACE_TYPE` with the canonical `--game-types` / `OP_CHALLENGER_GAME_TYPES` (the old names still work as a",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/migrating-permissionless.mdx"
+      ]
+    },
+    {
+      "title": "docs: fix broken links and typos in public docs",
+      "prNumber": 20467,
+      "type": "bugfix",
+      "body": "small docs fixes\r\n",
+      "files": [
+        "docs/public-docs/app-developers/tools/data/oracles.mdx",
+        "docs/public-docs/notices/archive/blob-fee-bug.mdx",
+        "docs/public-docs/rust/kona/node/design/intro.mdx"
+      ]
+    },
+    {
+      "title": "ci: clean up contracts CI and RPC secrets",
+      "prNumber": 20465,
+      "type": "refactor",
+      "body": "## Summary\n\nThis PR cleans up the contracts-related CircleCI configuration and moves authenticated RPC usage behind CircleCI contexts.\n\n- Simplifies the contracts feature-test matrix by removing redundant `OPCM_V2` combinations now that OPC",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/l2-rpcs.json",
+        "justfile",
+        "ops/scripts/source-ci-archive-rpcs.sh",
+        "packages/contracts-bedrock/scripts/checks/check-semver-diff.sh",
+        "packages/contracts-bedrock/scripts/ops/get-target-branch.sh",
+        "rust/kona/crates/protocol/registry/etc/configs.json"
+      ]
+    },
+    {
+      "title": "op-proposer/op-challenger: add supernode CLI flags",
+      "prNumber": 20460,
+      "type": "other",
+      "body": "## Summary\r\n- Add the multi-value `op-proposer --supernode-rpcs` flag and bind it to the existing supernode proposer config/runtime path.\r\n- Wire `op-challenger --supernode-rpc` CLI config to select the existing `SuperNodeClient` path.\r\n- P",
+      "files": [
+        "op-challenger/cmd/main_test.go",
+        "op-challenger/config/config_test.go",
+        "op-challenger/flags/flags.go",
+        "op-proposer/flags/flags.go",
+        "op-proposer/proposer/config.go",
+        "op-proposer/proposer/config_test.go"
+      ]
+    },
+    {
+      "title": "chore(rust): bump reth to v2.2.0",
+      "prNumber": 20459,
+      "type": "other",
+      "body": "## Summary\n\n- Bumps reth from floating rev `27bfddeada` (~v2.1.0) to **v2.2.0** (`88505c7fcb`)\n- Adapts to alloy-evm 0.34 / alloy-* 2.0.4 API changes\n- Workspace `cargo check`, `clippy -D warnings`, and `cargo +nightly fmt --check` all pass",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/receipt_builder.rs",
+        "rust/deny.toml",
+        "rust/op-reth/crates/consensus/src/lib.rs",
+        "rust/op-reth/crates/evm/src/post_exec_ext.rs",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/txpool/src/pool.rs",
+        "rust/op-reth/examples/custom-node/src/evm/config.rs",
+        "rust/op-reth/examples/custom-node/src/evm/executor.rs",
+        "rust/op-reth/examples/custom-node/src/primitives/header.rs"
+      ]
+    },
+    {
+      "title": "feat(op-reth): default bootnodes for OP Stack chains",
+      "prNumber": 20458,
+      "type": "feature",
+      "body": "## Summary\n\n`OpChainSpec::bootnodes()` previously delegated unconditionally to the upstream reth `ChainSpec::bootnodes()`, which only handles Ethereum L1 chains and returns `None` for any OP chain. A fresh `op-reth --chain optimism` (or bas",
+      "files": [
+        "rust/op-reth/crates/chainspec/src/bootnodes.rs",
+        "rust/op-reth/crates/chainspec/src/lib.rs"
+      ]
+    },
+    {
+      "title": "ci: explicitly disable circleci_ip_ranges on 4 jobs that don't need it (#2366)",
+      "prNumber": 20455,
+      "type": "other",
+      "body": "## What this changes\n\nSets `circleci_ip_ranges: false` on four jobs in `.circleci/continue/main.yml`:\n\n- `contracts-bedrock-tests` (line ~999)\n- `contracts-bedrock-heavy-fuzz-nightly` (line ~1088)\n- `ai-contracts-test` (line ~1146)\n- `op-ac",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "ci(kona): run all proofs/ action tests under kona-host by default",
+      "prNumber": 20446,
+      "type": "tests",
+      "body": "## Summary\r\n\r\nThe kona action-test selector in `rust/kona/tests/justfile` required a `Test_ProgramAction_` prefix to opt into the kona-host runner. Tests in `op-e2e/actions/proofs/` that were fault-proof-aware but named differently — e.g. `",
+      "files": [
+        "op-node/rollup/derive/upgrade_transaction.go",
+        "rust/kona/tests/justfile"
+      ]
+    },
+    {
+      "title": "refactor: remove ProtocolVersions Go plumbing",
+      "prNumber": 20441,
+      "type": "refactor",
+      "body": "PR 1 of two for #20309. Drops every Go path that reads, writes, or names the deprecated on-chain `ProtocolVersions` mechanism, and removes the `params.OPStackSupport` op-geth dependency that #20258 left as a build-green stop-gap. Eliminatin",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/bootstrap.mdx",
+        "op-chain-ops/addresses/contracts.go",
+        "op-chain-ops/addresses/roles.go",
+        "op-chain-ops/addresses/utils_test.go",
+        "op-chain-ops/cmd/protocol-version/main.go",
+        "op-chain-ops/devkeys/devkeys.go",
+        "op-chain-ops/genesis/config.go",
+        "op-chain-ops/genesis/config_test.go",
+        "op-chain-ops/genesis/testdata/l1-deployments.json",
+        "op-chain-ops/genesis/testdata/test-deploy-config-full.json",
+        "op-chain-ops/interopgen/configs.go",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-chain-ops/interopgen/deployments.go",
+        "op-chain-ops/interopgen/recipe.go",
+        "op-core/superchain/superchain.go",
+        "op-core/superchain/superchain_test.go",
+        "op-deployer/justfile",
+        "op-deployer/pkg/deployer/bootstrap/flags.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations_test.go",
+        "op-deployer/pkg/deployer/bootstrap/superchain.go",
+        "op-deployer/pkg/deployer/bootstrap/superchain_test.go",
+        "op-deployer/pkg/deployer/forge/encoding.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/bootstrap_forge_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/bootstrap_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/deploy_scripts_forge_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/e2e_apply_forge_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/e2e_apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/migrate_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/noop_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/validate_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/verify_test.go",
+        "op-deployer/pkg/deployer/integration_test/shared/shared.go",
+        "op-deployer/pkg/deployer/opcm/contract.go",
+        "op-deployer/pkg/deployer/opcm/implementations.go",
+        "op-deployer/pkg/deployer/opcm/implementations_test.go",
+        "op-deployer/pkg/deployer/opcm/superchain.go",
+        "op-deployer/pkg/deployer/opcm/superchain_test.go",
+        "op-deployer/pkg/deployer/pipeline/init_test.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "op-deployer/pkg/deployer/pipeline/superchain.go",
+        "op-deployer/pkg/deployer/pipeline/superchain_test.go",
+        "op-deployer/pkg/deployer/standard/standard.go",
+        "op-deployer/pkg/deployer/standard/standard_test.go",
+        "op-deployer/pkg/deployer/state/deploy_config.go",
+        "op-deployer/pkg/deployer/state/deploy_config_test.go",
+        "op-deployer/pkg/deployer/state/intent.go",
+        "op-deployer/pkg/deployer/state/intent_test.go",
+        "op-deployer/scripts/test-sepolia-op-deployer.sh"
+      ]
+    },
+    {
+      "title": "Update CircleCI configuration for Docker image and job clarity",
+      "prNumber": 20427,
+      "type": "other",
+      "body": "This pull request updates the CircleCI configuration for Rust CI and E2E workflows to improve job gating, standardize Docker image usage, and enhance security by adjusting required contexts. The changes focus on using a shared utility orb f",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 120.69712208804394,
+      "prScore": 88.65912208804394,
+      "issueScore": 8.1,
+      "reviewScore": 23.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 81.1729021418292,
+      "prScore": 48.472902141829195,
+      "issueScore": 0,
+      "reviewScore": 32.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 63.09106980460798,
+      "prScore": 45.75106980460798,
+      "issueScore": 2,
+      "reviewScore": 15,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 52.64285032044265,
+      "prScore": 52.302850320442644,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 41.96963836234181,
+      "prScore": 33.46963836234181,
+      "issueScore": 4,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 39.788612288668105,
+      "prScore": 12.788612288668109,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 36.09861228866811,
+      "prScore": 31.09861228866811,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "dhyaniarun1993",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
+      "totalScore": 35.3677738965761,
+      "prScore": 35.3677738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 34.315316453354015,
+      "prScore": 19.97531645335401,
+      "issueScore": 4,
+      "reviewScore": 10,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 30.961639203842083,
+      "prScore": 7.461639203842083,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 29.21288308335967,
+      "prScore": 24.21288308335967,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 24.938,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 22.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ChanHongMing",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91173675?v=4",
+      "totalScore": 22.059047825479162,
+      "prScore": 22.059047825479162,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 17.938641396489096,
+      "prScore": 8.938641396489096,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 11.731023005428145,
+      "prScore": 11.731023005428145,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lau90eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/122041349?u=083f9b0f1ec3eff197af0f13df875a8ca07ac6c6&v=4",
+      "totalScore": 8.240025100551104,
+      "prScore": 8.240025100551104,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "emmajam",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/21029500?u=c20493bac308758a7e3dbdea10c51bb0e975d17f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "shokeeb-yaqub-vcc",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106068670?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 19,
+  "mergedPRs": 14,
+  "newIssues": 11,
+  "closedIssues": 5,
+  "activeContributors": 32
 }
