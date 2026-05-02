@@ -5,20 +5,578 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-01 to 2026-06-01, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-05-01 to 2026-06-01, ethereum-optimism/optimism had 13 new PRs (13 merged), 8 new issues, and 31 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABA_g7JA",
+      "title": "op-dispute-mon: ability to query supernode's VNs to get output roots",
+      "author": "pauldowman",
+      "number": 20476,
+      "repository": "ethereum-optimism/optimism",
+      "body": "The transition period for operators that run supernodes and op-dispute-mon will require running two instances of op-dispute-mon until the output root games have finalized. Currently, dispute-mon relies specifically on cl nodes to enrich FaultDisputeGames. And supernodes only to enrich SuperFaultDisputeGames. \n\nTo simplify dispute-mon configuration and the infra around it, it would make sense for dispute-mon to query supernode's VNs to get output roots. This way one can run a dispute-mon that specifies only supernode-rpcs to monitor super and non-super dispute games.",
+      "createdAt": "2026-04-30T22:10:52Z",
+      "closedAt": "2026-05-01T15:11:40Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABBAuT-g",
+      "title": "op-supernode: VerifiedRequiredL1 uses MIN of per-chain L1s instead of MAX",
+      "author": "ajsutton",
+      "number": 20481,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`Superroot.atTimestamp` in `op-supernode/supernode/activity/superroot/superroot.go:74` tracks `minVerifiedRequiredL1` as the MIN of per-chain `verifiedL1` values, then publishes it as `SuperRootResponseData.VerifiedRequiredL1`. The field's docstring says it should be \"the minimum L1 block including the required data to fully verify **all** blocks at this timestamp\" — that semantics requires MAX of per-chain `verifiedL1`s, not MIN.\n\n```go\n// op-supernode/supernode/activity/superroot/superroot.go:74\nif verifiedL1.Number < minVerifiedRequiredL1.Number || minVerifiedRequiredL1 == (eth.BlockID{}) {\n    minVerifiedRequiredL1 = verifiedL1\n}\n```\n\n## Impact\n\nThe challenger trace provider's `step==0` path reads `Data.VerifiedRequiredL1` and returns `InvalidTransition` if it's past the game's `l1Head`. With the MIN bug, when only one chain is unverified at `l1Head` the supernode reports the boundary super root as \"fully verified\" anyway, so the trace provider returns a valid `SuperRoot` instead of `InvalidTransition`. The cascade rule (\"once `InvalidTransition`, always `InvalidTransition`\") is violated at this index.\n\nThis produces a real challenger / FPP disagreement in production: the challenger posts a claim that the FPP would reject, opening a dispute the challenger can't win.\n\n## Reproduction\n\n`op-acceptance-tests/tests/interop/proofs/serial.TestInteropFaultProofs_VariedBlockTimes` and `_FasterChainB`, in the `DisputeTimestampAfterChainHeadConsolidate-challenger` and `DisputeBlockAfterChainHead-FirstChain-challenger` subtests, surface the disagreement directly. The FPP halves of those subtests pass (cascade-from-Invalid produces Invalid as expected); the challenger halves fail because the supernode returns a valid SuperRoot at trace idx `2*stepsPerTimestamp - 1`.\n\nThe acceptance tests skip the affected challenger subtests until this is fixed (look for `SkipChallenger: true` references to this issue in `op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go`).\n\n## Suggested fix\n\nChange MIN to MAX so `VerifiedRequiredL1` reflects the L1 block that includes data for every chain. Concretely:\n\n```go\nif verifiedL1.Number > minVerifiedRequiredL1.Number {\n    minVerifiedRequiredL1 = verifiedL1\n}\n```\n\n(and rename `minVerifiedRequiredL1` to `verifiedRequiredL1`). Confirm by re-running the two skipped acceptance subtests and removing the `SkipChallenger` flags.",
+      "createdAt": "2026-05-01T04:40:54Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM76AQuT",
+      "title": "flaky test: `TestTruncateDatabaseOnELResync` — CrossSafe sync timeout during setup",
+      "author": "wwared",
+      "number": 19897,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Flaky Test\n\n`TestTruncateDatabaseOnELResync` in `op-acceptance-tests/tests/safeheaddb_elsync/`\n\n## CI Link\n\nhttps://app.circleci.com/pipelines/github/ethereum-optimism/optimism/121646/workflows/ce5a39a0-34f4-49e2-ac4d-73dfad0b8596/jobs/4730402\n\n## Error\n\n```\noperation failed permanently after 30 attempts: expected head to match: safe\n```\n\nNote: `\"safe\"` here is `types.CrossSafe` (which renders as `\"safe\"`), NOT `types.LocalSafe`.\n\n## Error Trace\n\n```\nop-devstack/dsl/check.go:26\nop-devstack/presets/singlechain_from_runtime.go:51\nop-devstack/presets/singlechain_multinode.go:22\nop-acceptance-tests/tests/safeheaddb_elsync/safeheaddb_test.go:15\nop-acceptance-tests/tests/safeheaddb_elsync/safeheaddb_test.go:25\n```\n\n## Analysis\n\n**This is NOT the same bug as #19661** (stale engine RPC address after restart). That issue was about a connection failure (`address unavailable`) during the stop/restart phase. This is a different failure with a different root cause.\n\n### Where it fails\n\nThe failure occurs during **preset setup** — before the test's own stop/restart logic runs. At `singlechain_from_runtime.go:51`, the preset runs an initial sync check:\n\n```go\ndsl.CheckAll(t,\n    preset.L2CLB.MatchedFn(preset.L2CL, types.CrossSafe, 30),   // ← \"safe\"\n    preset.L2CLB.MatchedFn(preset.L2CL, types.LocalUnsafe, 30),\n)\n```\n\nThis waits up to 30 attempts × 2 seconds = 60 seconds for the verifier node (B) to sync its `CrossSafe` and `LocalUnsafe` heads with the sequencer node (A). The `CrossSafe` check is the one that times out.\n\n### Why it may be flaky\n\nBoth nodes are configured with `sync.ELSync` mode and a `SafeDBPath` (lines 17-18 of `safeheaddb_test.go`). In EL Sync mode:\n\n1. The EL syncs blocks via P2P (fast), advancing the unsafe head\n2. But `CrossSafe` advancement requires the **derivation pipeline** to process L1 data and the **supervisor** to confirm cross-chain safety\n3. If the derivation pipeline or supervisor is slow to start, or if L1 block production hasn't advanced enough, `CrossSafe` may not advance within the 60-second window\n4. This is a timing issue that would be sensitive to CI resource contention\n\n### Possible fix directions\n\n- Increase the attempt count for the initial sync check when EL Sync mode is active (derivation/cross-safe promotion is expected to be slower)\n- Add a more targeted wait for CrossSafe that accounts for EL Sync startup latency\n- Check if the supervisor is slow to mark blocks as cross-safe during initial sync in EL Sync mode",
+      "createdAt": "2026-04-02T12:48:11Z",
+      "closedAt": "2026-05-01T10:30:55Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABAXHQwQ",
+      "title": "Observation: LightCL safe_l2/local_safe_l2/finalized_l2 zero on fresh-genesis boot",
+      "author": "opsuperchain",
+      "number": 20295,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Observation\n\nOn a fresh-genesis OP chain with two op-nodes:\n\n- One op-node configured with `--l2.follow.source` (LightCL)\n- Another op-node configured as the sequencer\n\nThe LightCL reports `safe_l2`, `finalized_l2`, and `local_safe_l2` as the zero-value BlockRef in `optimism_syncStatus`. The sequencer reports those fields populated with the L2 genesis block.\n\nI don't know whether this is a bug, an artifact of how follow-source initializes, or expected. Filing for visibility. It may or may not warrant a fix.\n\n## Sync status from the LightCL (fresh-genesis chain)\n\n```json\n{\n  \"current_l1\": {\n    \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 0\n  },\n  \"current_l1_finalized\": {\n    \"hash\": \"0xd3eba62653f3cc12e0b05250893ccd09eec6b3e18a1993e8db8fe47383ff12ce\",\n    \"number\": 10718750,\n    \"parentHash\": \"0x04bd3541813a423fe281a84247a5df56a120ff1865cdb243860ecdbea65ca47d\",\n    \"timestamp\": 1776978528\n  },\n  \"head_l1\": {\n    \"hash\": \"0xeb4be7d3280a761ef0f1bc4d5580ca61df423a432192e2ca2ef2c9b218978987\",\n    \"number\": 10718858,\n    \"parentHash\": \"0x646ed68572ef1f8291b25946aca7076884107a27e443499b6ec86edf2e283424\",\n    \"timestamp\": 1776979944\n  },\n  \"safe_l1\": {\n    \"hash\": \"0x1baba2640f6aff0dcaa3e6db1d10ff55c5eb013e877fec44cce1eeb7f26663e1\",\n    \"number\": 10718780,\n    \"parentHash\": \"0x91a819b967554469a94c8425f036d7c57074867d28eb018d845094207134ddcd\",\n    \"timestamp\": 1776978912\n  },\n  \"finalized_l1\": {\n    \"hash\": \"0xd3eba62653f3cc12e0b05250893ccd09eec6b3e18a1993e8db8fe47383ff12ce\",\n    \"number\": 10718750,\n    \"parentHash\": \"0x04bd3541813a423fe281a84247a5df56a120ff1865cdb243860ecdbea65ca47d\",\n    \"timestamp\": 1776978528\n  },\n  \"unsafe_l2\": {\n    \"hash\": \"0x627288f870c0c90a0caed743d327467fb4d9f84782aece4889af33da00fcee49\",\n    \"number\": 24847,\n    \"parentHash\": \"0xf0c6ecdd21ef05707f951bbac7604474657f97400d8cda85f52edb1f9b553fac\",\n    \"timestamp\": 1776979963,\n    \"l1origin\": {\n      \"hash\": \"0x338b5d0f47c8455d2d3b2f1dac813637fb8112638cf1c9618ec5c1d0e4b1e2cb\",\n      \"number\": 10718853\n    },\n    \"sequenceNumber\": 8\n  },\n  \"safe_l2\": {\n    \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 0,\n    \"l1origin\": {\n      \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n      \"number\": 0\n    },\n    \"sequenceNumber\": 0\n  },\n  \"finalized_l2\": {\n    \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 0,\n    \"l1origin\": {\n      \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n      \"number\": 0\n    },\n    \"sequenceNumber\": 0\n  },\n  \"pending_safe_l2\": {\n    \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 0,\n    \"l1origin\": {\n      \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n      \"number\": 0\n    },\n    \"sequenceNumber\": 0\n  },\n  \"cross_unsafe_l2\": {\n    \"hash\": \"0x627288f870c0c90a0caed743d327467fb4d9f84782aece4889af33da00fcee49\",\n    \"number\": 24847,\n    \"parentHash\": \"0xf0c6ecdd21ef05707f951bbac7604474657f97400d8cda85f52edb1f9b553fac\",\n    \"timestamp\": 1776979963,\n    \"l1origin\": {\n      \"hash\": \"0x338b5d0f47c8455d2d3b2f1dac813637fb8112638cf1c9618ec5c1d0e4b1e2cb\",\n      \"number\": 10718853\n    },\n    \"sequenceNumber\": 8\n  },\n  \"local_safe_l2\": {\n    \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 0,\n    \"l1origin\": {\n      \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n      \"number\": 0\n    },\n    \"sequenceNumber\": 0\n  }\n}\n```\n\n## Sync status from the sequencer on the same chain\n\n```json\n{\n  \"current_l1\": {\n    \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 0\n  },\n  \"current_l1_finalized\": {\n    \"hash\": \"0xd3eba62653f3cc12e0b05250893ccd09eec6b3e18a1993e8db8fe47383ff12ce\",\n    \"number\": 10718750,\n    \"parentHash\": \"0x04bd3541813a423fe281a84247a5df56a120ff1865cdb243860ecdbea65ca47d\",\n    \"timestamp\": 1776978528\n  },\n  \"head_l1\": {\n    \"hash\": \"0x9808a047b7f714e39f30503e615eec75192e704293fb35d1e30149ff797748ca\",\n    \"number\": 10718861,\n    \"parentHash\": \"0x92ac1daf95c681deaae330cac55a3cc244ebf67c784e404af818c6fb92cd8b10\",\n    \"timestamp\": 1776979980\n  },\n  \"safe_l1\": {\n    \"hash\": \"0x1baba2640f6aff0dcaa3e6db1d10ff55c5eb013e877fec44cce1eeb7f26663e1\",\n    \"number\": 10718780,\n    \"parentHash\": \"0x91a819b967554469a94c8425f036d7c57074867d28eb018d845094207134ddcd\",\n    \"timestamp\": 1776978912\n  },\n  \"finalized_l1\": {\n    \"hash\": \"0xd3eba62653f3cc12e0b05250893ccd09eec6b3e18a1993e8db8fe47383ff12ce\",\n    \"number\": 10718750,\n    \"parentHash\": \"0x04bd3541813a423fe281a84247a5df56a120ff1865cdb243860ecdbea65ca47d\",\n    \"timestamp\": 1776978528\n  },\n  \"unsafe_l2\": {\n    \"hash\": \"0xf48a2ff3ba3dc5dc4aef89d761f963ccc1903b8c00763d8423ff4ddbd3cc3aae\",\n    \"number\": 24877,\n    \"parentHash\": \"0x8faef5bdc853178d9f6d2296d866bc5155ed6e9f583a0543e87d0dea30f200c7\",\n    \"timestamp\": 1776979993,\n    \"l1origin\": {\n      \"hash\": \"0x9c3758b7a06867adfc6cfd2ef88f96e01c84b05b19b858fcca7b7a4e5e5853df\",\n      \"number\": 10718856\n    },\n    \"sequenceNumber\": 2\n  },\n  \"safe_l2\": {\n    \"hash\": \"0x30138b8177a15e6cdd2460c894d12570d59e355ea2be24b7130cecf5d93d85e4\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 1776955116,\n    \"l1origin\": {\n      \"hash\": \"0x63c5f079e12d65c3d76a37572b1f287d55697fb2dc33cfca8ca67a914acf1846\",\n      \"number\": 10716997\n    },\n    \"sequenceNumber\": 0\n  },\n  \"finalized_l2\": {\n    \"hash\": \"0x30138b8177a15e6cdd2460c894d12570d59e355ea2be24b7130cecf5d93d85e4\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 1776955116,\n    \"l1origin\": {\n      \"hash\": \"0x63c5f079e12d65c3d76a37572b1f287d55697fb2dc33cfca8ca67a914acf1846\",\n      \"number\": 10716997\n    },\n    \"sequenceNumber\": 0\n  },\n  \"pending_safe_l2\": {\n    \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 0,\n    \"l1origin\": {\n      \"hash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n      \"number\": 0\n    },\n    \"sequenceNumber\": 0\n  },\n  \"cross_unsafe_l2\": {\n    \"hash\": \"0xf48a2ff3ba3dc5dc4aef89d761f963ccc1903b8c00763d8423ff4ddbd3cc3aae\",\n    \"number\": 24877,\n    \"parentHash\": \"0x8faef5bdc853178d9f6d2296d866bc5155ed6e9f583a0543e87d0dea30f200c7\",\n    \"timestamp\": 1776979993,\n    \"l1origin\": {\n      \"hash\": \"0x9c3758b7a06867adfc6cfd2ef88f96e01c84b05b19b858fcca7b7a4e5e5853df\",\n      \"number\": 10718856\n    },\n    \"sequenceNumber\": 2\n  },\n  \"local_safe_l2\": {\n    \"hash\": \"0x30138b8177a15e6cdd2460c894d12570d59e355ea2be24b7130cecf5d93d85e4\",\n    \"number\": 0,\n    \"parentHash\": \"0x0000000000000000000000000000000000000000000000000000000000000000\",\n    \"timestamp\": 1776955116,\n    \"l1origin\": {\n      \"hash\": \"0x63c5f079e12d65c3d76a37572b1f287d55697fb2dc33cfca8ca67a914acf1846\",\n      \"number\": 10716997\n    },\n    \"sequenceNumber\": 0\n  }\n}\n```\n\n## Factual differences\n\n- `safe_l2`, `finalized_l2`, `local_safe_l2`:\n  - LightCL: all-zero BlockRef (hash `0x00…0`, number 0, timestamp 0, l1origin zero)\n  - Sequencer: number 0, hash `0x30138b…`, timestamp 1776955116, l1origin number 10716997\n- `head_l1`, `safe_l1`, `finalized_l1`, `current_l1_finalized`: populated on both.\n- `unsafe_l2`, `cross_unsafe_l2`: populated on both.\n- `current_l1`: zero on both.\n- `pending_safe_l2`: zero on both.\n\n## Environment\n\n- Fresh-genesis OP chain.\n- LightCL uses `--l2.follow.source` pointing at another op-node on the same chain.\n- Both nodes otherwise functioning: unsafe chain is advancing on both.\n\n## What I don't know\n\nWhether this reflects a bug in follow-source mode, an expected initialization phase, or something else. Filed for visibility.\n\n## Related\n\n- #20294 — separate LightCL / follow-source concern on op-node restart.\n",
+      "createdAt": "2026-04-23T22:16:51Z",
+      "closedAt": "2026-05-01T16:40:52Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABAnsfBQ",
+      "title": "[L2CM] Hardcode the default devfeatures bitmap to enable L2CM",
+      "author": "maurelian",
+      "number": 20356,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2026-04-27T14:42:12Z",
+      "closedAt": "2026-05-01T19:25:43Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7WmUJk",
+      "title": "feat(op-acceptance): after-chain-head tests via TestSequencer (alt to #20349)",
+      "author": "ajsutton",
+      "number": 20410,
+      "body": "Alternative implementation of ethereum-optimism/optimism#20349.\n\n#20349 ports 6 *AfterChainHead* subtests but also rewrites the existing `RunSuperFaultProofTest` / `RunVariedBlockTimesTest` Stage 1 and Stage 2 setup, and its Stage 2b's `StartSequencer → Reached → StopSequencer` dance has an unbounded race under CI scheduling pauses (a pause of any length between two of those calls produces unbounded sequencer overshoot, which `LocalSafe` then catches up to once batchers re-submit).\n\nThis PR keeps Stage 1 / Stage 2 **byte-identical to develop** (zero deletions vs develop) and replaces Stage 2b with deterministic block production via `dsl.TestSequencer.SequenceBlock` (already exposed through `SimpleInterop`):\n\n- Stops batchers + sequencers, waits for both safety levels to stall.\n- `SequenceBlock(parent = current head)` once per chain — produces exactly one block at `parent.Time + blockTime`, no wall-clock dependence, no `Reached/Stop` race.\n- Iterative-convergence catch-up: extends whichever chain is below the current max, re-derives max each iteration, terminates only when *all* chain heads are equal (handles 1 s + 2 s mixed configurations and arbitrary pre-Stage-2b chain drift).\n- Restarts batchers briefly to land boundary blocks on L1, validates via supernode, captures `l1HeadAdvanced`, stops batchers.\n- `claimTimestamp = boundaryTimestamp + 5` — derived from settled state.\n\nTests 5/6 reference `boundary+2` and `boundary+3` (boundary-relative trace indices). Sequencers stay stopped after Stage 2b so no chain has blocks past `boundary`; batchers stop after submitting boundary so no L1 batch covers anything past it. The supernode returns `InvalidTransition` at those indices deterministically.\n\nSingle-file change: `op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go`, +344 / −0 vs develop.\n\n## Test plan\n\n- [x] `TestInteropFaultProofs ×5` on initial implementation (44/44 subtests per run, 135–169 s each)\n- [x] `TestInteropFaultProofs ×1` on the convergence fix (44/44 subtests, 180 s)\n- [ ] `TestPreinteropFaultProofs ×5` (not yet executed locally)\n- [ ] `TestInteropFaultProofs_VariedBlockTimes` and `_FasterChainB` ×5 each (still `MarkFlaky` for ethereum-optimism/optimism#19828 — confirm this PR doesn't make that worse)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-29T06:16:24Z",
+      "mergedAt": null,
+      "additions": 375,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7XWMkL",
+      "title": "test(op-acceptance): drive AfterChainHead test setup via TestSequencer",
+      "author": "ajsutton",
+      "number": 20482,
+      "body": "Adds the 6 AfterChainHead subtests to the SuperFaultProofs acceptance suite and converts the existing tests' Stage 1+2 setup to deterministic block production via `TestSequencer` (replacing the running-sequencer flow). Drops `MarkFlaky` on the two varied-block-time tests — the original flake (`ethereum-optimism/optimism#19828`) is no longer reachable now that `nextTimestampAfterSafeHeads` walks past no-op transitions and `TestSequencer` drives every chain to the boundary deterministically.\n\nTwo new subtests (`DisputeTimestampAfterChainHeadConsolidate`, `DisputeBlockAfterChainHead-FirstChain`) skip their challenger halves under varied-block-time configs pending op-supernode bug `ethereum-optimism/optimism#20481` (`VerifiedRequiredL1` uses MIN of per-chain L1s instead of MAX). Their FPP halves still run.\n\nAlso bumps `GossipTimestampThreshold` to 1h in the devstack p2p config — devstack chain timestamps are synthetic and can lag wallclock during long tests, so the production-default 60s \"payload too old\" check rejects otherwise-valid TestSequencer-produced blocks. Devstack-only.\n\n## Test plan\n\n- [x] `TestInteropFaultProofs` — PASS (97s) locally\n- [x] `TestInteropFaultProofs_VariedBlockTimes` — PASS (100s) locally\n- [x] `TestInteropFaultProofs_VariedBlockTimes_FasterChainB` — PASS (100s) locally",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-01T05:14:19Z",
+      "mergedAt": null,
+      "additions": 348,
+      "deletions": 121
+    },
+    {
+      "id": "PR_kwDODjvEJM7PbjVC",
+      "title": "refactor(kona): single-definition prestate build with native + Docker paths",
+      "author": "ajsutton",
+      "number": 19889,
+      "body": "## Summary\n\n- Extract kona prestate build logic from Docker multi-stage builds into `just` targets in `rust/justfile`\n- Dockerfile becomes a thin environment wrapper using mise for tool versions; cannon binary provided via `docker buildx bake` named context\n- Enables native (non-Docker) prestate builds for local development: `cd rust && just build-kona-prestates`\n- Reproducible Docker builds preserved: `just reproducible-prestate-kona` produces identical hashes\n- `cannon-builder` image reduced to apt packages only (MIPS64 cross-toolchain)\n- `lint-cannon` and `build-cannon-client` use the reproducible build Docker environment via bake\n- Design doc: ethereum-optimism/design-docs#372\n\n## Test plan\n\n- [ ] `just reproducible-prestate-kona` produces identical prestate hashes as current main\n- [ ] `cd rust && just build-kona-prestates` works natively on Linux with MIPS64 cross-toolchain\n- [ ] `cd rust/kona && just lint-cannon` succeeds via Docker reproducible env\n- [ ] `cd rust/kona && just build-cannon-client` succeeds via Docker reproducible env\n- [ ] Top-level `just reproducible-prestate` still builds both op-program and kona in parallel\n- [ ] CI `kona-publish-prestate-artifacts` job works with the updated just target\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-02T02:52:45Z",
+      "mergedAt": "2026-05-01T01:27:09Z",
+      "additions": 336,
+      "deletions": 234
+    },
+    {
+      "id": "PR_kwDODjvEJM7WmUFF",
+      "title": "feat(op-acceptance): after-chain-head tests anchored on settled state (alt to #20349)",
+      "author": "ajsutton",
+      "number": 20409,
+      "body": "Alternative implementation of ethereum-optimism/optimism#20349.\n\n#20349 ports 6 *AfterChainHead* subtests but also rewrites the existing `RunSuperFaultProofTest` / `RunVariedBlockTimesTest` Stage 1 and Stage 2 setup, and its Stage 2b's `StartSequencer → Reached → StopSequencer` dance has an unbounded race under CI scheduling pauses (a pause of any length between two of those calls produces unbounded sequencer overshoot, which `LocalSafe` then catches up to once batchers re-submit).\n\nThis PR keeps Stage 1 / Stage 2 **byte-identical to develop** (zero deletions vs develop) and adds a freeze-and-measure stage that:\n\n- Stops batchers, then sequencers, then `WaitForStall(LocalUnsafe)` and `WaitForStall(LocalSafe)` on every chain. The two stalls absorb any scheduling pause anywhere in the freeze (each requires ≥10 s of stable head with a 2-minute budget).\n- Reads each chain's settled `UnsafeL2.Number` race-free.\n- Anchors the new tests on `ttest = max(settled unsafe timestamp) + maxBlockTime + 1` and `claimTimestamp = ttest + 5` — both derived from settled state, no hardcoded boundary.\n\nSequencers stay stopped for the rest of the test, so `ttest` is permanently past every chain's head and the supernode returns `InvalidTransition` at the test 5/6 indices regardless of how the freeze unfolded.\n\nSingle-file change: `op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go`, +296 / −0 vs develop.\n\n## Test plan\n\n- [ ] `TestInteropFaultProofs ×5` (run before merging — not yet executed locally)\n- [ ] `TestPreinteropFaultProofs ×5`\n- [ ] `TestInteropFaultProofs_VariedBlockTimes` and `_FasterChainB` ×5 each (these are still `MarkFlaky` for ethereum-optimism/optimism#19828 — confirm this PR doesn't make that worse)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-29T06:16:17Z",
+      "mergedAt": null,
+      "additions": 286,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7SgZaY",
+      "title": "feat(op-alloy): add EIP-7928 block access list to flashblock metadata",
+      "author": "sieniven",
+      "number": 20096,
+      "body": "## Summary\r\n\r\nAdd optional `access_list: Option<BlockAccessList>` field to `OpFlashblockPayloadMetadata` using canonical `alloy-eip7928` types. This enables flashblock producers to include per-transaction state reads and writes (storage, balance, nonce, code changes) indexed by transaction position, providing parallel execution hints to consumers.\r\n\r\n- Add `alloy-eip7928` as required dependency to `op-alloy-rpc-types-engine`\r\n- Wire `alloy-eip7928/std` and `alloy-eip7928/serde` into feature flags\r\n- Field uses `serde(default, skip_serializing_if)` for backwards compatibility\r\n- Add tests: roundtrip with all EIP-7928 field types, None omission, backwards compat\r\n- Update all struct literal construction sites with `access_list: None`\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-15T03:51:10Z",
+      "mergedAt": null,
+      "additions": 272,
+      "deletions": 65
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 976,
+    "deletions": 410,
+    "files": 39,
+    "commitCount": 61
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "refactor(kona): single-definition prestate build with native + Docker paths",
+      "prNumber": 19889,
+      "type": "refactor",
+      "body": "## Summary\n\n- Extract kona prestate build logic from Docker multi-stage builds into `just` targets in `rust/justfile`\n- Dockerfile becomes a thin environment wrapper using mise for tool versions; cannon binary provided via `docker buildx ba",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        ".github/docker-images.json",
+        "rust/justfile",
+        "rust/kona/docker/README.md",
+        "rust/kona/docker/cannon/cannon.dockerfile",
+        "rust/kona/docker/docker-bake.hcl",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile",
+        "rust/kona/docker/fpvm-prestates/justfile",
+        "rust/kona/justfile",
+        "rust/kona/bin/client/justfile",
+        "rust/kona/bin/client/testdata/holocene-op-sepolia-26215604-witness.tar.zst",
+        "rust/kona/bin/client/testdata/op-sepolia-42427365-witness.tar.zst",
+        ".dockerignore"
+      ]
+    },
+    {
+      "title": "fix(op-node): seed LightCL genesis sync status",
+      "prNumber": 20385,
+      "type": "bugfix",
+      "body": "## Summary\n\nFix LightCL follow-source initialization when upstream reports the real L2 genesis block as safe, local-safe, and finalized while the local engine/status state is still the zero-value L2 block ref.\n\nThe previous advancement chec",
+      "files": [
+        "op-node/rollup/engine/engine_controller.go",
+        "op-node/rollup/engine/engine_controller_test.go",
+        "op-node/rollup/status/status.go",
+        "op-node/rollup/status/status_test.go",
+        "op-service/eth/id.go",
+        "op-service/eth/id_test.go"
+      ]
+    },
+    {
+      "title": "feat: make cannon-kona default path in devfeature bitmap",
+      "prNumber": 20470,
+      "type": "feature",
+      "body": "Stacks on top of #20439. Mirrors the L2CM override pattern for the `CannonKona` flag: hardcodes `isDevFeatureEnabled(CANNON_KONA)` to true at the library level on both the Go side (`op-core/devfeatures/devfeatures.go`) and the Solidity side",
+      "files": [
+        "op-core/devfeatures/devfeatures.go",
+        "op-core/devfeatures/devfeatures_test.go",
+        "packages/contracts-bedrock/src/libraries/DevFeatures.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerContainer.t.sol",
+        "packages/contracts-bedrock/test/L2/L2DevFeatureFlags.t.sol",
+        "packages/contracts-bedrock/test/libraries/DevFeatures.t.sol"
+      ]
+    },
+    {
+      "title": "feat(rust): add fast build without examples",
+      "prNumber": 20456,
+      "type": "feature",
+      "body": "Adds a new Rust just recipe, `just build-no-examples`, for quickly building the Rust workspace while excluding example crates.\r\n\r\n---\r\n\r\n```\r\n    Finished `dev` profile [optimized + debuginfo] target(s) in 4m 45s\r\njust b  1231.64s user 122.",
+      "files": [
+        "docs/ai/rust-dev.md",
+        "rust/Cargo.toml",
+        "rust/justfile"
+      ]
+    },
+    {
+      "title": "fix(op-acceptance-tests): use preset's ELSync CrossSafe budget for safedb tests",
+      "prNumber": 20454,
+      "type": "bugfix",
+      "body": "## Summary\n\n- `newSingleChainMultiNodeELSync` was bypassing the preset's default initial sync check via `NewSingleChainMultiNodeWithoutCheck` and running a hand-rolled 60-attempt (120s) `CrossSafe` match.\n- That bypass was added when the pr",
+      "files": [
+        "op-acceptance-tests/tests/safeheaddb_elsync/safeheaddb_test.go"
+      ]
+    },
+    {
+      "title": "feat: make l2cm default path in devfeature bitmap",
+      "prNumber": 20439,
+      "type": "feature",
+      "body": "Makes L2CM the default codepath at the library level. Hardcodes L2CM dev flag to true in `op-core/devfeatures/devfeatures.go:IsDevFeatureEnabled` for the Go side and `packages/contracts-bedrock/src/libraries/DevFeatures.sol:isDevFeatureEnab",
+      "files": [
+        "op-core/devfeatures/devfeatures.go",
+        "op-core/devfeatures/devfeatures_test.go",
+        "packages/contracts-bedrock/scripts/libraries/UpgradeUtils.sol",
+        "packages/contracts-bedrock/scripts/upgrade/GenerateNUTBundle.s.sol",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/libraries/DevFeatures.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerContainer.t.sol",
+        "packages/contracts-bedrock/test/L2/L2DevFeatureFlags.t.sol",
+        "packages/contracts-bedrock/test/libraries/DevFeatures.t.sol"
+      ]
+    },
+    {
+      "title": "ci: downsize go-binaries-for-sysgo to medium (#2366)",
+      "prNumber": 20423,
+      "type": "other",
+      "body": "## What this changes\n\nDownsizes the `go-binaries-for-sysgo` job from `resource_class: large` to `resource_class: medium` in `.circleci/continue/main.yml`.\n\n## Why\n\nPer CircleCI's resource class analysis ([issue ethereum-optimism/core-team#2",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "ci: downsize check-kontrol-build to medium (#2366)",
+      "prNumber": 20422,
+      "type": "other",
+      "body": "## What this changes\n\nDownsizes the `check-kontrol-build` job from `resource_class: xlarge` to `resource_class: medium` in `.circleci/continue/main.yml`.\n\n## Why\n\nPer CircleCI's resource class analysis ([issue ethereum-optimism/core-team#23",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "ci: downsize contracts-bedrock-build to large (#2366)",
+      "prNumber": 20421,
+      "type": "other",
+      "body": "## What this changes\n\nDownsizes the `contracts-bedrock-build` job from `resource_class: 2xlarge` to `resource_class: large` in `.circleci/continue/main.yml`.\n\n## Why\n\nPer CircleCI's resource class analysis ([issue ethereum-optimism/core-tea",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "Simplify go feature flag tests",
+      "prNumber": 20496,
+      "type": "feature",
+      "body": "Table-drives the hardcoded-flag override tests in op-core/devfeatures.",
+      "files": [
+        ".circleci/continue/main.yml",
+        "op-core/devfeatures/devfeatures_test.go"
+      ]
+    },
+    {
+      "title": "Update interop explainer doc",
+      "prNumber": 20488,
+      "type": "other",
+      "body": "",
+      "files": [
+        "docs/public-docs/op-stack/interop/explainer.mdx"
+      ]
+    },
+    {
+      "title": "feat(op-dispute-mon): add game type breakdown metric",
+      "prNumber": 20479,
+      "type": "feature",
+      "body": "## Summary\n- Adds a new `op_dispute_mon_games` Prometheus gauge metric with a `game_type` label that breaks down monitored games by their dispute game type (cannon, permissioned, super-cannon, etc.)\n- Introduces `GameTypeMonitor` following ",
+      "files": [
+        "op-dispute-mon/metrics/metrics.go",
+        "op-dispute-mon/metrics/noop.go",
+        "op-dispute-mon/mon/game_types.go",
+        "op-dispute-mon/mon/service.go"
+      ]
+    },
+    {
+      "title": "fix(op-acceptance): preserve quoting in just test args",
+      "prNumber": 20478,
+      "type": "bugfix",
+      "body": "The `just test` recipe used `{{args}}`, which is textual interpolation — args are re-tokenized by the shell, dropping the original quoting. Passing `-run '^A(B)?$|^C$'` produces `syntax error near unexpected token \\`('` because the parens, ",
+      "files": [
+        "op-acceptance-tests/justfile"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 101.0435941296906,
+      "prScore": 91.5435941296906,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 86.52275552922211,
+      "prScore": 73.98475552922211,
+      "issueScore": 2.1,
+      "reviewScore": 10,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 39.04746082854713,
+      "prScore": 38.70746082854713,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 33.77204601085629,
+      "prScore": 31.772046010856293,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 29.08333305950803,
+      "prScore": 20.08333305950803,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 27.50863991840746,
+      "prScore": 27.50863991840746,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 23.88660385419959,
+      "prScore": 10.386603854199588,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "chunter-cb",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/133686793?v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "abhicris",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6990976?v=4",
+      "totalScore": 17.686580904843456,
+      "prScore": 17.686580904843456,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 8.7,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sanjusan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/22913147?u=fed4f53ea7f998f37af8ed027102138f39945514&v=4",
+      "totalScore": 8,
+      "prScore": 0,
+      "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 7.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 6.583306144334055,
+      "prScore": 6.583306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "axelKingsley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7201941?u=d3ed75b38d5b3079dfa593a217632ccb30b93610&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zekchan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3997978?u=aeafa383b70a7754f9489b836879279d4aaab7d3&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 13,
+  "mergedPRs": 13,
+  "newIssues": 8,
+  "closedIssues": 5,
+  "activeContributors": 31
 }
