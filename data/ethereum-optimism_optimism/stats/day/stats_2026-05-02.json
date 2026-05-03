@@ -5,20 +5,190 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-02 to 2026-05-03, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-05-02 to 2026-05-03, ethereum-optimism/optimism had 3 new PRs (1 merged), 3 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABBF_iyw",
+      "title": "Add superchain-ops template wrapping OPContractsManagerMigrator.migrate",
+      "author": "ajsutton",
+      "number": 20503,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** This issue was opened by Claude on behalf of @ajsutton.\n\n## Summary\n\nThere is no `superchain-ops` template wrapping `OPContractsManagerMigrator.migrate(MigrateInput)`. Operators planning a two-chain merge into a shared `DisputeGameFactory` / `AnchorStateRegistry` cannot run this migration through the standard signing workflow today.\n\nA search of `ethereum-optimism/superchain-ops/src/template/` returns no `OPCMMigrate*.sol` file; the only template with \"Migrate\" in its name is `MigrateToLiveness2.sol`, which is a Safe liveness module migration unrelated to OPCM.\n\n## What the template needs to do\n\nThe template should wrap `OPContractsManagerMigrator.migrate(MigrateInput)` and run `OPContractsManagerMigrationValidator` over the resulting state. The closest reference shapes are `OPCMUpgradeV700.sol` (multi-chain wrapper, OPCM delegatecall via `OPCMTaskBase`) and `AddGameTypeTemplate.sol` (single-call OPCM wrapper).\n\nConcretely the template needs to:\n\n1. Inherit `OPCMTaskBase`.\n2. In `_templateSetup`: load both chains' `SystemConfigProxy` addresses, the shared proposer and challenger addresses, the `initBond` for each super game type, the kona-interop absolute prestate hash from `superchain-registry/validation/standard/standard-prestates.toml`, the starting anchor super root (`Proposal.root` and `Proposal.l2SequenceNumber` where the latter is the supernode finalized timestamp), the `startingRespectedGameType` (`9` = `SUPER_CANNON_KONA` for permissionless setups), and the OPCM address from TOML.\n3. In `_build`: assemble a `MigrateInput` with both chains' `SystemConfig` addresses and a `disputeGameConfigs[]` array containing both `SUPER_PERMISSIONED_CANNON` (game type `5`) and `SUPER_CANNON_KONA` (game type `9`) entries. Encode each entry's `gameArgs` bytes from the input fields:\n    * type `9`: `abi.encode(absolutePrestate)`.\n    * type `5`: `abi.encode(absolutePrestate, proposer, challenger)`.\n    Then `address(opcm).delegatecall(abi.encodeCall(IOPContractsManagerMigrator.migrate, (input)))`.\n4. In `_validate`: call `OPContractsManagerMigrationValidator.validateMigration(...)` and assert the returned error string is empty (or matches a justified `expectedValidationErrors` value).\n\n## Notes\n\n* `_taskStorageWrites()` cannot pre-pin the new `ETHLockbox` / `DisputeGameFactory` / `AnchorStateRegistry` addresses because they are CREATE2-deployed inside `migrate()`. The template should declare the per-chain existing portals and `SystemConfig` addresses and rely on the migration validator for post-state assertions.\n* `migrate()` does not accept caller-supplied `extraInstructions`. The only `ExtraInstruction` used is constructed internally to permit the three new proxy deployments.\n* Both super game types must be registered. The migration validator requires both `gameImpls(SUPER_PERMISSIONED_CANNON) != address(0)` (`MIG-DGF-10`) and `gameImpls(SUPER_CANNON_KONA) != address(0)` (`MIG-DGF-20`) post-migration.\n\n## Why this lives in the optimism repo\n\nThe contract source lives here, the validator's error codes live here, and the closest reference template (`OPCMUpgradeV700`) is co-developed across `optimism` and `superchain-ops`. Tracking the work item here keeps it next to the contract behavior it wraps; the actual template file ships in `superchain-ops` once the design is settled.\n\nDiscovered while authoring the operator runbook for two-chain merges into a shared dispute game.\n",
+      "createdAt": "2026-05-02T07:48:45Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABBF_iNQ",
+      "title": "OPContractsManagerMigrator: chain B's SystemConfig.delayedWETH not repointed during shared-DGF migration",
+      "author": "ajsutton",
+      "number": 20502,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** This issue was opened by Claude on behalf of @ajsutton.\n\n## Summary\n\nWhen `OPContractsManagerMigrator.migrate(MigrateInput)` merges N pre-interop chains into a shared `DisputeGameFactory` and `AnchorStateRegistry`, the new shared super games are wired to `chainSystemConfigs[0].delayedWETH()` only. Chain B (and any later chain in `chainSystemConfigs[]`) keeps its `SystemConfig.delayedWETH` pointing at its old per-chain `DelayedWETH`, which is no longer attached to any active super game.\n\nThis creates a long-lived divergence:\n\n* The shared super games' bonds flow through chain A's `DelayedWETH`.\n* Chain B's `SystemConfig.delayedWETH()` still returns chain B's old `DelayedWETH`.\n* Future `OPCMv2.upgrade()` runs against chain B will read chain B's old `DelayedWETH` from `SystemConfig`, which is not the contract the shared games use — exactly the kind of drift the in-source comment at `OPContractsManagerMigrator.sol:176-181` warns against.\n\n## Reproduction\n\n`packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol:181`:\n\n```solidity\n// Reuse the existing DelayedWETH from chainSystemConfigs[0] rather than deploying a\n// new one. The migrated chains share a SystemConfig, and by extension share its\n// DelayedWETH. ...\nIDelayedWETH delayedWETH = IDelayedWETH(payable(_input.chainSystemConfigs[0].delayedWETH()));\n```\n\nThe comment assumes \"migrated chains share a SystemConfig,\" which is not true for two independent permissionless chains being merged for the first time. Each chain has its own `SystemConfig` with its own `delayedWETH` storage slot (see `SystemConfig.sol`).\n\n`migrate()` and `_migratePortal()` never call `SystemConfig.setAddresses` or any equivalent on chain B to repoint its `delayedWETH` to chain A's. The only `SystemConfig` write `_migratePortal` performs is `setFeature(ETH_LOCKBOX, true)` at line 304.\n\n## Impact\n\n1. **Future per-chain upgrades against chain B read a stale `delayedWETH`.** Any OPCM flow that loads `DelayedWETH` from `SystemConfig` (per the in-source warning) gets the wrong contract on chain B.\n2. **Operational confusion.** Operators tracking the shared games' bond pool will use chain A's `DelayedWETH`. Anyone tracking chain B's `SystemConfig.delayedWETH()` for the same purpose gets a contract that receives no new bonds.\n3. **Drain-window bonds claim correctly through the orphaned contract.** Chain B's still-in-flight pre-migration games' bonds were posted into the old `DelayedWETH` via CWIA-immutable references, so they continue to claim out of it. The divergence does not break the migration itself; it persists afterward as a maintenance hazard.\n\nDiscovered while authoring the operator runbook for two-chain merges into a shared dispute game.\n",
+      "createdAt": "2026-05-02T07:48:40Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABBFrIfg",
+      "title": "op-challenger: SuperPermissionedGameType should use the kona prestate URL, not the cannon prestate URL",
+      "author": "ajsutton",
+      "number": 20500,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** filing on behalf of @ajsutton.\n\n## Problem\n\nIn `op-challenger/game/fault/register_task.go`, `NewSuperCannonRegisterTask` is used for both `SuperCannonGameType` (4) and `SuperPermissionedGameType` (5):\n\n```go\n// register.go:82,96\nregisterTasks = append(registerTasks, NewSuperCannonRegisterTask(gameTypes.SuperCannonGameType, ...))\n...\nregisterTasks = append(registerTasks, NewSuperCannonRegisterTask(gameTypes.SuperPermissionedGameType, ...))\n```\n\n```go\n// register_task.go:55-57\nfunc NewSuperCannonRegisterTask(gameType gameTypes.GameType, cfg *config.Config, ...) *RegisterTask {\n    return newSuperCannonVMRegisterTaskWithConfig(gameType, cfg, m, serverExecutor, rootProvider, superNodeProvider, syncValidator, cfg.Cannon, cfg.CannonAbsolutePreStateBaseURL, cfg.CannonAbsolutePreState)\n}\n```\n\nThis routes `SuperPermissionedGameType` to `cfg.CannonAbsolutePreStateBaseURL` (set by `--cannon-prestates-url` / `--prestates-url`) and `cfg.Cannon` VM config.\n\n`SUPER_PERMISSIONED_CANNON` is a kona super game in the post-output-roots world: it uses the same kona-interop super absolute prestate as `SUPER_CANNON_KONA`, and its on-chain absolute prestate is the kona-interop one. Routing it through the cannon (non-kona) URL and VM config means the challenger fetches and runs a non-kona prestate / VM, which won't match the on-chain commitment.\n\n`SUPER_PERMISSIONED_CANNON` should be treated as a kona game throughout the registration path: same `--cannon-kona-prestates-url` / `cfg.CannonKona` config as `SUPER_CANNON_KONA`, just with the permissioned proposer/challenger immutables from on-chain.\n\n## Concretely\n\n- `register.go:96`: switch the `SuperPermissionedGameType` registration to use a kona-flavoured register task (or refactor `NewSuperCannonKonaRegisterTask` to take a game-type argument).\n- `register_task.go:79`: `skipPrestateValidation: gameType == gameTypes.SuperPermissionedGameType` — should remain (permissioned games don't validate prestates upstream), but the underlying URL/VM config it points at must be the kona pair.\n\n## Impact\n\nChain operators following the output-root → super-root upgrade runbook (ethereum-optimism/optimism#20499) will configure `--cannon-kona-prestates-url` for both enabled super game types, expecting the kona-interop prestate to serve both. Today that works for `SUPER_CANNON_KONA` but not `SUPER_PERMISSIONED_CANNON`, so any chain that needs the permissioned path defended at runtime will fail to defend.",
+      "createdAt": "2026-05-02T05:16:27Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7Xl7eS",
+      "title": "docs: add output→super-root upgrade tutorial (unlinked)",
+      "author": "ajsutton",
+      "number": 20499,
+      "body": "Adds a new tutorial under `docs/public-docs/chain-operators/tutorials/upgrade-chain-to-super-roots.mdx` describing how to upgrade a single OP Stack chain from output-root dispute games (`PERMISSIONED_CANNON`, `CANNON`, `CANNON_KONA`) to super-root dispute games (`SUPER_PERMISSIONED_CANNON`, `SUPER_CANNON_KONA`) via `opcm.upgrade`.\n\nIntentionally not added to `docs.json` or linked from any other page — this should land when the op-contracts/v7.x release that supports this upgrade path is ready.\n\nNotes for reviewers:\n- The tutorial assumes `OPCMUpgradeV700` (target OPCM version `7.1.17`).\n- It calls out two template extensions still required before the upgrade can run: routing both `SUPER_PERMISSIONED_CANNON` and `SUPER_CANNON_KONA` from a single kona-interop super prestate (ethereum-optimism/superchain-ops#1412) and injecting `overrides.cfg.startingAnchorRoot` from TOML.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-02T04:24:19Z",
+      "mergedAt": null,
+      "additions": 308,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7XnTAw",
+      "title": "op-challenger: route SuperPermissionedGameType through cannon-kona",
+      "author": "ajsutton",
+      "number": 20501,
+      "body": "SUPER_PERMISSIONED_CANNON uses the kona-interop super absolute prestate on-chain, so the challenger has to fetch the kona prestate and run kona-host — not op-program. Switch its registration, config validation, and CLI flag checks to the cannon-kona path. Also enforce `--cannon-kona-server` and `--cannon-kona-prestate` (or kona prestates URL) in `CheckSuperCannonKonaFlags`, parallel to how the cannon side enforces those flags via `CheckCannonBaseFlags` (closes the same latent gap for SUPER_CANNON_KONA).\n\nCloses ethereum-optimism/optimism#20500",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-02T07:43:11Z",
+      "mergedAt": null,
+      "additions": 164,
+      "deletions": 81
+    },
+    {
+      "id": "PR_kwDODjvEJM7W1f5n",
+      "title": "op-supernode: add Prometheus metrics for interop SLI qualification",
+      "author": "jelias2",
+      "number": 20443,
+      "body": "## Summary\n- Adds 6 new Prometheus metrics to op-supernode for interop quality gate qualification (SLI-SN-4 through SLI-SN-8)\n- `supernode_interop_verification_duration_seconds` — histogram of verification latency\n- `supernode_chain_rewind_depth_blocks` — histogram of rewind depths per chain\n- `supernode_denylist_entries_total` — gauge of deny list size per chain\n- `supernode_log_backfill_progress` — gauge (0.0-1.0) of backfill completion per chain\n- `supernode_log_backfill_retries_total` — counter of backfill retries per chain\n- `supernode_activity_errors_total` — counter of activity errors by type\n\n## Context\nThese metrics are required for the Interop Quality Gates qualification process. See [Interop Quality Gates](https://www.notion.so/Interop-Quality-Gates-34af153ee1628008b0c4f21b82143876) for SLI/SLO definitions.\n\n## Test plan\n- [ ] `go build ./...` passes from op-supernode/\n- [ ] Deploy to devnet and verify metrics appear on /metrics endpoint\n- [ ] Confirm histogram buckets are reasonable for expected value ranges\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-29T18:48:04Z",
+      "mergedAt": "2026-05-02T00:31:22Z",
+      "additions": 75,
+      "deletions": 7
+    },
+    {
+      "id": "PR_kwDODjvEJM7Xppi4",
+      "title": "fix(op-revm): ensure Bedrock deposits bump nonce on Halt",
+      "author": "emmokprime-pixel",
+      "number": 20504,
+      "body": "This PR addresses a state inconsistency in `op-revm` where deposit transactions of type `Create` in the Bedrock hardfork (Pre-Regolith) failed to increment the sender's nonce if the execution resulted in a `Halt` (e.g., `OutOfGas`).\r\n\r\n### The Bug\r\nIn `OpHandler::execution_result`, halted deposits were only converted to bubble-up errors if the `REGOLITH` hardfork was enabled. For `BEDROCK`, the handler returned `Ok(Halt)`, which bypassed the `catch_error` logic where the nonce bump occurs.\r\n\r\n### The Fix\r\n1. Modified `OpHandler::execution_result` to return an `Err(OpTransactionError::HaltedDeposit)` for all halted deposit transactions.\r\n2. Renamed `OpTransactionError::HaltedDepositPostRegolith` to `OpTransactionError::HaltedDeposit` for correctness across forks.\r\n\r\nVerified with regression test `test_halted_deposit_tx_bedrock_nonce_bump`.\r\n@rakita ",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-02T14:21:13Z",
+      "mergedAt": null,
+      "additions": 56,
+      "deletions": 9
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 75,
+    "deletions": 7,
+    "files": 4,
+    "commitCount": 6
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
+  "completedItems": [
+    {
+      "title": "op-supernode: add Prometheus metrics for interop SLI qualification",
+      "prNumber": 20443,
+      "type": "other",
+      "body": "## Summary\n- Adds 6 new Prometheus metrics to op-supernode for interop quality gate qualification (SLI-SN-4 through SLI-SN-8)\n- `supernode_interop_verification_duration_seconds` — histogram of verification latency\n- `supernode_chain_rewind_",
+      "files": [
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/log_backfill.go",
+        "op-supernode/supernode/chain_container/invalidation.go",
+        "op-supernode/supernode/resources/supernode_metrics.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 47.22299947827978,
+      "prScore": 38.92299947827978,
+      "issueScore": 8.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "emmokprime-pixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/277552541?v=4",
+      "totalScore": 10.769654742026425,
+      "prScore": 10.769654742026425,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "eventtrader",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/245737262?v=4",
+      "totalScore": 8.46005020110221,
+      "prScore": 8.46005020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 6.583306144334055,
+      "prScore": 6.583306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 1,
+  "newIssues": 3,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 8
 }
