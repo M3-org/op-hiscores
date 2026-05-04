@@ -5,20 +5,165 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-03 to 2026-05-04, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-05-03 to 2026-05-04, ethereum-optimism/optimism had 3 new PRs (1 merged), 1 new issues, and 9 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABBI_FWw",
+      "title": "op-challenger run-trace dispatches super-cannon-kona to single-chain Kona executor",
+      "author": "wwared",
+      "number": 20506,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`op-challenger run-trace` cannot exercise the `super-cannon-kona` game type. The runner's trace-provider factory dispatches both `CannonKonaGameType` and `SuperCannonKonaGameType` through the single-chain `vm.NewKonaExecutor()`, while the production challenger registers `SuperCannonKonaGameType` against `vm.NewKonaSuperExecutor()`. The two executors invoke different Kona-host CLI subcommands (`single` vs `super`) with disjoint flag sets and disjoint input shapes, so a `super-cannon-kona` run-trace invocation produces a Kona-host command that does not run super-state derivation at all.\n\n## Routing divergence\n\n`op-challenger/runner/factory.go:41-49` — runner factory (used by `run-trace`):\n\n```go\ncase gameTypes.CannonKonaGameType, gameTypes.SuperCannonKonaGameType:\n    serverExecutor := vm.NewKonaExecutor()\n    stateConverter := cannon.NewStateConverter(cfg.CannonKona)\n    prestate, err := prestateSource.getPrestate(ctx, logger, cfg.CannonKonaAbsolutePreStateBaseURL, cfg.CannonKonaAbsolutePreState, dir, stateConverter)\n    if err != nil {\n        return nil, err\n    }\n    prestateProvider := vm.NewPrestateProvider(prestate, stateConverter)\n    return cannon.NewTraceProvider(logger, m, cfg.CannonKona, serverExecutor, prestateProvider, prestate, localInputs, dir, 42), nil\n```\n\n`op-challenger/game/fault/register.go:77-83` — production challenger registry:\n\n```go\nif cfg.GameTypeEnabled(gameTypes.SuperCannonKonaGameType) {\n    rootProvider, superNodeProvider, syncValidator, err := clients.SuperchainClients()\n    if err != nil {\n        return err\n    }\n    registerTasks = append(registerTasks, NewSuperCannonKonaRegisterTask(gameTypes.SuperCannonKonaGameType, cfg, m, vm.NewKonaSuperExecutor(), rootProvider, superNodeProvider, syncValidator))\n}\n```\n\nThe registry uses `KonaSuperExecutor`; the runner factory uses `KonaExecutor` for the same game type. Only one of the two paths is correct for super-cannon-kona.\n\n## Subcommand and flag divergence\n\n`KonaExecutor` (`op-challenger/game/fault/trace/vm/kona_server_executor.go:25-69`) emits the Kona-host `single` subcommand, requires exactly one entry in `cfg.L2s` (errors at line 26-28 otherwise), reads `inputs.L2Head` / `inputs.L2OutputRoot` (lines 36-37), and ignores `inputs.AgreedPreState`.\n\n`KonaSuperExecutor` (`op-challenger/game/fault/trace/vm/kona_super_server_executor.go:25-65`) emits the Kona-host `super` subcommand, accepts a CSV `--l2-node-addresses` (line 35), reads `inputs.AgreedPreState` (line 37) and `inputs.L2Claim` as `--claimed-l2-post-state` (line 38), and supports `--depset-cfg` (line 58).\n\nThese are different code paths inside Kona — `bin/host/src/cli/single.rs` vs `bin/host/src/cli/super.rs` — with different derivation and validation logic.\n\n## Input-shape divergence\n\n`createGameInputsInterop` (`op-challenger/runner/game_inputs.go:167-231`), the runner's input builder for `SuperCannonKonaGameType`, populates `AgreedPreState` (line 226) and a synthetic `L2SequenceNumber` (line 228) but does **not** populate `L2Head` or `L2OutputRoot`; both remain zero.\n\nWhen the resulting `LocalGameInputs` flows through `KonaExecutor` via the runner factory's wrong branch, `KonaExecutor.OracleCommand` reads zero hashes for `--agreed-l2-head-hash` and `--agreed-l2-output-root` (`kona_server_executor.go:36-37`) and ignores the populated `AgreedPreState`. The resulting Kona-host command runs single-chain derivation against zero hashes plus a super-state hash assigned to `--claimed-l2-output-root`. This produces either an immediate error or a derivation that returns an invalid status root — not the super-state re-derivation the runner intends.\n\n## Consequence\n\n`op-challenger run-trace --run super-cannon-kona/<name>[/<prestate>]` cannot succeed against a real super-state input on any chain. The runner will repeatedly invoke a Kona-host command that has no path to a successful output-root verification for super-cannon-kona.\n\nThis is silent: the runner does not detect the routing mismatch, the Kona-host invocation fails for what looks like a derivation-level reason, and the runner records the failure under `RecordVmFailure` with a reason that does not surface the real cause.\n\n## Test coverage\n\nNo test in `op-challenger/`, `op-acceptance-tests/`, `op-e2e/`, or `op-devstack/` invokes `op-challenger run-trace --run super-cannon-kona/...`. `op-challenger/cmd/run_trace_test.go` covers only single `cannon` / `cannon-kona`. `op-challenger/runner/runner_test.go` is a stubbed timeout test. `KonaSuperExecutor` is unit-tested directly in `kona_super_server_executor_test.go` but never reached through the run-trace entry point.\n\n## Suggested fix shape\n\n`op-challenger/runner/factory.go` should split the `CannonKonaGameType` and `SuperCannonKonaGameType` cases. The super-cannon-kona branch needs:\n\n- `vm.NewKonaSuperExecutor()` instead of `vm.NewKonaExecutor()`.\n- A trace-provider constructor that accepts the super-state input shape produced by `createGameInputsInterop`, mirroring how `register.go`'s `NewSuperCannonKonaRegisterTask` wires the production challenger.\n- Correct propagation of dependency-set config so `--depset-cfg` is set when present.\n\nA runner-level test that constructs a `super-cannon-kona` `RunConfig` and asserts the resulting Kona-host command starts with `super` and includes `--agreed-l2-pre-state`, `--claimed-l2-post-state`, and `--l2-node-addresses` would prevent regression.",
+      "createdAt": "2026-05-03T10:29:46Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7X1ApD",
+      "title": "Run Osaka acceptance tests against kona-host",
+      "author": "joshklop",
+      "number": 20509,
+      "body": "",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-03T21:25:41Z",
+      "mergedAt": null,
+      "additions": 432,
+      "deletions": 128
+    },
+    {
+      "id": "PR_kwDODjvEJM7XWMkL",
+      "title": "test(op-acceptance): drive AfterChainHead test setup via TestSequencer",
+      "author": "ajsutton",
+      "number": 20482,
+      "body": "Adds the 6 AfterChainHead subtests to the SuperFaultProofs acceptance suite and converts the existing tests' Stage 1+2 setup to deterministic block production via `TestSequencer` (replacing the running-sequencer flow). Drops `MarkFlaky` on the two varied-block-time tests — the original flake (`ethereum-optimism/optimism#19828`) is no longer reachable now that `nextTimestampAfterSafeHeads` walks past no-op transitions and `TestSequencer` drives every chain to the boundary deterministically.\n\nTwo new subtests (`DisputeTimestampAfterChainHeadConsolidate`, `DisputeBlockAfterChainHead-FirstChain`) skip their challenger halves under varied-block-time configs pending op-supernode bug `ethereum-optimism/optimism#20481` (`VerifiedRequiredL1` uses MIN of per-chain L1s instead of MAX). Their FPP halves still run.\n\nAlso bumps `GossipTimestampThreshold` to 1h in the devstack p2p config — devstack chain timestamps are synthetic and can lag wallclock during long tests, so the production-default 60s \"payload too old\" check rejects otherwise-valid TestSequencer-produced blocks. Devstack-only.\n\n## Test plan\n\n- [x] `TestInteropFaultProofs` — PASS (97s) locally\n- [x] `TestInteropFaultProofs_VariedBlockTimes` — PASS (100s) locally\n- [x] `TestInteropFaultProofs_VariedBlockTimes_FasterChainB` — PASS (100s) locally",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-01T05:14:19Z",
+      "mergedAt": "2026-05-03T21:49:34Z",
+      "additions": 348,
+      "deletions": 121
+    },
+    {
+      "id": "PR_kwDODjvEJM7XujwN",
+      "title": "op-supernode: avoid engine rewind on L1 reorg",
+      "author": "karlfloersch",
+      "number": 20505,
+      "body": "## Summary\n\n- Stop resetting chain engines for pure `DecisionRewind` handling caused by L1 reorgs.\n- Keep the rewind scoped to Supernode-owned state when no invalidation is being undone: `VerifiedDB`, deny-list pruning, and `LogsDB`.\n- If the rewind would prune any deny-list entry, persist `ResetAllChainsTo = lastTS - 1` in the rewind plan and reset all chain engines after the DB cleanup succeeds.\n\n## Motivation\n\n`DecisionRewind` means previously accepted Supernode state no longer lines up with canonical L1. That can happen when L1 reorg handling invalidates previously accepted cross-chain verification state, and it does not necessarily mean any chain engine executed an invalid block.\n\nPreviously, the rewind plan populated `ResetAllChainsTo` whenever there was a previous verified timestamp. During apply, every chain engine was reset before the logs DB rewind/clear completed. For a pure L1 reorg, this is more disruptive than the state correction requires: the virtual nodes can be stopped, engines receive synthetic/target forkchoice updates, derivation may need to restart from the reset point, and the backend can look unhealthy while the engine is being reset. Those engine-side effects are unnecessary when only Supernode acceptance state needs to move back to match canonical L1.\n\nThe exception is deny-list cleanup. If an L1 reorg rewind prunes a deny-list entry, the prior invalidation may have already moved an engine onto a replacement/deposits-only path. Once that deny-list entry is removed, the engines need a chance to re-derive without that stale invalidation. Deny-list entries are expected to be rare, so this PR chooses the simpler conservative behavior: if any chain has a deny-list entry that will be pruned, reset all chain engines to `lastTS - 1`.\n\n## Crash-safety / ordering\n\nThe reset decision is captured in the persisted rewind plan before any side effects are applied. That matters because applying the rewind prunes deny-list entries; if the node crashes after pruning but before engine reset, replaying the WAL still needs to know that engine repair is required.\n\nEngine resets now run after `VerifiedDB`, deny-list, and `LogsDB` cleanup succeed. If the local DB cleanup fails, the pending transition remains and we avoid repeatedly resetting engines before the state rewind has completed.\n\n## Testing\n\n- `go test ./op-supernode/supernode/activity/interop`\n- `go test ./op-supernode/supernode/chain_container`\n- `go test ./op-supernode/supernode/...`",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-03T04:09:58Z",
+      "mergedAt": null,
+      "additions": 129,
+      "deletions": 19
+    },
+    {
+      "id": "PR_kwDODjvEJM7XzuPd",
+      "title": "feat(op-reth): convert built payload to execution data",
+      "author": "mattsse",
+      "number": 20507,
+      "body": "Adds an `OpBuiltPayload::into_execution_data` conversion that builds `OpExecutionData` from the sealed block, plus `From<OpBuiltPayload>` impls for both `OpExecutionData` and the local `OpExecData` wrapper. This gives op-reth the same infallible built-payload-to-execution-data path as upstream reth and prepares for the upcoming payload trait bound change.\n\nSee also paradigmxyz/reth#23859.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-03T18:18:43Z",
+      "mergedAt": null,
+      "additions": 21,
+      "deletions": 1
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 348,
+    "deletions": 121,
+    "files": 3,
+    "commitCount": 19
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
+  "completedItems": [
+    {
+      "title": "test(op-acceptance): drive AfterChainHead test setup via TestSequencer",
+      "prNumber": 20482,
+      "type": "tests",
+      "body": "Adds the 6 AfterChainHead subtests to the SuperFaultProofs acceptance suite and converts the existing tests' Stage 1+2 setup to deterministic block production via `TestSequencer` (replacing the running-sequencer flow). Drops `MarkFlaky` on ",
+      "files": [
+        "op-acceptance-tests/tests/interop/proofs/serial/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-devstack/sysgo/l2_cl_p2p_config.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 33.98681207080911,
+      "prScore": 33.98681207080911,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 22.98916271656809,
+      "prScore": 22.98916271656809,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 10.7,
+      "prScore": 0,
+      "issueScore": 6,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 9.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 7,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mattsse",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19890894?u=c96a03cb7f91b07ab031984e66a1b86dff67c70d&v=4",
+      "totalScore": 6.740747107964575,
+      "prScore": 6.740747107964575,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 6.583306144334055,
+      "prScore": 6.583306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 1,
+  "newIssues": 1,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 9
 }
