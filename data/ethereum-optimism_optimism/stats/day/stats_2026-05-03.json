@@ -15,8 +15,8 @@
       "repository": "ethereum-optimism/optimism",
       "body": "## Summary\n\n`op-challenger run-trace` cannot exercise the `super-cannon-kona` game type. The runner's trace-provider factory dispatches both `CannonKonaGameType` and `SuperCannonKonaGameType` through the single-chain `vm.NewKonaExecutor()`, while the production challenger registers `SuperCannonKonaGameType` against `vm.NewKonaSuperExecutor()`. The two executors invoke different Kona-host CLI subcommands (`single` vs `super`) with disjoint flag sets and disjoint input shapes, so a `super-cannon-kona` run-trace invocation produces a Kona-host command that does not run super-state derivation at all.\n\n## Routing divergence\n\n`op-challenger/runner/factory.go:41-49` — runner factory (used by `run-trace`):\n\n```go\ncase gameTypes.CannonKonaGameType, gameTypes.SuperCannonKonaGameType:\n    serverExecutor := vm.NewKonaExecutor()\n    stateConverter := cannon.NewStateConverter(cfg.CannonKona)\n    prestate, err := prestateSource.getPrestate(ctx, logger, cfg.CannonKonaAbsolutePreStateBaseURL, cfg.CannonKonaAbsolutePreState, dir, stateConverter)\n    if err != nil {\n        return nil, err\n    }\n    prestateProvider := vm.NewPrestateProvider(prestate, stateConverter)\n    return cannon.NewTraceProvider(logger, m, cfg.CannonKona, serverExecutor, prestateProvider, prestate, localInputs, dir, 42), nil\n```\n\n`op-challenger/game/fault/register.go:77-83` — production challenger registry:\n\n```go\nif cfg.GameTypeEnabled(gameTypes.SuperCannonKonaGameType) {\n    rootProvider, superNodeProvider, syncValidator, err := clients.SuperchainClients()\n    if err != nil {\n        return err\n    }\n    registerTasks = append(registerTasks, NewSuperCannonKonaRegisterTask(gameTypes.SuperCannonKonaGameType, cfg, m, vm.NewKonaSuperExecutor(), rootProvider, superNodeProvider, syncValidator))\n}\n```\n\nThe registry uses `KonaSuperExecutor`; the runner factory uses `KonaExecutor` for the same game type. Only one of the two paths is correct for super-cannon-kona.\n\n## Subcommand and flag divergence\n\n`KonaExecutor` (`op-challenger/game/fault/trace/vm/kona_server_executor.go:25-69`) emits the Kona-host `single` subcommand, requires exactly one entry in `cfg.L2s` (errors at line 26-28 otherwise), reads `inputs.L2Head` / `inputs.L2OutputRoot` (lines 36-37), and ignores `inputs.AgreedPreState`.\n\n`KonaSuperExecutor` (`op-challenger/game/fault/trace/vm/kona_super_server_executor.go:25-65`) emits the Kona-host `super` subcommand, accepts a CSV `--l2-node-addresses` (line 35), reads `inputs.AgreedPreState` (line 37) and `inputs.L2Claim` as `--claimed-l2-post-state` (line 38), and supports `--depset-cfg` (line 58).\n\nThese are different code paths inside Kona — `bin/host/src/cli/single.rs` vs `bin/host/src/cli/super.rs` — with different derivation and validation logic.\n\n## Input-shape divergence\n\n`createGameInputsInterop` (`op-challenger/runner/game_inputs.go:167-231`), the runner's input builder for `SuperCannonKonaGameType`, populates `AgreedPreState` (line 226) and a synthetic `L2SequenceNumber` (line 228) but does **not** populate `L2Head` or `L2OutputRoot`; both remain zero.\n\nWhen the resulting `LocalGameInputs` flows through `KonaExecutor` via the runner factory's wrong branch, `KonaExecutor.OracleCommand` reads zero hashes for `--agreed-l2-head-hash` and `--agreed-l2-output-root` (`kona_server_executor.go:36-37`) and ignores the populated `AgreedPreState`. The resulting Kona-host command runs single-chain derivation against zero hashes plus a super-state hash assigned to `--claimed-l2-output-root`. This produces either an immediate error or a derivation that returns an invalid status root — not the super-state re-derivation the runner intends.\n\n## Consequence\n\n`op-challenger run-trace --run super-cannon-kona/<name>[/<prestate>]` cannot succeed against a real super-state input on any chain. The runner will repeatedly invoke a Kona-host command that has no path to a successful output-root verification for super-cannon-kona.\n\nThis is silent: the runner does not detect the routing mismatch, the Kona-host invocation fails for what looks like a derivation-level reason, and the runner records the failure under `RecordVmFailure` with a reason that does not surface the real cause.\n\n## Test coverage\n\nNo test in `op-challenger/`, `op-acceptance-tests/`, `op-e2e/`, or `op-devstack/` invokes `op-challenger run-trace --run super-cannon-kona/...`. `op-challenger/cmd/run_trace_test.go` covers only single `cannon` / `cannon-kona`. `op-challenger/runner/runner_test.go` is a stubbed timeout test. `KonaSuperExecutor` is unit-tested directly in `kona_super_server_executor_test.go` but never reached through the run-trace entry point.\n\n## Suggested fix shape\n\n`op-challenger/runner/factory.go` should split the `CannonKonaGameType` and `SuperCannonKonaGameType` cases. The super-cannon-kona branch needs:\n\n- `vm.NewKonaSuperExecutor()` instead of `vm.NewKonaExecutor()`.\n- A trace-provider constructor that accepts the super-state input shape produced by `createGameInputsInterop`, mirroring how `register.go`'s `NewSuperCannonKonaRegisterTask` wires the production challenger.\n- Correct propagation of dependency-set config so `--depset-cfg` is set when present.\n\nA runner-level test that constructs a `super-cannon-kona` `RunConfig` and asserts the resulting Kona-host command starts with `super` and includes `--agreed-l2-pre-state`, `--claimed-l2-post-state`, and `--l2-node-addresses` would prevent regression.",
       "createdAt": "2026-05-03T10:29:46Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-05-04T08:58:19Z",
+      "state": "CLOSED",
       "commentCount": 0
     }
   ],
@@ -30,8 +30,8 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-05-03T21:25:41Z",
       "mergedAt": null,
-      "additions": 432,
-      "deletions": 128
+      "additions": 398,
+      "deletions": 159
     },
     {
       "id": "PR_kwDODjvEJM7XWMkL",
@@ -54,7 +54,7 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-05-03T04:09:58Z",
       "mergedAt": null,
-      "additions": 129,
+      "additions": 196,
       "deletions": 19
     },
     {
@@ -74,7 +74,7 @@
     "additions": 348,
     "deletions": 121,
     "files": 3,
-    "commitCount": 19
+    "commitCount": 20
   },
   "completedItems": [
     {
