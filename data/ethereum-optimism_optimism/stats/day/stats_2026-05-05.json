@@ -5,20 +5,683 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-05 to 2026-05-06, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-05-05 to 2026-05-06, ethereum-optimism/optimism had 13 new PRs (18 merged), 5 new issues, and 24 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7blDli",
+      "title": "op-node stuck in EL sync mode after restart when reth already has synced data",
+      "author": "louisliu2048",
+      "number": 18468,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Description**\nWhen `op-node` is configured with `--syncmode=execution-layer` and is restarted after having already synced with reth, it gets stuck in an initialization loop, continuously reporting `el_syncing=true` and refusing to send `ForkchoiceUpdate` requests to the execution engine.\n\n**Environment**\nop-node version: v1.16.2\nExecution client: reth, v1.9.3\nSync mode: `--syncmode=execution-layer`\n\n**Expected Behavior**\nWhen `op-node` restarts and `reth` already has synced data (e.g., block 8594953), `op-node` should:\nQuery `reth`'s current state via `engine_forkchoiceUpdatedV3`\nRecognize that `reth` is already synced (not actually syncing)\nResume normal operation (CL sync mode or continue from current state)\n\n**Actual Behavior**\nAfter restart, `op-node`:\n1. Enters `syncStatusWillStartEL` state because `--syncmode=execution-layer` is configured\n2. Reports `el_syncing=true` indefinitely\n3. Never sends `ForkchoiceUpdate` to `reth`\n4. Logs show:\n```\nt=2025-12-02T03:46:26.595+0000 lvl=debug msg=\"Sync process step\" unsafe=0 safe=0 el_syncing=true\nt=2025-12-02T03:46:26.595+0000 lvl=warn msg=\"Rollup driver is backing off because execution engine is syncing\" unsafe_head=0 unsafe_hash=0x0000000000000000000000000000000000000000000000000000000000000000\n```\n5. Meanwhile, `reth` is fully operational with synced data:\n```\nWARN Beacon client online, but no consensus updates received for a while. This may be because of a reth error, or an error in the beacon client! Please investigate reth and beacon client logs! period=135.344793103s\n```\n\nRoot Cause Analysis\nIn `engine_controller.go`:\n```\nfunc NewEngineController(...) *EngineController {\n    syncStatus := syncStatusCL\n    if syncCfg.SyncMode == sync.ELSync {\n        syncStatus = syncStatusWillStartEL  // <-- Gets stuck here on restart\n    }\n    // ...\n}\n\nfunc (e *EngineController) isEngineInitialELSyncing() bool {\n    return e.syncStatus == syncStatusWillStartEL ||\n           e.syncStatus == syncStatusStartedEL ||\n           e.syncStatus == syncStatusFinishedELButNotFinalized\n}\n```\nThe issue is that `syncStatus` is always initialized to `syncStatusWillStartEL` when `--syncmode=execution-layer` is configured, regardless of whether the execution client already has synced data.\n\n**Reproduction Steps**\n1. Start op-node with --syncmode=execution-layer and reth\n2. Wait until synced to a reasonable height (e.g., block 8594974)\n3. Restart op-node (while reth keeps running or restart both)\n4. Observe that op-node gets stuck with el_syncing=true\n\n**Suggested Fix**\nWhen op-node starts in EL sync mode, it should first query the execution client's current state:\n```\nfunc NewEngineController(...) *EngineController {\n    syncStatus := syncStatusCL\n    if syncCfg.SyncMode == sync.ELSync {\n        // Query execution client's current finalized/safe/unsafe heads\n        // If execution client already has finalized blocks, skip to syncStatusFinishedEL\n        // Otherwise, start EL sync as normal\n        syncStatus = syncStatusWillStartEL\n    }\n    // ...\n}\n```\nAlternatively, during the first `tryUpdateEngine` call, check if the execution client responds with `VALID` for its current head, indicating it's already synced.\n\n**Impact**\n\n- Severity: High\n- Affected users: Anyone using --syncmode=execution-layer with a persistent execution client\n- Service impact: Complete node stall after restart, requiring manual configuration change to recover\n",
+      "createdAt": "2025-12-02T04:02:31Z",
+      "closedAt": "2026-05-05T14:46:27Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABAZwoCA",
+      "title": "Remove ProtocolVersions contract and its deployment paths",
+      "author": "sebastianst",
+      "number": 20309,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Sibling of #20258 under parent #20308. Removes the on-chain ProtocolVersions contract and every deployment / bootstrap path that references it, now that op-node no longer watches it.\n\n## Scope\n\n### Solidity (`packages/contracts-bedrock/`)\n- Delete `src/L1/ProtocolVersions.sol`.\n- Remove references from:\n  - `scripts/libraries/Types.sol`\n  - `scripts/deploy/DeployImplementations.s.sol`\n  - `scripts/deploy/DeploySuperchain.s.sol`\n  - `scripts/deploy/DeployOPChain.s.sol`\n  - `scripts/deploy/ChainAssertions.sol`\n  - `scripts/deploy/Deploy.s.sol`\n- Regenerate/update any snapshot or size-check files that reference the contract.\n\n### op-deployer (Go)\nRemove ProtocolVersions-related plumbing in:\n- `op-deployer/pkg/deployer/pipeline/superchain.go` — drop `RequiredProtocolVersion`, `RecommendedProtocolVersion`, `ProtocolVersionsOwner`, `ProtocolVersionsProxy`, `ProtocolVersionsImpl` wiring. **This also drops the `params.OPStackSupport` stop-gap** carried over from #20258.\n- `op-deployer/pkg/deployer/pipeline/implementations.go` — drop `ProtocolVersionsProxy` field.\n- `op-deployer/pkg/deployer/bootstrap/superchain.go` — drop `ProtocolVersionsOwner`, `RequiredProtocolVersion`, `RecommendedProtocolVersion` fields, CLI flags, validation.\n- `op-deployer/pkg/deployer/bootstrap/implementations.go` — drop `ProtocolVersionsProxy` field, CLI flag, validation.\n- `op-deployer/pkg/deployer/forge/encoding.go` — drop the `reflect.TypeOf(params.ProtocolVersion{})` case in the ABI encoder.\n- Search for any other `ProtocolVersion*` or `protocol-versions*` flag/CLI references across `op-deployer/`.\n\n### State / intent types\n- Remove `ProtocolVersionsOwner`, `ProtocolVersionsProxy`, `ProtocolVersionsImpl` from deployer state/intent structs.\n- Update any existing deployer state fixtures / snapshots.\n\n### Tests & docs\n- Update/delete any test covering ProtocolVersions deployment.\n- Docs or READMEs mentioning the contract.\n\n## Dependencies\n\n- Follows #20258 (Go-side watching removal) — already landed.\n- Unblocks #20266 (op-geth decoupling final cutover) by eliminating the `params.OPStackSupport` op-geth symbol reference that remained after #20258.\n\n## Coordination\n\nSolidity / contracts work is typically owned by a different team than the Go services. Confirm scope & timing with contracts-bedrock owners before starting Solidity edits.\n\n🤖 *Generated by Claude Code*",
+      "createdAt": "2026-04-24T09:29:33Z",
+      "closedAt": "2026-05-05T16:12:58Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABBXxxUA",
+      "title": "op-node: support superroot_atTimestamp for non-interop chains",
+      "author": "wwared",
+      "number": 20552,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Context\n\nAfter the super-roots upgrade, fault dispute games for non-interop chains will reason over super roots rather than output roots. op-challenger and op-dispute-mon already consume super roots through the `superroot_atTimestamp` RPC, but today this method is only served by op-supernode, which is interop-specific infrastructure. Non-interop chains do not run op-supernode — they run op-node. Without an op-node-side implementation, op-challenger and op-dispute-mon cannot operate against non-interop chains once those chains move to super-root games.\n\n## Problem\n\nop-node does not implement `superroot_atTimestamp`. Consumers that depend on it today:\n\n- `op-challenger` — `SuperNodeTraceProvider` in `op-challenger/game/fault/trace/super/` (interface `SuperNodeRootProvider`, single method `SuperRootAtTimestamp(ctx, uint64) → eth.SuperRootAtTimestampResponse`)\n- `op-dispute-mon` — `SuperAgreementEnricher` in `op-dispute-mon/mon/extract/super_agreement_enricher.go` (interface `SuperRootProvider`, same method)\n\nBoth currently take `--supernode-rpc`. For a non-interop chain there is nothing reasonable to point that at.\n\n## Proposal\n\nImplement `superroot_atTimestamp` on op-node so that:\n\n- A single op-node endpoint can be used as the trace/agreement source for a non-interop chain post-super-roots upgrade.\n- The returned `eth.SuperRootAtTimestampResponse` is shaped so existing op-challenger and op-dispute-mon consumers Just Work — i.e. no client-side branching on whether the source is op-node or op-supernode.\n- For a single-chain (non-interop) deployment the response degenerates naturally: `ChainIDs` is the one local chain, `OptimisticAtTimestamp` has at most one entry, `CurrentL1` / `CurrentSafeTimestamp` / `CurrentLocalSafeTimestamp` / `CurrentFinalizedTimestamp` come from op-node's existing sync state, and `Data.Super` is built from the local L2 output at the requested timestamp.\n- op-challenger's `--supernode-rpc` and op-dispute-mon's `--supernode-rpc` can be pointed at an op-node URL for non-interop chains. (Whether to introduce a separate flag name vs. reusing `--supernode-rpc` is an open question — see below.)\n\n## Open questions\n\n- **Flag/URL plumbing.** Do op-challenger and op-dispute-mon accept op-node URLs under the existing `--supernode-rpc` flag (treating any `superroot_atTimestamp`-speaking endpoint uniformly), or do we add a new flag (e.g. `--rollup-superroot-rpc`)? Reusing the existing flag is simpler; a new flag is more explicit about intent.\n- **Namespacing.** op-supernode exposes the method under the `superroot` namespace (`superroot_atTimestamp`). op-node should match that exact method name to keep the client interfaces and existing call sites untouched.\n- **Pre-upgrade behavior.** Before the super-roots activation timestamp on a given chain, what should op-node return? Options: error with a clear \"not yet active\" message, or return `Data: nil` with current sync fields populated (mirroring how op-supernode behaves when there is no block at the requested timestamp).\n\n## Out of scope\n\n- Interop chains — op-supernode remains the source of truth there.\n- Any change to the super-root format itself or to `SuperRootAtTimestampResponse`.\n- Changes to op-challenger/op-dispute-mon trace logic. This issue is about adding the server side on op-node so the existing client code paths can be reused.\n\n## Acceptance criteria\n\n- [ ] op-node exposes `superroot_atTimestamp` returning `eth.SuperRootAtTimestampResponse` compatible with existing clients.\n- [ ] op-challenger configured against an op-node URL can play super-root games on a non-interop chain (covered by acceptance / e2e tests against a non-interop devstack).\n- [ ] op-dispute-mon configured against an op-node URL can monitor super-root games on a non-interop chain.\n- [ ] Behavior at and around the super-roots activation boundary is specified and tested.\n- [ ] In-repo docs / READMEs reflect that op-node is the source for non-interop chains.",
+      "createdAt": "2026-05-05T20:47:15Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABBXBcqg",
+      "title": "Consolidate per-VM flags into global flags in op-challenger",
+      "author": "wwared",
+      "number": 20547,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Problem\n\n`op-challenger` currently exposes many flags in two parallel forms: a global `--<flag>` and a per-game-type `--<vm>-<flag>` (e.g. `--cannon-rollup-config`, `--cannon-kona-rollup-config`, `--super-cannon-rollup-config`, `--super-cannon-kona-rollup-config`). The mechanism is implemented in `op-challenger/flags/vm_flag.go` and applied to several flags in `op-challenger/flags/flags.go`, including:\n\n- `--prestates-url`\n- `--rollup-config`\n- `--l2-genesis`\n- `--l1-genesis`\n- `--depset-config`\n\nThis is confusing for operators and is being used inconsistently. More importantly, several of these are not actually VM-specific concepts — they are **network-global**:\n\n- The L1 genesis is a property of the L1 network.\n- The L2 genesis, rollup config, and dependency set are properties of the L2 chain (and superchain), not of the proof VM.\n- The same chain produces the same L2 genesis / rollup config / depset regardless of whether it is being disputed via Cannon, Cannon-Kona, Super-Cannon, or Super-Cannon-Kona.\n\nAllowing these to be set per VM makes it possible (and easy) to configure them inconsistently across game types on the same chain, which is a footgun rather than a feature.\n\n## Proposal\n\n1. **Audit every flag that currently uses `VMFlag`** and classify it as either:\n   - **Network-global** — must be the same regardless of game type. Drop the per-VM forms; keep only the global flag. Examples: `--rollup-config`, `--l2-genesis`, `--l1-genesis`, `--depset-config`.\n   - **Genuinely VM-specific** — varies meaningfully between VMs. Keep VM-specific flags only. Examples: `--cannon-bin`, `--cannon-server`, `--cannon-prestate`, `--cannon-kona-server`, `--cannon-kona-prestate`, snapshot/info frequencies.\n   - **Ambiguous** — discuss case-by-case. `--prestates-url` is a candidate (prestates are commitment-keyed, so one URL should suffice; but operators may want per-VM mirrors).\n\n2. **Goal:** every config value has exactly one canonical flag and one canonical env var, so it only needs to be specified once and is read from one location.\n\n3. **Backwards compatibility:** keep the deprecated per-VM forms working as aliases of the new global flag, with a clear startup warning naming the replacement whenever a deprecated form is set. If both the global and a deprecated per-VM form are provided, the global takes precedence (and the deprecated one still warns). Schedule removal of the deprecated forms in a follow-up.\n\n## Out of scope\n\n- Renaming or restructuring flags that are not currently per-VM.\n- Changing the underlying config plumbing beyond what's needed to remove the per-VM read paths.\n\n## Acceptance criteria\n\n- [ ] Each currently-VMFlag flag is classified as global, VM-specific, or removed.\n- [ ] Network-global flags have only one canonical form; per-VM forms are deprecated aliases with a startup warning.\n- [ ] When both forms are set, the global value wins and the deprecated form still warns.\n- [ ] In-repo docs / READMEs / devstack / op-deployer references are updated.\n- [ ] Deprecation removal scheduled for a follow-up issue.",
+      "createdAt": "2026-05-05T18:21:16Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM78z8Vx",
+      "title": "update devstack to use SUPER_CANNON_KONA and disable SUPER_CANNON as starting respected game type in migrator and",
+      "author": "stevennevins",
+      "number": 20030,
+      "repository": "ethereum-optimism/optimism",
+      "body": "SUPER_CANNON (Go/Cannon, game type 4) should be disallowed as a starting respected game type during migration. Only SUPER_CANNON_KONA (9) and SUPER_PERMISSIONED_CANNON (5) should\n be valid. \nThis also requires updating the devstack to use SUPER_CANNON_KONA for the proposer's DisputeGameType and the migration's StartingRespectedGameType.",
+      "createdAt": "2026-04-10T20:02:49Z",
+      "closedAt": "2026-05-05T13:03:00Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7YXqvh",
+      "title": "feat(sdm): admin RPC toggle for sequencer SDM/PostExec opt-in",
+      "author": "nonsense",
+      "number": 20541,
+      "body": " - Add admin_setSdmEnabled and admin_sdmStatus to control local sequencer SDM/PostExec behavior.\r\n - Persist the desired SDM state in --rpc.admin-state without overwriting existing sequencer state.\r\n - Enable enablePostExec in payload attributes only when both operator preference and SDM protocol activation are active for the block timestamp.\r\n \r\n Fixes: https://github.com/ethereum-optimism/optimism/issues/20542\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-05T11:24:31Z",
+      "mergedAt": null,
+      "additions": 2877,
+      "deletions": 96
+    },
+    {
+      "id": "PR_kwDODjvEJM7Yf52f",
+      "title": "feat(op-deployer): allow ResourceConfig override per chain",
+      "author": "maurelian",
+      "number": 20546,
+      "body": "## Summary\n\nAdds an optional, per-chain `ResourceConfig` override to op-deployer's `DeployOPChain` flow. Today the deploy script hardcodes `Constants.DEFAULT_RESOURCE_CONFIG()`, so chains that need a different gas envelope (notably any chain with `gasLimit < maxResourceLimit + systemTxMaxGas`, since the default sums to ~21M) cannot be deployed through op-deployer at all.\n\nThe override is opt-in: a zero-valued `maxResourceLimit` is treated by the Solidity script as \"use the default\", matching the pre-existing behavior. Setting any non-default value intentionally produces a chain that fails `OPContractsManagerStandardValidator` (SYSCON-50…SYSCON-100) — this is documented in both the Go and Solidity comments.\n\n### Changes\n\n- **`state.ChainIntent`** — new optional `ResourceConfig` field with full `Check()` validation mirroring `SystemConfig._setResourceConfig` (precision, bounds, `uint128` cap, gas-limit headroom).\n- **`opcm.DeployOPChainInput`** — new `ResourceConfig` ABI-bound struct. Adds `abiType:\"uint128\"` tag support so `MaximumBaseFee` (no native Go primitive) round-trips correctly.\n- **`forge/encoding.go`** — `GoStructToABITuple` now honors an `abiType` tag for explicit Solidity type selection and recursively encodes nested struct fields as nested tuples.\n- **`pipeline.DeployOPChain`** — converts intent → opcm struct; nil intent yields a zero struct (the Solidity sentinel for \"use default\").\n- **`DeployOPChain.s.sol`** — adds `_resolveResourceConfig` and forwards the override to OPCM.\n- **`Types.DeployOPChainInput`** — adds the `resourceConfig` field.\n\n### Tests\n\n- `state.TestChainIntentCheck_ResourceConfig` — table-driven coverage for every invariant (`maxResourceLimit > 0`, `elasticityMultiplier > 0`, denominator > 1, divisibility, `min ≤ max`, `uint128` bound, gas-limit headroom).\n- `forge.TestGoStructToABITuple_AbiTypeTag` / `TestGoStructToABITuple_NestedStruct` / `TestBytesScriptEncoder_NestedAndUint128` — covers the new tag and nested-tuple encoding paths.\n- `DeployOPChain_Test.test_run_resourceConfigDefaulted_succeeds` / `test_run_resourceConfigCustom_succeeds` — verifies a zeroed input still yields the default config and that a custom 5M-gas-limit chain initializes successfully.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-05T18:05:20Z",
+      "mergedAt": null,
+      "additions": 418,
+      "deletions": 17
+    },
+    {
+      "id": "PR_kwDODjvEJM7WFBYq",
+      "title": "fix(opcm): disallow super cannon respected start",
+      "author": "wwared",
+      "number": 20363,
+      "body": "## Summary\n\n- reject `SUPER_CANNON` as `OPContractsManagerMigrator.migrate` starting respected game type while keeping `SUPER_CANNON_KONA` and `SUPER_PERMISSIONED_CANNON` accepted on-chain\n- switch migration callers/defaults in devstack, interopgen, and `op-deployer manage migrate` to `SUPER_CANNON_KONA`\n- re-enable `SCDG-SHAPE` and `MIG-DGF-60` validator checks and add regression coverage\n\nStacked on #19946. Closes #20030.\n\n## Notes\n\n- This tightens the migration entrypoint used for shared-DGF interop migrations without removing type-4 support from the rest of the stack. Existing `SUPER_CANNON` games still need to be serviceable by challenger/proposer/dispute tooling.\n- Devstack and interopgen still register type 4 in their game-config lists for test coverage, but they no longer choose type 4 as the migration starting respected type. The validator checks are strict for production-shaped validation, while devstack fixtures can remain intentionally broader.\n- The `OPContractsManagerV2.deploy` / `upgrade` override path is not changed here because that path is governance-controlled and has different semantics: it checks that the respected type is enabled in the supplied config, not that the type is one of the post-retirement defaults. Tightening that path should be a separate, explicit change.\n- `op-deployer manage migrate` now rejects non-Kona game types locally because that CLI path only encodes bytes32-only permissionless super-root game args. That avoids accepting type 5 flags and then failing later during contract-side decode.\n- No semver updates are needed for the directly touched helper contracts: `OPContractsManagerMigrator`, `OPContractsManagerMigrationValidator`, and `StandardValidatorUtils` do not expose `ISemver` versions. `just pre-pr -clean` passed semver-diff with no snapshot drift.\n\n## Test Plan\n\n- `mise exec -- just submodules`\n- `cd packages/contracts-bedrock && mise exec -- just build-no-tests`\n- `mise exec -- just cannon-prestates`\n- `mise exec -- just reproducible-prestate-kona`\n- `mise exec -- just build-rust-release`\n- `cd packages/contracts-bedrock && mise exec -- just test-dev`\n- `cd packages/contracts-bedrock && mise exec -- just lint`\n- `cd packages/contracts-bedrock && mise exec -- just snapshots-check`\n- `cd packages/contracts-bedrock && mise exec -- just pre-pr -clean`\n- `mise exec -- go build ./...`\n- `mise exec -- just lint-go`\n- `mise exec -- go test ./op-deployer/pkg/deployer/manage -run 'TestMigrateDefaultGameTypeFlags|TestMigrateCLIRejectsMismatchedGameTypesBeforeRPC|TestMigrateCLIRejectsUnsupportedGameTypeBeforeRPC|TestMigrateCLIV2Uint32Overflow|TestEncodedMigrateInputV2' -count=1`\n- `mise exec -- go test ./op-deployer/pkg/deployer/manage/... ./op-chain-ops/interopgen/... ./op-devstack/sysgo/... -count=1` (fails only because local `SEPOLIA_RPC_URL` is unset for `TestInteropMigration`; `interopgen` and `sysgo` pass)\n- `mise exec -- go test -run 'TestInteropDevRecipe|TestProposals' ./op-e2e/interop -count=1`\n- `cd op-acceptance-tests && mise exec -- go test -run 'TestProposer|TestChallengerPlaysGame' ./tests/interop/proofs -count=1`\n- `cd op-acceptance-tests && mise exec -- go test -run TestSuperRootGamesInstalledViaOPCMUpgrade ./tests/interop/super-via-upgrade -count=1`\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-27T18:46:27Z",
+      "mergedAt": "2026-05-05T13:02:58Z",
+      "additions": 353,
+      "deletions": 323
+    },
+    {
+      "id": "PR_kwDODjvEJM7YO5Vl",
+      "title": "op-supernode: prevent superroot_atTimestamp from returning data straddling a state-mutating event",
+      "author": "ajsutton",
+      "number": 20536,
+      "body": "## Summary\r\n\r\n`superroot_atTimestamp` performs many per-chain reads (sync status, verified, optimistic, etc.). If a VN restart, `RewindEngine`, or inner-pipeline `rollup.ResetEvent` happened between any two of those reads, the response could mix pre- and post-mutation state — silently returning a populated `CurrentL1` paired with `Data == nil`, or a `Data.Super` whose contents disagree with the surrounding sync status.\r\n\r\nThe fix is a per-chain generation counter on `simpleChainContainer`, bumped on every state transition that could invalidate previously-gathered data:\r\n\r\n- `setVN` (VN restart)\r\n- `RewindEngine` entry\r\n- `NotifyPipelineReset` (added to `rollup.SuperAuthority`; the StatusTracker invokes it in the existing `rollup.ResetEvent` handler)\r\n\r\nThe superroot activity captures `chain.Generation()` for every chain at the start of the gather and re-checks at the end. Any change collapses to `ErrInconsistentSnapshot`; callers retry next tick.\r\n\r\n`simpleVirtualNode.Stop` also now clears `v.inner` synchronously so `SyncStatus` / `SafeHeadAtL1` / `L1AtSafeHead` return `ErrVirtualNodeNotRunning` immediately rather than continuing to serve the last-published snapshot for the duration of the inner-node drain.\r\n\r\nPart of https://github.com/ethereum-optimism/optimism/issues/18667",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-05T01:56:43Z",
+      "mergedAt": null,
+      "additions": 309,
+      "deletions": 21
+    },
+    {
+      "id": "PR_kwDODjvEJM7Wv_QF",
+      "title": "test(kona): post-exec tx / SDM coverage in proof executor",
+      "author": "nonsense",
+      "number": 20432,
+      "body": "- Adds 10 post-exec / `SDM` unit tests to `kona-executor` covering parser checks, executor payload validation, and a happy-path `PostExec` execution.\r\n- Adds a `cfg(test, feature = \"test-utils\")`-gated SDM activation override on `StatelessL2Builder` (SDM has no scheduled fork yet) and splits `test_utils` into `load`/`execute`/`run` so tests can mutate fixtures and inspect outcomes.\r\n\r\nOnce SDM gets a scheduled hardfork timestamp on `RollupConfig::Hardforks`, all three current overrides (kona's `sdm_active_override`, `OpEvmConfig::sdm_enabled`, `OpBuilderConfig::sdm_enabled`) become dead code: `is_sdm_active(timestamp)` does the right thing on all chains.\r\n\r\nRemoving the overrides is the cleanup PR that lands alongside the activation schedule.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-29T14:19:48Z",
+      "mergedAt": "2026-05-05T10:18:08Z",
+      "additions": 303,
+      "deletions": 26
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 1923,
+    "deletions": 1955,
+    "files": 159,
+    "commitCount": 86
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "chore(contracts-bedrock): remove stale U15 fork guards",
+      "prNumber": 20330,
+      "type": "other",
+      "body": "## Summary\n- remove stale Upgrade 15 fork guards around ETHLockbox setup\n- always register ETHLockbox from artifacts via getAddress, preserving address(0) fallback for chains without a lockbox\n- keep the generic non-upgraded fork path for O",
+      "files": [
+        "packages/contracts-bedrock/test/L1/ETHLockbox.t.sol",
+        "packages/contracts-bedrock/test/setup/Setup.sol"
+      ]
+    },
+    {
+      "title": "chore(contracts-bedrock): clean up docs and stale config",
+      "prNumber": 20324,
+      "type": "refactor",
+      "body": "## Summary\n\n- remove the dead `.pr-check-passed` sentinel and stale `toc` recipe\n- fix invalid periphery JSON without adding new tooling\n- refresh contracts package README, book navigation, interface docs, versioning policy wording, and Kon",
+      "files": [
+        "packages/contracts-bedrock/.pr-check-passed",
+        "packages/contracts-bedrock/README.md",
+        "packages/contracts-bedrock/book/src/SUMMARY.md",
+        "packages/contracts-bedrock/book/src/contributing/interfaces.md",
+        "packages/contracts-bedrock/book/src/introduction.md",
+        "packages/contracts-bedrock/book/src/policies/foundry-upgrades.md",
+        "packages/contracts-bedrock/book/src/policies/release-process.md",
+        "packages/contracts-bedrock/book/src/policies/versioning.md",
+        "packages/contracts-bedrock/deploy-config-periphery/drippie/sepolia-maintenance.json",
+        "packages/contracts-bedrock/justfile",
+        "packages/contracts-bedrock/test/kontrol/README.md"
+      ]
+    },
+    {
+      "title": "fix(opcm): disallow super cannon respected start",
+      "prNumber": 20363,
+      "type": "bugfix",
+      "body": "## Summary\n\n- reject `SUPER_CANNON` as `OPContractsManagerMigrator.migrate` starting respected game type while keeping `SUPER_CANNON_KONA` and `SUPER_PERMISSIONED_CANNON` accepted on-chain\n- switch migration callers/defaults in devstack, in",
+      "files": [
+        "op-acceptance-tests/tests/isthmus/preinterop/interop_readiness_test.go",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-deployer/pkg/deployer/integration_test/cli/migrate_test.go",
+        "op-deployer/pkg/deployer/manage/flags.go",
+        "op-deployer/pkg/deployer/manage/migrate.go",
+        "op-deployer/pkg/deployer/manage/migrate_test.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/superroot.go",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrationValidator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/StandardValidatorUtils.sol",
+        "packages/contracts-bedrock/test/L1/OPContractsManagerStandardValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerMigrationValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "op-acceptance-tests/tests/interop/super-via-upgrade/super_dispute_game_via_upgrade_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/manage_add_game_type_v2_test.go",
+        "op-deployer/pkg/deployer/integration_test/shared/shared.go",
+        "op-deployer/pkg/deployer/upgrade/embedded/upgrade.go",
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-devstack/shared/challenger/challenger.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "op-devstack/sysgo/superroot_via_upgrade.go",
+        "op-e2e/e2eutils/challenger/helper.go",
+        "packages/contracts-bedrock/scripts/deploy/Deploy.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerUtils.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/test/setup/ForkL1Live.s.sol",
+        "packages/contracts-bedrock/test/setup/PastUpgrades.sol",
+        "packages/contracts-bedrock/test/setup/SuperGameTestInit.sol"
+      ]
+    },
+    {
+      "title": "feat(op-supernode): honour user-supplied p2p listen ports",
+      "prNumber": 20448,
+      "type": "feature",
+      "body": "op-supernode previously forced each virtual node's `p2p.listen.tcp` / `p2p.listen.udp` to `0` regardless of user input, so a fixed port could not be pinned. With this change the supernode only injects the `0` default when the user hasn't su",
+      "files": [
+        "op-supernode/README.md",
+        "op-supernode/cmd/main.go",
+        "op-supernode/cmd/p2p.go",
+        "op-supernode/cmd/p2p_test.go"
+      ]
+    },
+    {
+      "title": "test(kona): post-exec tx / SDM coverage in proof executor",
+      "prNumber": 20432,
+      "type": "tests",
+      "body": "- Adds 10 post-exec / `SDM` unit tests to `kona-executor` covering parser checks, executor payload validation, and a happy-path `PostExec` execution.\r\n- Adds a `cfg(test, feature = \"test-utils\")`-gated SDM activation override on `StatelessL",
+      "files": [
+        "rust/kona/crates/proof/executor/Cargo.toml",
+        "rust/kona/crates/proof/executor/src/builder/core.rs",
+        "rust/kona/crates/proof/executor/src/test_utils.rs",
+        "rust/kona/crates/proof/executor/src/builder/core/tests.rs"
+      ]
+    },
+    {
+      "title": "refactor(kona): make debug_executePayload witness collection the default",
+      "prNumber": 20498,
+      "type": "bugfix",
+      "body": "Graduate the `L2PayloadWitness` hint out of experimental: drop the `--cannon-kona-experimental-witness-endpoint` flag from op-challenger, the `WithExperimentalWitnessEndpoint` helper from op-devstack, and the `enable_experimental_witness_en",
+      "files": [
+        "op-challenger/flags/flags.go",
+        "op-challenger/game/fault/trace/vm/executor.go",
+        "op-challenger/game/fault/trace/vm/kona_server_executor.go",
+        "op-challenger/game/fault/trace/vm/kona_server_executor_test.go",
+        "op-challenger/game/fault/trace/vm/kona_super_server_executor.go",
+        "op-challenger/game/fault/trace/vm/kona_super_server_executor_test.go",
+        "op-devstack/shared/challenger/challenger.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "rust/kona/bin/host/src/interop/cfg.rs",
+        "rust/kona/bin/host/src/interop/handler.rs",
+        "rust/kona/bin/host/src/single/cfg.rs",
+        "rust/kona/bin/host/src/single/handler.rs"
+      ]
+    },
+    {
+      "title": "fix(ci): remove \"non-docs\" path filtering for rust CI checks",
+      "prNumber": 20486,
+      "type": "bugfix",
+      "body": "This gives certainty that `required-rust-e2e` (a fan-in terminal job which accumulates the status of either the full rust e2e suite, or trivial checks) always runs. This allows us to require it as a check in the github repo settings. \r\n\r\nAl",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        ".circleci/continue/main.yml",
+        "rust/deny.toml"
+      ]
+    },
+    {
+      "title": "op-supernode: avoid engine rewind on L1 reorg",
+      "prNumber": 20505,
+      "type": "other",
+      "body": "## Summary\n\n- Stop resetting chain engines for pure `DecisionRewind` handling caused by L1 reorgs.\n- Keep the rewind scoped to Supernode-owned state when no invalidation is being undone: `VerifiedDB`, deny-list pruning, and `LogsDB`.\n- If t",
+      "files": [
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/types.go",
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/invalidation.go",
+        "op-supernode/supernode/chain_container/invalidation_test.go"
+      ]
+    },
+    {
+      "title": "Update reorg.mdx",
+      "prNumber": 20535,
+      "type": "other",
+      "body": "Cleanup reorg explainer page",
+      "files": [
+        "docs/public-docs/op-stack/interop/reorg.mdx"
+      ]
+    },
+    {
+      "title": "chore(contracts-bedrock): remove unused deploy.sh script",
+      "prNumber": 20534,
+      "type": "other",
+      "body": "## Summary\r\n\r\n- Delete `packages/contracts-bedrock/scripts/deploy/deploy.sh` (a thin wrapper over `forge script Deploy.s.sol`).\r\n- Drop the corresponding `just deploy` recipe in `packages/contracts-bedrock/justfile`, which only invoked the ",
+      "files": [
+        "packages/contracts-bedrock/justfile",
+        "packages/contracts-bedrock/scripts/deploy/deploy.sh"
+      ]
+    },
+    {
+      "title": "refactor(op-service/eth): remove BlockInfo Header() and HeaderRLP() escape hatches",
+      "prNumber": 20531,
+      "type": "refactor",
+      "body": "## Summary\r\n\r\n`eth.BlockInfo` exposed two escape-hatch methods, `Header() *types.Header` and `HeaderRLP() ([]byte, error)`, that forced every implementation to either hold a `*types.Header` or panic (leaky abstraction). They had only four p",
+      "files": [
+        "op-acceptance-tests/tests/jovian/bpo2/joviantest/cases.go",
+        "op-acceptance-tests/tests/jovian/min_base_fee.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-interop-filter/filter/mock_test.go",
+        "op-node/rollup/derive/l1_traversal_managed_test.go",
+        "op-program/host/common/l2_source.go",
+        "op-program/host/prefetcher/prefetcher.go",
+        "op-program/host/prefetcher/prefetcher_test.go",
+        "op-program/host/prefetcher/reexec.go",
+        "op-program/host/prefetcher/retry.go",
+        "op-program/host/prefetcher/retry_test.go",
+        "op-program/host/types/types.go",
+        "op-service/apis/eth.go",
+        "op-service/eth/block_info.go",
+        "op-service/sources/eth_client.go",
+        "op-service/sources/eth_client_test.go",
+        "op-service/sources/types.go",
+        "op-service/testutils/l1info.go",
+        "op-service/testutils/mock_eth_client.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop_test.go"
+      ]
+    },
+    {
+      "title": "refactor: remove ProtocolVersions Solidity contract and OPCM remnants",
+      "prNumber": 20527,
+      "type": "refactor",
+      "body": "PR 2 of two for #20309 (PR 1 = #20441, already merged). Deletes the on-chain `ProtocolVersions` contract end-to-end and removes the corresponding storage slot from `OPContractsManagerContainer.Implementations`, regenerates all snapshots, an",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "docs/public-docs/chain-operators/guides/configuration/rollup.mdx",
+        "docs/public-docs/chain-operators/guides/features/custom-gas-token-guide.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/architecture/pipeline.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/bootstrap.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/init.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/verify.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-deployer-setup.mdx",
+        "docs/public-docs/node-operators/reference/op-node-config.mdx",
+        "docs/public-docs/snippets/superchain-contract-table.jsx",
+        "op-chain-ops/addresses/contracts.go",
+        "op-chain-ops/devkeys/devkeys.go",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-chain-ops/interopgen/deployments.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations.go",
+        "op-deployer/pkg/deployer/bootstrap/superchain.go",
+        "op-deployer/pkg/deployer/opcm/implementations.go",
+        "op-deployer/pkg/deployer/opcm/implementations_test.go",
+        "op-deployer/pkg/deployer/opcm/superchain.go",
+        "op-deployer/pkg/deployer/opcm/superchain_test.go",
+        "op-deployer/pkg/deployer/pipeline/implementations.go",
+        "op-deployer/pkg/deployer/pipeline/superchain.go",
+        "op-deployer/pkg/deployer/pipeline/superchain_test.go",
+        "ops/ai-eng/contracts-test-maintenance/docs/runbook.md",
+        "ops/ai-eng/contracts-test-maintenance/prompt/prompt.md",
+        "packages/contracts-bedrock/book/src/contributing/opcm.md",
+        "packages/contracts-bedrock/foundry.toml",
+        "packages/contracts-bedrock/interfaces/L1/IProtocolVersions.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerContainer.sol",
+        "packages/contracts-bedrock/scripts/deploy/ChainAssertions.sol",
+        "packages/contracts-bedrock/scripts/deploy/Deploy.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployConfig.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeploySuperchain.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
+        "packages/contracts-bedrock/scripts/getting-started/config.sh",
+        "packages/contracts-bedrock/scripts/libraries/Types.sol",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerContainer.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerUtils.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerV2.json",
+        "packages/contracts-bedrock/snapshots/abi/ProtocolVersions.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/OPContractsManagerContainer.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/ProtocolVersions.json",
+        "packages/contracts-bedrock/src/L1/ProtocolVersions.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerContainer.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/test/L1/ProtocolVersions.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerContainer.t.sol",
+        ".semgrep/rules/sol-rules.yaml",
+        "docs/public-docs/chain-operators/guides/management/operations.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/custom-deployments.mdx",
+        "docs/public-docs/node-operators/reference/op-node-json-rpc.mdx",
+        "op-chain-ops/README.md",
+        "op-deployer/pkg/deployer/integration_test/cli/verify_test.go"
+      ]
+    },
+    {
+      "title": "feat(devstack): support SDM acceptance tests",
+      "prNumber": 20516,
+      "type": "feature",
+      "body": "Adds configuration options to `op-reth` so we can run it with `--rollup.sdm-enabled` flag.",
+      "files": [
+        "op-devstack/sysgo/l2_el_opreth.go",
+        "op-devstack/sysgo/mixed_runtime.go"
+      ]
+    },
+    {
+      "title": "fix(kona-interop): guard executing chain against interop activation block",
+      "prNumber": 20550,
+      "type": "bugfix",
+      "body": "`MessageGraph::check_single_dependency` only enforces the interop activation invariant on the initiating chain. The interop spec forbids executing messages in any chain's activation block, and op-supervisor's `LinkCheckerImpl.CanExecute` an",
+      "files": [
+        "rust/kona/crates/protocol/interop/src/errors.rs",
+        "rust/kona/crates/protocol/interop/src/graph.rs"
+      ]
+    },
+    {
+      "title": "fix(op-challenger): create-game cli super root encoding",
+      "prNumber": 20545,
+      "type": "bugfix",
+      "body": "Fix `op-challenger create-game` calldata generation for super dispute games.\r\n\r\nSuper dispute games expect `extraData` to be an encoded single-chain super root proof: `0x01 || uint64(timestamp) || uint256(l2ChainID) || bytes32(outputRoot)` ",
+      "files": [
+        "op-challenger/cmd/create_game.go",
+        "op-challenger/game/fault/contracts/gamefactory.go",
+        "op-challenger/game/fault/contracts/gamefactory_test.go",
+        "op-challenger/tools/create_game.go"
+      ]
+    },
+    {
+      "title": "ci(op-reth): use fast-build profile in PR docker bake",
+      "prNumber": 20543,
+      "type": "other",
+      "body": "## Summary\n- Override `BUILD_PROFILE` for the `op-reth` bake target to `fast-build` on `pull_request` events; keep `maxperf` for pushes to `develop`, scheduled builds, and tags.\n- `maxperf` uses `lto = \"fat\"` + `codegen-units = 1`, which se",
+      "files": [
+        ".github/workflows/branches.yaml"
+      ]
+    },
+    {
+      "title": "fix(op-supernode): error on InvalidateBlock rewind preconditions",
+      "prNumber": 20539,
+      "type": "bugfix",
+      "body": "`InvalidateBlock` previously returned `(false, nil)` when `c.engine == nil` or `c.engine.L2BlockRefByNumber` failed, so `applyPendingTransition` would clear the pending transition and the EL kept executing the invalidated block. Both paths ",
+      "files": [
+        "op-supernode/supernode/chain_container/invalidation.go",
+        "op-supernode/supernode/chain_container/invalidation_test.go"
+      ]
+    },
+    {
+      "title": "op-supernode: pass observeRound L1 heads through to l1Inclusion",
+      "prNumber": 20538,
+      "type": "other",
+      "body": "`l1Inclusion` was calling `chain.OptimisticAt(ts)` independently from `observeRound`, so an L2 reorg between observation and verification could make the L1 inclusion inconsistent with the L2 heads being verified. Use the per-chain L1 inclus",
+      "files": [
+        "op-supernode/supernode/activity/interop/algo.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/log_backfill_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 140.90965814461651,
+      "prScore": 131.0696581446165,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 119.93576424834063,
+      "prScore": 119.93576424834063,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 85.85957020200048,
+      "prScore": 80.65957020200048,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 68.63010648668768,
+      "prScore": 53.29010648668768,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 47.90371757896165,
+      "prScore": 47.90371757896165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 45.794773896576096,
+      "prScore": 34.794773896576096,
+      "issueScore": 2,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 43.03639009507066,
+      "prScore": 43.03639009507066,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 33.14199381241676,
+      "prScore": 33.14199381241676,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 24,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 17.650606672028108,
+      "prScore": 7.450606672028108,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 11.778528664807629,
+      "prScore": 11.778528664807629,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "theochap",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "tynes",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6626818?u=b3c2987fe8eef535a8a123e6f22728475c7dbc5f&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 4.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "palango",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/90851?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 13,
+  "mergedPRs": 18,
+  "newIssues": 5,
+  "closedIssues": 7,
+  "activeContributors": 24
 }
