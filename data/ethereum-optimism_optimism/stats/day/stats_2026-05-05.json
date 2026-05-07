@@ -90,8 +90,20 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-05-05T18:05:20Z",
       "mergedAt": null,
-      "additions": 418,
+      "additions": 409,
       "deletions": 17
+    },
+    {
+      "id": "PR_kwDODjvEJM7YgZ6O",
+      "title": "fix: ZK Game Internal Review Remediations",
+      "author": "0xarktos",
+      "number": 20548,
+      "body": "## Summary\r\n\r\nThis PR remediates internal review findings related to ZK dispute game validation, deployment safety checks, and minor consistency issues. The changes align ZK dispute game behavior with existing `FaultDisputeGame` checks, improve validator coverage for ZK game arguments, and prevent invalid enabled game configurations from being deployed.\r\n\r\n## Audit Issues Remediated\r\n\r\n| Issue | Description | Remediation |\r\n|---|---|---|\r\n| `L-0` | `rootClaimByChainId(uint256)` ignored its `chainId` argument and returned the game root claim for any chain ID. | Added an explicit `UnknownChainId` revert when `_chainId != l2ChainId()`. |\r\n| `L-1` | Validator hard-failed initial deployments when the ZK dev feature was enabled but `ZK_DISPUTE_GAME` was absent from the factory. | Added an early return when `gameImpls(ZK_DISPUTE_GAME) == address(0)`, treating absence as opt-out. |\r\n| `L-2` | `_assertValidZKGameArgs` only validated `l2ChainId` and ignored other critical ZK parameters. | Extended `LibGameArgs.decodeZK` to decode all fields and added nonzero checks for `absolutePrestate`, `verifier`, durations, and `challengerBond`. |\r\n| `L-3` | `OPContractsManagerV2._apply()` allowed enabled game types to register a zero implementation. | Added a zero-implementation revert using `OPContractsManagerV2_ZeroGameImplementation(GameType)`. |\r\n| `I-0` | ZK game did not defensively check that the ASR `anchorRoot` is nonzero when no parent game exists. | Added an explicit zero check in ZK game initialization for the no-parent case. |\r\n| `I-5` | ZK game type was not ordered consistently in `Types.sol`. | Reordered the ZK game type to preserve ascending order. |\r\n| `I-6` | Enabled game configs could use a zero `initBond`, weakening dispute game incentives. | Added validation requiring nonzero `initBond` for enabled games. |\r\n\r\n## Detailed Changes\r\n\r\n### `[L-0]` `rootClaimByChainId` ignores its `chainId` argument\r\n\r\n`rootClaimByChainId(uint256)` now validates the requested chain ID before returning the root claim.\r\n\r\nThis matches the behavior of `FaultDisputeGame` and prevents callers from accidentally receiving a root claim for the wrong chain.\r\n\r\n```solidity\r\nif (_chainId != l2ChainId()) revert UnknownChainId();\r\n```\r\n\r\nRelevant tests were added/updated.\r\n\r\n---\r\n\r\n### `[L-1]` Validation fails for initial deployments when the ZK dev feature is enabled\r\n\r\n`OPContractsManagerStandardValidator` no longer treats the release-level `devFeatureBitmap` as proof that every chain has ZK enabled.\r\n\r\nWhen `gameImpls(ZK_DISPUTE_GAME) == address(0)`, `assertValidZKDisputeGame` now returns early. This treats ZK absence in the factory as an intentional opt-out, which is valid for initial deployments.\r\n\r\nRelevant tests were added/updated.\r\n\r\n---\r\n\r\n### `[L-2]` StandardValidator does not check main ZK game params\r\n\r\n`LibGameArgs.decodeZK` now decodes all 8 ZK game argument fields into a new `ZKGameArgs` struct.\r\n\r\n`_assertValidZKGameArgs` now validates the critical ZK-specific fields:\r\n\r\n- `absolutePrestate` — `ZKDG-70`\r\n- `verifier` — `ZKDG-80`\r\n- `maxChallengeDuration` — `ZKDG-90`\r\n- `maxProveDuration` — `ZKDG-100`\r\n- `challengerBond` — `ZKDG-110`\r\n\r\nA generic `mockZKGameArg` helper was added in `DisputeGames.sol`, with tests for each new error code.\r\n\r\n---\r\n\r\n### `[L-3]` OPCMV2 does not reject enabled games with zero implementations\r\n\r\n`OPContractsManagerV2._apply()` now rejects enabled dispute game configs when the resolved implementation is `address(0)` or the on chain code length is 0.\r\n\r\nA new custom error was added to both the contract and interface:\r\n\r\n```solidity\r\nOPContractsManagerV2_ZeroGameImplementation(GameType)\r\n```\r\n\r\nA generic test was added using the always-enabled Cannon game type.\r\n\r\n---\r\n\r\n### `[I-0]` Missing zero check for `anchorRoot` when no parent ZK game exists\r\n\r\nThe ZK game now defensively checks that the anchor root pulled from the Anchor State Registry is nonzero when no parent game exists.\r\n\r\nThis prevents initialization with an invalid first root in the no-parent case.\r\n\r\n---\r\n\r\n### `[I-5]` ZK game type violates ascending order in `Types.sol`\r\n\r\nThe ZK game type was reordered in `Types.sol` to preserve the existing ascending-order convention.\r\n\r\n---\r\n\r\n### `[I-6]` No check for enabled games with zero `initBond`\r\n\r\nOPCM deployed game config validation now enforces that enabled games must have a nonzero `initBond`.\r\n\r\nThis complements the existing disabled-game validation, which already requires disabled games to have a zero bond.\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-05T18:33:42Z",
+      "mergedAt": null,
+      "additions": 376,
+      "deletions": 65
     },
     {
       "id": "PR_kwDODjvEJM7WFBYq",
@@ -116,18 +128,6 @@
       "mergedAt": null,
       "additions": 309,
       "deletions": 21
-    },
-    {
-      "id": "PR_kwDODjvEJM7Wv_QF",
-      "title": "test(kona): post-exec tx / SDM coverage in proof executor",
-      "author": "nonsense",
-      "number": 20432,
-      "body": "- Adds 10 post-exec / `SDM` unit tests to `kona-executor` covering parser checks, executor payload validation, and a happy-path `PostExec` execution.\r\n- Adds a `cfg(test, feature = \"test-utils\")`-gated SDM activation override on `StatelessL2Builder` (SDM has no scheduled fork yet) and splits `test_utils` into `load`/`execute`/`run` so tests can mutate fixtures and inspect outcomes.\r\n\r\nOnce SDM gets a scheduled hardfork timestamp on `RollupConfig::Hardforks`, all three current overrides (kona's `sdm_active_override`, `OpEvmConfig::sdm_enabled`, `OpBuilderConfig::sdm_enabled`) become dead code: `is_sdm_active(timestamp)` does the right thing on all chains.\r\n\r\nRemoving the overrides is the cleanup PR that lands alongside the activation schedule.",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-04-29T14:19:48Z",
-      "mergedAt": "2026-05-05T10:18:08Z",
-      "additions": 303,
-      "deletions": 26
     }
   ],
   "codeChanges": {

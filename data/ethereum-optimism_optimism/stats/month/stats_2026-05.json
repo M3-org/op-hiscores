@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-01 to 2026-06-01, ethereum-optimism/optimism had 54 new PRs (45 merged), 21 new issues, and 48 active contributors.",
+  "overview": "From 2026-05-01 to 2026-06-01, ethereum-optimism/optimism had 77 new PRs (57 merged), 26 new issues, and 51 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM62azM2",
@@ -16,6 +16,18 @@
       "body": "Review the process for creating new chains post-interop and ensure it works with op-deployer/opcm and has suitable documentation. Need to decide on what is in scope for which releases - ie we could require new chains to continue to use pre-interop genesis then migrate and activate the fork initially but would need to document that (and at some point we will want to be able to create new chains with interop enabled at genesis).\n\nAlso need to decide whether/when to support deploying new chains into a dependency set together or if when deploying multiple chains in the same intent file they still go into their own separate dependency sets.",
       "createdAt": "2025-05-13T15:32:14Z",
       "closedAt": "2026-05-04T03:17:14Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7bc4eM",
+      "title": "Modify OP-Supernode Charts to Support Healthchecks on /<chain-id>/ subdomains",
+      "author": "jelias2",
+      "number": 18451,
+      "repository": "ethereum-optimism/optimism",
+      "body": "# Descriptions\nThe healthchecks no longer work with the chain-id subdomains from the op-supernode",
+      "createdAt": "2025-12-01T16:21:40Z",
+      "closedAt": "2026-05-06T16:51:53Z",
       "state": "CLOSED",
       "commentCount": 1
     },
@@ -54,18 +66,6 @@
       "closedAt": "2026-05-04T02:53:55Z",
       "state": "CLOSED",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM7-Mum6",
-      "title": "[L2CM] Milestone: Acceptance testing on Betanet",
-      "author": "maurelian",
-      "number": 20089,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Run acceptance tests against Betanet deployment to validate L2CM upgrades.\n\n**Milestone:** M3 - audit and quality\n**Effort:** ~0.4 eng weeks",
-      "createdAt": "2026-04-14T21:07:18Z",
-      "closedAt": "2026-05-05T13:21:25Z",
-      "state": "CLOSED",
-      "commentCount": 1
     }
   ],
   "topPRs": [
@@ -82,59 +82,59 @@
       "deletions": 96
     },
     {
-      "id": "PR_kwDODjvEJM7YIpHe",
-      "title": "refactor(op-service/sources): minimal-fetch path for L2BlockRef and SystemConfig",
-      "author": "sebastianst",
-      "number": 20532,
-      "body": "## Summary\n\n`L2Client.L2BlockRefBy{Label,Number,Hash}` and `SystemConfigByL2Hash` previously fetched the entire L2 block (`eth_getBlockByX` with `fullTx=true`) just to read a handful of header fields and decode the first transaction (the L1 info deposit). For large blocks this can waste >99% of the bandwidth and CPU. These methods sit on hot paths: engine FCU validation, attributes builder, sync startup.\n\nThis PR introduces a minimal-fetch path that downloads only the header (`fullTx=false`) plus the first transaction in a single batched JSON-RPC round trip. By-hash is naturally consistent. By-label / by-number do an optimistic consistency check (`header.Transactions[0] == tx.Hash()`) and refetch only the tx by the resolved hash on mismatch (rare race under reorg / new head).\n\n## Stacking\n\nThis PR is stacked on **#20531** (`refactor(op-service/eth): remove BlockInfo Header() and HeaderRLP() escape hatches`). The base branch is set to `seb/refactor/blockinfo-cleanup` to keep the diff small. After #20531 merges, this PR retargets to `develop`.\n\n## What changes\n\n- **`eth.PayloadToInfo`** — new wrapper making `*ExecutionPayload` satisfy `BlockInfo` (now possible because the precursor PR removed `Header()` / `HeaderRLP()` from the interface).\n- **`derive.BlockRefFromHeaderAndDeposit`** and **`derive.SystemConfigFromHeaderAndDeposit`** — new inner helpers operating on `(BlockInfo, *types.Transaction)`. The existing `PayloadToBlockRef` and `PayloadToSystemConfig` become thin wrappers; behavior is preserved.\n- **`EthClient.HeaderAndFirstTx`** — batched JSON-RPC call (`eth_getBlockByX(id, false)` + `eth_getTransactionByBlockXAndIndex(id, 0)`). Optimistic consistency check on label/number paths; tx-only refetch on mismatch using the resolved block hash. Skipped for by-hash paths.\n- **`RPCHeaderWithTxHashes`** — new type to decode the `fullTx=false` response with transaction hashes (rather than full transactions).\n- **`headerAndDepositCache`** — new LRU cache keyed by block hash, populated by `HeaderAndFirstTx`. Both `L2BlockRefByHash` and `SystemConfigByL2Hash` benefit from the same cache entry, since the engine FCU and attributes builder routinely call both for the same hash.\n- **`L2Client` adapters rewritten** — `L2BlockRefBy{Label,Number,Hash}` and `SystemConfigByL2Hash` now go through `HeaderAndFirstTx` + the new derive helpers. Existing per-result caches (`l2BlockRefsCache`, `systemConfigsCache`) are preserved as the hot-path lookups.\n\n## Behavior preserved\n\n- Output of `L2BlockRefByX` and `SystemConfigByL2Hash` is identical to the previous full-payload path (verified by existing derivation, attributes-queue, and engine tests, all of which pass unchanged).\n- Genesis short-circuit still handled (in the inner helpers).\n- Deposit-type assertion still enforced.\n- Existing `PayloadToBlockRef` and `PayloadToSystemConfig` callers (~25 sites across derivation, span batches, attributes) keep working — they call the new inner helpers via the preserved wrappers.\n\n## Open items deferred\n\n- Metrics for the consistency-check retry path. Add only if production data shows it firing measurably.\n- Multi-block batching during sync (the `MultiCaller` pattern could batch K of these into one round trip). Out of scope here; a future optimization.\n- The same minimal-fetch optimization applied to `EthClient.BlockRefBy{Label,Number,Hash}` (L1 side — header-only, no first-tx dependency). Independently valuable.\n\n## Test plan\n\n- [x] `mise exec -- go build ./...` passes\n- [x] `mise exec -- just lint-go` passes (0 issues, mod tidy clean)\n- [x] `mise exec -- go test -count=1 -short ./op-service/... ./op-program/... ./op-supernode/... ./op-interop-filter/... ./op-node/...` passes\n- [x] `op-node/rollup/derive` test suite passes (covers the existing `PayloadToBlockRef` and `PayloadToSystemConfig` paths through their new thin-wrapper form)\n- [ ] _Pending follow-up:_ dedicated unit tests for `HeaderAndFirstTx` (happy path, by-hash skip-check, label-race retry, deposit-type rejection) and for `BlockRefFromHeaderAndDeposit` / `SystemConfigFromHeaderAndDeposit` parity vs. `PayloadTo*`. Existing test coverage transitively exercises the path through `L2BlockRefBy*`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-04T19:22:49Z",
-      "mergedAt": null,
-      "additions": 711,
-      "deletions": 70
-    },
-    {
-      "id": "PR_kwDODjvEJM7X2P0p",
-      "title": "docs: runbook for merging two chains into a shared dispute game",
+      "id": "PR_kwDODjvEJM7Yvqh0",
+      "title": "op-supernode: serve full superroot RPC from durable state post-activation",
       "author": "ajsutton",
-      "number": 20510,
-      "body": "Adds a chain-operator runbook for merging two pre-interop OP Stack chains onto a shared `DisputeGameFactory`, `AnchorStateRegistry`, and `ETHLockbox` via `OPContractsManagerMigrator.migrate`.\n\n- Uses `op-fetcher` (with `--output-file`) for L1 address/role lookups in pre- and post-migration states; keeps direct `cast`/`curl` checks for the feature-flag, CGT, respected-game-type, supernode-sync, and prestate-server preconditions.\n- Distinguishes the privileged `proposer`/`challenger` roles on `SUPER_PERMISSIONED_CANNON` from the wallet `op-challenger` actually signs with.\n- Calls out an explicit step to start the shared `op-challenger` and `op-dispute-mon` as soon as the shared factory is verified, since `SUPER_CANNON_KONA` is permissionless and games can be created — and resolved — by anyone the moment the factory is live.\n\nCompanion to the existing single-chain \"Upgrading a Chain From Output Roots to Super Roots\" runbook.",
+      "number": 20559,
+      "body": "## Summary\n\nStacked on top of #20558. Adds the infrastructure needed for `superroot_atTimestamp` to serve **`Data`, `OptimisticAtTimestamp`, and `CurrentL1` entirely from durable verifier state** post-interop-activation, so `CurrentL1 ≥ game.L1Head` is sufficient for op-challenger to know it is only acting on cross-safe-consistent data.\n\nThree commits:\n\n1. **Serve `OptimisticAtTimestamp` from durable verified records** + per-chain L1 inclusion in `VerifiedRecord` and `DenyRecord`. Denylist overlay preserves the original optimistic block when a chain was invalidated and replaced.\n2. **Preinterop / pre-activation live fallback** for `Data` (the existing `chain.VerifiedAt` path), so preinterop fault-proof acceptance tests can still observe `Data != nil`.\n3. **Durable per-chain observation snapshot** so in-flight (post-activation, pre-commit) timestamps can serve `OptimisticAtTimestamp` partial views without a live SafeDB read. This closes the rewind race and is what makes the durability guarantee complete.\n\n## Design overview\n\n### `VerifiedRecord` (already in #20558, extended here)\n- Per-chain `ChainObservation` (L2 head, L1 head, OutputV0 preimage). Aggregate `L1Inclusion` and per-chain output roots are derived on demand.\n- `DenyRecord` and `InvalidHead` carry per-chain `L1Inclusion` captured at decision time.\n\n### `ObservationsSnapshot` (new)\n- Single `(timestamp, map[chainID]ChainObservation)` value, replaced atomically by the verifier each round in `checkChainsReady`.\n- Replacement (including dropping chains that previously had a block but no longer do) is what closes the rewind race.\n- `checkChainsReady` now returns partial results plus an `allReady` bool. NotFound from a chain is no longer fatal — the round is treated as Wait, but the partial snapshot is still persisted so the challenger can serve per-chain partial visibility (needed to identify which chain's optimistic step is the InvalidTransition boundary).\n- Cleared on rewind in `applyRewindPlan` so post-rewind queries cannot return stale observations.\n\n### Verifier frontier `CurrentL1`\n- `Interop.VerifierCurrentL1()` exposes the durable frontier (already maintained in `frontier_bucket`/`current_l1`). The handler prefers it over the live aggregate.\n- Advances every Wait round (`refreshCurrentL1OnWait`) so it tracks live L1 within a few blocks even between L2 batches.\n\n### Live reads\nThe handler now consults live state **only** when `verifierActiveAt(timestamp) == false` — i.e. there is no provider configured (preinterop build) or the timestamp is pre-activation. Post-activation, every cross-safe-derived field is durable.\n\n## Live vs durable audit\n\n### Pre-interop activation (`!verifierActiveAt(timestamp)`)\n\nLive reads only — there is no cross-safe state to be durable.\n\n| Field | Source |\n|---|---|\n| `Data` | live `chain.VerifiedAt` + `chain.OutputRootAtL2BlockNumber` per chain |\n| `OptimisticAtTimestamp` | live `chain.OptimisticOutputAtTimestamp` (with chain-side denylist overlay) + `chain.OptimisticAt` per chain |\n| `CurrentL1` | `aggregate.CurrentL1` (live `chain.SyncStatus().CurrentL1`, reduced by registered verifiers' L1s) |\n| `CurrentSafeTimestamp`, `CurrentLocalSafeTimestamp`, `CurrentFinalizedTimestamp` | live, from `chain.SyncStatus()` |\n| `ChainIDs` | sorted keys of the chains map |\n\nThis branch handles preinterop deployments and any pre-activation timestamp on an interop deployment. The challenger's `CurrentL1 ≥ game.L1Head` guarantee doesn't apply here because the verifier isn't producing it; preinterop fault games don't depend on cross-safe verification anyway.\n\n### Post-interop activation (`verifierActiveAt(timestamp) == true`)\n\nNo live reads of cross-safe data.\n\n| Field | Source | Notes |\n|---|---|---|\n| `Data` | `Interop.StoredSuperRootAtTimestamp` → `VerifiedRecord.ResponseData()` | Returns nil if no record. No live fallback. |\n| `OptimisticAtTimestamp` | `Interop.StoredOptimisticAtTimestamp` → `VerifiedRecord.Chains` if present, else `ObservationsSnapshot.Chains` if it covers the timestamp; both paths apply the denylist overlay | Returns empty (and partial within the snapshot) when the verifier hasn't observed the timestamp at all. No live fallback. |\n| `CurrentL1` | `Interop.VerifierCurrentL1()` (durable verifier frontier in bbolt's `frontier_bucket`/`current_l1` key) | Falls back to live aggregate only before the verifier has populated the frontier (true cold start, pre-activation). |\n| `CurrentSafeTimestamp`, `CurrentLocalSafeTimestamp`, `CurrentFinalizedTimestamp` | live `chain.SyncStatus()` | Local node sync state, not cross-safe data. Not consumed by the challenger for game decisions. |\n| `ChainIDs` | sorted keys of the chains map | Matches the dependency set. |\n\n### How each durable source is built\n\n`VerifiedRecord` (committed by `applyPendingTransition` on `DecisionAdvance`):\n- Per-chain L2 head, L1 head, OutputV0 preimage all snapshotted at observation time inside `buildVerifiedRecord` (using the `result.L1Heads` populated by `verifyInteropMessages` from `obs.L1Heads`).\n- Aggregate `L1Inclusion()` is `max(per-chain L1Head)`, derived not stored.\n\n`ObservationsSnapshot` (replaced by `observeRound` each round in `observationsDB.Set`):\n- Built in `checkChainsReady` from per-chain `OptimisticAt(ts)` + `OutputV0AtBlockNumber(...)` calls. Each chain that returns successfully gets a `ChainObservation`; chains that return NotFound are absent.\n- Replaced atomically in a single bbolt transaction so RPC reads see a consistent (timestamp, chains) view, not a torn snapshot.\n- Cleared on rewind (`applyRewindPlan`) so a later round at a now-rewound timestamp cannot serve stale observations.\n\n`DenyList` overlay (applied to both sources by `optimisticFromObservations`):\n- Per-chain `LastDeniedAtHeight(L2Head.Number)` returns the original (denied) preimage and per-chain L1 inclusion captured at decision time. Overrides the verified/observed entry when present so the response surfaces the originally-observed (now-replaced) block, matching the semantic the challenger relies on.\n\n### Why `CurrentL1 ≥ game.L1Head` is now sufficient\n\nFor any post-activation timestamp T:\n\n1. The handler reads `verifiedProvider.VerifierCurrentL1()` — the durable frontier the verifier has fully digested. No live data influences `CurrentL1`.\n2. If a `VerifiedRecord` exists at T → cross-safe view, all chains, full preimages and per-chain L1 inclusions. `VerifiedRequiredL1 ≤ CurrentL1` by construction (the verifier sets `CurrentL1 = parent(L1Inclusion)` on commit).\n3. If no record at T but the observation snapshot covers T → partial cross-safe-candidate view. Each entry's `RequiredL1` is the per-chain L1 head observed in that round. Chains absent from the snapshot are absent from the response, exactly the per-chain partial visibility the challenger needs.\n4. If neither covers T → empty response. The verifier hasn't observed T, so any answer would be a guess. The challenger correctly treats this as InvalidTransition.\n\nIn all three cases the response is built from a single bbolt-consistent snapshot. Chain rewinds between when the round committed and when the RPC fires can't desync `CurrentL1` from the per-chain entries, because both come from the same durable store.\n\n### Live reads after activation\n\nThe only post-activation live reads are the L2 timestamp aggregates (`SafeTimestamp`, `LocalSafeTimestamp`, `FinalizedTimestamp`) — local node sync metadata that doesn't feed challenger decisions. Everything derived from L1 ≤ CurrentL1 — `Data`, `OptimisticAtTimestamp`, `CurrentL1`, denylist overlays — is durable, deterministic, and consistent.\n\n## Tests\n\n- `op-supernode/...` unit tests: pass.\n- `op-acceptance-tests/tests/interop/proofs/serial/...` (11 tests): pass.\n- `op-acceptance-tests/tests/interop/proofs-singlechain/...`: pass.\n- `op-acceptance-tests/tests/isthmus/preinterop/...` (8 tests): pass.\n- `op-acceptance-tests/tests/isthmus/preinterop-singlechain/...`: pass.",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-04T00:45:36Z",
+      "createdAt": "2026-05-06T11:28:47Z",
       "mergedAt": null,
-      "additions": 494,
-      "deletions": 0
+      "additions": 1285,
+      "deletions": 352
     },
     {
-      "id": "PR_kwDODjvEJM7Yf52f",
-      "title": "feat(op-deployer): allow ResourceConfig override per chain",
-      "author": "maurelian",
-      "number": 20546,
-      "body": "## Summary\n\nAdds an optional, per-chain `ResourceConfig` override to op-deployer's `DeployOPChain` flow. Today the deploy script hardcodes `Constants.DEFAULT_RESOURCE_CONFIG()`, so chains that need a different gas envelope (notably any chain with `gasLimit < maxResourceLimit + systemTxMaxGas`, since the default sums to ~21M) cannot be deployed through op-deployer at all.\n\nThe override is opt-in: a zero-valued `maxResourceLimit` is treated by the Solidity script as \"use the default\", matching the pre-existing behavior. Setting any non-default value intentionally produces a chain that fails `OPContractsManagerStandardValidator` (SYSCON-50…SYSCON-100) — this is documented in both the Go and Solidity comments.\n\n### Changes\n\n- **`state.ChainIntent`** — new optional `ResourceConfig` field with full `Check()` validation mirroring `SystemConfig._setResourceConfig` (precision, bounds, `uint128` cap, gas-limit headroom).\n- **`opcm.DeployOPChainInput`** — new `ResourceConfig` ABI-bound struct. Adds `abiType:\"uint128\"` tag support so `MaximumBaseFee` (no native Go primitive) round-trips correctly.\n- **`forge/encoding.go`** — `GoStructToABITuple` now honors an `abiType` tag for explicit Solidity type selection and recursively encodes nested struct fields as nested tuples.\n- **`pipeline.DeployOPChain`** — converts intent → opcm struct; nil intent yields a zero struct (the Solidity sentinel for \"use default\").\n- **`DeployOPChain.s.sol`** — adds `_resolveResourceConfig` and forwards the override to OPCM.\n- **`Types.DeployOPChainInput`** — adds the `resourceConfig` field.\n\n### Tests\n\n- `state.TestChainIntentCheck_ResourceConfig` — table-driven coverage for every invariant (`maxResourceLimit > 0`, `elasticityMultiplier > 0`, denominator > 1, divisibility, `min ≤ max`, `uint128` bound, gas-limit headroom).\n- `forge.TestGoStructToABITuple_AbiTypeTag` / `TestGoStructToABITuple_NestedStruct` / `TestBytesScriptEncoder_NestedAndUint128` — covers the new tag and nested-tuple encoding paths.\n- `DeployOPChain_Test.test_run_resourceConfigDefaulted_succeeds` / `test_run_resourceConfigCustom_succeeds` — verifies a zeroed input still yields the default config and that a custom 5M-gas-limit chain initializes successfully.",
+      "id": "PR_kwDODjvEJM7WICCP",
+      "title": "Revert \"op-stack: remove deprecated ProtocolVersions support (#20317)\"",
+      "author": "axelKingsley",
+      "number": 20373,
+      "body": "This reverts commit a6992294acc75569bf8b099606da32e48b7dde84.\r\n\r\nRemoved fields cause node software to reject existing rollup configs. We can make these fields optional, but the most direct way to restore compatibility is to remove the commit before it gets too old.",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-05T18:05:20Z",
+      "createdAt": "2026-04-27T21:47:23Z",
       "mergedAt": null,
-      "additions": 418,
-      "deletions": 17
+      "additions": 1154,
+      "deletions": 90
     },
     {
-      "id": "PR_kwDODjvEJM7X1ApD",
-      "title": "Run Osaka acceptance tests against kona-host",
-      "author": "joshklop",
-      "number": 20509,
-      "body": "",
+      "id": "PR_kwDODjvEJM7Y2bDF",
+      "title": "test(contracts): stage past NUT bundles in L2 fork upgrades",
+      "author": "lumoswiz",
+      "number": 20565,
+      "body": "**Description**\r\n\r\nStages committed prior NUT bundles during live L2 fork upgrade test setup so fork tests can run on chains that have not yet applied earlier NUT-backed forks.\r\n\r\nFailure shape this fixes:\r\n\r\n```\r\nExecuteNUTBundle: Transaction failed - Deploy StorageSetter Implementation - Proxy: implementation not initialized\r\n```\r\n\r\nThat happens when the current bundle expects Karst-era `ConditionalDeployer` / L2CM infrastructure that is not present on the forked chain.\r\n\r\nThis adds:\r\n- Ordered NUT bundle discovery from `op-core/nuts/fork_lock.toml` via a new `scripts/go-ffi/go-ffi nut-bundles` command.\r\n- Reusable `ExecuteNUTBundle.executePath(string)` and `ExecuteNUTBundle.executeAll(NetworkUpgradeTxn[])` APIs; `execute()` is preserved as a thin wrapper around the current bundle path.\r\n- Test-only `PastNUTBundles` library that fetches ordered prior bundles, extracts each bundle's L2CM from the final `IL2ProxyAdmin.upgradePredeploys` call, and stages or skips each bundle via a centralized skip policy.\r\n- `foundry.toml` read permission for `../../op-core/nuts/`.\r\n- Wiring into `L2ForkUpgrade_TestInit.setUp()` only, after `generateScript.run()` and before common state capture.\r\n\r\n**Skip policy**\r\n\r\nSame-L2CM skipping alone is too broad: Karst and a future Interop bundle can share the same final L2CM, so a naive same-L2CM skip drops Karst even when the forked chain has never applied it. `_shouldSkipPriorBundle` applies these rules in order:\r\n- Karst direct CREATE2 bootstrap supersession: skip when the current bundle already contains a byte-identical `(to, data)` transaction whose `to == Preinstalls.DeterministicDeploymentProxy`. These direct CREATE2 calls are not idempotent; staging Karst first would cause a CREATE2 collision in the current bundle.\r\n- Karst state-aware staging: when Karst's L2CM matches the current bundle, still stage Karst if the live fork's `ConditionalDeployer` is uninitialized.\r\n- Generic same-L2CM skip for non-Karst bundles.\r\n\r\nThis is intentionally a named-rules list, not residual per-transaction de-dup. Executing only a prior bundle's \"unique tail\" can violate bundle ordering and prerequisites.\r\n\r\n**Non-goals**\r\n\r\n- No production activation changes.\r\n- No genesis fork staging — `L2GenesisForkUpgrade.t.sol` is intentionally untouched.\r\n- No Interop wrapper replay (`setFeature(INTEROP)`, `ETHLiquidity` funding, optional `CrossL2Inbox` deploy/upgrade). The FFI is fork-name-aware so wrapper dispatch can be added later without redesigning discovery.\r\n\r\n**Tests**\r\n\r\nAdded coverage for:\r\n- Ordered NUT bundle FFI behavior, lock parsing, path resolution, error cases.\r\n- `ExecuteNUTBundle.executePath` / `executeAll` happy path and revert-message preservation.\r\n- L2CM extraction and rejection of malformed final txs (wrong target / wrong selector / wrong calldata length / non-zero high padding / zero address / empty bundle).\r\n- Same-L2CM skip, Karst direct CREATE2 bootstrap skip, Karst same-L2CM staging when `ConditionalDeployer` is not initialized, and non-overlapping different-L2CM execution.\r\n\r\n**Forward-compat check**\r\n\r\nVerified against a PR #20397-shaped branch (Karst + Interop lock entries, current bundle is Interop-shaped, both committed bundles decode to the same final L2CM):\r\n\r\n```\r\nPastNUTBundles: 2 prior bundle entry/entries discovered\r\nPastNUTBundles: staging fork=karst ...\r\nPastNUTBundles: skipping fork=interop ... (L2CM matches current)\r\n```\r\n\r\nFull `test/L2/fork/L2ForkUpgrade.t.sol` passed on that branch. This validates ordered discovery, Karst prerequisite staging, and same-L2CM Interop skip. It does not validate Interop wrapper replay, which remains out of scope.\r\n\r\n**Metadata**\r\n\r\n- Fixes #20524\r\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-03T21:25:41Z",
+      "createdAt": "2026-05-06T16:44:16Z",
       "mergedAt": null,
-      "additions": 398,
-      "deletions": 159
+      "additions": 872,
+      "deletions": 5
+    },
+    {
+      "id": "PR_kwDODjvEJM7Y9MT9",
+      "title": "feat(op-node): serve superroot_atTimestamp for non-interop chains",
+      "author": "pauldowman",
+      "number": 20581,
+      "body": "## Summary\n\nAdds a new \\`superroot\\` JSON-RPC namespace on op-node with a single method \\`AtTimestamp(timestamp)\\`, mirroring op-supernode's wire contract exactly so existing dispute infrastructure (op-challenger, op-dispute-mon) can point \\`--supernode-rpc\\` at op-node URLs on non-interop chains.\n\nCloses #20552 (server side; consumer-side wiring & acceptance tests are follow-up scope per the original plan).\n\n## Why\n\nAfter the super-roots upgrade, fault dispute games for non-interop chains will reason over super roots rather than output roots. op-challenger and op-dispute-mon already consume \\`superroot_atTimestamp\\`, but today only op-supernode serves it — and non-interop chains don't run op-supernode. Per @ajsutton on the issue: *\"This is critical since we need to move to super dispute games before interop activates.\"*\n\n## What\n\nTwo commits:\n\n1. **\\`refactor(safedb): extract L1AtSafeHead into shared helper\\`** — pure refactor, no behavior change.\n   - Move the L1-at-safe-head walkback algorithm from \\`op-supernode/.../virtual_node.go\\` into \\`op-node/node/safedb/l1_at_safe_head.go\\` so op-node and op-supernode share one implementation.\n   - op-supernode delegates; existing \\`ErrL1AtSafeHeadNotFound\\` / \\`ErrL1AtSafeHeadUnavailable\\` are re-exported from the new package.\n   - Algorithm-level tests relocate to the new package (10 sub-cases). Virtual-node-specific delegate checks stay where they are.\n\n2. **\\`feat(op-node): serve superroot_atTimestamp for non-interop chains\\`** — the feature.\n   - New \\`op-node/node/superroot_api.go\\`. Single chain → single \\`ChainID\\` in response.\n   - Registered as \\`superroot\\` namespace in \\`registerAPIs\\` (always-on; harmless on chains that haven't activated super-root games).\n   - Field semantics documented in code and matched against op-supernode's \\`Aggregate\\` helper:\n     - \\`CurrentSafeTimestamp\\` ← \\`SafeL2.Time\\`, \\`CurrentLocalSafeTimestamp\\` ← \\`LocalSafeL2.Time\\`, \\`CurrentFinalizedTimestamp\\` ← \\`FinalizedL2.Time\\`.\n     - \\`VerifiedRequiredL1\\` (and verified-branch \\`OptimisticAtTimestamp[chainID].RequiredL1\\`) come from \\`safedb.L1AtSafeHead\\` — correctness-critical because op-challenger gates \\`InvalidTransition\\` on this value.\n     - Optimistic-only branch (block beyond LocalSafeL2 but within UnsafeL2) uses \\`L1Origin\\` as \\`RequiredL1\\`, matching op-supernode.\n     - Pre-genesis / beyond-UnsafeL2 / safeDB-not-found degrade to \\`Data: nil\\` with sync fields populated. Errors only on transport failures.\n   - No activation gate (per @ajsutton's issue resolution): identical pre- and post-Interop.\n\n## Out of scope\n\nPer the original plan, follow-up work (separate PRs):\n- Devstack wiring (\\`op-devstack/sysgo/l2_challenger.go\\`, \\`dsl.NewSupernodeFromQueryAPI\\` adapter).\n- New \\`preinterop-superroots\\` acceptance gate exercising op-challenger + op-dispute-mon end-to-end against op-node.\n- Cross-implementation parity test driving both op-node and op-supernode from the same fixture.\n- README updates.\n- op-proposer CLI flag (\\`--super-node-rpcs\\`) — config field exists but no flag is wired today; tracked separately.\n\n## Test plan\n\n- [x] \\`go test ./op-node/node/safedb/...\\` — 10 algorithm sub-cases pass.\n- [x] \\`go test ./op-node/node/...\\` — 9 superroot API cases + existing op-node tests pass.\n- [x] \\`go test ./op-supernode/...\\` — virtual_node delegate tests pass; superroot/chain_container/engine_controller suites unchanged.\n- [x] \\`go vet ./op-node/... ./op-supernode/...\\` — clean.\n- [x] \\`just lint-go\\` — clean (zero issues).\n- [ ] Acceptance / e2e (follow-up PR).\n\n## Notes for reviewers\n\n- **No deletions in op-node.** Phase 0's only deletion is the body of \\`simpleVirtualNode.L1AtSafeHead\\` in op-supernode (now a one-line delegate).\n- **Wire surface is minimal.** Only \\`superroot_atTimestamp\\` is registered. The interface-conformance check uses a test-only adapter rather than a method on the live struct, which would otherwise leak \\`superroot_superRootAtTimestamp\\` as an extra wire method.\n- **Fallback path is intentional.** When \\`safeDB.L1AtSafeHead\\` returns \\`ErrL1AtSafeHeadNotFound\\` (e.g., snap-sync gap, or target beyond latest), op-node degrades to optimistic-only with \\`Data: nil\\` — matching op-supernode's \\`notFound\\` branch (chain_container.go → superroot.go). Consumers (op-challenger trace provider, op-dispute-mon enricher) already treat \\`Data: nil\\` as \"not yet verified.\"\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-06T23:24:54Z",
+      "mergedAt": null,
+      "additions": 796,
+      "deletions": 251
     }
   ],
   "codeChanges": {
-    "additions": 4203,
-    "deletions": 2917,
-    "files": 262,
-    "commitCount": 251
+    "additions": 5364,
+    "deletions": 3849,
+    "files": 320,
+    "commitCount": 348
   },
   "completedItems": [
     {
@@ -169,6 +169,29 @@
       ]
     },
     {
+      "title": "chore(rust): Release op-alloy 2.0, alloy-op-hardforks 0.5.0",
+      "prNumber": 20325,
+      "type": "other",
+      "body": "## Description\r\n\r\nRelease:\r\n- alloy 2.0\r\n- alloy-op-hardforks 0.5.0",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/alloy-op-hardforks/Cargo.toml",
+        "rust/justfile",
+        "rust/op-alloy/crates/consensus/Cargo.toml",
+        "rust/op-alloy/crates/network/Cargo.toml",
+        "rust/op-alloy/crates/op-alloy/Cargo.toml",
+        "rust/op-alloy/crates/provider/Cargo.toml",
+        "rust/op-alloy/crates/rpc-jsonrpsee/Cargo.toml",
+        "rust/op-alloy/crates/rpc-types-engine/Cargo.toml",
+        "rust/op-alloy/crates/rpc-types/Cargo.toml",
+        "mise.toml",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-evm/release.toml",
+        "rust/op-revm/Cargo.toml"
+      ]
+    },
+    {
       "title": "chore(contracts-bedrock): clean up docs and stale config",
       "prNumber": 20324,
       "type": "refactor",
@@ -185,6 +208,36 @@
         "packages/contracts-bedrock/deploy-config-periphery/drippie/sepolia-maintenance.json",
         "packages/contracts-bedrock/justfile",
         "packages/contracts-bedrock/test/kontrol/README.md"
+      ]
+    },
+    {
+      "title": "chore(rust): add release recipe for subdir crate releases",
+      "prNumber": 20320,
+      "type": "other",
+      "body": "## Summary\n\n- Adds a `release` recipe to `rust/justfile` that publishes the crates under a given subdirectory (e.g. `rust/op-alloy`) together with their transitive workspace dependencies.\n- Supports a `dry` (default) / `execute` mode so the",
+      "files": [
+        "rust/justfile",
+        "rust/op-revm/CHANGELOG.md",
+        "rust/op-revm/src/handler.rs",
+        "rust/op-revm/src/l1block.rs",
+        "rust/op-revm/src/precompiles.rs",
+        ".gitignore",
+        "mise.toml",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-evm/release.toml",
+        "rust/alloy-op-hardforks/Cargo.toml",
+        "rust/kona/release.toml",
+        "rust/op-alloy/crates/consensus/Cargo.toml",
+        "rust/op-alloy/crates/network/Cargo.toml",
+        "rust/op-alloy/crates/op-alloy/Cargo.toml",
+        "rust/op-alloy/crates/provider/Cargo.toml",
+        "rust/op-alloy/crates/rpc-jsonrpsee/Cargo.toml",
+        "rust/op-alloy/crates/rpc-types-engine/Cargo.toml",
+        "rust/op-alloy/crates/rpc-types/Cargo.toml",
+        "rust/op-alloy/release.toml",
+        "rust/op-revm/Cargo.toml"
       ]
     },
     {
@@ -601,6 +654,23 @@
       ]
     },
     {
+      "title": "feat(op-devstack): add MinimalWithKona preset for native kona-host runs",
+      "prNumber": 20529,
+      "type": "feature",
+      "body": "Bundles everything an acceptance test needs to invoke `kona-host --native` against a live devstack into a single preset. Tests call `RunKona(t, agreedBlock, claimBlock)` and check the returned error: `nil` means kona agrees with the live ch",
+      "files": [
+        "op-devstack/dsl/l2_cl.go",
+        "op-devstack/presets/minimal_with_kona.go",
+        "op-devstack/shared/rustbin/kona_host_native.go",
+        "op-devstack/sysgo/l1_network.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-e2e/actions/proofs/block_data_hint_test.go",
+        "op-e2e/actions/proofs/helpers/env.go",
+        "op-e2e/actions/proofs/helpers/fixture.go",
+        "op-e2e/actions/proofs/helpers/kona.go"
+      ]
+    },
+    {
       "title": "refactor: remove ProtocolVersions Solidity contract and OPCM remnants",
       "prNumber": 20527,
       "type": "refactor",
@@ -782,6 +852,20 @@
       ]
     },
     {
+      "title": "ci: standardize image builds on factory plan action",
+      "prNumber": 20540,
+      "type": "other",
+      "body": "## Summary\n\nConsolidate `.github/workflows/branches.yaml` and `.github/workflows/tags.yaml` into a single `.github/workflows/build-images.yaml` driven by the shared factory tooling, and adopt the inline fork-context pattern shipped in `ethe",
+      "files": [
+        ".github/docker-images.json",
+        ".github/workflows/branches.yaml",
+        ".github/workflows/build-images.yaml",
+        ".github/workflows/tags.yaml",
+        ".github/images.json",
+        "ops/scripts/compute-git-versions.sh"
+      ]
+    },
+    {
       "title": "fix(op-supernode): error on InvalidateBlock rewind preconditions",
       "prNumber": 20539,
       "type": "bugfix",
@@ -803,28 +887,171 @@
         "op-supernode/supernode/activity/interop/interop_test.go",
         "op-supernode/supernode/activity/interop/log_backfill_test.go"
       ]
+    },
+    {
+      "title": "docs(contracts-bedrock): note gas accounting quirk in test style guide",
+      "prNumber": 20570,
+      "type": "docs",
+      "body": "## Summary\n\nAdds a short subsection to the contracts-bedrock style guide on Foundry's intrinsic gas behavior in tests, sitting next to the existing \"Expect Revert with Low Level Calls\" entry.\n\n## Why\n\nPR #20075 fixed a bug where the upgrade",
+      "files": [
+        "packages/contracts-bedrock/book/src/contributing/style-guide.md"
+      ]
+    },
+    {
+      "title": "op-supernode: run log backfill before SafeDB startup readiness",
+      "prNumber": 20568,
+      "type": "other",
+      "body": "## Summary\n\nRuns interop log backfill before the SafeDB-gated first-verifiable startup readiness check. This lets a node with missing early SafeDB history still use `--interop.log-backfill-depth` to populate logs before normal verification ",
+      "files": [
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go"
+      ]
+    },
+    {
+      "title": "chore(kona-interop): remove dead InteropValidator trait and InteropValidationError",
+      "prNumber": 20567,
+      "type": "other",
+      "body": "The `InteropValidator` trait at `traits.rs` declares `validate_interop_timestamps`, `is_post_interop`, and `is_interop_activation_block` but has zero implementations and zero callers in the kona tree. The companion `InteropValidationError` ",
+      "files": [
+        "rust/kona/crates/protocol/interop/src/errors.rs",
+        "rust/kona/crates/protocol/interop/src/lib.rs",
+        "rust/kona/crates/protocol/interop/src/traits.rs"
+      ]
+    },
+    {
+      "title": "fix(op-supernode): add env var for interop log backfill depth flag",
+      "prNumber": 20566,
+      "type": "bugfix",
+      "body": "## Summary\n- Add `EnvVars` field to `InteropLogBackfillDepthFlag` so it can be configured via `OP_SUPERNODE_INTEROP_LOG_BACKFILL_DEPTH` environment variable\n- Follows the same `PrefixEnvVar` pattern as the adjacent `InteropActivationTimesta",
+      "files": [
+        "op-supernode/supernode/activity/interop/interop.go"
+      ]
+    },
+    {
+      "title": "all: upgrade op-geth",
+      "prNumber": 20564,
+      "type": "other",
+      "body": "",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "op-dispute-mon: remove super-cannon (game type 4) support",
+      "prNumber": 20556,
+      "type": "other",
+      "body": "Stacked on #20555.\n\nRemoves plain super-cannon (game type 4) support from op-dispute-mon and finishes the cleanup that #20555 deferred. After this lands, no reference to `SuperCannonGameType` or the string `\"super-cannon\"` remains in op-cha",
+      "files": [
+        "op-challenger/game/fault/contracts/detect.go",
+        "op-challenger/game/fault/contracts/disputegame.go",
+        "op-challenger/game/fault/contracts/faultdisputegame.go",
+        "op-challenger/game/fault/contracts/gamefactory.go",
+        "op-challenger/game/types/game_type.go",
+        "op-dispute-mon/mon/extract/caller.go",
+        "op-dispute-mon/mon/extract/caller_test.go",
+        "op-dispute-mon/mon/types/types.go"
+      ]
+    },
+    {
+      "title": "op-challenger: remove super-cannon (game type 4) support",
+      "prNumber": 20555,
+      "type": "other",
+      "body": "Removes plain super-cannon (game type 4) support from op-challenger and op-dispute-mon. SuperCannonKona (9) and SuperPermissioned (5) are unchanged.\n\nThe `SuperCannonGameType` constant is removed; a comment in its place documents that game ",
+      "files": [
+        "op-challenger/cmd/main_test.go",
+        "op-challenger/config/config.go",
+        "op-challenger/config/config_test.go",
+        "op-challenger/flags/flags.go",
+        "op-challenger/game/fault/contracts/detect.go",
+        "op-challenger/game/fault/contracts/disputegame.go",
+        "op-challenger/game/fault/contracts/faultdisputegame.go",
+        "op-challenger/game/fault/contracts/faultdisputegame_test.go",
+        "op-challenger/game/fault/contracts/gamefactory.go",
+        "op-challenger/game/fault/register.go",
+        "op-challenger/game/fault/register_task.go",
+        "op-challenger/game/fault/register_task_test.go",
+        "op-challenger/game/types/game_type.go",
+        "op-challenger/game/types/game_type_test.go",
+        "op-challenger/runner/factory.go",
+        "op-challenger/runner/factory_test.go",
+        "op-challenger/runner/game_inputs.go",
+        "op-dispute-mon/mon/extract/caller.go",
+        "op-dispute-mon/mon/extract/caller_test.go",
+        "op-dispute-mon/mon/types/types.go"
+      ]
+    },
+    {
+      "title": "op-interop-filter: optional reorg support",
+      "prNumber": 20554,
+      "type": "other",
+      "body": "## Summary\n\nAdds optional backend-owned reorg recovery for `op-interop-filter` behind `--reorg-recovery-enabled`.\n\nWhen a chain ingester enters `ErrorReorg`, the backend keeps failsafe enabled while it coordinates recovery: it asks the affe",
+      "files": [
+        "op-interop-filter/README.md",
+        "op-interop-filter/filter/backend.go",
+        "op-interop-filter/filter/backend_reorg_recovery.go",
+        "op-interop-filter/filter/backend_test.go",
+        "op-interop-filter/filter/config.go",
+        "op-interop-filter/filter/interfaces.go",
+        "op-interop-filter/filter/lockstep_cross_validator.go",
+        "op-interop-filter/filter/logsdb_chain_ingester.go",
+        "op-interop-filter/filter/logsdb_chain_ingester_test.go",
+        "op-interop-filter/filter/mock_test.go",
+        "op-interop-filter/filter/service.go",
+        "op-interop-filter/flags/flags.go"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 343.34601593060756,
-      "prScore": 286.0300159306076,
-      "issueScore": 12.2,
-      "reviewScore": 43.5,
-      "commentScore": 1.6159999999999999,
+      "totalScore": 532.5587212105329,
+      "prScore": 463.20472121053285,
+      "issueScore": 14.3,
+      "reviewScore": 53,
+      "commentScore": 2.054,
       "summary": "ajsutton: Focused on enhancing the reliability and configuration of the superchain infrastructure, notably identifying a critical logic error in how the supernode calculates required L1 blocks (#20481) and providing a fix for test argument quoting in the acceptance tests (#20478). They actively drove the development of the SuperPermissionedGameType and OPContractsManagerMigrator, opening several high-impact issues to address configuration discrepancies and integration requirements for the Cannon and Kona executors (#20500, #20502). With over 1,800 lines of code changed across 29 files, their work primarily centered on bug fixes and test suite improvements within the op-acceptance, op-challenger, and op-supernode components."
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 264.8642800217129,
+      "prScore": 250.12428002171293,
+      "issueScore": 4,
+      "reviewScore": 10,
+      "commentScore": 0.74,
+      "summary": "karlfloersch: Focused on maintaining codebase quality and addressing technical debt within the ethereum-optimism/optimism repository, specifically initiating follow-up tasks from previous reviews in issue #20492. Their technical contribution centered entirely on bugfix work, involving 4 commits that modified 12 files with 317 total lines of code changed. Additionally, they provided oversight through code reviews and PR comments to ensure project standards were met. Overall, their activity this month was dedicated to stability and refining existing implementations through targeted bug fixes."
     },
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 217.4274131606606,
+      "totalScore": 241.6274131606606,
       "prScore": 188.28941316066062,
       "issueScore": 0,
-      "reviewScore": 28.5,
-      "commentScore": 0.6379999999999999,
+      "reviewScore": 52.5,
+      "commentScore": 0.838,
       "summary": "sebastianst: This month, the primary focus was on supporting the development workflow through peer code review. They contributed to project quality by providing a formal approval on a pull request, ensuring code standards were met. Their activity was centered exclusively on the review process rather than direct code implementation or issue management."
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 199.94294638954165,
+      "prScore": 176.04294638954164,
+      "issueScore": 4,
+      "reviewScore": 19.5,
+      "commentScore": 0.4,
+      "summary": "maurelian: Focused on streamlining development workflows and advancing interoperability features, notably simplifying Go feature flag testing through the merge of PR #20496. They demonstrated proactive project management by identifying and closing a requirement to hardcode the default devfeatures bitmap for L2CM in issue #20356, while also initiating the regeneration of the NUT bundle for interop in PR #20497. Their technical contributions spanned 37 files with a strong emphasis on feature development and test infrastructure. Overall, their work this month centered on feature implementation, configuration management, and enhancing the robustness of the testing suite."
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 179.88675293523136,
+      "prScore": 138.68675293523137,
+      "issueScore": 0,
+      "reviewScore": 41,
+      "commentScore": 0.2,
+      "summary": "joshklop: Focused on quality assurance and peer feedback this month, contributing to the development process through code review. They provided a formal approval and engaged in technical discussion via a pull request comment to ensure code standards were met. Their activity centered on collaborative oversight rather than direct code implementation."
     },
     {
       "username": "falcorocks",
@@ -837,16 +1064,6 @@
       "summary": "falcorocks: This month, the contributor focused on quality assurance and peer collaboration by providing a formal review and approval on a pull request. While there were no direct code changes or issue engagements, their participation in the review process supported the team's development workflow. Their primary area of impact was centered on code review and maintaining project standards."
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 166.33550666248468,
-      "prScore": 142.6355066624847,
-      "issueScore": 4,
-      "reviewScore": 19.5,
-      "commentScore": 0.2,
-      "summary": "maurelian: Focused on streamlining development workflows and advancing interoperability features, notably simplifying Go feature flag testing through the merge of PR #20496. They demonstrated proactive project management by identifying and closing a requirement to hardcode the default devfeatures bitmap for L2CM in issue #20356, while also initiating the regeneration of the NUT bundle for interop in PR #20497. Their technical contributions spanned 37 files with a strong emphasis on feature development and test infrastructure. Overall, their work this month centered on feature implementation, configuration management, and enhancing the robustness of the testing suite."
-    },
-    {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
       "totalScore": 162.44585034229425,
@@ -857,44 +1074,84 @@
       "summary": "nonsense: Focused on enhancing the stability and reliability of the op-reth integration, specifically addressing critical synchronization and transaction issues. They authored two key open pull requests aimed at ensuring the validator waits for the proofs ExEx store (#20487) and correctly committing read-write transactions during state initialization (#20485). Their work involved significant technical depth, modifying 42 files with over 2,700 lines of code primarily dedicated to robust testing and bug fixes. This month, their primary focus was on strengthening the infrastructure and data consistency of the optimism repository."
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 144.44084278617603,
-      "prScore": 116.74084278617605,
-      "issueScore": 0,
-      "reviewScore": 27.5,
-      "commentScore": 0.2,
-      "summary": "joshklop: Focused on quality assurance and peer feedback this month, contributing to the development process through code review. They provided a formal approval and engaged in technical discussion via a pull request comment to ensure code standards were met. Their activity centered on collaborative oversight rather than direct code implementation."
-    },
-    {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 134.80748301836263,
+      "totalScore": 144.30748301836263,
       "prScore": 104.76748301836264,
       "issueScore": 0,
-      "reviewScore": 29.5,
+      "reviewScore": 39,
       "commentScore": 0.54,
       "summary": "Inphi: Focused on quality assurance and peer collaboration this month by providing technical oversight through pull request reviews. They completed 2 code reviews, both resulting in approvals, to support the progress of ongoing development tasks. Their primary impact centered on maintaining code standards and facilitating the merge process for team members."
     },
     {
       "username": "stevennevins",
       "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
-      "totalScore": 113.06810648668768,
-      "prScore": 53.29010648668768,
-      "issueScore": 0,
+      "totalScore": 132.12100219162173,
+      "prScore": 68.00300219162172,
+      "issueScore": 4,
       "reviewScore": 59,
-      "commentScore": 0.7779999999999999,
+      "commentScore": 1.1179999999999999,
       "summary": "stevennevins: Focused on streamlining repository health and maintenance, specifically by addressing technical debt within the ethereum-optimism/optimism repository. They successfully identified and resolved an issue regarding deprecated base checks in superchain operations (#20472), resulting in a significant cleanup of over 5,500 lines of code. Beyond their direct contributions, they supported the team by providing two approvals on peer reviews to ensure code quality. Their primary focus this month was on bugfix work and optimizing the codebase through the removal of legacy configurations."
     },
     {
       "username": "theochap",
       "avatarUrl": "https://avatars.githubusercontent.com/u/80177219?u=ae2f417b09960ed0cd1ffe41cee169d5dd7e9cce&v=4",
-      "totalScore": 104.54,
+      "totalScore": 113.54,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 104,
+      "reviewScore": 113,
       "commentScore": 0.54,
       "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 88.79465881541879,
+      "prScore": 69.79465881541879,
+      "issueScore": 4,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": "digorithm: Focused on quality assurance and peer feedback this month, providing three approvals across various pull requests. Their contributions centered on the review process, ensuring code standards were met through consistent oversight. This activity reflects a primary focus on maintaining project momentum through collaborative code reviews."
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 86.88829544650385,
+      "prScore": 65.85029544650384,
+      "issueScore": 6.1,
+      "reviewScore": 14.5,
+      "commentScore": 0.43799999999999994,
+      "summary": "jelias2: Focused on enhancing monitoring capabilities within the dispute system by implementing a game type breakdown metric in ethereum-optimism/optimism (#20479). Beyond this feature work, they initiated the \"Interop Proofs Devnet\" tracking issue (#20489) to coordinate upcoming development efforts. Their technical contributions involved modifying 15 files with a balanced focus across feature development and bug fixes. Overall, their work this month centered on improving observability and planning for interoperability infrastructure."
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 83.38374406572649,
+      "prScore": 57.783744065726495,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0.6000000000000001,
+      "summary": "opgitgovernance: Focused on maintaining the integrity of the superchain-registry through automated configuration management. They initiated two pull requests (#1218, #1219) to perform automated codegen updates, ensuring the registry remains synchronized with the latest system requirements. Their primary focus this month was exclusively on infrastructure and configuration maintenance."
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 81,
+      "prScore": 0,
+      "issueScore": 6,
+      "reviewScore": 75,
+      "commentScore": 0,
+      "summary": "wwared: Focused on maintaining system reliability by identifying and documenting stability issues within the ethereum-optimism/optimism repository. They notably reported a flaky cross-safe sync test in the database truncation logic (#19897), which was subsequently tracked and closed. Additionally, they contributed to the peer review process by providing a formal approval on a project pull request."
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 74.2281025561504,
+      "prScore": 71.8881025561504,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": "pauldowman: Focused on enhancing diagnostic capabilities and monitoring within the optimism repository, notably by proposing a refactor for witness collection in the Kona debug_executePayload (PR #20498). They also addressed infrastructure visibility by opening and closing an issue regarding the ability to query supernode VNs for output roots (#20476). Their technical contributions this month were centered entirely on bugfix work, involving modifications to 13 files with a primary emphasis on code and test stability."
     },
     {
       "username": "smartcontracts",
@@ -907,34 +1164,24 @@
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 56,
-      "prScore": 0,
-      "issueScore": 6,
-      "reviewScore": 50,
-      "commentScore": 0,
-      "summary": "wwared: Focused on maintaining system reliability by identifying and documenting stability issues within the ethereum-optimism/optimism repository. They notably reported a flaky cross-safe sync test in the database truncation logic (#19897), which was subsequently tracked and closed. Additionally, they contributed to the peer review process by providing a formal approval on a project pull request."
-    },
-    {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 54.733137393698385,
-      "prScore": 34.33313739369839,
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 58.49645727937597,
+      "prScore": 58.49645727937597,
       "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0.4,
-      "summary": "opgitgovernance: Focused on maintaining the integrity of the superchain-registry through automated configuration management. They initiated two pull requests (#1218, #1219) to perform automated codegen updates, ensuring the registry remains synchronized with the latest system requirements. Their primary focus this month was exclusively on infrastructure and configuration maintenance."
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "ZakAyesh: Focused on enhancing project clarity and documentation accuracy by updating the interop explainer within the ethereum-optimism/optimism repository. They successfully merged PR #20488, which involved a significant revision of existing content with 154 lines of changes to ensure technical documentation remains up to date. This work demonstrates a clear commitment to maintaining high-quality resources for the developer community, with a primary focus on documentation maintenance."
     },
     {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 50.14199381241676,
-      "prScore": 33.14199381241676,
-      "issueScore": 2,
-      "reviewScore": 15,
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 52.388232968175586,
+      "prScore": 47.888232968175586,
+      "issueScore": 0,
+      "reviewScore": 4.5,
       "commentScore": 0,
-      "summary": "digorithm: Focused on quality assurance and peer feedback this month, providing three approvals across various pull requests. Their contributions centered on the review process, ensuring code standards were met through consistent oversight. This activity reflects a primary focus on maintaining project momentum through collaborative code reviews."
+      "summary": "lumoswiz: Focused on large-scale codebase modifications, contributing two commits that impacted 317 files with a significant volume of over 19,000 additions and 4,700 deletions. While no pull requests were merged or opened this month, they participated in the peer review process by providing feedback on one external pull request. Their primary activity centered on broad, cross-functional updates across various file types, indicating a focus on extensive structural or systemic changes."
     },
     {
       "username": "0xarktos",
@@ -947,26 +1194,6 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 45.550574675663924,
-      "prScore": 43.550574675663924,
-      "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": "jelias2: Focused on enhancing monitoring capabilities within the dispute system by implementing a game type breakdown metric in ethereum-optimism/optimism (#20479). Beyond this feature work, they initiated the \"Interop Proofs Devnet\" tracking issue (#20489) to coordinate upcoming development efforts. Their technical contributions involved modifying 15 files with a balanced focus across feature development and bug fixes. Overall, their work this month centered on improving observability and planning for interoperability infrastructure."
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 43.52681207080911,
-      "prScore": 33.98681207080911,
-      "issueScore": 4,
-      "reviewScore": 5,
-      "commentScore": 0.54,
-      "summary": "karlfloersch: Focused on maintaining codebase quality and addressing technical debt within the ethereum-optimism/optimism repository, specifically initiating follow-up tasks from previous reviews in issue #20492. Their technical contribution centered entirely on bugfix work, involving 4 commits that modified 12 files with 317 total lines of code changed. Additionally, they provided oversight through code reviews and PR comments to ensure project standards were met. Overall, their activity this month was dedicated to stability and refining existing implementations through targeted bug fixes."
-    },
-    {
       "username": "wiz-0f98cca50a",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 42.337999999999994,
@@ -977,33 +1204,13 @@
       "summary": "wiz-0f98cca50a: Focused on security and repository health by initiating branch scan overviews across key repositories. They created two new issues to track 'main' branch scans in ethereum-optimism/Retro-Funding (#100) and ethereum-optimism/design-docs (#379). Additionally, they contributed to the peer review process by providing a technical comment on an active pull request. Their primary focus this month was on infrastructure oversight and security auditing."
     },
     {
-      "username": "pauldowman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 41.04746082854713,
-      "prScore": 38.70746082854713,
-      "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 0.33999999999999997,
-      "summary": "pauldowman: Focused on enhancing diagnostic capabilities and monitoring within the optimism repository, notably by proposing a refactor for witness collection in the Kona debug_executePayload (PR #20498). They also addressed infrastructure visibility by opening and closing an issue regarding the ability to query supernode VNs for output roots (#20476). Their technical contributions this month were centered entirely on bugfix work, involving modifications to 13 files with a primary emphasis on code and test stability."
-    },
-    {
-      "username": "ZakAyesh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
-      "totalScore": 33.49597116329262,
-      "prScore": 33.49597116329262,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": "ZakAyesh: Focused on enhancing project clarity and documentation accuracy by updating the interop explainer within the ethereum-optimism/optimism repository. They successfully merged PR #20488, which involved a significant revision of existing content with 154 lines of changes to ensure technical documentation remains up to date. This work demonstrates a clear commitment to maintaining high-quality resources for the developer community, with a primary focus on documentation maintenance."
-    },
-    {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 28.586603854199588,
+      "totalScore": 28.926603854199588,
       "prScore": 10.386603854199588,
       "issueScore": 0,
       "reviewScore": 18,
-      "commentScore": 0.2,
+      "commentScore": 0.54,
       "summary": "geoknee: Focused on optimizing development workflows by addressing CI/CD bottlenecks within the ethereum-optimism/optimism repository. They initiated a fix to remove restrictive path filtering for Rust CI checks in PR #20486, ensuring more comprehensive testing coverage across the codebase. Beyond their direct contributions to configuration files, they supported the team by providing three technical reviews on ongoing pull requests. Their primary focus this month was on enhancing test reliability and maintaining infrastructure stability through targeted configuration updates."
     },
     {
@@ -1013,6 +1220,26 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 24.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tynes",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6626818?u=b3c2987fe8eef535a8a123e6f22728475c7dbc5f&v=4",
+      "totalScore": 20.83575477931522,
+      "prScore": 15.83575477931522,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tremarkley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15234569?u=b2a30602eb3a6a6fbd8e7b2ee2eef68888738704&v=4",
+      "totalScore": 20.549306144334054,
+      "prScore": 20.549306144334054,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1047,6 +1274,16 @@
       "summary": "chunter-cb: Focused on providing technical feedback and guidance through the review process, contributing four reviews across the codebase. While no code was merged this month, their activity centered on peer review and collaborative oversight. Their primary impact was driven by evaluating ongoing pull requests to ensure quality and alignment with project standards."
     },
     {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": "0xiamflux: Focused on feature development and code maintenance this month, contributing four commits that modified seven files with a net addition of 35 lines of code. While no pull requests were merged, they actively participated in the development lifecycle by providing two technical reviews on open pull requests. Their work was primarily balanced between implementing new features and performing necessary code refactors."
+    },
+    {
       "username": "abhicris",
       "avatarUrl": "https://avatars.githubusercontent.com/u/6990976?v=4",
       "totalScore": 17.686580904843456,
@@ -1065,6 +1302,16 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "eventtrader: Focused on expanding the ecosystem's asset listings by initiating the addition of the ET10 Revenue Token to the platform's documentation. This contribution was centered on the ethereum-optimism.github.io repository via PR #1310. Their primary focus this month was on asset integration and documentation updates."
+    },
+    {
+      "username": "artmakh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/13339874?v=4",
+      "totalScore": 15.472219489583221,
+      "prScore": 15.472219489583221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "JosepBove",
@@ -1097,6 +1344,16 @@
       "summary": "emmokprime-pixel: Focused on protocol integrity within the Optimism ecosystem by addressing a specific edge case in transaction processing. They opened a technical fix in ethereum-optimism/optimism (#20504) designed to ensure that Bedrock deposits correctly increment the nonce upon a Halt in the op-revm component. This work demonstrates a primary focus on the reliability and correctness of the execution layer's state transitions."
     },
     {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "donoso-eth",
       "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
       "totalScore": 9.930949357461536,
@@ -1107,14 +1364,14 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 9,
-      "prScore": 0,
+      "username": "cuiweixie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1579517?u=e897ebe119b54f736a2ff9a246ed8c4ac327d17e&v=4",
+      "totalScore": 8.75425378073324,
+      "prScore": 8.75425378073324,
       "issueScore": 0,
-      "reviewScore": 9,
+      "reviewScore": 0,
       "commentScore": 0,
-      "summary": "0xiamflux: Focused on feature development and code maintenance this month, contributing four commits that modified seven files with a net addition of 35 lines of code. While no pull requests were merged, they actively participated in the development lifecycle by providing two technical reviews on open pull requests. Their work was primarily balanced between implementing new features and performing necessary code refactors."
+      "summary": null
     },
     {
       "username": "sanjusan",
@@ -1125,6 +1382,16 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "sanjusan: Focused on coordinating ecosystem preparedness for interoperability by initiating several high-level tracking issues within the optimism repository. They defined readiness requirements for key stakeholders, including Coinbase (#20490), Node Operators (#20491), Blockscout (#20493), and general communications (#20494). Their primary focus this month was on project management and strategic alignment for the Interop milestone."
+    },
+    {
+      "username": "0xAxiom",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258511027?u=5f42c6266d8f013dbc4914bcad1b2af391b80d15&v=4",
+      "totalScore": 6.910306144334055,
+      "prScore": 6.910306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "mattsse",
@@ -1157,14 +1424,14 @@
       "summary": null
     },
     {
-      "username": "tynes",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/6626818?u=b3c2987fe8eef535a8a123e6f22728475c7dbc5f&v=4",
-      "totalScore": 5,
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5.2,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
+      "commentScore": 0.2,
+      "summary": "0xOneTony: Focused on feature development this month, contributing a single commit that modified 10 files with 165 lines of new code. While no pull requests were merged or issues closed, the work represented a concentrated effort on implementing new functionality across various file types. Their primary focus for the period was dedicated entirely to advancing feature-related work within the codebase."
     },
     {
       "username": "pcw109550",
@@ -1177,8 +1444,8 @@
       "summary": "pcw109550: Provided technical oversight through the review and approval of a pull request this month. While there were no direct code contributions or issue engagements, their participation in the review process supported the progress of ongoing development. Their primary focus was centered on quality assurance through peer review."
     },
     {
-      "username": "bitwiseguy",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "username": "its-everdred",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1020682?u=ef69e13586ebc33960d4aa1bf7ef3938bebd59a3&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -1197,14 +1464,14 @@
       "summary": "axelKingsley: This month, their contribution was limited to providing a single peer review with an approval on an open pull request. There were no code changes, merged pull requests, or issue-related activities recorded during this period. Their primary focus was on supporting the development workflow through code review."
     },
     {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "username": "0xng",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/87835144?u=c771d7f41606790d0147cf5969abb327cc2f534c&v=4",
       "totalScore": 4.5,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 4.5,
       "commentScore": 0,
-      "summary": "lumoswiz: Focused on large-scale codebase modifications, contributing two commits that impacted 317 files with a significant volume of over 19,000 additions and 4,700 deletions. While no pull requests were merged or opened this month, they participated in the peer review process by providing feedback on one external pull request. Their primary activity centered on broad, cross-functional updates across various file types, indicating a focus on extensive structural or systemic changes."
+      "summary": null
     },
     {
       "username": "zekchan",
@@ -1227,9 +1494,9 @@
       "summary": null
     }
   ],
-  "newPRs": 54,
-  "mergedPRs": 45,
-  "newIssues": 21,
-  "closedIssues": 22,
-  "activeContributors": 48
+  "newPRs": 77,
+  "mergedPRs": 57,
+  "newIssues": 26,
+  "closedIssues": 31,
+  "activeContributors": 51
 }
