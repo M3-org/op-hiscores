@@ -5,20 +5,121 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-09 to 2026-05-10, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-05-09 to 2026-05-10, ethereum-optimism/optimism had 3 new PRs (0 merged), 1 new issues, and 7 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABBxmGaQ",
+      "title": "checkSpanBatch does not enforce activation-block user-tx rule that checkSingularBatch enforces",
+      "author": "trasnake87",
+      "number": 20625,
+      "repository": "ethereum-optimism/optimism",
+      "body": "\n`op-node/rollup/derive/batches.go` enforces the activation-block \"no user transactions\" rule (per spec [optimism/specs#791](https://github.com/ethereum-optimism/specs/pull/791) and issue #17704) for singular batches but not for span batches. The same activation block, encoded as a span batch, is accepted.\n\n### Where\n\n`checkSingularBatch` (batches.go around L137) drops the batch:\n\n```go\nif (cfg.IsJovianActivationBlock(batch.Timestamp) ||\n    cfg.IsKarstActivationBlock(batch.Timestamp) ||\n    cfg.IsInteropActivationBlock(batch.Timestamp)) &&\n    len(batch.Transactions) > 0 {\n    log.Warn(\"dropping batch with user transactions in fork activation block\")\n    return BatchDrop\n}\n```\n\n`checkSpanBatch` (batches.go L308–L445) validates timestamps, sequencer drift, deposit/SetCode tx exclusion per block, but never checks `IsJovianActivationBlock` / `IsKarstActivationBlock` / `IsInteropActivationBlock` against `batch.GetBlockTransactions(i)`.\n\nHistory: PR #14797 added the rule for Isthmus (singular only, closed), PR #17984 added it for Jovian (singular only, merged), PR #19250 added Karst to the same condition (singular only, merged). PR #19150 separately added the SetCode check to span (`fix(op-node): add SetCodeTxType check to span batch validation`) — same kind of singular/span asymmetry, fixed in isolation. The activation-block rule appears to have been missed across all three iterations.\n\n### Reproduction\n\nA short unit test against `CheckBatch` builds the same activation-block user transaction twice — singular returns `BatchDrop`, span returns `BatchAccept`:\n\n```go\npackage derive\n\nimport (\n    \"context\"\n    \"math/big\"\n    \"math/rand\"\n    \"testing\"\n\n    \"github.com/ethereum-optimism/optimism/op-core/forks\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup\"\n    \"github.com/ethereum-optimism/optimism/op-service/eth\"\n    \"github.com/ethereum-optimism/optimism/op-service/testutils\"\n    \"github.com/ethereum/go-ethereum/common/hexutil\"\n    \"github.com/ethereum/go-ethereum/core/types\"\n    \"github.com/ethereum/go-ethereum/log\"\n    \"github.com/stretchr/testify/require\"\n)\n\nfunc TestSpanBatchActivationBlockUserTx(t *testing.T) {\n    rng := rand.New(rand.NewSource(0x51a75))\n    chainID := big.NewInt(10)\n    signer := types.NewLondonSigner(chainID)\n    tx := testutils.RandomTx(rng, big.NewInt(1_000_000_000), signer)\n    txData, err := tx.MarshalBinary()\n    require.NoError(t, err)\n\n    for _, fork := range []forks.Name{forks.Jovian, forks.Karst, forks.Interop} {\n        t.Run(string(fork), func(t *testing.T) {\n            l1A := eth.L1BlockRef{Hash: testutils.RandomHash(rng), Number: 100, Time: 1_000}\n            l2Safe := eth.L2BlockRef{\n                Hash: testutils.RandomHash(rng), Number: 200, Time: l1A.Time,\n                L1Origin: l1A.ID(), ParentHash: testutils.RandomHash(rng),\n            }\n            cfg := &rollup.Config{\n                Genesis:           rollup.Genesis{L2Time: l2Safe.Time},\n                BlockTime:         2,\n                SeqWindowSize:     4,\n                MaxSequencerDrift: 30,\n            }\n            activationTime := l2Safe.Time + cfg.BlockTime\n            cfg.ActivateAt(fork, activationTime)\n\n            singular := &SingularBatch{\n                ParentHash: l2Safe.Hash, EpochNum: rollup.Epoch(l1A.Number),\n                EpochHash: l1A.Hash, Timestamp: activationTime,\n                Transactions: []hexutil.Bytes{txData},\n            }\n            singularValidity := CheckBatch(context.Background(), cfg, log.New(),\n                []eth.L1BlockRef{l1A}, l2Safe,\n                &BatchWithL1InclusionBlock{L1InclusionBlock: l1A, Batch: singular}, nil)\n            require.Equal(t, BatchValidity(BatchDrop), singularValidity)\n\n            span := initializedSpanBatch([]*SingularBatch{{\n                ParentHash: l2Safe.Hash, EpochNum: rollup.Epoch(l1A.Number),\n                EpochHash: l1A.Hash, Timestamp: activationTime,\n                Transactions: []hexutil.Bytes{txData},\n            }}, cfg.Genesis.L2Time, chainID)\n\n            spanValidity := CheckBatch(context.Background(), cfg, log.New(),\n                []eth.L1BlockRef{l1A}, l2Safe,\n                &BatchWithL1InclusionBlock{L1InclusionBlock: l1A, Batch: span}, nil)\n            require.Equal(t, BatchValidity(BatchAccept), spanValidity,\n                \"span batches bypass activation-block user tx filtering\")\n        })\n    }\n}\n```\n\n`go test ./op-node/rollup/derive -run TestSpanBatchActivationBlockUserTx -v` passes for jovian, karst, and interop on `develop` (verified at `be742e31a`).\n\n### Suggested fix\n\nApply the same condition inside `checkSpanBatch`'s per-block loop, before the per-tx validation:\n\n```go\nif (cfg.IsJovianActivationBlock(blockTimestamp) ||\n    cfg.IsKarstActivationBlock(blockTimestamp) ||\n    cfg.IsInteropActivationBlock(blockTimestamp)) &&\n    len(batch.GetBlockTransactions(i)) > 0 {\n    log.Warn(\"dropping span batch with user transactions in fork activation block\")\n    return BatchDrop\n}\n```\n\nFor symmetry with `checkSingularBatch` and consistency with the spec rule.\n\n### Notes\n\nThe action test `TestActivationBlockTxOmission` added in #17984 uses `helpers.NewBatcherCfg()` which produces span batches by default (Delta+ fork, `ForceSubmitSingularBatch=false` → `useSpanChannelOut=true`). I have not run that test against current `develop`; if it currently passes, there is an additional path catching this that I have missed.\n",
+      "createdAt": "2026-05-09T23:09:36Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7Zxuac",
+      "title": "op-deployer: cache resolved artifacts persistently",
+      "author": "Inphi",
+      "number": 20622,
+      "body": "## Summary\r\n\r\nop-deployer was creating a large number of files under --cache-dir because artifact bundles were extracted into fresh temporary directories on each run. Even when the same contracts/artifact locator were reused, only the downloaded archive was cached;\r\nthe extracted project directory was not. This also meant forge could not reliably reuse its compilation cache across repeated --use-forge commands.\r\n\r\nThis PR adds a persistent artifact resolution cache so repeated commands using the same artifact content reuse the same extracted project.\r\n\r\n## What Changed\r\n\r\n- Adds `artifacts.Resolve`, returning the artifact FS plus explicit project/cache metadata.\r\n- Keeps `artifacts.Download` as a compatibility wrapper.\r\n- Caches HTTP downloads under artifacts/archives.\r\n- Caches extracted artifact projects by artifact content hash under artifacts/projects.\r\n- Reuses embedded and HTTP artifact extractions across repeated commands.\r\n- Leaves `file://` locators user-owned and uncached.\r\n- Updates Forge paths to use explicit project roots instead of deriving paths from `fmt.Sprintf(\"%v\", artifactsFS)`.\r\n- Adds forge --root, --cache-path, and --out options so repeated Forge runs can share build cache.\r\n- Ensures artifact temp cleanup runs before CLI error exits.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-09T04:29:54Z",
+      "mergedAt": null,
+      "additions": 631,
+      "deletions": 62
+    },
+    {
+      "id": "PR_kwDODjvEJM7ZzVQJ",
+      "title": "fix(protocol): only decrease size if not keep",
+      "author": "cuiweixie",
+      "number": 20623,
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\n<!--\r\nA clear and concise description of the features you're adding in this pull request.\r\n-->\r\n\r\n**Tests**\r\n\r\n<!--\r\nPlease describe any tests you've added. If you've added no tests, or left important behavior untested, please explain why not.\r\n-->\r\n\r\n**Additional context**\r\n\r\n<!--\r\nAdd any other context about the problem you're solving.\r\n-->\r\n\r\n**Metadata**\r\n\r\n<!-- \r\nInclude a link to any github issues that this may close in the following form:\r\n- Fixes #[Link to Issue]\r\n-->\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-09T07:10:15Z",
+      "mergedAt": null,
+      "additions": 5,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDODjvEJM7Z3udC",
+      "title": "test(contracts-bedrock): enable isolate for XDM baseGas fuzz tests",
+      "author": "ralme1da",
+      "number": 20624,
+      "body": "  **Description**                                                                                                                                                                                \r\n                                                                                                                                                                                                 \r\n  This PR enables inline Foundry isolation for the CrossDomainMessenger base-gas sufficiency fuzz tests by adding `forge-config: default.isolate = true` to both:                                \r\n  - `test/L1/L1CrossDomainMessenger.t.sol`                                                                                                                                                       \r\n  - `test/L2/L2CrossDomainMessenger.t.sol`                                                                                                                                                       \r\n                                                                                                                                                                                                 \r\n  It also removes the now-stale `TODO(#14609)` notes that were waiting on Foundry support.                                                                                                       \r\n                                                                                                                                                                                                 \r\n  This makes these fuzz tests execute under transaction semantics that better match real gas accounting behavior.                                                                                \r\n                                                                                                                                                                                                 \r\n  **Tests**                                                                                                                                                                                      \r\n                                                                                                                                                                                                 \r\n  No new test cases were added.                                                                                                                                                                  \r\n                                                                                                                                                                                                 \r\n  This change updates execution mode for existing tests:                                                                                                                                         \r\n  - `testFuzz_relayMessage_baseGasSufficient_succeeds` in `L1CrossDomainMessenger.t.sol`                                                                                                         \r\n  - `testFuzz_relayMessage_baseGasSufficient_succeeds` in `L2CrossDomainMessenger.t.sol`                                                                                                         \r\n                                                                                                                                                                                                 \r\n  CI will validate the updated tests in the normal contracts-bedrock test pipeline.                                                                                                              \r\n                                                                                                                                                                                                 \r\n  **Additional context**                                                                                                                                                                         \r\n                                                                                                                                                                                                 \r\n  This follows the direction documented in the contracts-bedrock style guide gas-accounting notes and unblocks the long-standing follow-up tracked in #14609.                                    \r\n                                                                                                                                                                                                 \r\n  **Metadata**                                                                                                                                                                                   \r\n                                                                                                                                                                                                 \r\n  - Fixes #14609   ",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-09T16:06:38Z",
+      "mergedAt": null,
+      "additions": 2,
+      "deletions": 8
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 4
   },
   "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
+  "topContributors": [
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 40.54335980253403,
+      "prScore": 40.54335980253403,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ralme1da",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232362866?u=1f374a1e22a8d08fcc250d2bee5ec124ae31bc6e&v=4",
+      "totalScore": 16.397895272798372,
+      "prScore": 16.397895272798372,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "cuiweixie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1579517?u=e897ebe119b54f736a2ff9a246ed8c4ac327d17e&v=4",
+      "totalScore": 6.884720770839918,
+      "prScore": 6.884720770839918,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "trasnake87",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12703916?u=a9e40b75bdc6aa4227a30f5f2579c4eafafced38&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
   "mergedPRs": 0,
-  "newIssues": 0,
+  "newIssues": 1,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 7
 }
