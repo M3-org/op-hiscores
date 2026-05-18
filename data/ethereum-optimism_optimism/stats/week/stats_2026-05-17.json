@@ -5,20 +5,109 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-17 to 2026-05-24, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-05-17 to 2026-05-24, ethereum-optimism/optimism had 2 new PRs (0 merged), 1 new issues, and 4 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABCgYMfw",
+      "title": "op-reth: minimal Bedrock bootstrap (init-state --without-ovm) incompatible with storage v2 — node panics on launch (unwind to block 0)",
+      "author": "ajsutton",
+      "number": 20821,
+      "repository": "ethereum-optimism/optimism",
+      "body": "### Summary\n\nThe documented minimal Bedrock bootstrap (`op-reth init-state --without-ovm` from the `op-mainnet-pre-bedrockstate` dump) is incompatible with the default storage **v2** (hot/cold RocksDB) layout. After a successful `init-state`, the node panics on every launch and cannot start.\n\n### Version\n\n- op-reth `op-reth/v2.2.3-rc.1-pr20770.0` (optimism monorepo rev `4ddba1610a5d13c1a8c297a91228559d731cc6d5`, reth rev `e8c29c987dd5bb23e95114279c89ce5326fd206d`)\n- chain: `optimism` (OP Mainnet), `--full`\n\n### Repro\n\n1. `op-reth init-state --without-ovm --chain=optimism --datadir=/data <op-mainnet-pre-bedrockstate.jsonl>` (state from `https://datadirs.optimism.io/op-mainnet-pre-bedrockstate.zst`) — completes successfully, DB at Bedrock block `105235063`.\n2. Start the node (default storage layout, v2 on).\n\n### Actual\n\n```\nWARN ...rocksdb check_consistency: StoragesHistory: static file tip behind checkpoint, unwind needed sf_tip=0 checkpoint=105235063\nWARN ...rocksdb check_consistency: AccountsHistory: static file tip behind checkpoint, unwind needed sf_tip=0 checkpoint=105235063\nINFO ...static_file Setting unwind target. db_first_block=105235063 highest_block=0 unwind_target=0 segment=StorageChangeSets\nthread 'main' panicked at .../e8c29c9/crates/node/builder/src/launch/common.rs:546:13:\nassertion `left != right` failed: A RocksDB and static file inconsistency was found that would trigger an unwind to block 0\n```\n\nNode crash-loops; never starts.\n\n### Root cause\n\n`reth_cli_commands::init_state::without_evm::setup_without_evm` seeds only the `Headers`/`Transactions`/`Receipts`/`TransactionSenders` static-file segments and writes stage checkpoints at the Bedrock block for all stages. It never seeds the v2 RocksDB history segments (`StorageChangeSets`/`AccountsHistory`/`StoragesHistory`). With v2 on, the launch consistency check (`launch/common.rs` ~532–549) sees those at tip 0 vs checkpoint `105235063`, computes `unwind_target = 0`, and deliberately `assert_ne!`s rather than unwind to 0 → panic. The minimal-bootstrap path predates storage v2.\n\n### Workaround (confirmed)\n\n`--storage.v2=false` on **both** `init-state` (sets layout at DB creation) and the node. Requires re-bootstrapping from an empty datadir. With the legacy layout the node boots cleanly and lands at Bedrock `105235063`.\n\n### Suggested fix\n\n`setup_without_evm` should also initialize the v2 RocksDB history segments to the bootstrap block (or the launch consistency check should recognise a minimal-bootstrap floor), so minimal Bedrock bootstrap works with the default v2 layout. At minimum, the OP Mainnet sync docs should state that minimal bootstrap currently requires `--storage.v2=false`.\n",
+      "createdAt": "2026-05-17T10:13:02Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7cc8Q6",
+      "title": "feat(op-supernode): rework interop activity startup",
+      "author": "ajsutton",
+      "number": 20823,
+      "body": "Replaces the EL-finalized-head cold-start heuristic with a deterministic verifiedDB-resume / SafeDB-first-entry model.\n\n## Why\n\nThe previous startup logic was a tangle:\n- `resolveFirstVerifiableTimestamp` used EL finalized head as the cold-start origin — the wrong signal (EL's view of finality, not proof that derivation has run).\n- A retry loop conflated transient EL not-ready with permanent SafeDB gaps.\n- Backfill ran before deciding the verification start timestamp.\n- `firstVerifiableTimestamp` re-derived its value lazily, sometimes with I/O, from RPC handlers.\n\n## What changed\n\n- **Resume always wins.** Any committed `verifiedDB` entry resumes at `LastTimestamp+1` without consulting SafeDB or chain RPCs.\n- **Cold start** waits for every chain to record a first SafeDB entry, then sets `verificationStartTimestamp = max(activationTimestamp, max first-safe-head timestamp)`. Wall-clock time is never consulted.\n- **Backfill** clamps lower bound to `max(activation, per-chain genesis, verificationStart - depth)`. Hard fails if any chain can't serve the range. `reconcileLogsDBTail` runs only during cold-start backfill.\n- **Start** splits into a fast init + stateful main loop. The loop drives both cold-start init and `progressAndRecord`, so `Start` never blocks on multi-day EL sync waits. Per-iteration backoff, cancellation, and observability come for free.\n- **`firstVerifiableTimestamp`** is now a synchronous accessor; RPC handlers return `ErrNotStarted` until init completes.\n\nNew API surface:\n- `SafeDBReader.FirstEntry` (op-node) → `VirtualNode.FirstSafeHeadEntry` → `ChainContainer.FirstSafeHeadTimestamp`. Returns `ErrSafeDBEmpty` during cold-start wait.\n\n## Tests\n\n- New `startup_test.go` covers `fastInit` resume / cold-start, the `advanceColdStartInit` state machine, cold-start backfill no-op paths, per-chain genesis clamp, and RPC `ErrNotStarted` semantics.\n- Deleted `log_backfill_test.go` and the obsolete EL-finalized-head startup tests in `interop_test.go` — replaced by the above.\n- End-to-end resync acceptance tests (post- and pre-activation, with/without EL data wipe) are tracked as follow-up work, not included here.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-17T22:46:05Z",
+      "mergedAt": null,
+      "additions": 801,
+      "deletions": 1559
+    },
+    {
+      "id": "PR_kwDODjvEJM7cb73o",
+      "title": "op-supernode: fix backfill startup handoff",
+      "author": "opsuperchain",
+      "number": 20822,
+      "body": "## Summary\n- replace the cold-start EL-finalized backfill anchor with a latched newest-local-safe handoff\n- require the handoff timestamp to be available through OptimisticAt before sealing backfill logs\n- make historical superroot queries below local verifier coverage pessimistic instead of composing optimistic data\n- halt startup backfill immediately on permanent SafeDB history gaps\n\n## Validation\n- go test ./op-supernode/supernode/activity/interop ./op-supernode/supernode/activity/superroot -count=1\n- mise exec -- env JUST_UNSTABLE=1 just build-contracts\n\nNote: contract build completed with existing Solidity warnings around payable fallback without receive.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-17T20:25:49Z",
+      "mergedAt": null,
+      "additions": 513,
+      "deletions": 314
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 9
   },
   "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 42.208773896576105,
+      "prScore": 40.0087738965761,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 39.5990657719263,
+      "prScore": 39.5990657719263,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "davidmosiah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/624359?u=f78e9a58bbe100b117ce655a663e33a12af37860&v=4",
+      "totalScore": 17.771596335232385,
+      "prScore": 17.771596335232385,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.006955074527657,
+      "prScore": 7.006955074527657,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
   "mergedPRs": 0,
-  "newIssues": 0,
+  "newIssues": 1,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 4
 }
