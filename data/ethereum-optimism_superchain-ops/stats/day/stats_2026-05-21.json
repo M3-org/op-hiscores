@@ -5,17 +5,295 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/superchain-ops",
-  "overview": "From 2026-05-21 to 2026-05-22, ethereum-optimism/superchain-ops had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-05-21 to 2026-05-22, ethereum-optimism/superchain-ops had 1 new PRs (1 merged), 0 new issues, and 19 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOKIsnqM7eEDz6",
+      "title": "Type A Migration Exercise Tasks",
+      "author": "Wazabie",
+      "number": 1430,
+      "body": "Scaffold migrations-sop-1 chain migration tasks (076–081)\r\n\r\nAdds six sepolia tasks for migrating the migrations-sop-1 devnet (chainId 420120110) from Partner-operated to OP-operated infrastructure:\r\n\r\n076 — add FaultDisputeGame (game type 0) via OPCM\r\n077 — set OptimismPortal respected game type to 0\r\n078 — transfer SystemConfig ownership from Partner EOA → OPE Admin Safe (EOA-signed off-chain; ships as documented cast send flow)\r\n079 — set OP batcher + unsafe block signer\r\n080 — rotate PDG proposer to OP via DisputeGameFactory.setImplementation\r\n081 — upgrade fee-vault proxies to OP recipients via L1→L2 deposit\r\nEach task ships config.toml, addresses.json (fallback — chain not in superchain-registry), README.md, VALIDATION.md, and .env. <TBD_*> placeholders mark chain-specific values (prestate, ProxyAdmin, PDG game args, fee-vault impls, Safe nonces) the operator fills in at execution time.",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-05-21T18:44:32Z",
+      "mergedAt": null,
+      "additions": 1086,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOKIsnqM7LgNVK",
+      "title": "Fee vault upgrade template - FeeVaultUpgrader",
+      "author": "Wazabie",
+      "number": 1387,
+      "body": "Fee vault upgrade template based on FeeVaultUpgrader.\r\n\r\nIt differs from the template #1381 because this one deploys new FeeVault implementation contracts to L2 and upgrades the proxies to them via upgradeAndCall + setRecipient in one atomic batch (v1.6.0 settable-recipient approach). UpdateFeeVaultRecipient in #1381 assumes implementations are already deployed and simply calls upgradeTo to point the proxies at them (immutable-recipient approach). ",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-03-18T11:01:35Z",
+      "mergedAt": null,
+      "additions": 318,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOKIsnqM7dB4dU",
+      "title": "ci: remove circleci_ip_ranges flag and route fork-sim RPCs via secrets context",
+      "author": "hdcesario-op",
+      "number": 1429,
+      "body": "## Summary\n\nRemoves `circleci_ip_ranges: true` from all 4 jobs in `superchain-ops` that carry it, and migrates the fork-simulation jobs to the `circleci-repo-rpc-secrets` context. Follow-on to ethereum-optimism/optimism#20455 and ethereum-optimism/optimism#20465; part of the org-wide cleanup tracked in ethereum-optimism/core-team#2564.\n\n## Audit chain\n\n`circleci_ip_ranges: true` routes job egress through CircleCI's 21 published static IPs at the cost of 450 credits/GB on top of compute. Inside OP Labs infrastructure that allowlist is consumed by exactly one Traefik middleware (`ci-ip-whitelist` in `ethereum-optimism/k8s`), which gates the `ci-*.optimism.io` RPC and beacon endpoints. Each job in this repo currently using the flag falls into one of two cases:\n\n| Job | What it does network-wise | Tier |\n|---|---|---|\n| `forge_test` | `forge test --skip Integration` — integration tests (the RPC-using ones) are explicitly skipped via `--skip` | A |\n| `just_new_recipe_tests` | `test/script/test-just-new.sh` exercises `just new` CLI parsing only; no network calls | A |\n| `stacked_simulation` (eth + sep) | `simulate-task.sh` → `forge script --fork-url $rpcUrl`, resolved via `[profile.ci.rpc_endpoints]` in `foundry.toml` | B |\n| `template_regression_tests` | `simulate-all-templates` → `simulate-task.sh` → same `forge --fork-url` path | B |\n\n### Tier A — flag removal only\n\n`just_new_recipe_tests` makes zero network calls; the flag is vestigial and is removed without further changes.\n\n`forge_test` is also classified Tier A (today, no non-Integration test reaches a `[profile.ci]` endpoint), but it additionally receives the `circleci-repo-rpc-secrets` context defensively. The job sets `FOUNDRY_PROFILE: ci` and will resolve `[profile.ci.rpc_endpoints]` at startup; binding the context now means a future contributor adding a non-Integration test that uses one of those endpoints won't hit a confusing \"endpoint is empty\" error. Cost is one workflow line.\n\n### Tier B — context migration\n\n`stacked_simulation` and `template_regression_tests` both reach allowlisted hostnames indirectly: forge resolves the network name (`mainnet`, `sepolia`, `opSepolia`, `opMainnet`) against `[profile.ci.rpc_endpoints]` in `foundry.toml`. The actual coupling therefore lives in `foundry.toml`, not in the per-job step blocks.\n\nThe fix is a single change in `foundry.toml`: replace the four hardcoded `ci-*.optimism.io` URLs with the corresponding `OP_CI_*` env vars provided by `circleci-repo-rpc-secrets`. The jobs themselves get the context added and the flag removed.\n\nThis also resolves a long-standing TODO in `foundry.toml`: `opMainnet` previously pointed at the public `mainnet.optimism.io` URL with the comment \"We eventually need a CI L2 RPC URL for this.\" It now uses `OP_CI_MAINNET_L2_RPC_URL`.\n\n## Changes\n\n1. **`foundry.toml`** — four URL → env var swaps in `[profile.ci.rpc_endpoints]`:\n   - `mainnet` → `${OP_CI_MAINNET_L1_ARCHIVE_RPC_URL}`\n   - `sepolia` → `${OP_CI_SEPOLIA_L1_ARCHIVE_RPC_URL}`\n   - `opSepolia` → `${OP_CI_SEPOLIA_L2_RPC_URL}`\n   - `opMainnet` → `${OP_CI_MAINNET_L2_RPC_URL}` (also closes the pre-existing TODO)\n\n2. **`.circleci/config.yml`**:\n   - Remove `circleci_ip_ranges: true` from: `stacked_simulation`, `forge_test`, `template_regression_tests`, `just_new_recipe_tests`.\n   - Add `- circleci-repo-rpc-secrets` to the workflow `context:` block for: `forge_test`, `template_regression_tests`, and both `stacked_simulation` workflow entries (`eth`, `sep`).\n\n## Verification\n\nThis is a draft PR. Watching CI before marking ready for review. Looking for:\n- All four touched jobs pass\n- `stacked_simulation` (both networks) and `template_regression_tests` exercise the new RPC URLs without 403s/timeouts\n- `forge_test` and `just_new_recipe_tests` pass unchanged\n\n## Reviewer notes\n\n- The `circleci-repo-rpc-secrets` context contains all 6 expected `OP_CI_*` env vars and has no project restrictions (available to all projects in the org by default).\n- The pattern matches the monorepo precedent established by ethereum-optimism/optimism#20465.\n- One of nine repos slated for this cleanup under ethereum-optimism/core-team#2564.",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-05-19T10:41:32Z",
+      "mergedAt": "2026-05-21T17:50:14Z",
+      "additions": 8,
+      "deletions": 8
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 8,
+    "deletions": 8,
+    "files": 2,
+    "commitCount": 3
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "ci: remove circleci_ip_ranges flag and route fork-sim RPCs via secrets context",
+      "prNumber": 1429,
+      "type": "other",
+      "body": "## Summary\n\nRemoves `circleci_ip_ranges: true` from all 4 jobs in `superchain-ops` that carry it, and migrates the fork-simulation jobs to the `circleci-repo-rpc-secrets` context. Follow-on to ethereum-optimism/optimism#20455 and ethereum-o",
+      "files": [
+        ".circleci/config.yml",
+        "foundry.toml"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 174.63320094811712,
+      "prScore": 147.19520094811713,
+      "issueScore": 2,
+      "reviewScore": 25,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 66.0437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 41.458773896576105,
+      "prScore": 36.2587738965761,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 35.452866136777,
+      "prScore": 21.752866136776994,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 33.6127738965761,
+      "prScore": 33.6127738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 32.271471805599454,
+      "prScore": 20.931471805599454,
+      "issueScore": 0,
+      "reviewScore": 11,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 29.646981782064508,
+      "prScore": 24.646981782064508,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 29.111201227261724,
+      "prScore": 29.111201227261724,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 28.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 28,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 25,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 22.109564081810813,
+      "prScore": 14.909564081810814,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "dhyaniarun1993",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
+      "totalScore": 21.01275020080676,
+      "prScore": 15.812750200806763,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 18.20002691517397,
+      "prScore": 13.000026915173972,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 15.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "fallintoplace",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/38443830?v=4",
+      "totalScore": 12.279540786924242,
+      "prScore": 10.279540786924242,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "stevennevins",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12021290?u=87fe650172e39a439e61fc800fe67fbb179aef6a&v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "mininny",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/24566759?u=bab7a021ccff22f5f2035879c79184b900cfb7ce&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
@@ -27,9 +305,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 1,
+  "mergedPRs": 1,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 19
 }
