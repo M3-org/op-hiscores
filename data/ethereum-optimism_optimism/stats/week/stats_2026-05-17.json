@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-17 to 2026-05-24, ethereum-optimism/optimism had 108 new PRs (65 merged), 44 new issues, and 52 active contributors.",
+  "overview": "From 2026-05-17 to 2026-05-24, ethereum-optimism/optimism had 124 new PRs (80 merged), 47 new issues, and 56 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABCpzgVw",
@@ -44,6 +44,18 @@
       "commentCount": 2
     },
     {
+      "id": "I_kwDODjvEJM8AAAABC58eSA",
+      "title": "bug(op-reth): proofs-history exex SIGBUS crash and infinite retry loop during deep FCU rewinds",
+      "author": "jelias2",
+      "number": 20934,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe proofs-history exex has a race condition that causes **SIGBUS crashes** (exit code 135) during deep FCU-triggered rewinds, and an **infinite retry loop** that saturates logs and eventually makes the EL unresponsive. Both the deployed architecture (`LiveTrieCollector` + `spawn_sync_task`) and the new engine architecture on `develop` (`Engine`/`EngineState`) are affected.\n\nObserved on sdg-v1 devnet on 2026-05-20 when an invalid cross-chain executing message triggered a 1,405-block deep reorg on chain 420120085. The bug manifested differently across four op-reth versions deployed simultaneously:\n\n| EL Version | Symptom | \n|---|---|\n| **v2.1.0-rc.1** | **SIGBUS crash (exit 135)** during FCU rewind → permanent CL/EL deadlock |\n| **v2.2.0-rc.1** | Exex jammed on \"Missing block 1880583\" (thousands of retries/sec) → EL eventually unresponsive |\n| **v2.2.2** | Exex jammed on \"Missing block 1880582\" (thousands of retries/sec) → log buffer saturated |\n| **v2.2.3** | Appeared healthy — but only because the paired CL never triggered a rewind (bug still present in code) |\n\n## Root Causes\n\n### 1. `sync_target` is never lowered on rewind/unwind\n\n**Old architecture (deployed):** `sync_target_tx` is a `watch::Sender<u64>` set in `handle_chain_committed` but never lowered in `handle_chain_reverted`. After a revert, the sync loop continues trying to fetch blocks up to the old (now-truncated) target.\n\n**New architecture (develop):** `EngineState::update_sync_target()` at `rust/op-reth/crates/trie/src/engine/state.rs:228-232` is monotonically increasing:\n\n```rust\npub(crate) const fn update_sync_target(&mut self, block_number: u64) {\n    if block_number > self.sync_target {\n        self.sync_target = block_number;\n    }\n}\n```\n\nNeither `UnwindTask::run()` (`tasks/unwind.rs`) nor `ReorgTask::run()` (`tasks/reorg.rs`) reset `sync_target`. `handle_chain_reverted` in `lib.rs:376-389` sends an `Unwind` action but no `SyncTo` to lower the target.\n\n### 2. No synchronization between static file truncation and mmap readers\n\nThe exex engine thread reads blocks via `provider.recovered_block()` which accesses reth's mmap'd static files (`StaticFileProvider`). When the main engine tree does `ftruncate()` on static files during a reorg, the mmap'd pages for blocks beyond the new file length become invalid. The exex thread reading those pages gets **SIGBUS** (kernel delivers bus error for pages no longer backed by the file).\n\nThere is no read-write lock, no notification, and no coordination between the truncation and the exex reader.\n\n### 3. No backoff on retry when blocks are missing\n\n**Old architecture:** On error, does `task::yield_now().await` then immediately retries.\n\n**New architecture (develop):** The `crossbeam_channel::select!` fires `sync_rx` with `Duration::ZERO` when `needs_sync()` returns true. When `advance_sync()` fails with `BlockNotFound`, the error is logged and the loop immediately retries — **zero delay, full CPU spin**. This is actively worse than the old code.\n\n```rust\n// runner.rs, process_next_event():\nrecv(sync_rx) -> _ => if let Err(err) = self.advance_sync() {\n    error!(target: \"trie::engine::runner\", ?err, \"Sync step failed\");\n},\n// immediately loops back, sync_rx fires again with Duration::ZERO\n```\n\n## Crash Timeline (from sdg-v1 incident)\n\nSupernode CL detected an invalid executing message in block 1880582 and sent an FCU to rewind from block 1881986 → 1880581 (1,405-block deep reorg).\n\n```\nTime       Engine Tree (main)              ExEx Engine Thread\n─────      ──────────────────              ──────────────────\n15:33:50   FCU: rewind to 1880581          sync_target = ~1881986\n  ...      Rewinding (20 seconds)          advance_sync() → block 1881200\n  ...      (still rewinding)               advance_sync() → block 1881700\n15:34:10   ftruncate() static files        advance_sync() → block 1881918\n           pages beyond 1880581 gone       recovered_block() reads dead page\n                                           \"no state found\" × 5,305\n                                           \"Missing block\" × 392\n15:34:14                                   *** SIGBUS (exit 135) ***\n```\n\n### Log evidence\n\n**FCU timeout (20.25s, receiver dropped):**\n```\nts=2026-05-20T15:34:10 level=warn target=engine::tree\n  message=\"Failed to deliver forkchoiceUpdated response, receiver dropped (request cancelled)\"\n  state=\"ForkchoiceState {\n    head_block_hash: 0xcbbe67f1...20075771,\n    safe_block_hash: 0x4552f4f6...,\n    finalized_block_hash: 0x4552f4f6... }\"\n  elapsed=20.250721856s\n```\n\n**Exex cascade (5,305 state errors + 392 missing block errors in 0.4s):**\n```\nts=2026-05-20T15:34:10 level=error target=optimism::exex\n  message=\"Batch processing failed\"\n  error=\"no state found for block 0xbf5a8d5698b1237b543371cb479871ccf9fd2bfa339e357dd4cf5dd226974335\"\n  id=proofs-history\n\nts=2026-05-20T15:34:10 level=error target=optimism::exex\n  message=\"Batch processing failed\"\n  error=\"Missing block 1881918\\n\\nLocation:\\n    op-reth/crates/exex/src/lib.rs:381:32\"\n  id=proofs-history\n```\n\n**SIGBUS crash:**\n```\nLast State: Terminated\n  Reason: Error\n  Exit Code: 135   # = 128 + 7 (SIGBUS)\n```\n\n**Post-restart consistency check (static files at 1881985, DB at 1880580):**\n```\nChecking consistency for segment Headers\n  initial_highest_block=1881985 highest_block=1880580\n→ Setting unwind target = 1880580\n\nExecuting an unwind after a failed storage consistency check\n  unwind_target=Unwind(1880580)\n```\n\n**Infinite retry loop on other nodes (saturates entire log buffer):**\n```\nts=2026-05-20T16:39:17 level=error target=optimism::exex\n  message=\"Batch processing failed\"\n  error=\"Missing block 1880582\\n\\nLocation:\\n    op-reth/crates/exex/src/lib.rs:381:32\"\n  id=proofs-history\n# repeated thousands of times per second, pushing all other logs out of the buffer\n```\n\n## Impact\n\n1. **SIGBUS crash** leaves the EL in an inconsistent state (DB unwound one block too far), creating a permanent CL/EL deadlock where the CL needs block N but the EL only has up to N-1\n2. **Infinite retry loop** (thousands/sec) saturates log buffers, making debugging impossible, and eventually causes EL unresponsiveness through resource exhaustion\n3. On the sdg-v1 devnet, this bug took down 3 of 4 supernodes. The only \"healthy\" one was never triggered because its CL lacked interop validation\n\n## Suggested Fixes\n\n### Fix 1: Reset `sync_target` on unwind (critical)\n\nIn `rust/op-reth/crates/trie/src/engine/state.rs`, add to the `unwind()` method:\n\n```rust\npub(crate) fn unwind(&mut self, to: BlockWithParent) -> Result<(), EngineError> {\n    self.persistence.unwind(to, &self.memory)?;\n    self.memory.unwind(to.block.number);\n    // Reset sync_target so engine thread stops fetching truncated blocks\n    self.sync_target = self.sync_target.min(to.block.number.saturating_sub(1));\n    Ok(())\n}\n```\n\nFor the old architecture, `handle_chain_reverted` should send a lower value to `sync_target_tx`.\n\n### Fix 2: Bounds check before `recovered_block()` (defensive)\n\nIn `rust/op-reth/crates/trie/src/engine/runner.rs`, `advance_sync()`:\n\n```rust\nfn advance_sync(&mut self) -> Result<(), EngineError> {\n    let current_tip = self.state.get_tip()?.number;\n    if self.state.sync_target <= current_tip {\n        return Ok(());\n    }\n    let block_num = current_tip + 1;\n    // Don't read past what the provider actually has\n    if block_num > self.state.provider.best_block_number()? {\n        return Ok(());\n    }\n    let block = self.state.provider\n        .recovered_block(block_num.into(), TransactionVariant::NoHash)?\n        .ok_or(EngineError::BlockNotFound(block_num))?;\n    // ...\n}\n```\n\n### Fix 3: Add backoff on `BlockNotFound` errors\n\nIn `runner.rs`, the sync arm of `process_next_event()` should introduce a delay after errors instead of immediately retrying:\n\n```rust\nrecv(sync_rx) -> _ => if let Err(err) = self.advance_sync() {\n    error!(target: \"trie::engine::runner\", ?err, \"Sync step failed\");\n    // Don't spin — wait before retrying\n    std::thread::sleep(Duration::from_secs(1));\n},\n```\n\nOr better: disable `sync_rx` until a new `SyncTo` action arrives.\n\n## Affected Files\n\n- `rust/op-reth/crates/exex/src/lib.rs` — `handle_chain_reverted` doesn't lower sync_target\n- `rust/op-reth/crates/trie/src/engine/state.rs` — `update_sync_target()` monotonically increasing, `unwind()` doesn't reset it\n- `rust/op-reth/crates/trie/src/engine/runner.rs` — `advance_sync()` no bounds check, `process_next_event()` zero-delay retry\n- `rust/op-reth/crates/trie/src/engine/tasks/unwind.rs` — `run()` doesn't reset sync_target\n- `rust/op-reth/crates/trie/src/engine/tasks/reorg.rs` — `run()` doesn't reset sync_target\n\n## Additional Context\n\nFull incident writeup with per-supernode analysis: https://www.notion.so/oplabs/Interop-Reorg-Test-Conductor-366f153ee16280089019f11abaf3e360",
+      "createdAt": "2026-05-20T21:13:22Z",
+      "closedAt": "2026-05-22T14:30:10Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
       "id": "I_kwDODjvEJM8AAAABCzQ1dw",
       "title": "op-supernode: Ignore backfill depth if activation timestamp is not set",
       "author": "ajsutton",
@@ -54,18 +66,6 @@
       "closedAt": "2026-05-20T21:52:54Z",
       "state": "CLOSED",
       "commentCount": 2
-    },
-    {
-      "id": "I_kwDODjvEJM7L_OaX",
-      "title": "Update withdrawal op-chain-ops command for U16a",
-      "author": "pauldowman",
-      "number": 17470,
-      "repository": "ethereum-optimism/optimism",
-      "body": "The [withdrawal command](https://github.com/ethereum-optimism/optimism/tree/develop/op-chain-ops/cmd/withdrawal) calls `superRootsActive()` which may not exist if the chain didn't go through U16. First check for a non-zero lockbox.\n\n```go\nfunc (b *StandardBridge) UsesSuperRoots() bool {\n\t// Only interop contracts have SuperRootsActive functionality\n\tversion := b.PortalVersion()\n\tif !strings.HasSuffix(version, \"+interop\") {\n\t\treturn false\n\t}\n\n\tsuperRootsActive, err := contractio.Read(b.l1Portal.SuperRootsActive(), b.ctx)\n\tb.require.NoError(err, \"Failed to read super roots active\")\n\treturn superRootsActive\n}\n```",
-      "createdAt": "2025-09-16T13:37:29Z",
-      "closedAt": "2026-05-19T19:31:07Z",
-      "state": "CLOSED",
-      "commentCount": 1
     }
   ],
   "topPRs": [
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 28964,
-    "deletions": 25220,
-    "files": 537,
-    "commitCount": 571
+    "additions": 30975,
+    "deletions": 29142,
+    "files": 619,
+    "commitCount": 643
   },
   "completedItems": [
     {
@@ -541,6 +541,18 @@
       "body": "",
       "files": [
         "op-service/txplan/txplan.go"
+      ]
+    },
+    {
+      "title": "docs(flakes): add flake-prevention catalogue + semgrep rules for op-acceptance-tests",
+      "prNumber": 20784,
+      "type": "docs",
+      "body": "## Summary\r\n\r\n- Catalogues 14 recurring flake-causing patterns observed in `op-acceptance-tests/` and `op-devstack/` PRs over the past month (F1 through F14, each grounded in a real fix PR). New file `docs/ai/flake-prevention.md`.\r\n- Adds 8",
+      "files": [
+        ".semgrep/rules/go-acceptance-test-flakes.yaml",
+        "docs/ai/flake-prevention.md",
+        "docs/ai/writing-acceptance-tests.md",
+        "AGENTS.md"
       ]
     },
     {
@@ -1013,6 +1025,26 @@
       ]
     },
     {
+      "title": "fix(kona-node): carry L2 hash through finalization to prevent silent …",
+      "prNumber": 20877,
+      "type": "bugfix",
+      "body": "`FinalizeTask` dropped the L2 block hash and finalized by number only. In delegated derivation mode the upstream supplies `(number, hash)` on every sync-status poll. If the upstream and the local engine disagree at that height (e.g. upstrea",
+      "files": [
+        "rust/kona/crates/node/engine/src/lib.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/id.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/actor.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/engine_client.rs",
+        "rust/kona/crates/node/service/src/actors/engine/actor.rs",
+        "rust/kona/crates/node/service/src/actors/engine/engine_request_processor.rs",
+        "rust/kona/crates/node/service/src/actors/engine/request.rs"
+      ]
+    },
+    {
       "title": "test(op-acceptance-tests): port super_root_script test to acceptance suite",
       "prNumber": 20876,
       "type": "tests",
@@ -1172,6 +1204,16 @@
       ]
     },
     {
+      "title": "fix(op-service/eth): stabilize FuzzEncodeDecodeBlob and FuzzDetectNonBijectivity",
+      "prNumber": 20940,
+      "type": "bugfix",
+      "body": "**Claude:** Authored by Claude on Adrian's behalf.\n\nBoth fuzz targets in `op-service/eth` were prone to `fuzzing process hung or terminated unexpectedly while minimizing: EOF` in CI. Root cause: `Blob.FromData` formatted the full `hexutil.B",
+      "files": [
+        "op-service/eth/blob.go",
+        "op-service/eth/blob_test.go"
+      ]
+    },
+    {
       "title": "Resize Fuzz-golang job to xlarge.gen2",
       "prNumber": 20931,
       "type": "other",
@@ -1239,6 +1281,64 @@
       "body": "## Summary\n\nMigrates the `fuzz-golang` job definition in `.circleci/continue/main.yml` from `xlarge` (Gen1) to `medium.gen2`. First W4 PR — see ethereum-optimism/core-team#2564.\n\n## Change\n\n| Job | Workflows | Current | Proposed |\n|---|---|",
       "files": [
         ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "refactor(interop): move shared interop error sentinels into op-core/interop",
+      "prNumber": 20896,
+      "type": "refactor",
+      "body": "Moves the interop result vocabulary (`ErrFuture`, `ErrConflict`, `ErrSkipped`, `ErrOutOfOrder`, `ErrDataCorruption`, `ErrAwaitReplacementBlock`, `GetErrorCode`, …) out of `op-supervisor/supervisor/types` into the top-level `op-core/interop`",
+      "files": [
+        "op-core/interop/interop.go",
+        "op-interop-filter/filter/backend.go",
+        "op-interop-filter/filter/frontend.go",
+        "op-interop-filter/filter/lockstep_cross_validator.go",
+        "op-interop-filter/filter/lockstep_cross_validator_test.go",
+        "op-interop-filter/filter/logsdb_chain_ingester.go",
+        "op-interop-filter/filter/logsdb_chain_ingester_test.go",
+        "op-interop-filter/filter/logsdb_dispatch_test.go",
+        "op-interop-filter/filter/logsdb_integration_backend_test.go",
+        "op-interop-filter/filter/logsdb_integration_contains_test.go",
+        "op-interop-filter/filter/logsdb_integration_execmsgs_test.go",
+        "op-interop-filter/filter/logsdb_integration_reorg_recovery_test.go",
+        "op-interop-filter/filter/mock_test.go",
+        "op-program/client/interop/consolidate.go",
+        "op-program/client/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/algo.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/raftwallogdb/db.go",
+        "op-supernode/supernode/activity/interop/raftwallogdb/db_test.go",
+        "op-supervisor/supervisor/backend/backend.go",
+        "op-supervisor/supervisor/backend/backend_test.go",
+        "op-supervisor/supervisor/backend/cross/cycle.go",
+        "op-supervisor/supervisor/backend/cross/cycle_test.go",
+        "op-supervisor/supervisor/backend/cross/hazard_set.go",
+        "op-supervisor/supervisor/backend/cross/hazard_set_test.go",
+        "op-supervisor/supervisor/backend/cross/safe_frontier.go",
+        "op-supervisor/supervisor/backend/cross/safe_frontier_test.go",
+        "op-supervisor/supervisor/backend/cross/safe_start.go",
+        "op-supervisor/supervisor/backend/cross/safe_start_test.go",
+        "op-supervisor/supervisor/backend/cross/safe_update.go",
+        "op-supervisor/supervisor/backend/cross/safe_update_test.go",
+        "op-supervisor/supervisor/backend/cross/unsafe_frontier.go",
+        "op-supervisor/supervisor/backend/cross/unsafe_frontier_test.go",
+        "op-supervisor/supervisor/backend/cross/unsafe_start_test.go",
+        "op-supervisor/supervisor/backend/cross/unsafe_update.go",
+        "op-supervisor/supervisor/backend/cross/unsafe_update_test.go",
+        "op-supervisor/supervisor/backend/db/anchor.go",
+        "op-supervisor/supervisor/backend/db/db.go",
+        "op-supervisor/supervisor/backend/db/fromda/db.go",
+        "op-supervisor/supervisor/backend/db/fromda/db_test.go",
+        "op-supervisor/supervisor/backend/db/fromda/entry.go",
+        "op-supervisor/supervisor/backend/db/fromda/update.go",
+        "op-supervisor/supervisor/backend/db/fromda/update_test.go",
+        "op-supervisor/supervisor/backend/db/logs/db.go",
+        "op-supervisor/supervisor/backend/db/logs/db_test.go",
+        "op-supervisor/supervisor/backend/db/logs/entries.go",
+        "op-supervisor/supervisor/backend/db/logs/iterator.go",
+        "op-supervisor/supervisor/backend/db/logs/state.go",
+        "op-supervisor/supervisor/backend/db/query.go",
+        "op-supervisor/supervisor/backend/db/update.go"
       ]
     },
     {
@@ -1378,12 +1478,100 @@
       ]
     },
     {
+      "title": "chore(ci): disable Go test coverage and Codecov uploads",
+      "prNumber": 20972,
+      "type": "tests",
+      "body": "Go test coverage adds CPU/memory overhead in CI without being used as a gating signal. Drops `-coverprofile`/`-coverpkg` from the Go CI test recipes (main Go suite, fraud proofs, cannon, kona action tests) and removes the cannon and fraud-p",
+      "files": [
+        ".circleci/continue/main.yml",
+        "justfile",
+        "rust/kona/tests/justfile"
+      ]
+    },
+    {
+      "title": "op-service: Avoid allocating 8Gb of memory to test ssz encoding.",
+      "prNumber": 20970,
+      "type": "tests",
+      "body": "**Description**\r\n\r\nThe SSZ Marshall test was consuming 8Gb of memory which creates a risk of OOM when run in parallel with other tests. Refactored the length calculations so it can be tested in isolation.\r\n\r\n\r\n**Metadata**\r\n\r\nfixes https://",
+      "files": [
+        "op-service/eth/ssz.go",
+        "op-service/eth/ssz_test.go"
+      ]
+    },
+    {
+      "title": "chore(ci): unblock CI — verbose test streaming + cap package concurrency",
+      "prNumber": 20965,
+      "type": "tests",
+      "body": "Bundle of fixes aimed at the elevated flake rate currently blocking merges (ethereum-optimism/optimism#20966 and the recent wave of mass `context deadline exceeded` failures on `memory-all-*` jobs, e.g. job 5097460 with 24 simultaneous fail",
+      "files": [
+        "justfile",
+        "op-acceptance-tests/justfile",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "fix(devstack): tolerate \"batcher is already running\" in DSL Start()",
+      "prNumber": 20963,
+      "type": "bugfix",
+      "body": "`L2Batcher.Start()` retries the `StartBatcher` RPC up to 3 times. If the first call actually starts the batcher but the client sees a transient error, retries 2 and 3 hit `\"batcher is already running\"` and the helper fails permanently.\n\nMir",
+      "files": [
+        "op-devstack/dsl/l2_batcher.go"
+      ]
+    },
+    {
+      "title": "chore: remove ai-contracts-test job and supporting system",
+      "prNumber": 20954,
+      "type": "tests",
+      "body": "Remove AI contracts job",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml",
+        ".semgrep/rules/sol-rules.yaml",
+        "ops/ai-eng/.gitignore",
+        "ops/ai-eng/README.md",
+        "ops/ai-eng/contracts-test-maintenance/README.md",
+        "ops/ai-eng/contracts-test-maintenance/VERSION",
+        "ops/ai-eng/contracts-test-maintenance/components/devin-api/devin_client.py",
+        "ops/ai-eng/contracts-test-maintenance/components/prompt-renderer/render.py",
+        "ops/ai-eng/contracts-test-maintenance/components/slack-notifier/build_notification.sh",
+        "ops/ai-eng/contracts-test-maintenance/components/tests_ranker/test_ranker.py",
+        "ops/ai-eng/contracts-test-maintenance/docs/runbook.md",
+        "ops/ai-eng/contracts-test-maintenance/exclusion.toml",
+        "ops/ai-eng/contracts-test-maintenance/no-need-changes.toml",
+        "ops/ai-eng/contracts-test-maintenance/prompt/prompt.md",
+        "ops/ai-eng/justfile"
+      ]
+    },
+    {
       "title": "docs: update kona prestate build instructions",
       "prNumber": 20951,
       "type": "docs",
       "body": "Updates the Kona FPVM prestate README to document the current reproducible build flow",
       "files": [
         "rust/kona/docker/fpvm-prestates/README.md"
+      ]
+    },
+    {
+      "title": "test(op-acceptance-tests): speed up depreqres tests to make CI faster",
+      "prNumber": 20950,
+      "type": "tests",
+      "body": "Collapse the `Short`/`Long` variants of the `UnsafeChainNotStalling` tests into a single 20-block run and set a uniform 1s L2 block time via `WithUniformL2BlockTimes(1)`. The previous `Long` variants ran for 47 blocks at the default block t",
+      "files": [
+        "op-acceptance-tests/tests/depreqres/common/common.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/clsync/clsync_test.go",
+        "op-acceptance-tests/tests/depreqres/reqressyncdisabled/elsync/elsync_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/clsync/clsync_test.go",
+        "op-acceptance-tests/tests/depreqres/syncmodereqressync/elsync/elsync_test.go"
+      ]
+    },
+    {
+      "title": "fix(op-reth): prevent engine sync-target spin after deep unwind",
+      "prNumber": 20949,
+      "type": "bugfix",
+      "body": "**Description**\r\n\r\n- Clamp `sync_target` to the post-unwind tip inside `EngineState::unwind`, fixing a tight loop where a stale target left over from a deep FCU rewind kept `needs_sync()` true and the runner spun on `BlockNotFound` for bloc",
+      "files": [
+        "rust/op-reth/crates/trie/src/engine/runner.rs",
+        "rust/op-reth/crates/trie/src/engine/state.rs"
       ]
     },
     {
@@ -1398,6 +1586,27 @@
         "op-service/sources/supervisor_client_test.go",
         "op-supervisor/supervisor/frontend/api.go",
         "op-supervisor/supervisor/frontend/frontend.go"
+      ]
+    },
+    {
+      "title": "refactor(interop): move log helpers into op-core/interop/messages",
+      "prNumber": 20946,
+      "type": "refactor",
+      "body": "Moves `MessageFromLog`, `DecodeExecutingMessageLog`, and `LogToLogHash` out of `op-supervisor/supervisor/backend/processors` and into `op-core/interop/messages`. These are pure log-decoding helpers over `op-core/interop/messages` types with",
+      "files": [
+        "op-core/interop/messages/logs.go",
+        "op-core/interop/messages/logs_test.go",
+        "op-interop-filter/filter/logsdb_chain_ingester.go",
+        "op-interop-filter/filter/logsdb_integration_helpers_test.go",
+        "op-interop-mon/monitor/job.go",
+        "op-program/client/interop/consolidate.go",
+        "op-supernode/supernode/activity/interop/logdb.go",
+        "op-supernode/supernode/activity/interop/verification_view.go",
+        "op-supervisor/supervisor/backend/processors/executing_message.go",
+        "op-supervisor/supervisor/backend/processors/executing_message_test.go",
+        "op-supervisor/supervisor/backend/processors/log_processor.go",
+        "op-supervisor/supervisor/backend/processors/log_processor_test.go",
+        "op-supervisor/supervisor/backend/syncnode/rpc.go"
       ]
     },
     {
@@ -1419,6 +1628,42 @@
         "op-e2e/actions/helpers/user.go",
         "op-e2e/actions/proofs/sequence_window_expiry_test.go"
       ]
+    },
+    {
+      "title": "fix(ctb): increase cost of l2ProxyAdmin.upgradeExecution()",
+      "prNumber": 20986,
+      "type": "bugfix",
+      "body": "**Description**\r\n\r\nFixes this CI failure with a bit of buffer on top: https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/126088/workflows/bc59c603-2634-46fc-945f-82a319e9672d/jobs/5103776",
+      "files": [
+        "packages/contracts-bedrock/scripts/libraries/UpgradeUtils.sol",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json"
+      ]
+    },
+    {
+      "title": "Revert \"fix(l2cm): preserve XLayer LiquidityController minters\"",
+      "prNumber": 20981,
+      "type": "bugfix",
+      "body": "This reverts commit 0905bb28484b2069e58509f8aa1448c31e81f05f.\r\n\r\nThe XLayer LiquidityController has no addresses in their `minters()` mapping, and \r\ntheir CGT implementation does not even use the `LiquidityController` and `NativeAssetLiquid",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L2/ILiquidityControllerStorage.sol",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/LiquidityController.json",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/L2/LiquidityController.sol",
+        "packages/contracts-bedrock/test/L2/L2ContractsManager.t.sol",
+        "packages/contracts-bedrock/test/L2/fork/L2ForkUpgrade.t.sol"
+      ]
+    },
+    {
+      "title": "fix(contracts): increase NUT bundle gas limits for ConditionalDeployer and upgrade execution",
+      "prNumber": 20977,
+      "type": "bugfix",
+      "body": "## Summary\r\n\r\n- `deployGasLimit` for `ConditionalDeployer` was `116_400`, which only covered the EIP-7623 calldata floor. The actual CREATE2 deployment via the DeterministicDeploymentProxy costs ~325k gas (32k base + 200 × 1464 bytes runtim",
+      "files": [
+        "packages/contracts-bedrock/scripts/libraries/UpgradeUtils.sol",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/libraries/Predeploys.sol"
+      ]
     }
   ],
   "topContributors": [
@@ -1435,21 +1680,31 @@
     {
       "username": "karlfloersch",
       "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 445.11047125898557,
-      "prScore": 345.13247125898556,
+      "totalScore": 468.4412045992719,
+      "prScore": 363.4632045992719,
       "issueScore": 6,
-      "reviewScore": 93,
+      "reviewScore": 98,
       "commentScore": 0.978,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 287.81211209361436,
+      "prScore": 210.19811209361436,
+      "issueScore": 2.1,
+      "reviewScore": 74,
+      "commentScore": 1.5139999999999998,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 216.65808478145868,
-      "prScore": 155.8200847814587,
+      "totalScore": 253.3148586780348,
+      "prScore": 192.27685867803478,
       "issueScore": 4,
       "reviewScore": 56,
-      "commentScore": 0.838,
+      "commentScore": 1.038,
       "summary": null
     },
     {
@@ -1465,51 +1720,71 @@
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 173.97382408505572,
+      "totalScore": 193.47382408505572,
       "prScore": 50.77382408505572,
       "issueScore": 4,
-      "reviewScore": 119,
+      "reviewScore": 138.5,
       "commentScore": 0.2,
       "summary": null
     },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 148.01100805522077,
-      "prScore": 101.99100805522077,
+      "totalScore": 161.3880833568741,
+      "prScore": 110.3680833568741,
       "issueScore": 2,
-      "reviewScore": 43,
+      "reviewScore": 48,
       "commentScore": 1.02,
       "summary": null
     },
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 145.41588545880072,
+      "totalScore": 150.41588545880072,
       "prScore": 111.41588545880072,
       "issueScore": 0,
-      "reviewScore": 34,
+      "reviewScore": 39,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 140.01664235718167,
-      "prScore": 72.34064235718168,
-      "issueScore": 2.1,
-      "reviewScore": 64.5,
-      "commentScore": 1.0759999999999998,
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 123.63982878483354,
+      "prScore": 88.43982878483354,
+      "issueScore": 0,
+      "reviewScore": 35,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 121.29905403935338,
+      "prScore": 54.25905403935338,
+      "issueScore": 0,
+      "reviewScore": 66.5,
+      "commentScore": 0.54,
       "summary": null
     },
     {
       "username": "dhyaniarun1993",
       "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
-      "totalScore": 118.57657626922209,
+      "totalScore": 118.91657626922209,
       "prScore": 95.37657626922208,
       "issueScore": 0,
       "reviewScore": 23,
-      "commentScore": 0.2,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 116.79460772849825,
+      "prScore": 41.394607728498244,
+      "issueScore": 2,
+      "reviewScore": 73,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -1523,26 +1798,6 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 105.60157934918598,
-      "prScore": 75.401579349186,
-      "issueScore": 0,
-      "reviewScore": 30,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 104.1320771546179,
-      "prScore": 42.092077154617904,
-      "issueScore": 0,
-      "reviewScore": 61.5,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
       "totalScore": 95.48377389657611,
@@ -1553,22 +1808,32 @@
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 90.30956408181082,
-      "prScore": 14.909564081810814,
-      "issueScore": 2,
-      "reviewScore": 73,
-      "commentScore": 0.4,
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 89.21541507781077,
+      "prScore": 38.71541507781077,
+      "issueScore": 0,
+      "reviewScore": 50.5,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "ZakAyesh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
-      "totalScore": 83.75110893347671,
-      "prScore": 33.251108933476715,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 87.82749269401805,
+      "prScore": 62.62749269401804,
+      "issueScore": 2,
+      "reviewScore": 23,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 85.7541979327684,
+      "prScore": 60.754197932768406,
       "issueScore": 0,
-      "reviewScore": 50.5,
+      "reviewScore": 25,
       "commentScore": 0,
       "summary": null
     },
@@ -1583,12 +1848,22 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 78.12529257832449,
-      "prScore": 52.92529257832447,
-      "issueScore": 2,
-      "reviewScore": 23,
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 78.014,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 76.5,
+      "commentScore": 1.5139999999999998,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 75.64644351485947,
+      "prScore": 70.44644351485947,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0.2,
       "summary": null
     },
@@ -1603,23 +1878,13 @@
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 66.89083122619137,
-      "prScore": 61.690831226191364,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 66.79860865163866,
+      "totalScore": 66.99860865163866,
       "prScore": 35.298608651638666,
       "issueScore": 0,
       "reviewScore": 31.5,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1635,41 +1900,31 @@
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 53.330384827786084,
-      "prScore": 53.330384827786084,
+      "totalScore": 60.169103784003134,
+      "prScore": 60.169103784003134,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 50.576,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 49.5,
-      "commentScore": 1.0759999999999998,
-      "summary": null
-    },
-    {
-      "username": "JosepBove",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
-      "totalScore": 48.6127738965761,
-      "prScore": 33.6127738965761,
-      "issueScore": 0,
-      "reviewScore": 15,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "0xOneTony",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 48.2,
+      "totalScore": 53.4,
       "prScore": 0,
       "issueScore": 38,
-      "reviewScore": 10,
-      "commentScore": 0.2,
+      "reviewScore": 15,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 47.7671895929889,
+      "prScore": 47.7671895929889,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1703,6 +1958,16 @@
       "summary": null
     },
     {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 29.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 29.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "rado-alchemy",
       "avatarUrl": "https://avatars.githubusercontent.com/u/244678413?v=4",
       "totalScore": 25.961848030920162,
@@ -1710,16 +1975,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "bitwiseguy",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
-      "totalScore": 24.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 24.5,
-      "commentScore": 0,
       "summary": null
     },
     {
@@ -1783,6 +2038,26 @@
       "summary": null
     },
     {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 15.410306144334054,
+      "prScore": 5.410306144334054,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "0xarktos",
       "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
       "totalScore": 14.869470422144175,
@@ -1813,26 +2088,6 @@
       "summary": null
     },
     {
-      "username": "smartcontracts",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
-      "totalScore": 10.410306144334054,
-      "prScore": 5.410306144334054,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "serpixel",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
-      "totalScore": 10,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "tiaraimpex410-sudo",
       "avatarUrl": "https://avatars.githubusercontent.com/u/285470865?v=4",
       "totalScore": 9.71405126783455,
@@ -1849,6 +2104,16 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zarocoin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/212278793?u=49fc5ae7f2c6e3e71d964ab4fd7bc0fef33620b0&v=4",
+      "totalScore": 9.377371757896164,
+      "prScore": 9.377371757896164,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1873,6 +2138,16 @@
       "summary": null
     },
     {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 7,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Brindrajsinh-Chauhan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/91854080?u=45e138155b78a7b36776ce1d68ab36fa043941c0&v=4",
       "totalScore": 6.912292546497023,
@@ -1893,8 +2168,8 @@
       "summary": null
     },
     {
-      "username": "sjonpaulbrown",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -1903,8 +2178,8 @@
       "summary": null
     },
     {
-      "username": "pauldowman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -1920,6 +2195,16 @@
       "issueScore": 4.1,
       "reviewScore": 0,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "553589912",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29298234?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1943,9 +2228,9 @@
       "summary": null
     }
   ],
-  "newPRs": 108,
-  "mergedPRs": 65,
-  "newIssues": 44,
-  "closedIssues": 26,
-  "activeContributors": 52
+  "newPRs": 124,
+  "mergedPRs": 80,
+  "newIssues": 47,
+  "closedIssues": 37,
+  "activeContributors": 56
 }
