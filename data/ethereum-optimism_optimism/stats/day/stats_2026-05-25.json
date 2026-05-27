@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-25 to 2026-05-26, ethereum-optimism/optimism had 13 new PRs (5 merged), 0 new issues, and 83 active contributors.",
+  "overview": "From 2026-05-25 to 2026-05-26, ethereum-optimism/optimism had 13 new PRs (5 merged), 0 new issues, and 81 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM6onNFI",
@@ -113,21 +113,21 @@
       "body": "Previously, when the supernode rewound the engine for `DecisionRewind` / `DecisionInvalidate`, it:\n1. Inserted a synthetic block and FCU'd to it (making the original target non-canonical), then\n2. FCU'd back to the original target.\n\nBetween (1) and (2) the original target sat non-canonical, where op-reth's pruner is free to discard it. A crash mid-rewind left the supernode unable to recover: looking the target up again by number would return the synthetic, and looking it up by hash could return NotFound.\n\nThis PR makes the supernode WAL the authoritative source for the rewind target — at build time, while the block is still canonical — so apply / recovery never needs the live EL to still have it.\n\n## Data model\n\n- `RewindPlan` gains `TargetPayloads map[ChainID]*eth.ExecutionPayloadEnvelope`.\n- `PendingTransition` gains `InvalidationParentPayloads map[ChainID]*eth.ExecutionPayloadEnvelope` (sibling of `Result`, not embedded in `InvalidHead` to keep that struct lean for API consumers).\n\n## Build / apply / engine APIs\n\n- `buildRewindPlan` and `buildPendingTransition(DecisionInvalidate)` fetch each chain's canonical payload by hash. Any fetch failure aborts the build; the decision is re-evaluated next round.\n- Apply paths (`resetChainEnginesIfNeeded`, the invalidate loop in `applyPendingTransition`) use only the WAL'd payloads and surface a malformed-WAL error if any expected entry is missing — they never fall back to the live EL.\n- `engine.Rewind(ctx, target)` replaces `RewindToTimestamp`. The synthetic block is derived from the supplied target, and the same target is re-inserted via `engine_newPayload` between the synthetic and target FCUs to guarantee EL durability across pruning.\n- `InvalidateBlock` and `RewindEngine` take the target envelope explicitly so the WAL contract reaches all the way down to the engine controller.\n\n## Other behavioral notes\n\n- Rewind no-ops cleanly when the unsafe head already matches the target hash.\n- Engine controller cross-checks the envelope's number/timestamp against the rollup config.\n\n## Test plan\n\n- [x] `go test ./op-supernode/...` passes (chain_container, engine_controller, activity/interop, supernode, superroot, virtual_node, raftwallogdb, resources).\n- [x] `just lint-go` clean.\n- [ ] Manual / e2e validation across a crash mid-rewind on a devnet.",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-05-25T22:15:16Z",
-      "mergedAt": null,
-      "additions": 720,
-      "deletions": 299
+      "mergedAt": "2026-05-26T22:25:17Z",
+      "additions": 841,
+      "deletions": 321
     },
     {
-      "id": "PR_kwDODjvEJM7DJ9Gw",
-      "title": "op-devstack: parallelize service startup and batch migration transactions",
-      "author": "Inphi",
-      "number": 19167,
-      "body": "## Problem Statement\r\n\r\nDevstack network setup is slow because all services start sequentially and the superroot migration issues ownership-transfer transactions one at a time, each waiting for an L1 block (~6s). This makes acceptance test iteration painfully slow.\r\n\r\n## Solution\r\n\r\nAdd an `InParallel` option combinator that runs `AfterDeploy` phases concurrently, and refactor all devstack presets to group independent services by dependency level. Also batch ownership-transfer transactions in the superroot migration to reduce L1 block waits. \r\n\r\nKey changes:\r\n- Add ParallelOption type and InParallel constructor to stack package\r\n- Refactor system presets to use dependency-level parallelism (e.g. L2 CL + Faucets in parallel, then Batcher + Proposer in parallel)\r\n- Add SendTxs batch utility to transactions package\r\n- Parallelize L2 safe head polling across chains in superroot migration\r\n- Batch pre-migration and post-migration ownership transfers\r\n- Deduplicate shared proxy admin addresses in batched transfers\r\n\r\n## Testing\r\n\r\nOn my machine, proofs and the minimal interop presets are setup in half the time.",
+      "id": "PR_kwDODjvEJM7fC-AX",
+      "title": "feat: Super ZK Dispute Game",
+      "author": "0xarktos",
+      "number": 21011,
+      "body": "## Summary\r\n\r\nMigrates `ZKDisputeGame` from single-chain output roots to super-root semantics in place, mirroring `SuperFaultDisputeGame`. Reuses the existing `ZK_DISPUTE_GAME` slot; all callers keep routing through the same addresses.\r\n\r\n## Changes\r\n\r\n### Contracts — `src/dispute/zk/ZKDisputeGame.sol`\r\n\r\n| Area | Change |\r\n|---|---|\r\n| `extraData` & CWIA | New variable-length layout: 4 B `parentIndex` ‖ 1 B version ‖ 8 B timestamp ‖ n × 64 B `(chainId, root)` pairs. Hardcoded `0x12E` calldata check replaced with `_verifyInitCallDataLength`; impl-arg getters use dynamic offsets. New internal helpers: `_preExtraDataByteCount`, `_extraDataByteCount`, `gameImplArgsByteCount`, plus public `superRootProof()` returning the canonical SuperRootProof bytes. |\r\n| `rootClaim` | Now `keccak256(SuperRootProof)`, bound at init via `Hashing.hashSuperRootProof(...) == rootClaim`. |\r\n| `l2SequenceNumber` | Semantically u64 timestamp (was u256 block number); read via `_getArgUint64(0x5D)`. `startingBlockNumber()` → `startingSequenceNumber()`. |\r\n| `l2ChainId` | Invariant flipped: `!= 0` → revert `NoChainIdNeeded`. Getter made internal (`_l2ChainId()`); new `error NoChainIdNeeded()` mirrors SFDG. |\r\n| `rootClaimByChainId` | Decodes SuperRootProof, scans pairs, reverts `UnknownChainId` on miss. |\r\n| `prove()` | Drops `l2ChainId` from public values (5 fields instead of 6). |\r\n| Misc | Version `1.2.0` → `2.0.0`. `absolutePrestate` NatSpec flagged as multi-chain super-root vkey. New imports: `Types`, `Encoding`, `Hashing`, `BadExtraData`. |\r\n\r\n### Interfaces — `interfaces/dispute/zk/IZKDisputeGame.sol`\r\n\r\n| Change | Notes |\r\n|---|---|\r\n| Added `error NoChainIdNeeded()` | Mirrors contract-local declaration |\r\n| Added `superRootProof()` | New view returning the canonical SuperRootProof bytes |\r\n| Renamed `startingBlockNumber()` → `startingSequenceNumber()` | Reflects timestamp semantics |\r\n| Removed `l2ChainId()` | Getter is now internal on the contract |\r\n\r\n### Tests\r\n\r\n| File | Change |\r\n|---|---|\r\n| `test/dispute/DisputeGameFactory.t.sol` | Shared ZK helpers updated: `setupZKDisputeGame` packs `l2ChainId = 0`; new `_makeZKExtraDataAndClaim` overloads; `_zkCreateParams` builds valid SuperRootProof bindings; assertions updated for the new 77-byte minimum extraData. |\r\n| `test/dispute/zk/ZKDisputeGame.t.sol` | `setUp()` + 22 game-creation sites refactored through new `_createZKGame` / `_createZKGameOfType` helpers. New cases: hash-binding mismatch, multi-chain lookup, helper coverage, lower-bound timestamp fuzz (replaces the obsolete uint64-overflow fuzz). |\r\n| `test/dispute/zk/ZKDisputeGameIntegration.t.sol` | `_createGame` rewired to derive `rootClaim` from the output-root label; all three lifecycle scenarios updated. |\r\n\r\n## Test Plan\r\n\r\n```bash\r\nDEV_FEATURE__ZK_DISPUTE_GAME=true forge test --match-path \"test/dispute/zk/*.t.sol\"\r\n```\r\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-02-12T01:51:30Z",
+      "createdAt": "2026-05-25T12:58:14Z",
       "mergedAt": null,
-      "additions": 592,
-      "deletions": 289
+      "additions": 604,
+      "deletions": 369
     }
   ],
   "codeChanges": {
@@ -379,5 +379,5 @@
   "mergedPRs": 5,
   "newIssues": 0,
   "closedIssues": 7,
-  "activeContributors": 83
+  "activeContributors": 81
 }
