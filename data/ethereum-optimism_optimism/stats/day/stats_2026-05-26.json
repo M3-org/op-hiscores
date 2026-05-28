@@ -27,8 +27,8 @@
       "repository": "ethereum-optimism/optimism",
       "body": "## Summary\n\n`generate-semver-lock` can write nondeterministic `semver-lock.json` output when multiple Forge artifacts map to the same semver key but were compiled with different optimizer settings.\n\nConcrete case: `L2ProxyAdmin`.\n\n## Evidence\n\nExisting artifacts include:\n\n| Artifact | Profile | Optimizer runs | initCodeHash |\n|---|---|---:|---|\n| `L2ProxyAdmin.sol/L2ProxyAdmin.json` | default | 999999 | `0x1b392652cf6009f47ed8c794c1f117ea51a626234fe419660bc273b5ad03b020` |\n| `L2ProxyAdmin.sol/L2ProxyAdmin.dispute.json` | dispute | 5000 | `0xd9d6f7850ca2f14376b4a9c8b7693edd820803baddf42da91c0d452c207914a8` |\n\nBoth map to:\n\n```text\nsrc/L2/L2ProxyAdmin.sol:L2ProxyAdmin\n```\n\n`L2ProxyAdmin` is not directly listed in `foundry.toml` `compilation_restrictions`. The 5000-run artifact appears because `L2ContractsManager` is restricted to 5000 runs and imports `L2ProxyAdmin` through `L2ContractsManagerUtils`.\n\nThis appears to have become observable after `L2ContractsManager` was added to the 5000-run compiler profile. The underlying generator behavior is older. Duplicate semver keys are silently overwritten when all `forge-artifacts/**/*.json` files are scanned.\n\nArtifact scan summary:\n\n- default profile: 50 semver artifacts\n- restricted 5000-run profile: 8 intended semver artifacts\n- restricted 200-run profile: 1 intended semver artifact\n- `L2ProxyAdmin` is the only duplicate semver key found with two different optimizer runs\n\n## Root cause\n\nRelevant files:\n\n```text\npackages/contracts-bedrock/scripts/autogen/generate-semver-lock/main.go\npackages/contracts-bedrock/scripts/checks/common/util.go\npackages/contracts-bedrock/foundry.toml\n```\n\nThe generator scans all artifacts and writes them into a map keyed by semver key:\n\n```go\noutput[result.ContractKey] = result.SemverLockOutput\n```\n\nDuplicate keys silently overwrite each other. Since artifact processing uses maps and concurrency, the winning artifact is not stable.\n\n## Expected behavior\n\n`generate-semver-lock` should choose canonical artifacts deterministically.\n\nA possible rule:\n\n- direct `compilation_restrictions` entry means use that restricted profile\n- otherwise use the default profile\n- non-canonical duplicates must not overwrite canonical output\n- multiple canonical artifacts with different bytecode should fail explicitly\n\nFor `L2ProxyAdmin`, the canonical artifact is the default-profile artifact:\n\n```text\nL2ProxyAdmin.sol/L2ProxyAdmin.json\noptimizer_runs=999999\n```\n\n## Acceptance criteria\n\n- generation is deterministic when duplicate semver keys exist\n- `L2ProxyAdmin` uses the default-profile artifact\n- directly restricted contracts still use their intended restricted artifacts\n- conflicting canonical duplicates fail explicitly\n",
       "createdAt": "2026-05-26T13:30:53Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-05-27T17:30:15Z",
+      "state": "CLOSED",
       "commentCount": 1
     },
     {
@@ -134,7 +134,7 @@
     "additions": 3538,
     "deletions": 2025,
     "files": 88,
-    "commitCount": 125
+    "commitCount": 126
   },
   "completedItems": [
     {

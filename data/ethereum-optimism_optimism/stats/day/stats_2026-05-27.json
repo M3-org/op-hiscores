@@ -5,29 +5,197 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-27 to 2026-05-28, ethereum-optimism/optimism had 0 new PRs (1 merged), 0 new issues, and 1 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-05-27 to 2026-05-28, ethereum-optimism/optimism had 24 new PRs (10 merged), 4 new issues, and 29 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABCEfM8g",
+      "title": "[Flake] TestSupernodeLogBackfill_HappyPath: latest.Number == first.Number after restart+backfill",
+      "author": "ajsutton",
+      "number": 20690,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Filed by Claude on behalf of @ajsutton via `/fix-flake`.\n\n## Test\n\n- **Test:** `TestSupernodeLogBackfill_HappyPath`\n- **Package:** `github.com/ethereum-optimism/optimism/op-acceptance-tests/tests/supernode/interop/backfill/happy`\n\n## Symptom\n\n```\nassertions.go:387:\n    Error: \"0\" is not greater than \"0\"\n    Test:  TestSupernodeLogBackfill_HappyPath\n--- FAIL: TestSupernodeLogBackfill_HappyPath (99.39s)\n```\n\nThe failing assertion is in `op-devstack/dsl/supernode.go:216`:\n\n```go\ns.require.Greaterf(latest.Number, first.Number,\n    \"chain %s: backfill should produce multiple sealed blocks (first=%d, latest=%d)\",\n    chainID, first.Number, latest.Number)\n```\n\nBoth `latest.Number` and `first.Number` are `0`, meaning that after `RestartInterop(wipeLogsDBs=true)` and `AwaitBackfillCompleted()`, the logs DB for one of the chains contains exactly one sealed block (likely just the activation/genesis block). The test expects backfill to seal at least the prior `BackfillDepth` (60s) worth of blocks.\n\n## Recent CI\n\n- Job: https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/124997/workflows/1ec15f51-6328-4510-a6b0-8b55dfdf40d7/jobs/5026120/tests\n- Pipeline 124997, workflow `main`, job `memory-all-opn-op-reth`\n\n## Flake history (CircleCI Insights, last 14 days)\n\n| Pipeline | Job # | Workflow | Job | Times flaked |\n|---|---|---|---|---|\n| 124997 | 5026120 | main | memory-all-opn-op-reth | (this report) |\n| 124922 | 5020348 | main | memory-all-opn-op-reth | 3 |\n| 124839 | 5013685 | main | memory-all-opn-op-geth | 1 |\n\n## Hypothesis\n\n`AwaitBackfillCompleted()` polls `BackfillCompleted()` which is set when `runLogBackfill` returns (or is skipped). It's possible the test races a path where backfill returns nil with the DB still containing only one sealed block — e.g. the L1 head wasn't ready, or the backfill range was empty due to a transient view of `firstVerifiableTimestamp`. Needs investigation of `runLogBackfill` and the conditions under which `backfillCompleted=true` is reached without sealing more than one block.",
+      "createdAt": "2026-05-13T01:29:50Z",
+      "closedAt": "2026-05-27T13:59:47Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABCgYMfw",
+      "title": "op-reth: minimal Bedrock bootstrap (init-state --without-ovm) incompatible with storage v2 — node panics on launch (unwind to block 0)",
+      "author": "ajsutton",
+      "number": 20821,
+      "repository": "ethereum-optimism/optimism",
+      "body": "### Summary\n\nThe documented minimal Bedrock bootstrap (`op-reth init-state --without-ovm` from the `op-mainnet-pre-bedrockstate` dump) is incompatible with the default storage **v2** (hot/cold RocksDB) layout. After a successful `init-state`, the node panics on every launch and cannot start.\n\n### Version\n\n- op-reth `op-reth/v2.2.3-rc.1-pr20770.0` (optimism monorepo rev `4ddba1610a5d13c1a8c297a91228559d731cc6d5`, reth rev `e8c29c987dd5bb23e95114279c89ce5326fd206d`)\n- chain: `optimism` (OP Mainnet), `--full`\n\n### Repro\n\n1. `op-reth init-state --without-ovm --chain=optimism --datadir=/data <op-mainnet-pre-bedrockstate.jsonl>` (state from `https://datadirs.optimism.io/op-mainnet-pre-bedrockstate.zst`) — completes successfully, DB at Bedrock block `105235063`.\n2. Start the node (default storage layout, v2 on).\n\n### Actual\n\n```\nWARN ...rocksdb check_consistency: StoragesHistory: static file tip behind checkpoint, unwind needed sf_tip=0 checkpoint=105235063\nWARN ...rocksdb check_consistency: AccountsHistory: static file tip behind checkpoint, unwind needed sf_tip=0 checkpoint=105235063\nINFO ...static_file Setting unwind target. db_first_block=105235063 highest_block=0 unwind_target=0 segment=StorageChangeSets\nthread 'main' panicked at .../e8c29c9/crates/node/builder/src/launch/common.rs:546:13:\nassertion `left != right` failed: A RocksDB and static file inconsistency was found that would trigger an unwind to block 0\n```\n\nNode crash-loops; never starts.\n\n### Root cause\n\n`reth_cli_commands::init_state::without_evm::setup_without_evm` seeds only the `Headers`/`Transactions`/`Receipts`/`TransactionSenders` static-file segments and writes stage checkpoints at the Bedrock block for all stages. It never seeds the v2 RocksDB history segments (`StorageChangeSets`/`AccountsHistory`/`StoragesHistory`). With v2 on, the launch consistency check (`launch/common.rs` ~532–549) sees those at tip 0 vs checkpoint `105235063`, computes `unwind_target = 0`, and deliberately `assert_ne!`s rather than unwind to 0 → panic. The minimal-bootstrap path predates storage v2.\n\n### Workaround (confirmed)\n\n`--storage.v2=false` on **both** `init-state` (sets layout at DB creation) and the node. Requires re-bootstrapping from an empty datadir. With the legacy layout the node boots cleanly and lands at Bedrock `105235063`.\n\n### Suggested fix\n\n`setup_without_evm` should also initialize the v2 RocksDB history segments to the bootstrap block (or the launch consistency check should recognise a minimal-bootstrap floor), so minimal Bedrock bootstrap works with the default v2 layout. At minimum, the OP Mainnet sync docs should state that minimal bootstrap currently requires `--storage.v2=false`.\n",
+      "createdAt": "2026-05-17T10:13:02Z",
+      "closedAt": "2026-05-27T03:03:41Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABC7QNSg",
+      "title": "flaky test: `TestSupernodeResyncResumesAtActivation_PostActivation`",
+      "author": "ajsutton",
+      "number": 20944,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Filed by Claude on behalf of @ajsutton.\n\n**CI run:** https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/125864/workflows/c962d976-298b-48e2-b393-3b875bbfa9b5/jobs/5087023/tests\n\n**Job:** `memory-all-opn-op-reth` (acceptance tests)\n**Date:** 2026-05-21\n**Test file:** `op-acceptance-tests/tests/supernode/interop/startup_resync/startup_resync_test.go`\n**Flake count (CircleCI Insights):** 6 (5 on `opn-op-reth`, 1 on `opn-op-geth`)\n**Duration on failure:** 141.85s\n\n**Error:** Test reported `Failed` with truncated CI message — needs investigation against full job artifacts.\n\nSame CI job also saw `TestReorgInitExecMsg` and `TestReorgUnsafeHead` fail (different package, different symptom — funding timeouts). Could be related infrastructure issue or independent — to be determined.\n\nWill investigate and propose a fix.",
+      "createdAt": "2026-05-21T02:49:57Z",
+      "closedAt": "2026-05-27T12:41:39Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABAdA57w",
+      "title": "L2CM: prevent silent drift between feature flag definitions and CI matrix",
+      "author": "maurelian",
+      "number": 20340,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Background\n\nThe L2CM audit surfaced two findings (#11 and #15, fixed in #20095) that shared a single root cause: the `CUSTOM_GAS_TOKEN` System Configuration Feature can exist in multiple reachable states, the upgrade path did not handle all of them, and the CI matrix at the time did not exercise the problematic state. The bug escaped code review and surfaced only in audit.\n\nThe retro identified this as a structural problem. The state of a System Configuration Feature is expressed on multiple surfaces that can drift from each other:\n\n- `SystemConfig.isFeatureEnabled(bit)` — L1 runtime\n- `L2ContractsManager.isFeatureEnabled(bit)` — L2 runtime\n- `SYS_FEATURE__*` environment variables — the test-harness lever for the same underlying bit\n\nThese three names all refer to the same underlying System Configuration Feature; nothing mechanical keeps them in sync today. \n\n`DEV_FEATURE__*` flags face an analogous drift risk — a new `DEV_FEATURE__*` must be enabled in **both** `packages/contracts-bedrock/test/setup/FeatureFlags.sol` and `packages/contracts-bedrock/scripts/libraries/Config.sol`, with no mechanical check that they agree.\n\n## Requirements\n\nThe solution must:\n\n1. **Establish a single source of truth for feature flag definitions** spanning:\n   - Solidity feature bits used by `SystemConfig` and `L2ContractsManager`\n   - `SYS_FEATURE__*` environment variables that exercise those bits in tests\n   - `DEV_FEATURE__*` definitions in both `test/setup/FeatureFlags.sol` and `scripts/libraries/Config.sol`\n\n   Drift between these surfaces must be detectable mechanically — via codegen, a consistency check, or equivalent. Convention alone does not satisfy this.\n\n2. **Drive the CI matrix from that source of truth**, such that:\n   - Every valid combination of flag states has a CI job\n   - Invalid combinations are enumerated and explicitly excluded — for example, a chain with `CUSTOM_GAS_TOKEN` enabled but L2CM not yet enabled\n   - Adding a new flag requires editing one location, not several\n\n3. **Backfill existing flags, not only future ones.** The fix must apply to the flags currently in use (`DEV_FEATURE__L2CM`, `SYS_FEATURE__CUSTOM_GAS_TOKEN`, and any others). A change that only governs new flags leaves the existing landscape in exactly the state that produced the incident.",
+      "createdAt": "2026-04-24T20:24:26Z",
+      "closedAt": "2026-05-27T14:18:41Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABC5ty1w",
+      "title": "op-supernode: rewind/invalidation is not robust to partial-progress states or slow ELs — synthetic-stuck loop, EL-behind-target loop, and conflated retry signals",
+      "author": "wwared",
+      "number": 20929,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe `op-supernode` rewind/invalidation path has multiple, compounding ways to deadlock in an infinite retry loop without crashing or surfacing the fault. In every case the chain container CL appears healthy by external metrics but the chain's virtual node never starts, the deriver makes no forward progress, and the pending interop transition stays in the WAL until an operator intervenes.\n\nThree related, all-observed failure modes:\n\n1. **Synthetic-stuck** (sn-1, sdg-v1, 2026-05-20): the supernode's engine API call hits a ~10 s deadline during Step 3 of `RewindToTimestamp`, but op-reth in archive mode commits the Step 3 FCU anyway (observed: 298 s for a 1,405-block reorg). Step 4 is never issued. The EL is left anchored on the synthetic block; every retry hits the same Step 3 deadline and never gets to Step 4. `RewindEngine` treats `context.DeadlineExceeded` as a *terminal* error and propagates back to `InvalidateBlock`, which then re-runs the whole invalidation every ~2 s.\n2. **EL-behind-target** (sn-2, sdg-v1, 2026-05-20): the EL crashes mid-rewind, recovers with truncated state, and ends up at an unsafe head whose timestamp is *earlier* than the rewind target. The supernode replays the persisted `RewindPlan` on startup but cannot rewind \"forward\" — the target block (and possibly the synthetic block from the previous attempt) is no longer in the EL's DB. The pending transition is never cleared.\n3. **InvalidateBlock retry-loop on \"not found\"**: after either of the above leaves the canonical tip below the invalidated height, `InvalidateBlock`'s call to `L2BlockRefByNumber(ctx, height)` returns `not found`. Post-#20539, that error is propagated (deliberately, to satisfy RV finding `optimism-private#546`), which collapses two distinct states — \"EL is legitimately past the invalidated block\" and \"engine RPC failed transiently\" — into the same indefinite retry bucket.\n\nNotion writeup: https://www.notion.so/oplabs/Interop-Reorg-Test-Conductor-366f153ee16280089019f11abaf3e360#283581cec149490cb736608144e40581\n\n## Affected paths\n\n- `op-supernode/supernode/chain_container/engine_controller/rewind.go` — `RewindToTimestamp`\n- `op-supernode/supernode/chain_container/chain_container.go` — `RewindEngine` (`retryLoop`, lines ~665-686)\n- `op-supernode/supernode/chain_container/invalidation.go` — `InvalidateBlock` (lines ~395-412)\n- `op-supernode/supernode/activity/interop/interop.go` — `progressAndRecord` (DecisionInvalidate branch)\n\nReproduces on `develop` (post-#20539) and on the `aj/fix-cold-start-firstsafehead-stable` build that ran on sdg-v1.\n\n## State taxonomy after a partial rewind\n\nAfter an interrupted `RewindToTimestamp(ctx, T)` at target height `N` (where `T → N` via rollup config):\n\n| State | Unsafe head | Comment | Recovery |\n|-------|-------------|---------|----------|\n| A — fully rewound | `(N, original@N)` or `(N-1, parent@N-1)` (depending on canonical anchor) | Steps 1-4 completed | No-op; clear transition |\n| B — synthetic-stuck | `(N, synthetic@N)` | Step 3 committed, Step 4 missed. Target block may or may not still be in EL DB depending on EL-side damage. | If target block is in DB: skip to Step 4 (FCU to original `targetBlock.Hash`). If target block is gone: trigger L1 re-derivation from a pre-target point — re-derivation must reorg the EL out of the synthetic chain. |\n| C — re-derived past | `(≥ N, block@N hash ≠ deny-listed)` | EL advanced via deriver / p2p | Deny list is durable; no-op |\n| D — never started | `(≥ N, block@N hash == deny-listed)` | Existing full rewind path | Run Steps 1-4 |\n| E — EL data loss / behind target | `unsafe.Number < N` | EL crashed and truncated below target | Trigger L1 re-derivation from a pre-target point; do not attempt the synthetic-block rewind path. |\n\n**Note on a state that should not exist**: a \"synthetic-stuck unsafe head at a height below `N`\" (i.e. a stranded synthetic chain extended past its single block) should not be reachable: the synthetic chain is a single block and derivation is paused during rewind, so nothing should build on top of it. Worth double-checking in code (especially: can a peer or a restart re-trigger forward progress that includes the synthetic as a parent?). If it ever does become reachable, the recovery is the same as B's \"target block is gone\" sub-case — trigger L1 re-derivation, which must reorg the synthetic chain out regardless.\n\n## Root causes\n\n### 1. `RewindEngine` bails on `context.DeadlineExceeded` instead of retrying\n\n`chain_container.go:665-686`:\n\n```go\ncase errors.Is(err, context.DeadlineExceeded):\n    c.log.Error(\"chain_container/RewindEngine: timeout exceeded\")\n    return err  // exits retry loop\n```\n\nA per-call FCU deadline expiring is not a permanent failure — especially against archive-mode op-reth committing a deep reorg. It belongs in the temporary-error branch.\n\n### 2. Engine API per-call deadline is shorter than op-reth's worst-case FCU latency\n\nThe deadline that trips is ~10 s (sourced somewhere between the supernode's interop context and the engine client config — not visible at the `RewindEngine` call site; tracking down the source is part of this issue's work). op-reth on the sn-1 incident took **298 s** to commit the Step 3 FCU on a 1,405-block reorg with `--proofs-history`. The CL gave up two orders of magnitude before the EL was done.\n\nDefault direction: remove the per-call timeout in the rewind path entirely. The operation is intentionally long-running, and the supernode has its own retry envelope around it. (Open to discussion in this issue if anyone prefers a single long timeout on the whole `RewindEngine` call instead.)\n\n### 3. `RewindToTimestamp` is not idempotent across attempts\n\nAfter a Step 3 commit + Step 4 miss, a retry re-executes Steps 0-3 (idempotent, fast) and re-attempts Step 4 (slow). There is no detection of \"we're already on the synthetic, only Step 4 is left.\" Worse: there is also no detection of \"EL is below target and cannot be rewound upward by the synthetic-block path.\"\n\n### 4. `InvalidateBlock` conflates \"EL past invalidated block\" with \"engine RPC failed transiently\"\n\n`invalidation.go:395-412`:\n\n```go\ncurrentBlock, err := c.engine.L2BlockRefByNumber(ctx, height)\nif err != nil {\n    return false, fmt.Errorf(\"failed to get current block at height %d: %w\", height, err)\n}\n```\n\nPR #20539 changed this from `(false, nil)` to `(false, err)` to satisfy RV finding `optimism-private#546` (\"Block invalidation may fail silently without rewinding executing engine\"). The fix is correct for state D (transient lookup failure when the EL is genuinely at-or-past height) but it now also catches states A, B, and E, all of which return `not found` because the canonical tip is below `height`. Result: indefinite retry, transition never clears.\n\n## Proposed fixes\n\nThese are independent and can land separately, but all are needed for full robustness.\n\n### (1) Make `RewindToTimestamp` idempotent and partial-progress-aware\n\nAt the top of `RewindToTimestamp`, query the EL's unsafe head, compute the target block, and branch:\n\n```go\nunsafe, err := e.l2.L2BlockRefByLabel(ctx, eth.Unsafe)\nif err != nil { return ... }\ntargetBlock, err := e.blockAtTimestamp(ctx, timestamp)\n// Note: blockAtTimestamp may itself fail in state E (and the data-loss\n// sub-case of B) because the target block is no longer in the EL DB.\n// Handle that as a \"trigger L1 re-derivation\" signal rather than a hard\n// error — see fix (5).\n\nswitch {\ncase unsafe.Hash == targetBlock.Hash:\n    // State A: already at target. No-op.\n    return nil\n\ncase unsafe.Number == targetBlock.Number && unsafe.Hash != targetBlock.Hash:\n    // State B: synthetic-stuck. Skip to Step 4.\n    e.log.Warn(\"detected synthetic-stuck rewind state; skipping to Step 4\",\n        \"unsafeHash\", unsafe.Hash, \"targetHash\", targetBlock.Hash, \"height\", targetBlock.Number)\n    targetSafe, targetFinalized, err := e.computeRewindTargets(ctx, targetBlock)\n    if err != nil { return ... }\n    return e.forkchoiceUpdateWithRetry(ctx, targetBlock.Hash, targetSafe.Hash, targetFinalized.Hash)\n\ncase unsafe.Number > targetBlock.Number:\n    // States C/D: normal full path, Steps 1-4.\n\ncase unsafe.Number < targetBlock.Number:\n    // State E: EL is behind target, cannot rewind upward.\n    // Return a sentinel that triggers L1 re-derivation in the caller\n    // (see fix (5)); do not attempt synthetic-block insertion.\n    return fmt.Errorf(\"%w: unsafe=%d target=%d\", ErrRewindELBehindTarget, unsafe.Number, targetBlock.Number)\n}\n```\n\nLoud warning logs at every branch entry that isn't state A or D, so operators see exactly which recovery path fired.\n\n### (2) Don't treat `context.DeadlineExceeded` as terminal in `RewindEngine`\n\n`chain_container.go:665-686`: drop the early return; treat `DeadlineExceeded` as a temporary error and fall through to the 1-second-backoff `default` branch. Combined with fix (3), the worst case is \"we retry every second until the EL catches up or the outer context cancels.\"\n\n```go\ncase errors.Is(err, context.DeadlineExceeded):\n    c.log.Warn(\"chain_container/RewindEngine: deadline exceeded; retrying\", \"err\", err)\n    select {\n    case <-ctx.Done(): return ctx.Err()\n    case <-time.After(time.Second):\n    }\n```\n\n### (3) Remove per-call engine-API timeouts in the rewind path\n\nFor the rewind path specifically: drop per-call FCU/newPayload timeouts. The exact mechanism depends on where the current ~10 s deadline comes from — tracking that down is part of this issue's investigation work. Whatever the source, archive-mode op-reth on a deep reorg routinely exceeds it by 30×.\n\n### (4) `InvalidateBlock`: distinguish \"EL past invalidated block\" from \"engine RPC failed\"\n\nReplace the bare `L2BlockRefByNumber` lookup with explicit canonical-tip classification (`invalidation.go:395-412`):\n\n```go\nunsafe, err := c.engine.L2BlockRefByLabel(ctx, eth.Unsafe)\nif err != nil {\n    return false, fmt.Errorf(\"failed to get unsafe head: %w\", err)\n}\n\nif unsafe.Number < height {\n    // States A, B, E: invalidated block is not on the canonical chain.\n    // Deny list is already durable. Clear the transition and trigger\n    // L1 re-derivation from a pre-invalidation point so the deriver\n    // rebuilds the canonical chain and FCUs the EL out of any\n    // synthetic-stuck state.\n    c.log.Warn(\"EL unsafe head is below invalidated height; treating as already-invalidated and triggering L1 re-derivation\",\n        \"invalidatedHeight\", height, \"unsafeNumber\", unsafe.Number, \"unsafeHash\", unsafe.Hash)\n    // ... trigger L1 re-derivation here; mechanism is part of this issue's work.\n    return true, nil\n}\n\ncurrentBlock, err := c.engine.L2BlockRefByNumber(ctx, height)\nif err != nil {\n    // State D-equivalent: unsafe ≥ height but lookup at height failed.\n    // This is the case RV #546 cared about — preserve the transition.\n    return false, fmt.Errorf(\"failed to get current block at height %d: %w\", height, err)\n}\n\nif currentBlock.Hash != payloadHash {\n    // State C: re-derived past the invalidated block.\n    return false, nil\n}\n\n// Full rewind needed.\n...\n```\n\nThe key requirement on the \"skip rewind\" path: the supernode's internal state (verifiedDB, safe-head tracking, frontier logs) cannot be left at the pre-rewind anchor while the EL has effectively moved. Whatever mechanism we land on, it must trigger L1 re-derivation from an earlier chain point so that the supernode and EL converge on the canonical chain. Identifying the right call site / signal for this is part of the issue's design work.\n\n### (5) Recovery for state E (and B's data-loss sub-case) via L1 re-derivation\n\nWhen fix (1) returns `ErrRewindELBehindTarget`, or when `blockAtTimestamp` fails because the target block is gone from the EL DB, the caller should treat this as a successful-but-degraded rewind: clear the pending transition and trigger L1 re-derivation from a pre-target point. Re-derivation will produce the correct canonical block at the affected heights and FCU the EL forward, evicting any stranded synthetic block as a side effect.\n\nLoud warning log when this fires. No silent recovery — operators should know the EL was data-incomplete (or partially-rewound past the point of usable local state) and the supernode chose to re-derive instead of rewind.\n\n### (6) Defensive: capture rewind progress in metrics / structured logs\n\nSynthetic-stuck state is currently only inferable by Loki-querying the EL's unsafe-head hash and comparing to a CL-side value. Add a Prometheus gauge or labelled log line per rewind attempt that records which branch of (1) was taken. Makes this state operator-visible without custom queries.\n\n## Tests\n\nEngine controller (`engine_controller/rewind_test.go`):\n\n1. **State A (unsafe == target)** — `RewindToTimestamp` returns `nil`, no `NewPayload`/FCU calls.\n2. **State B (synthetic-stuck, target block present)** — unsafe number == target number, hash differs, target block lookup succeeds. Assert only Step 4 FCU is issued (no synthetic insert, no Step 3).\n3. **State B (synthetic-stuck, target block gone)** — same as above but target block lookup fails. Assert `ErrRewindELBehindTarget`-equivalent or the re-derivation-trigger error path, no FCU calls.\n4. **State E (unsafe below target)** — assert `ErrRewindELBehindTarget`, no FCU calls.\n5. **States C/D (existing happy path)** — full Steps 1-4 still run.\n\nChain container (`chain_container_test.go`):\n\n6. **`RewindEngine` retries on `context.DeadlineExceeded`** — mock engine returns `DeadlineExceeded` twice then succeeds; assert at least 3 attempts and final success.\n7. **`RewindEngine` clears the WAL transition on `ErrRewindELBehindTarget` and triggers L1 re-derivation** — assert the re-derivation signal is fired, transition cleared, no further retries.\n\nInvalidation (`invalidation_test.go`):\n\n8. **`InvalidateBlock` with EL unsafe head below `height`** — assert `(true, nil)` return, L1 re-derivation triggered, no retry loop.\n9. **`InvalidateBlock` with transient engine RPC error at `unsafe`** — assert `(false, err)` and transition preserved (RV #546 still satisfied).\n10. **`InvalidateBlock` with `currentBlock.Hash != payloadHash` at height** — existing state C behavior preserved.\n\nIntegration-style:\n\n11. **Persisted `RewindPlan` recovery on startup with EL in state B** — load WAL entry, run one `progressAndRecord` cycle, assert WAL clears, EL receives one Step 4 FCU, virtual node restarts.\n12. **Persisted `RewindPlan` recovery on startup with EL in state E** — same but EL is behind target; assert L1 re-derivation triggers, WAL clears, deriver path takes over.\n\n## Non-goals\n\n- Not fixing op-reth's archive-mode reorg latency or its database-truncation crash recovery — separate concerns owned by reth.\n- Not re-architecting the rewind algorithm itself; only adding precondition checks and partial-progress branches around the existing synthetic-block + dual-FCU flow.\n\n## Open questions to resolve during the work\n\n- Where does the effective ~10 s engine-API per-call deadline come from? (Engine client default, interop context layering, or a wrapper.) Needs tracing before fix (3) can be implemented precisely.\n- Confirm in code that the synthetic chain cannot be extended past its single block under any combination of restart / peer / deriver interaction. If it can, the \"synthetic-stuck below `N`\" state becomes reachable and we should explicitly document the recovery (which is still \"trigger L1 re-derivation\").\n- Concrete mechanism / call site for \"trigger L1 re-derivation from a pre-target point\" — what signal does the deriver consume, and what is the right point to rewind to (last finalized? configurable lookback?).\n\n## References\n\n- Notion writeup: \"Interop Reorg Test — Invalid Executing Message on sdg-v1\"\n- Audit finding: RV `optimism-private#546`\n- Related PRs: #19571 (freeze VNs before invalidation rewind), #20539 (error on InvalidateBlock rewind preconditions), #20823, #20855\n- Devnet: `devnets-private/dev/sdg-v1/`, cluster `oplabs-dev-ent-networks-us-ue1-0`\n- Key Grafana queries (from the writeup):\n  - `{cluster=\"oplabs-dev-ent-networks-us-ue1-0\", namespace=\"an-sdg-v1-supernode-1\"} |~ \"inserting synthetic payload|RewindEngine|invalidation failed\"`\n  - `{cluster=\"oplabs-dev-ent-networks-us-ue1-0\", namespace=\"an-sdg-v1-1-ops-reth-a-sn-1\"} |~ \"Forkchoice updated|forkchoiceUpdated|Status connected_peers\"`\n- Synthetic hash observed in sn-1 incident: `0xcbbe67f1c761ccdb7ae7650cb6d3eb2b120d40e9d06135ef76c8a1db20075771`\n- Invalidated block: 1880582 `0x8335a150…`\n- Rewind target: timestamp 1779289825 → block 1880581 `0x86ae1644…`",
+      "createdAt": "2026-05-20T20:30:30Z",
+      "closedAt": "2026-05-27T13:58:56Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM7fefqj",
-      "title": "fix(op-chain-ops): fix check-prestate after kona monorepo merge",
-      "author": "pauldowman",
-      "number": 21036,
-      "body": "The kona project was merged into the optimism monorepo, breaking `check-prestate` for `cannon64-kona` prestates from v1.5.1 onward.\n\n- Look up the superchain-registry commit from `op-core/superchain/superchain-registry-commit.txt` in the optimism monorepo (the file the Go-side build pins), and report the fpp-program diff URL against the monorepo too.\n- Initialize `outdated-chains` as an empty slice so reports with no diffs serialize as `[]` not `null` — the latter broke `diff-check.zsh`'s `sort_by`.",
+      "id": "PR_kwDODjvEJM7dDzKb",
+      "title": "feat(contracts-bedrock): add feature flag registry and drift check",
+      "author": "lumoswiz",
+      "number": 20861,
+      "body": "**Description**\r\n\r\nAdds `packages/contracts-bedrock/feature-flags.yaml` as the feature flag registry and `go run ./scripts/checks/feature-flags` as a strict drift check.\r\n\r\nHow this addresses #20340:\r\n\r\n- Single source of truth: the registry now owns feature names, feature type (`dev` / `sys`), lifecycle, dependency rules, exclusion rules, and supported CI matrix rows.\r\n- Mechanical drift detection: the checker fails when the registry diverges from Solidity feature definitions/wiring, Go dev-feature definitions, hardcoded-on dev-feature branches, or CircleCI's `system_features.default` / `features_matrix`.\r\n- Existing flags are backfilled: the registry covers current dev and sys flags, and this PR fixes the pre-existing `ETH_LOCKBOX` / `INTEROP` drift so the check can run strictly with no allowlist.\r\n\r\nThe backfill adds `sysFeatureEthLockbox()` and `sysFeatureInterop()` readers in `Config.sol`, adds the missing `Features.INTEROP` branch in `FeatureFlags.getFeatureName`, applies both sys features in `CommonTest.sol`, and expands CircleCI's feature matrix with `[ETH_LOCKBOX]` and `[OPTIMISM_PORTAL_INTEROP, ETH_LOCKBOX, INTEROP]`.\r\n\r\nThe check runs in `contracts-bedrock-checks-fast` via `checks.yaml`. A standalone `feature-flags-sync-check` job also covers PRs that only touch `op-core/devfeatures/` or `.circleci/` and would otherwise bypass contracts path gating.\r\n\r\n**Tests**\r\n\r\n- `mise exec -- go test ./scripts/checks/feature-flags`\r\n- `mise exec -- go run ./scripts/checks/feature-flags`\r\n- `mise exec -- just check-fast`\r\n- `.circleci/scripts/test-decision-tree.sh`\r\n- Manual drift perturbations against the real tree for missing/extra registry, Solidity, Go, and CircleCI entries, plus invalid/missing matrix rows. Each failed nonzero with an actionable error and reverted byte-clean.\r\n\r\n**Additional context**\r\n\r\nThis PR uses enforcement rather than codegen. That satisfies the issue's \"codegen, consistency check, or equivalent\" path for drift detection, but it does not fully implement the strongest version of \"adding a new flag requires editing one location.\" Adding a flag still requires updating the runtime surfaces that actually define or consume it; the registry is the source of truth, and CI fails if those edits do not match.\r\n\r\nIf reviewers prefer generation, the next step would be to extend the registry schema with generated constants/metadata and render the Solidity, Go, and/or CircleCI surfaces from it.\r\n\r\n**Metadata**\r\n\r\nCloses #20340",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-26T15:51:47Z",
-      "mergedAt": "2026-05-27T00:08:12Z",
-      "additions": 51,
-      "deletions": 31
+      "createdAt": "2026-05-19T12:17:21Z",
+      "mergedAt": null,
+      "additions": 3520,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDODjvEJM7f80td",
+      "title": "[claude] consolidate superchain-registry on a single committed zip",
+      "author": "joshklop",
+      "number": 21071,
+      "body": "## Summary\n\nSingle-commit replacement for the abandoned 5-PR stack (#21050–#21056). One Rust producer crate generates a single ~3.8 MB committed zip; one Go side reads it via the existing `archive/zip` path; one set of consumer build.rss extract per-chain artifacts into OUT_DIR.\n\n**Net diff: +1081 / -7279 lines + 1 new binary file.** No Go sync script. No KONA_BIND env var. No tar + zlib + fetch script. Drift gate is a real `git diff --exit-code` against committed bytes.\n\n## What's in the change\n\n**Producer (`rust/op-superchain/`):**\n- `bin/regenerate.rs` walks the `packages/contracts-bedrock/lib/superchain-registry` submodule and writes a deterministic zip (1980-01-01 mtimes, sorted entries, deflate-9) to two committed paths: `rust/op-superchain/data/superchain-configs.zip` (Rust canonical) and `op-core/superchain/superchain-configs.zip` (Go `//go:embed`).\n- `lib.rs` exposes reader helpers (`read_chain_list_json`, `read_superchains_json`, `read_depsets_json`, `read_chain_config_toml`, `read_chain_genesis_compressed`, `supported_chains`) consumed by downstream build.rss.\n\n**Go side (`op-core/superchain/`):**\n- `chain.go` unchanged — same `archive/zip` reader.\n- `init.go` simplified to one COMMIT-vs-op-geth check. Drops `.sha256` and `.txt` embeds.\n- Deletes `sync-superchain.sh`, `superchain-registry-commit.txt`, `superchain-configs.zip.sha256`.\n\n**`check-prestate`:** `fetchSuperchainRegistryCommit` reads the submodule pointer via `git ls-tree` instead of the deleted `.txt`.\n\n**kona-registry:** `build.rs` extracts the three aggregate JSONs from `op_superchain` into `$OUT_DIR`; `lib.rs`/`superchain.rs` `include_str!` from `$OUT_DIR`. `KONA_BIND` gone; `KONA_CUSTOM_CONFIGS` overlay path preserved against OUT_DIR. Deletes committed `etc/{chainList,configs,depsets}.json`.\n\n**reth-optimism-chainspec:** New `build.rs` extracts per-chain configs (TOML→JSON) + raw zstd genesis to `$OUT_DIR`; generates `chain_specs.rs` (macro invocation) and `lookups.rs` (match-based `config_str`/`genesis_bytes`). Runtime decompresses genesis via `zstd` with the embedded dictionary. Drops `superchain-configs.tar`, `fetch_superchain_config.sh`, `superchain_registry_commit`, and the committed `src/superchain/chain_specs.rs`.\n\n**CI:**\n- `prep-superchain` is now a thin sanity check (zip is in git, no rebuild needed). Drops the `.sha256` diff step.\n- `kona-registry-snapshot-check` re-pointed at the committed zips: init submodule, `cargo run --bin regenerate`, `git diff --exit-code` on both copies.\n- Cannon Docker: `COPY rust/op-superchain/` added.\n\n## Why one PR off develop, not stacked on the existing PRs\n\nThe 5-PR stack tried a gitignored-`gen/` approach. Two problems surfaced (publish-time stale-artifact risk; Docker can't find the submodule), and the fix for both was: commit the artifact. Rather than retrofit those PRs, this branch starts fresh from `develop` and lands the whole consolidation in one reviewable commit. The old PRs (#21050–#21056) are abandoned but left open for context.\n\n## Test plan\n\n- [x] `just sync-superchain` produces byte-identical zips across two cold runs (SHA-256 verified)\n- [x] `cargo test -p op-superchain -p kona-registry -p kona-genesis` — 137 + 15 + 2 doctests passing\n- [x] `cargo test -p reth-optimism-chainspec --features superchain-configs` — 35/35 passing\n- [x] `go test ./op-core/superchain/...` — `init.go`'s simplified `VerifyEmbeddedCommit` matches op-geth\n- [x] `cargo clippy --tests -- -D warnings` clean for each of the three modified Rust crates\n- [x] `cargo +nightly fmt --check` clean\n- [x] Idempotency: running `just sync-superchain` against an unchanged submodule produces no `git diff`\n- [ ] CI runs green\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-27T18:47:37Z",
+      "mergedAt": null,
+      "additions": 1098,
+      "deletions": 7285
+    },
+    {
+      "id": "PR_kwDODjvEJM7f2Gw5",
+      "title": "[codex] simplify SuperAuthority safe fallback",
+      "author": "karlfloersch",
+      "number": 21066,
+      "body": "Stacked on #21049.\n\nThis keeps the smaller approach: make SuperAuthority safe-head failures and anchor results fall back to finalized instead of local-safe, while preserving Adrian's tri-state verifier model.\n\nWhat changed:\n- safe head HoldPrevious falls back to FinalizedHead\n- safe head Anchor falls back to FinalizedHead\n- verified safe heads use a single canonical number/hash check before publishing\n- finalized anchor resolution preserves the existing finalized cache monotonicity\n- tests/docs updated around the fallback semantics\n\nValidation:\n- go test ./op-supernode/supernode/chain_container ./op-supernode/supernode/activity/internal/syncstatus ./op-node/rollup/engine ./op-supernode/supernode/activity/interop\n- git diff --check",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-27T13:48:06Z",
+      "mergedAt": null,
+      "additions": 1037,
+      "deletions": 632
+    },
+    {
+      "id": "PR_kwDODjvEJM7fpDWf",
+      "title": "fix(op-node,op-supernode): redesign SuperAuthority safe/finalized head as tri-state",
+      "author": "ajsutton",
+      "number": 21049,
+      "body": "Redesigns SuperAuthority's safe/finalized head contract as a tri-state result (`VerifierHead` with `Source = PreActivation | Anchor | Verified`, plus an `ok bool`) and fixes three live bugs:\n\n- **Bug A** — verifier read error returned `(BlockID{}, true)` which advanced cross-safe to `localSafeHead` despite no verification. Now: `ok=false` floors at `FinalizedHead` — never local-safe.\n- **Bug B** — post-activation empty verifier returned `(BlockID{}, false)` which resolved to L2 genesis via `L2BlockRefByNumber(0)` (ethereum-optimism/optimism#20944). Now: the active verifier contributes its activation anchor as a cap timestamp (`activationTimestamp - 1`); the engine controller resolves the canonical L2 block.\n- **Bug D** — EL-unknown / non-canonical verifier results could fall below `FinalizedHead`. Now: degrade to `FinalizedHead` — never below.\n\n`FinalizedHead` is bounded by `localFinalizedHead` (not `localSafeHead`).\n\n`EngineController.SafeL2Head` / `FinalizedHead` own block resolution and canonicality validation. Cross-safe fallback paths unify through `crossSafeFallback`, which currently just returns `FinalizedHead`; the existing `superAuthorityFinalizedHead` cache is unchanged. Lookup-and-compare is extracted into `isCanonical`. `SuperAuthority` methods take an explicit `ctx`.\n\nStacked on #21077. Slimmer take on the original #21049 against develop — the single-verifier base collapses the per-verifier loop, `pickOldest` aggregation, and mixed-active-verifier plumbing into direct single-verifier calls. Cross-safe caching is deferred to a follow-up.\n\n## Test plan\n\n- `op-node/rollup/engine/super_authority_safe_head_test.go` adds red/green repro tests:\n  - `TestSafeL2Head_EmptyVerifier_DoesNotDropToGenesis` (bug B)\n  - `TestSafeL2Head_VerifierError_FloorsAtFinalized` (bugs A + D)\n  - `TestFinalizedHead_HoldPrevious_NoCache_ReturnsZero` (cold-start safety)\n- `op-acceptance-tests/tests/interop/upgrade/finalized_activation_test.go` brought over; DSL helper `ReachedTimeWithoutRegressionFn` added to `op-devstack/dsl/l2_cl.go`.\n- `go test ./op-node/rollup/... ./op-supernode/...` all green; `just lint-go` clean.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-27T01:48:48Z",
+      "mergedAt": null,
+      "additions": 844,
+      "deletions": 443
+    },
+    {
+      "id": "PR_kwDODjvEJM7fsMKE",
+      "title": "docs(node-operators/tutorials): default to op-reth",
+      "author": "donoso-eth",
+      "number": 21052,
+      "body": "Closes ethereum-optimism/solutions#689.\n\nRewrites the node-operator tutorials so the primary flow targets op-reth + op-node ahead of op-geth EOS (2026-05-31). Follow-up for ops/management guides tracked in ethereum-optimism/solutions#703.\n\n## Test plan\n\n- [x] Mintlify preview renders all touched pages\n- [x] Internal links in `docs.json` redirects resolve\n- [x] Following `node-from-docker.mdx` top-to-bottom produces a running op-reth + op-node container pair on OP Sepolia\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-27T05:34:32Z",
+      "mergedAt": "2026-05-27T17:26:17Z",
+      "additions": 662,
+      "deletions": 783
     }
   ],
   "codeChanges": {
-    "additions": 51,
-    "deletions": 31,
-    "files": 2,
-    "commitCount": 0
+    "additions": 1773,
+    "deletions": 1324,
+    "files": 41,
+    "commitCount": 81
   },
   "completedItems": [
+    {
+      "title": "feat(op-interop-filter): add chain tip lag and ingestion lag metrics",
+      "prNumber": 20620,
+      "type": "feature",
+      "body": "## Summary\n- Adds three new per-chain Prometheus gauges: `chain_tip` (RPC head block), `tip_lag_blocks` (blocks behind tip), and `ingestion_lag_seconds` (wall-clock seconds behind tip)\n- Recorded every poll tick in the ingestion loop after ",
+      "files": [
+        "op-interop-filter/filter/logsdb_chain_ingester.go",
+        "op-interop-filter/metrics/metrics.go",
+        "op-interop-filter/filter/logsdb_integration_helpers_test.go"
+      ]
+    },
+    {
+      "title": "feat(op-service/clock): make AdvancingClock continuous",
+      "prNumber": 20995,
+      "type": "feature",
+      "body": "Replaces the tick-pumped `AdvancingClock` (a `DeterministicClock` advanced by a fixed wall-clock ticker) with a lazy implementation:\r\n\r\n- `Now()` = `wallClock.Now() + offset`, with no tick quantisation. Wall time progresses continuously and",
+      "files": [
+        "op-challenger/game/fault/preimages/large_test.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-dispute-mon/mon/monitor_test.go",
+        "op-e2e/interop/supersystem.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-service/clock/advancing.go",
+        "op-service/clock/advancing_test.go"
+      ]
+    },
+    {
+      "title": "docs: add reth dependency update guide",
+      "prNumber": 21009,
+      "type": "docs",
+      "body": "## Summary\n\n- Adds `rust/UPDATING-RETH.md` — how to bump the reth git rev pinned in `rust/Cargo.toml` safely. Covers picking the target (prefer upstream release tags → merge commits on `main` → main HEAD → never PR branch tips), the practic",
+      "files": [
+        "docs/ai/rust-dev.md",
+        "rust/UPDATING-RETH.md",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/payload.rs"
+      ]
+    },
+    {
+      "title": "Remove unused rust/kona/version.json",
+      "prNumber": 21046,
+      "type": "other",
+      "body": "The file `rust/kona/version.json` is not referenced anywhere in the repo (no Go embed, no scripts, no docs, no CI), so this PR deletes it. It appears to be a vestige from the upstream `op-rs/kona` layout, introduced during the kona workspac",
+      "files": [
+        "rust/kona/version.json"
+      ]
+    },
+    {
+      "title": "chore(opd): update SCR dep for op-contracts/v7.0.0-rc.4 tag",
+      "prNumber": 21045,
+      "type": "other",
+      "body": "Bumps `superchain-registry/validation` to the merge commit of [superchain-registry#1245](https://github.com/ethereum-optimism/superchain-registry/pull/1245) (which adds standard-versions entries for `op-contracts/v7.0.0-rc.4`), and updates ",
+      "files": [
+        "go.mod",
+        "go.sum",
+        "op-deployer/pkg/deployer/standard/standard.go"
+      ]
+    },
     {
       "title": "fix(op-chain-ops): fix check-prestate after kona monorepo merge",
       "prNumber": 21036,
@@ -37,12 +205,325 @@
         "op-chain-ops/cmd/check-prestate/main.go",
         "op-chain-ops/cmd/check-prestate/prestate/kona.go"
       ]
+    },
+    {
+      "title": "feat(op-node): default syncmode.offset-el-safe to 12h",
+      "prNumber": 21033,
+      "type": "feature",
+      "body": "## Summary\r\n\r\n- Default `--syncmode.offset-el-safe` from `0` to `12h`, matching the OP Mainnet sequencing window (`SeqWindowSize = 3600` L1 blocks × 12s). Activates the offset mechanism from #19972.\r\n- Drop the `Check()` rejection of a nonz",
+      "files": [
+        "op-node/flags/flags.go",
+        "op-node/rollup/sync/config.go",
+        "op-node/service.go"
+      ]
+    },
+    {
+      "title": "chore(op-supernode): collapse SuperAuthority to a single verifier",
+      "prNumber": 21077,
+      "type": "other",
+      "body": "op-supernode only ever wires the interop verifier into chain containers, so the multi-verifier slice, oldest-wins aggregation, and same-timestamp disagreement panic are dead weight.\n\n- Replace `verifiers []VerificationActivity` with a singl",
+      "files": [
+        "op-supernode/supernode/activity/internal/syncstatus/syncstatus.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/supernode/supernode_test.go",
+        "op-supernode/supernode/activity/superroot/superroot_test.go",
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/super_authority.go",
+        "op-supernode/supernode/chain_container/super_authority_test.go"
+      ]
+    },
+    {
+      "title": "fix(contracts-bedrock): make semver lock artifact selection deterministic",
+      "prNumber": 21058,
+      "type": "bugfix",
+      "body": "**Description**\r\n\r\nMakes `generate-semver-lock` deterministic when Forge emits multiple artifacts for the same `source:contract` key. The generator now ignores profile-suffixed artifacts like `Contract.dispute.json`, uses the canonical unsu",
+      "files": [
+        "packages/contracts-bedrock/scripts/autogen/generate-semver-lock/main.go"
+      ]
+    },
+    {
+      "title": "docs(node-operators/tutorials): default to op-reth",
+      "prNumber": 21052,
+      "type": "docs",
+      "body": "Closes ethereum-optimism/solutions#689.\n\nRewrites the node-operator tutorials so the primary flow targets op-reth + op-node ahead of op-geth EOS (2026-05-31). Follow-up for ops/management guides tracked in ethereum-optimism/solutions#703.\n\n",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/reference/architecture/architecture.mdx",
+        "docs/public-docs/node-operators/reference/architecture/rollup-node.mdx",
+        "docs/public-docs/node-operators/tutorials/node-from-docker-simple-optimism-node.mdx",
+        "docs/public-docs/node-operators/tutorials/node-from-docker.mdx",
+        "docs/public-docs/node-operators/tutorials/node-from-source.mdx",
+        "docs/public-docs/node-operators/tutorials/reth-historical-proofs.mdx",
+        "docs/public-docs/node-operators/tutorials/run-node-from-source.mdx"
+      ]
     }
   ],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 1,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 1
+  "topContributors": [
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 265.0079565009926,
+      "prScore": 264.5699565009926,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 102.72680367781139,
+      "prScore": 87.88680367781139,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 79.5985503527785,
+      "prScore": 72.2985503527785,
+      "issueScore": 2.1,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 77.4978802387578,
+      "prScore": 72.4978802387578,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 54.82145055472022,
+      "prScore": 27.821450554720222,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 52.27148001791668,
+      "prScore": 43.27148001791668,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 51.77136035270615,
+      "prScore": 17.833360352706144,
+      "issueScore": 4,
+      "reviewScore": 29.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 44.819717916476904,
+      "prScore": 44.819717916476904,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 29,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 29,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 27.678877273244836,
+      "prScore": 27.678877273244836,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 26.908125502755528,
+      "prScore": 26.908125502755528,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JosepBove",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/45015975?u=5fd6491f3a1c84f1716cb321f59ec1b76119a339&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 18.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 15.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 9.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xCoati",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258754646?u=9061778e881129b6d25ac54f6453ca8a5565f1c4&v=4",
+      "totalScore": 9.307873864173311,
+      "prScore": 9.307873864173311,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Joxess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "fletcherroberts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/185981747?u=400146601f9fdd957bbbe5d394e30a28e66769bc&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wodann",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6917585?u=de7f3665fc3b64aca930f8b481d9a26c39cdb240&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 24,
+  "mergedPRs": 10,
+  "newIssues": 4,
+  "closedIssues": 9,
+  "activeContributors": 29
 }
