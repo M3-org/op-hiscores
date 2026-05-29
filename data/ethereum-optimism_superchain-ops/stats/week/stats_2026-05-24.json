@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/superchain-ops",
-  "overview": "From 2026-05-24 to 2026-05-31, ethereum-optimism/superchain-ops had 1 new PRs (3 merged), 2 new issues, and 33 active contributors.",
+  "overview": "From 2026-05-24 to 2026-05-31, ethereum-optimism/superchain-ops had 6 new PRs (8 merged), 2 new issues, and 36 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOKIsnqM8AAAABDaW6dw",
@@ -58,23 +58,47 @@
       "deletions": 8
     },
     {
-      "id": "PR_kwDOKIsnqM7f-jzZ",
-      "title": "Update hashes and prestates",
+      "id": "PR_kwDOKIsnqM7gaB5x",
+      "title": "FeeVaultUpgradeTemplate: add optional L2 ProxyAdmin owner pre-flight check",
       "author": "Wazabie",
-      "number": 1432,
-      "body": "Prestate and hashes fixes on U19 betanet tasks",
+      "number": 1438,
+      "body": "## Summary\n\n- Adds an opt-in L2 ProxyAdmin owner pre-flight check to `FeeVaultUpgradeTemplate`, gated on a new optional `l2RpcUrls` TOML field\n- Catches the failure mode where the L1 Safe tx executes successfully but the L2 `upgradeAndCall` deposits silently revert with `onlyOwner` because the L2 ProxyAdmin isn't owned by the aliased L1 PAO\n- Backward compatible: when `l2RpcUrls` is absent, a warning is printed and the check is skipped — existing tasks and the 034 arena-z regression fixture run unchanged\n\n## Motivation\n\nWhile verifying [085-migrations-sop-1-fee-vault-update](https://github.com/ethereum-optimism/superchain-ops/tree/main/src/tasks/sep/085-migrations-sop-1-fee-vault-update) we found that the L1 task tx (https://sepolia.etherscan.io/tx/0x4e92b55e0e944ac89743f7562393a929d8efd82dfdb94972ac5a43b02b9edd12) succeeded and emitted all 7 expected `TransactionDeposited` events, but the 4 `upgradeAndCall` deposits all reverted on L2 (status `0x0`, identical 30,605 gas — classic `onlyOwner` revert), leaving the fee vaults at their original impls/recipients.\n\nRoot cause: the `migrations-sop` devnet family was bootstrapped with a plain L2 EOA as `L2ProxyAdmin.owner()` rather than the canonical `aliased(L1_PAO)`, so deposits arriving with `from = aliased(rootSafe)` are rejected.\n\nOn any canonical OP Stack chain the template already works correctly. This check is a safety net for misconfigured chains (devnets, mis-bootstrapped tenants) — operators get a clear simulation-time error instead of discovering the silent revert after signing.\n\n## Usage\n\nAdd to `config.toml`:\n\n```toml\nl2RpcUrls = [\n  \"https://migrations-sop-1.optimism.io\",  # URL...\n  \"opSepolia\",                              # ...or foundry.toml rpc alias\n]\n```\n\nLength must equal `l2chains.length` and order must match.\n\nWhen the check fails, the revert message points operators at [`TransferL2PAOFromL1`](https://github.com/ethereum-optimism/superchain-ops/blob/main/src/template/TransferL2PAOFromL1.sol) as the fix.\n\n## Test plan\n\n- [x] `forge build` — compiles\n- [x] `forge test --match-test testRegressionCallDataMatches_FeeVaultUpgradeTemplate` — passes (existing 034 fixture has no `l2RpcUrls`, hits the warn-and-skip path; calldata unchanged)\n- [ ] Manual: run a sim with `l2RpcUrls` pointing at a chain where L2 PA is correctly owned by aliased L1 PAO → check passes silently\n- [ ] Manual: run a sim with `l2RpcUrls` pointing at `migrations-sop-1` → check reverts with the expected diagnostic\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
       "repository": "ethereum-optimism/superchain-ops",
-      "createdAt": "2026-05-27T20:13:55Z",
-      "mergedAt": "2026-05-27T20:44:45Z",
-      "additions": 7,
-      "deletions": 7
+      "createdAt": "2026-05-28T21:05:57Z",
+      "mergedAt": "2026-05-28T21:40:43Z",
+      "additions": 71,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOKIsnqM7gVfMA",
+      "title": "084: update prestate to op-program/v1.9.0-rc.1 Cannon64 (multichain build)",
+      "author": "Wazabie",
+      "number": 1436,
+      "body": "## Summary\n\n- Updates both FDG (game type 0) and PDG (game type 1) `gameArgs` in `src/tasks/sep/084-migrations-sop-1-proposer-rotation/` to embed the freshly-built `op-program/v1.9.0-rc.1` Cannon64 absolute prestate `0x032ab5ac33a98dc99947c54eeb0bf84f22abe4be0b01537235218164492ecab9`.\n- The prestate was rebuilt locally with **both** `migrations-sop-0` (420120109) and `migrations-sop-1` (420120110) chain configs placed in `op-program/chainconfig/configs/` (`<chain-id>-rollup.json` + `<chain-id>-genesis-l2.json` for each). Preimage uploaded to `gs://oplabs-network-data/proofs/op-program/cannon/0x032ab5ac…ecab9.bin.gz`.\n- Effective on-chain change vs. the previous draft of 084:\n  - **FDG (game type 0):** now emits a `setImplementation` call (the template's skip-if-unchanged guard in `SetDisputeGameImpl._setFDGImplementation` no longer fires now that `fdgGameArgs` differs from on-chain). Only the prestate bytes change; impl / vm / ASR / weth / chainId are unchanged.\n  - **PDG (game type 1):** prestate bytes change (was `0x0355d19a…`, now `0x032ab5ac…`); proposer + challenger rotation is unchanged from the previous draft.\n- `Domain Hash`, `Message Hash`, `Safe Hash`, EIP-712 digest, and the task calldata in `VALIDATION.md` were regenerated via `just simulate` at latest block (PAO Safe nonce override = 105, unchanged).\n\n## Files changed\n\n- `src/tasks/sep/084-migrations-sop-1-proposer-rotation/config.toml` — new `fdgGameArgs` and `pdgGameArgs` hex; comments rewritten to reflect the expanded scope.\n- `src/tasks/sep/084-migrations-sop-1-proposer-rotation/README.md` — objective + state-changes section now covers both game types (separate FDG and PDG tables).\n- `src/tasks/sep/084-migrations-sop-1-proposer-rotation/VALIDATION.md` — Domain / Message / Safe hashes, calldata blob, and EIP-712 digest re-pasted from a fresh `just simulate`. Expected-output section now decomposes both sub-calls.\n\n## Test plan\n\n- [ ] Reviewer re-runs `SIMULATE_WITHOUT_LEDGER=1 just --dotenv-path \\$(pwd)/.env --justfile ../../../justfile simulate` from `src/tasks/sep/084-migrations-sop-1-proposer-rotation` and confirms:\n  - Safe Hash matches `0x0f383beadc983ca38c120505ef9d7d0b9735d231c5d975b6f3ecd3cbae895197`\n  - Domain Hash matches `0x07e03428d7125835eca12b6dd1a02903029b456da3a091ecd66fda859fbce61e`\n  - Message Hash matches `0xf4d026a2fb539bcf480ef9eeaed288eeef6acde188a12fca7be12d389b47b9f9`\n- [ ] Tenderly state-change diff shows the expected slot writes on `0xD22e520F…23` (DisputeGameFactoryProxy):\n  - gameArgs(0) prestate slot `0x2e713cda…2ea5`: `0x038c5780…ec6c` → `0x032ab5ac…ecab9`\n  - gameArgs(1) prestate slot `0x9afb513d…fa7c`: `0x038512e0…d54c` → `0x032ab5ac…ecab9`\n  - gameArgs(1) proposer/challenger composite slots (`…fa7f` / `…fa80` / `…fa81`) match the rotation already in the previous draft.\n- [ ] PAO Safe nonce slot `0x…05`: `105` → `106`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-05-28T17:30:25Z",
+      "mergedAt": "2026-05-28T17:50:27Z",
+      "additions": 70,
+      "deletions": 31
+    },
+    {
+      "id": "PR_kwDOKIsnqM7gO7mJ",
+      "title": "Migration Exercise Task Update",
+      "author": "Wazabie",
+      "number": 1435,
+      "body": "Updates the tasks with receiving infra addresses. Cancel tasks 80 and 81 as stale.\r\n\r\n**migrated-sop-1 (permissionless) chain roles:**\r\n\r\nunsafe signer: 0x224C4E0a1d99CE75671C2C3f2a54ab775b999f90\r\nbatcher: 0x9bEE5085CB02BFb26E5838b88F2d3827401865Ce\r\nproposer: 0x5e9eE0Aa455425AaD2B55742077F95113FbaeB71\r\nchallenger: 0x9805e7976880e6e48Ce765118846078B877d80D0",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-05-28T12:39:27Z",
+      "mergedAt": "2026-05-28T14:33:05Z",
+      "additions": 64,
+      "deletions": 57
     }
   ],
   "codeChanges": {
-    "additions": 2722,
-    "deletions": 19,
-    "files": 91,
-    "commitCount": 23
+    "additions": 2936,
+    "deletions": 116,
+    "files": 92,
+    "commitCount": 44
   },
   "completedItems": [
     {
@@ -200,24 +224,92 @@
         "src/tasks/sep/079-U19-op-betanet-permissionless/config.toml",
         "src/tasks/sep/085-migrations-sop-1-fee-vault-update/.env"
       ]
+    },
+    {
+      "title": "FeeVaultUpgradeTemplate: add optional L2 ProxyAdmin owner pre-flight check",
+      "prNumber": 1438,
+      "type": "other",
+      "body": "## Summary\n\n- Adds an opt-in L2 ProxyAdmin owner pre-flight check to `FeeVaultUpgradeTemplate`, gated on a new optional `l2RpcUrls` TOML field\n- Catches the failure mode where the L1 Safe tx executes successfully but the L2 `upgradeAndCall`",
+      "files": [
+        "src/template/FeeVaultUpgradeTemplate.sol"
+      ]
+    },
+    {
+      "title": "Mark migration SOP-1 tasks 082-085 as EXECUTED on Sepolia",
+      "prNumber": 1437,
+      "type": "other",
+      "body": "## Summary\n- Updates the status of Sepolia migration SOP-1 tasks 082-085 from DRAFT to EXECUTED\n- Adds links to the execution transactions on Sepolia Etherscan\n\n## Test plan\n- [x] Status line updated for [082-migrations-sop-1-transfer-syste",
+      "files": [
+        "src/tasks/sep/082-migrations-sop-1-transfer-system-config-owner/README.md",
+        "src/tasks/sep/083-migrations-sop-1-set-batcher-unsafe-signer/README.md",
+        "src/tasks/sep/084-migrations-sop-1-proposer-rotation/README.md",
+        "src/tasks/sep/085-migrations-sop-1-fee-vault-update/README.md"
+      ]
+    },
+    {
+      "title": "084: update prestate to op-program/v1.9.0-rc.1 Cannon64 (multichain build)",
+      "prNumber": 1436,
+      "type": "other",
+      "body": "## Summary\n\n- Updates both FDG (game type 0) and PDG (game type 1) `gameArgs` in `src/tasks/sep/084-migrations-sop-1-proposer-rotation/` to embed the freshly-built `op-program/v1.9.0-rc.1` Cannon64 absolute prestate `0x032ab5ac33a98dc99947c",
+      "files": [
+        "src/tasks/sep/084-migrations-sop-1-proposer-rotation/README.md",
+        "src/tasks/sep/084-migrations-sop-1-proposer-rotation/VALIDATION.md",
+        "src/tasks/sep/084-migrations-sop-1-proposer-rotation/config.toml"
+      ]
+    },
+    {
+      "title": "Migration Exercise Task Update",
+      "prNumber": 1435,
+      "type": "other",
+      "body": "Updates the tasks with receiving infra addresses. Cancel tasks 80 and 81 as stale.\r\n\r\n**migrated-sop-1 (permissionless) chain roles:**\r\n\r\nunsafe signer: 0x224C4E0a1d99CE75671C2C3f2a54ab775b999f90\r\nbatcher: 0x9bEE5085CB02BFb26E5838b88F2d3827",
+      "files": [
+        "src/tasks/sep/080-migrations-sop-1-add-game-type/.env",
+        "src/tasks/sep/080-migrations-sop-1-add-game-type/README.md",
+        "src/tasks/sep/080-migrations-sop-1-add-game-type/VALIDATION.md",
+        "src/tasks/sep/080-migrations-sop-1-add-game-type/config.toml",
+        "src/tasks/sep/081-migrations-sop-1-set-respected-game-type/README.md",
+        "src/tasks/sep/081-migrations-sop-1-set-respected-game-type/config.toml",
+        "src/tasks/sep/082-migrations-sop-1-transfer-system-config-owner/VALIDATION.md",
+        "src/tasks/sep/083-migrations-sop-1-set-batcher-unsafe-signer/README.md",
+        "src/tasks/sep/083-migrations-sop-1-set-batcher-unsafe-signer/VALIDATION.md",
+        "src/tasks/sep/083-migrations-sop-1-set-batcher-unsafe-signer/config.toml",
+        "src/tasks/sep/084-migrations-sop-1-proposer-rotation/README.md",
+        "src/tasks/sep/084-migrations-sop-1-proposer-rotation/VALIDATION.md",
+        "src/tasks/sep/084-migrations-sop-1-proposer-rotation/config.toml",
+        "src/tasks/sep/085-migrations-sop-1-fee-vault-update/VALIDATION.md",
+        "src/tasks/sep/085-migrations-sop-1-fee-vault-update/config.toml"
+      ]
+    },
+    {
+      "title": "Mark U19 betanet tasks 076-079 as EXECUTED on Sepolia",
+      "prNumber": 1434,
+      "type": "other",
+      "body": "## Summary\n- Marks the four U19 betanet tasks (076-079) as `EXECUTED` and links each task's README to its on-chain Sepolia tx.\n- Tasks ran in order against the shared PAO Safe `0xe934Dc97E347C6aCef74364B50125bb8689c40ff`; nonces 96 → 97 → 9",
+      "files": [
+        "src/tasks/sep/076-U19-op-betanet-permissioned/README.md",
+        "src/tasks/sep/077-betanet-set-dispute-game-impl-permissionless/README.md",
+        "src/tasks/sep/078-betanet-set-respected-game-type-permissionless/README.md",
+        "src/tasks/sep/079-U19-op-betanet-permissionless/README.md",
+        "test/tasks/example/opsep/001-set-eip1967-impl/.env"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 391.988317045915,
-      "prScore": 327.834317045915,
+      "totalScore": 546.9206555278519,
+      "prScore": 443.5666555278518,
       "issueScore": 0,
-      "reviewScore": 62.5,
-      "commentScore": 1.654,
+      "reviewScore": 101.5,
+      "commentScore": 1.8539999999999999,
       "summary": null
     },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 364.6981358269118,
-      "prScore": 349.76013582691184,
+      "totalScore": 447.86803864022266,
+      "prScore": 432.9300386402227,
       "issueScore": 0,
       "reviewScore": 14.5,
       "commentScore": 0.43799999999999994,
@@ -226,31 +318,61 @@
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 205.7466863146488,
-      "prScore": 139.7466863146488,
+      "totalScore": 292.21229414085997,
+      "prScore": 192.21229414086,
       "issueScore": 0,
-      "reviewScore": 66,
+      "reviewScore": 100,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 290.8309221214464,
+      "prScore": 246.89292212144642,
+      "issueScore": 8.1,
+      "reviewScore": 35,
+      "commentScore": 0.838,
       "summary": null
     },
     {
       "username": "donoso-eth",
       "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 204.0292729964779,
-      "prScore": 199.0292729964779,
+      "totalScore": 224.49599195269496,
+      "prScore": 204.29599195269498,
       "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0.2,
       "summary": null
     },
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 197.80369499457242,
-      "prScore": 170.80369499457242,
-      "issueScore": 0,
-      "reviewScore": 27,
+      "totalScore": 220.8449908245589,
+      "prScore": 182.8449908245589,
+      "issueScore": 2,
+      "reviewScore": 36,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 214.81121034252462,
+      "prScore": 204.4712103425246,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 163.72802463795696,
+      "prScore": 73.04802463795696,
+      "issueScore": 4,
+      "reviewScore": 86,
+      "commentScore": 0.6799999999999999,
       "summary": null
     },
     {
@@ -264,33 +386,33 @@
       "summary": null
     },
     {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 145.23975499108394,
-      "prScore": 122.73975499108393,
-      "issueScore": 2.1,
-      "reviewScore": 20,
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 125.94125125272438,
+      "prScore": 67.10325125272438,
+      "issueScore": 4,
+      "reviewScore": 54,
+      "commentScore": 0.838,
+      "summary": null
+    },
+    {
+      "username": "dhyaniarun1993",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
+      "totalScore": 91.84625858528982,
+      "prScore": 59.94625858528981,
+      "issueScore": 0,
+      "reviewScore": 31.5,
       "commentScore": 0.4,
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 95.31839733440404,
-      "prScore": 51.680397334404034,
-      "issueScore": 4,
-      "reviewScore": 39,
-      "commentScore": 0.6379999999999999,
-      "summary": null
-    },
-    {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 88.14142454752823,
-      "prScore": 22.801424547528228,
-      "issueScore": 2,
-      "reviewScore": 63,
-      "commentScore": 0.33999999999999997,
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 79.11657153271176,
+      "prScore": 29.416571532711757,
+      "issueScore": 0,
+      "reviewScore": 49.5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -306,11 +428,41 @@
     {
       "username": "0xOneTony",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 59.09587795833289,
+      "totalScore": 69.09587795833289,
       "prScore": 27.41587795833288,
       "issueScore": 2,
-      "reviewScore": 29,
+      "reviewScore": 39,
       "commentScore": 0.6799999999999999,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 66.01495661021542,
+      "prScore": 40.376956610215416,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "0xCoati",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258754646?u=9061778e881129b6d25ac54f6453ca8a5565f1c4&v=4",
+      "totalScore": 65.16591668283891,
+      "prScore": 38.16591668283892,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 60.060458713910236,
+      "prScore": 33.66045871391023,
+      "issueScore": 2,
+      "reviewScore": 24,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -336,11 +488,21 @@
     {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 44.58944692713657,
+      "totalScore": 49.289446927136574,
       "prScore": 15.589446927136573,
       "issueScore": 0,
-      "reviewScore": 29,
-      "commentScore": 0,
+      "reviewScore": 33.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 38.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 38.5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -351,16 +513,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.8759999999999999,
-      "summary": null
-    },
-    {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 37.24812550275553,
-      "prScore": 26.908125502755528,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -394,30 +546,10 @@
       "summary": null
     },
     {
-      "username": "0xCoati",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/258754646?u=9061778e881129b6d25ac54f6453ca8a5565f1c4&v=4",
-      "totalScore": 32.04521842639541,
-      "prScore": 18.54521842639541,
-      "issueScore": 0,
-      "reviewScore": 13.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "Hobie1Kenobi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/121536171?v=4",
       "totalScore": 30.959361680475812,
       "prScore": 30.959361680475812,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 29.416571532711757,
-      "prScore": 29.416571532711757,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -431,16 +563,6 @@
       "issueScore": 0,
       "reviewScore": 25,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "dhyaniarun1993",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
-      "totalScore": 24.726096381183762,
-      "prScore": 20.026096381183763,
-      "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -474,33 +596,23 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 20.7,
-      "prScore": 0,
+      "username": "jyellick",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7431583?v=4",
+      "totalScore": 15.42972392623351,
+      "prScore": 15.229723926233511,
       "issueScore": 0,
-      "reviewScore": 20.5,
+      "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 20.2,
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 14.376,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 19.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 19,
-      "commentScore": 0.2,
+      "reviewScore": 13.5,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
@@ -511,6 +623,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 10.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -534,16 +656,6 @@
       "summary": null
     },
     {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 9.876,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.8759999999999999,
-      "summary": null
-    },
-    {
       "username": "IRONBRIDGE-Al",
       "avatarUrl": "https://avatars.githubusercontent.com/u/273395300?u=4208ddeeb92d5bda6136bfe9c207934e18c79d4e&v=4",
       "totalScore": 8.708438979166441,
@@ -556,16 +668,26 @@
     {
       "username": "ashitakah",
       "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
-      "totalScore": 6.2,
+      "totalScore": 6.4,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 6,
-      "commentScore": 0.2,
+      "commentScore": 0.4,
       "summary": null
     },
     {
       "username": "teddyknox",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -580,6 +702,16 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "toshihiko-okubo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16998692?u=3412bb4b900cec797d6558438e0017da9f586013&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -624,9 +756,9 @@
       "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 3,
+  "newPRs": 6,
+  "mergedPRs": 8,
   "newIssues": 2,
   "closedIssues": 0,
-  "activeContributors": 33
+  "activeContributors": 36
 }
