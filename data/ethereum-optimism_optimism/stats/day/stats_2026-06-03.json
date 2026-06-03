@@ -1,0 +1,129 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-03T00:00:00.000Z",
+    "intervalEnd": "2026-06-04T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-06-03 to 2026-06-04, ethereum-optimism/optimism had 2 new PRs (2 merged), 0 new issues, and 4 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7g7qYZ",
+      "title": "test(interop): follow-mode supernode interop on ELSync + #21119 proof",
+      "author": "wwared",
+      "number": 21122,
+      "body": "## Summary\nSwitches the follow-mode supernode interop devstack presets to EL sync and adds the end-to-end proof that a light op-node sequencer adopts the supernode's deposits-only invalid-message replacement.\n\nFixes #21119\n\n## Changes\n**Devstack**\n- Production-faithful light-sequencer topology: each follow-mode sequencer runs its own EL, distinct from the supernode VN's EL, joined only by L1 and P2P (CL gossip + EL block-body sync) — plus the supernode-EL frontend wiring.\n- Default the light-sequencer and follow-L2 presets to **EL sync** with `SyncModeReqResp=false`, matching the req-resp CL-sync deprecation direction. Virtual-sequencer presets stay on CL sync (the VN is itself the genesis sequencer there; generic ELSync-from-genesis bootstrap is out of scope). Adds a `SyncMode` override to `l2CLNodeStartConfig`.\n\n**Tests**\n- `TestSupernodeLightSequencerInteropInvalidMessageReplacement`: follow-mode analogue of the virtual reorg test, sharing `runInteropInvalidMessageReplacementScenario`.\n- Cross-node convergence + forward-progress assertions in the shared scenario: each chain's block producer converges with the supernode verifier route at cross-safe while advancing local-unsafe, and agrees at local-safe.\n- Post-reorg check is **settle-first**: the convergence assertions run *before* sending the new transaction, so the tx lands on an already-converged chain. The new-tx step then uses the same idiomatic DSL helpers as the replacement-block assertion (`Transfer` → `AwaitValidatedTimestamp` → `AssertTxInBlock`).\n\n## De-flaked under load (progress-aware, not wider margins)\nThe post-reorg chain settles over a few bounded reorgs, and on a saturated CI executor that recovery can be several times slower. Rather than widening a wall-clock deadline, the convergence assertions use **`MatchedWithProgressFn`**, which is progress-aware: it fails on a genuine stall (no forward progress within the stall window), not on total elapsed time. This tolerates a slow/loaded box while still catching real non-convergence. Reordering to **settle first, then transact** removes the previous race where the new tx competed with in-flight reorgs — which was the source of the long-tail slow runs. Validated **8/8** on kona+op-reth, every run a tight ~56s with no slow-run tail (the prior approach had passing ~55s but slow ~160s runs). op-reth is structurally sound in every run (invalid msg reorged out, deposits-only replacement adopted, follow-reorgs bounded, no forkchoice stall).\n\n## op-geth: skipped (consistently fails — known gap)\nThe light-sequencer test is **skipped on op-geth** (`sysgo.SkipOnOpGeth`). On op-geth this scenario **consistently does not converge (0/12 locally; op-reth passes)**:\n\n- After the deposits-only replacement, the op-geth follower **never adopts the supernode's replacement block**. Cross-safe stalls at the replacement height (e.g. block 9) while the sequencer keeps building a divergent chain above it, so the follow-source reorg fires every tick and **nothing past the replacement is ever validated** (`safe block not in canonical chain` repeatedly).\n- The new transaction therefore never gets a stable receipt.\n- The invalid message is invalidated exactly once (no re-inclusion loop), so this is a **block-propagation / convergence** gap, not a re-mint loop.\n- The **virtual-sequencer** variant (`TestSupernodeInteropInvalidMessageReplacement`) passes on op-geth, so the gap is specific to the **light-sequencer follow path**.\n\nop-geth is being deprecated, so we skip rather than block CI on it; the convergence gap is left for follow-up. The fix and test fully cover op-reth, the target client for this configuration.\n\n## Test plan\n`DEVSTACK_L2EL_KIND=op-reth RUST_JIT_BUILD=1 go test ./op-acceptance-tests/tests/supernode/interop/reorg/ ./op-acceptance-tests/tests/supernode/interop/follow_l2/`\n- Light-sequencer #21119 test: **PASS** on op-reth — 8/8 in a kona+op-reth stress loop, ~56s each, no slow-run tail · virtual control: PASS · follow_l2 (DerivesSafeChain, HeadsDivergeThenConverge, P2PSync): PASS.\n- op-geth: light-sequencer test skipped; virtual + follow_l2 unaffected.\n\n---\nPart 3 of 3. Stacked on the divergence-reorg PR (`fix/op-node-follow-sequencer-divergence-reorg`). Requires both op-node fixes underneath for these presets to start and converge.\n\n## Stack (merge bottom-up)\n1. #21120 — op-node: genesis bootstrap for ELSync follow-mode sequencers\n2. #21121 — op-node: divergence reorg-reset for follow-mode sequencers\n3. #21122 — devstack: switch follow-mode supernode presets to ELSync + #21119 end-to-end proof",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-30T11:03:19Z",
+      "mergedAt": "2026-06-03T00:17:06Z",
+      "additions": 153,
+      "deletions": 40
+    },
+    {
+      "id": "PR_kwDODjvEJM7iB-fQ",
+      "title": "[DRAFT] go.mod: bump op-geth to Karst kill-switch (op-geth#802)",
+      "author": "sebastianst",
+      "number": 21167,
+      "body": "## ⚠️ Draft — CI probe, do not merge\n\nRepins op-geth to the **Karst deprecation kill-switch** commit from [ethereum-optimism/op-geth#802](https://github.com/ethereum-optimism/op-geth/pull/802) (`b698d07e9264`).\n\nop-geth is being deprecated as of the Karst fork. With that PR, the beacon consensus engine refuses to build, seal, or import any block whose timestamp activates Karst (via `verifyHeader`, `Prepare`, and `FinalizeAndAssemble`), keyed off the existing `IsOptimismKarst` predicate — so it engages automatically wherever `KarstTime` is configured.\n\n### Purpose of this draft\nSurface the full set of monorepo tests that configure Karst (e.g. test chain configs with `KarstTime` set, or \"all forks active\" timestamps) and therefore now hit the kill switch. Once CI gives the complete picture, we'll decide how to adapt the affected tests / harnesses.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-03T01:28:13Z",
+      "mergedAt": null,
+      "additions": 3,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDODjvEJM7iAxZa",
+      "title": "op-devstack: add op-rbuilder as el option",
+      "author": "joshklop",
+      "number": 21165,
+      "body": "For now, using this for manual testing of Osaka on L2 against rbuilder. In the future we may want to run all tests against rbuilder in ci (and explicitly skip on tests where it is expected to fail due to feature gaps with op-reth).",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-02T23:57:09Z",
+      "mergedAt": "2026-06-03T01:05:57Z",
+      "additions": 3,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7iBPQI",
+      "title": "op-supernode: add to release notes script",
+      "author": "joshklop",
+      "number": 21166,
+      "body": "",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-03T00:32:47Z",
+      "mergedAt": null,
+      "additions": 2,
+      "deletions": 2
+    }
+  ],
+  "codeChanges": {
+    "additions": 156,
+    "deletions": 40,
+    "files": 7,
+    "commitCount": 3
+  },
+  "completedItems": [
+    {
+      "title": "test(interop): follow-mode supernode interop on ELSync + #21119 proof",
+      "prNumber": 21122,
+      "type": "tests",
+      "body": "## Summary\nSwitches the follow-mode supernode interop devstack presets to EL sync and adds the end-to-end proof that a light op-node sequencer adopts the supernode's deposits-only invalid-message replacement.\n\nFixes #21119\n\n## Changes\n**Dev",
+      "files": [
+        "op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go",
+        "op-devstack/presets/twol2_from_runtime.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-acceptance-tests/tests/supernode/interop/follow_l2/light_sequencer_test.go"
+      ]
+    },
+    {
+      "title": "op-devstack: add op-rbuilder as el option",
+      "prNumber": 21165,
+      "type": "other",
+      "body": "For now, using this for manual testing of Osaka on L2 against rbuilder. In the future we may want to run all tests against rbuilder in ci (and explicitly skip on tests where it is expected to fail due to feature gaps with op-reth).",
+      "files": [
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 13.711910149055313,
+      "prScore": 8.711910149055313,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 4.80471895621705,
+      "prScore": 4.80471895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 2,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 4
+}

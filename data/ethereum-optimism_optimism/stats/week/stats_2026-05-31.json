@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-31 to 2026-06-07, ethereum-optimism/optimism had 12 new PRs (8 merged), 6 new issues, and 26 active contributors.",
+  "overview": "From 2026-05-31 to 2026-06-07, ethereum-optimism/optimism had 31 new PRs (20 merged), 12 new issues, and 37 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABBC52Sw",
@@ -44,42 +44,42 @@
       "commentCount": 1
     },
     {
-      "id": "I_kwDODjvEJM76d38g",
-      "title": "Audit Kona Proof Interop logic",
-      "author": "pauldowman",
-      "number": 19920,
+      "id": "I_kwDODjvEJM8AAAABEKV1xQ",
+      "title": "Invalid interop message recovery runbook",
+      "author": "ajsutton",
+      "number": 21161,
       "repository": "ethereum-optimism/optimism",
-      "body": "",
-      "createdAt": "2026-04-03T20:43:56Z",
-      "closedAt": "2026-06-01T21:00:52Z",
-      "state": "CLOSED",
-      "commentCount": 0
+      "body": "Write and test a runbook for recovering a chain after an invalid interop message is detected and a reorg is triggered.\n\nTesting has shown a number of systems which don't smoothly handle the large reorg caused by an invalid interop message. Since it's important that invalid messages are never accepted, requiring manual intervention is a reasonable \"safety over liveness\" policy. We need alerting in place to detect the situation and a clear runbook to follow in response.",
+      "createdAt": "2026-06-02T19:06:54Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
     },
     {
-      "id": "I_kwDODjvEJM8AAAABDsjj5A",
-      "title": "dispute-mon: Support simplified super permissioned game",
-      "author": "Inphi",
-      "number": 21098,
+      "id": "I_kwDODjvEJM8AAAABEIYFCA",
+      "title": "op-reth: interop tx pool does not resume after failsafe is disabled (requires restart)",
+      "author": "jelias2",
+      "number": 21149,
       "repository": "ethereum-optimism/optimism",
-      "body": "Dispute-mon needs some work to be compatible with the simplified super permissioned game.",
-      "createdAt": "2026-05-28T19:01:07Z",
-      "closedAt": "2026-06-01T17:41:24Z",
-      "state": "CLOSED",
-      "commentCount": 0
+      "body": "## Summary\n\nWhen the op-interop-filter failsafe is enabled and then disabled, **op-reth's transaction pool does not resume accepting interop (executing-message) transactions** until op-reth is restarted. The filter and `proxyd` recover within seconds, but op-reth stays in the failsafe-evicted state and silently drops interop txs (accepted by the RPC, never included; receipt lookup returns `not found`).\n\nObserved on **interop-bench-3** with **op-reth `v2.2.6-rc.3`** on 2026-06-02.\n\n## Steps to reproduce\n\n1. Healthy two-chain interop devnet (executing messages land normally).\n2. Enable failsafe on the op-interop-filter: `admin_setFailsafeEnabled true`.\n3. Submit an executing message → correctly rejected (expected).\n4. Disable failsafe: `admin_setFailsafeEnabled false`.\n5. Submit executing messages → **still dropped for many minutes** (`not found` / never included), even though failsafe is off.\n\n## Evidence that op-reth is the stuck component\n\n- **Filter recovered:** `interop_checkAccessList([], \"unsafe\", …)` against the filter returns `null` (success), and a fabricated entry returns `failed to parse access entry` — i.e. the filter is healthy and actively validating, not in failsafe.\n- **proxyd recovered (~10s):** chain B `proxyd-public` logs flip back to `interop access list validated successfully` within ~10s of disabling failsafe (it marks the filter backend unhealthy for `load_balancing_unhealthiness_timeout`, default 10s, then re-probes).\n- **op-reth did NOT recover:** op-reth logged\n  ```\n  txpool::interop  failsafe enabled: evicting all interop transactions\n  ```\n  on activation and logged **no recovery**. Interop executing messages kept failing for >5 minutes after failsafe was cleared, while the filter and proxyd were both healthy. An independent `op-benchmark interop` re-check showed `0/1` executing messages succeeding post-toggle (vs `5/5` before any toggling).\n\nSo with the filter + proxyd healthy and failsafe off, op-reth's pool is the only layer still rejecting interop txs.\n\n## Expected\n\nAfter failsafe is disabled, op-reth should re-poll/re-validate and resume accepting interop transactions without operator intervention.\n\n## Actual\n\nop-reth's interop tx-pool stays evicted until the op-reth process is restarted:\n```\nkubectl rollout restart statefulset/op-reth -n <chain-op-reth-namespace>\n```\n\n## Notes\n\n- May be version-specific to `op-reth v2.2.6-rc.3`; please confirm against current builds.\n- Documented in the op-interop-filter failsafe runbook (RB-336).",
+      "createdAt": "2026-06-02T14:13:06Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
     }
   ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM7hXhwz",
-      "title": "feat(op-conductor): flag-gated interop reorg recovery (#20006)",
-      "author": "wwared",
-      "number": 21133,
-      "body": "## Summary\r\n\r\nAdds flag-gated **reorg recovery** to op-conductor (issue #20006). By default the Raft FSM only records forward-moving unsafe heads, so a backward interop reorg leaves the recorded head pinned to an orphaned block and wedges the cluster. With `--reorg-recovery.enabled` set, the leader subscribes to its op-reth's `reth_subscribeChainNotifications`, and on a reorg notification commits the EL's current canonical head — letting the recorded unsafe head move backward (last-write-wins).\r\n\r\n**The flag defaults OFF. With it off, behavior is byte-for-byte unchanged.** When on, it changes Raft FSM apply semantics and MUST be set identically on every conductor in the cluster (all-on or all-off, never mixed).\r\n\r\n### What's included\r\n\r\n- **Reth chain-notifications subscriber** (`chainevents/`): WebSocket subscription on the leader (`--execution.ws-url`); on each reorg reads the EL's canonical unsafe head, fetches the payload, and commits via the existing `CommitUnsafePayload`. The subscription has no replay, so the leader re-commits its EL head on every (re)subscribe to recover any reorg missed during a disconnect.\r\n- **Flag-gated FSM guard bypass** (`consensus/raft_fsm.go`): backward head moves are accepted only when the flag is on.\r\n- **Non-cancellable demotion grace (5s)** (`conductor/demotion_latch.go`, `service.go`): a deep reorg rewinds the unsafe head far enough to trip the unsafe-staleness health check, which would normally transfer leadership away before the leader processes the one-shot reorg notification. The first staleness observation keeps the leader reporting healthy for the grace so it can commit the post-reorg head, then demotes it **unconditionally** at expiry (a fresh block timestamp does not prove a correct chain, so a healthy poll during the grace cannot cancel the demotion). `ErrSequencerConnectionDown` still fails over immediately. Cost: up to ~5s added failover latency on a stuck-but-connected sequencer and one guaranteed handoff per deep reorg. Grace is 0 (today's immediate demotion) when the flag is off.\r\n- **`conductor_latestUnsafePayload` admin RPC** for inspection/recovery.\r\n- **Metrics**: reorg observations and resyncs.\r\n- **op-devstack interop harness**: 3-conductor cluster on op-reth ELSync follow-mode, with acceptance scenarios A–D plus a deep-reorg + tight-health recovery test asserting all-EL convergence.\r\n- **Docs**: README, RUNBOOK, and public chain-operator docs describe the flag, the fleet-uniform contract, and the demotion-grace trade-offs.\r\n\r\n## Stacking\r\n\r\nStacked on **#21122** (`feat/devstack-follow-mode-supernode-elsync`), which is itself stacked on #21121 → #21120. Review/merge those first. This PR's diff is only the 12 conductor commits on top.\r\n\r\n## Test plan\r\n\r\n- `go test ./op-conductor/...` — unit tests for the demotion latch (9 cases), service-level timer wiring (incl. a real 5s timer fire), subscriber reconnect/resubscribe, FSM guard bypass, and the reorg-event handler. All pass; race clean; custom linter clean.\r\n- op-acceptance: conductor reorg-recovery scenarios A–D and the deep-reorg + tight-health convergence test.\r\n- Stress: 100× deep-reorg + tight-health runs. 95/100 pass cleanly. The 5 failures were root-caused to a **separate upstream op-node `forceReset`/`latestHead` re-anchor bug** under EL-sync (op-node's sequencer `latestHead` stays pinned past a `FollowSource` reset; the conductor FSM correctly tracks the canonical head) — not a defect in this PR. That bug is tracked separately and needs an op-node-side fix; it is out of scope here.\r\n\r\n## Notes\r\n\r\nLeft as **draft** pending the base PRs and the upstream op-node fix discussion.\r\n\r\nCloses #20006 (recovery path; the upstream op-node bug is tracked in #21125).\r\n",
+      "id": "PR_kwDODjvEJM7bgiBm",
+      "title": "feat(sdm): flashblocks support for SDM",
+      "author": "nonsense",
+      "number": 20738,
+      "body": "",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-06-01T12:51:52Z",
-      "mergedAt": null,
-      "additions": 5642,
-      "deletions": 1245
+      "createdAt": "2026-05-14T12:07:46Z",
+      "mergedAt": "2026-06-02T09:04:19Z",
+      "additions": 5751,
+      "deletions": 476
     },
     {
       "id": "PR_kwDODjvEJM7hi6ad",
@@ -89,6 +89,18 @@
       "body": "**DO NOT MERGE** — full-stack view against `develop` for docker build only. The mergeable stack PR is #21133.\r\n\r\nFlag-gated reorg recovery for op-conductor (issue #20006).",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-06-01T21:58:34Z",
+      "mergedAt": null,
+      "additions": 3502,
+      "deletions": 181
+    },
+    {
+      "id": "PR_kwDODjvEJM7hXhwz",
+      "title": "feat(op-conductor): flag-gated interop reorg recovery (#20006)",
+      "author": "wwared",
+      "number": 21133,
+      "body": "## Summary\r\n\r\nAdds flag-gated **reorg recovery** to op-conductor (issue #20006). By default the Raft FSM only records forward-moving unsafe heads, so a backward interop reorg leaves the recorded head pinned to an orphaned block and wedges the cluster. With `--reorg-recovery.enabled` set, the leader subscribes to its op-reth's `reth_subscribeChainNotifications`, and on a reorg notification commits the EL's current canonical head — letting the recorded unsafe head move backward (last-write-wins).\r\n\r\n**The flag defaults OFF. With it off, behavior is byte-for-byte unchanged.** When on, it changes Raft FSM apply semantics and MUST be set identically on every conductor in the cluster (all-on or all-off, never mixed).\r\n\r\n### What's included\r\n\r\n- **Reth chain-notifications subscriber** (`chainevents/`): WebSocket subscription on the leader (`--execution.ws-url`); on each reorg reads the EL's canonical unsafe head, fetches the payload, and commits via the existing `CommitUnsafePayload`. The subscription has no replay, so the leader re-commits its EL head on every (re)subscribe to recover any reorg missed during a disconnect.\r\n- **Flag-gated FSM guard bypass** (`consensus/raft_fsm.go`): backward head moves are accepted only when the flag is on.\r\n- **Non-cancellable demotion grace (5s)** (`conductor/demotion_latch.go`, `service.go`): a deep reorg rewinds the unsafe head far enough to trip the unsafe-staleness health check, which would normally transfer leadership away before the leader processes the one-shot reorg notification. The first staleness observation keeps the leader reporting healthy for the grace so it can commit the post-reorg head, then demotes it **unconditionally** at expiry (a fresh block timestamp does not prove a correct chain, so a healthy poll during the grace cannot cancel the demotion). `ErrSequencerConnectionDown` still fails over immediately. Cost: up to ~5s added failover latency on a stuck-but-connected sequencer and one guaranteed handoff per deep reorg. Grace is 0 (today's immediate demotion) when the flag is off.\r\n- **`conductor_latestUnsafePayload` admin RPC** for inspection/recovery.\r\n- **Metrics**: reorg observations and resyncs.\r\n- **op-devstack interop harness**: 3-conductor cluster on op-reth ELSync follow-mode, with acceptance scenarios A–D plus a deep-reorg + tight-health recovery test asserting all-EL convergence.\r\n- **Docs**: README, RUNBOOK, and public chain-operator docs describe the flag, the fleet-uniform contract, and the demotion-grace trade-offs.\r\n\r\n## Stacking\r\n\r\nStacked on **#21122** (`feat/devstack-follow-mode-supernode-elsync`), which is itself stacked on #21121 → #21120. Review/merge those first. This PR's diff is only the 12 conductor commits on top.\r\n\r\n## Test plan\r\n\r\n- `go test ./op-conductor/...` — unit tests for the demotion latch (9 cases), service-level timer wiring (incl. a real 5s timer fire), subscriber reconnect/resubscribe, FSM guard bypass, and the reorg-event handler. All pass; race clean; custom linter clean.\r\n- op-acceptance: conductor reorg-recovery scenarios A–D and the deep-reorg + tight-health convergence test.\r\n- Stress: 100× deep-reorg + tight-health runs. 95/100 pass cleanly. The 5 failures were root-caused to a **separate upstream op-node `forceReset`/`latestHead` re-anchor bug** under EL-sync (op-node's sequencer `latestHead` stays pinned past a `FollowSource` reset; the conductor FSM correctly tracks the canonical head) — not a defect in this PR. That bug is tracked separately and needs an op-node-side fix; it is out of scope here.\r\n\r\n## Notes\r\n\r\nLeft as **draft** pending the base PRs and the upstream op-node fix discussion.\r\n\r\nCloses #20006 (recovery path; the upstream op-node bug is tracked in #21125).\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-01T12:51:52Z",
       "mergedAt": null,
       "additions": 3502,
       "deletions": 181
@@ -106,35 +118,23 @@
       "deletions": 26
     },
     {
-      "id": "PR_kwDODjvEJM7bSSLw",
-      "title": "refactor(op-core/nuts): write fork_lock.toml entries chronologically",
-      "author": "maurelian",
-      "number": 20723,
-      "body": "Top of a 2-PR stack for the Interop NUT bundle activation migration.\n\n**Base:** #20722 (must merge first).\n\nMigrates Interop hardfork activation onto the L2CM NUT bundle path:\n\n- **op-node** — activation wrappers for `L1Block.setFeature(INTEROP)` (pre-bundle) and `ETHLiquidity.fund()` with `u128::MAX` value/mint (post-bundle). Bundle txs are loaded from the embedded JSON.\n- **kona** — Interop hardfork implementation wrapping the generated bundle with the same setFeature + funding wrappers; matches op-node ordering.\n- **Cleanup** — removes the old hardcoded Interop upgrade transaction files and per-tx bytecode fixtures, which are superseded by the JSON-driven path.\n- **op-e2e** — activation assertions for Interop-specific state changes (feature flag, ETHLiquidity balance, predeploy proxy implementations).\n\nDepends on #20722, which carries the bundle JSON, the lock entry, and the embed.",
+      "id": "PR_kwDODjvEJM7fdci7",
+      "title": "docs(releases): add per-component release pages to docs.optimism.io",
+      "author": "sbvegan",
+      "number": 21035,
+      "body": "## Summary\n\n- Adds a new **Releases** section under the Notices tab in docs.optimism.io\n- Per-component release pages for 13 components across `ethereum-optimism/optimism` and `ethereum-optimism/infra`\n- Mintlify `<Update>` components with date labels, stripped version numbers, and filter tags (Latest, Stable, Release Candidate)\n- Overview index page with latest-per-component horizontal cards\n- Network Notices index page (`notices/index.mdx`) with a maintenance comment keeping it in sync with `docs.json`\n- `generate-releases.ts` prebuild script that fetches GitHub Releases API at build time — supports multiple repos, auto-detects RCs, guarantees the RC filter always renders on every page\n\n## Components covered\n\n**Protocol:** op-node, kona-node, op-batcher, op-proposer, op-challenger  \n**Execution:** op-reth  \n**Fault Proofs:** kona-client, kona-host  \n**Contracts:** op-contracts  \n**Tooling:** op-conductor, op-deployer, proxyd, op-acceptor\n\n## Keeping it up to date\n\nRe-run `pnpm prebuild` from `docs/public-docs/` to refresh. Set `GITHUB_TOKEN` env var to avoid the 60 req/hr anonymous rate limit. A Mintlify Workflow (weekly schedule) can be configured to keep pages current automatically — see the prompt in the PR description comments.\n\n## Test plan\n\n- [ ] `pnpm prebuild` runs without errors\n- [ ] `mintlify dev` shows Notices tab with Network Notices and Releases groups\n- [ ] Each component page renders with intro text, filter tags, and Update entries\n- [ ] Latest, Stable, and Release Candidate filters appear on every component page\n- [ ] `/notices/upgrade-19` still resolves (no broken existing URLs)\n- [ ] Index page shows horizontal Latest Releases cards and Info callout\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-13T21:11:05Z",
-      "mergedAt": "2026-05-31T22:09:17Z",
-      "additions": 716,
-      "deletions": 1009
-    },
-    {
-      "id": "PR_kwDODjvEJM7gfGwG",
-      "title": "feat(op-supernode,op-sync-tester): drive supernode VN via sync-tester EL + finalize anchor at genesis",
-      "author": "ajsutton",
-      "number": 21107,
-      "body": "**Claude:** Part A of ethereum-optimism/optimism#21096. Wires a single op-supernode VN to drive an op-sync-tester mocked EL, plus two production fixes uncovered along the way.\n\n## Production fixes\n- **`op-supernode` super-authority** — `simpleChainContainer.verifierContribution` now clamps the Anchor cap timestamp up to L2 genesis. Previously the verifier reported `activationTimestamp - 1` as the cap, which is pre-genesis when interop activates at genesis; the engine controller then failed to resolve a block and floored finalized at zero, blocking finalization indefinitely. The clamp keeps safe/finalized anchored at the genesis block until the verifier confirms a post-activation block via the Verified path.\n- **`op-sync-tester` `GetBlockReceipts`** — no longer errors on empty receipts; genesis legitimately has none, and the error blocked the supernode interop verifier from reading the frontier genesis block.\n\n## Devstack\n- New `NewSingleSupernodeWithSyncTester` preset (sequencer + sync-tester + verifier-mode supernode VN); interop always on, activation timestamp via `WithInteropActivationDelay`.\n- `startSingleChainSharedSupernode` threads `sequencerEnabled`, `interopActivationTimestamp`, `verifierSyncMode`.\n- `SupernodeTestControl` gains `Stop`/`Start`; `Supernode.Start` now restores DSL-managed peers on registered VN proxies via the new `ManageVN` hook, mirroring `L2CLNode.Start`.\n- Preset option surface narrowed to what the runtime actually wires — proposer / game-type / proof-validation options are rejected instead of silently dropped.\n- New DSL: `SafetyHeads`/`AllHeadsAdvancedFn`/`AllHeadsReachedFn` + `DefaultSafetyHeadsAdvancement`.\n\n## Tests (`tests/supernode/sync_tester/`)\n- `AdvancesViaSyncTester`, `CatchesUpFromCold`, `ELSyncsFromCold`, `SyncsThroughInteropActivation` — all assert unsafe + safe + finalized.\n- Super-authority unit test for the at-genesis clamp.",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-29T03:17:12Z",
-      "mergedAt": "2026-05-31T21:23:17Z",
-      "additions": 683,
-      "deletions": 18
+      "createdAt": "2026-05-26T15:04:52Z",
+      "mergedAt": "2026-06-02T18:35:58Z",
+      "additions": 3060,
+      "deletions": 26
     }
   ],
   "codeChanges": {
-    "additions": 3024,
-    "deletions": 1140,
-    "files": 110,
-    "commitCount": 107
+    "additions": 16675,
+    "deletions": 2070,
+    "files": 269,
+    "commitCount": 176
   },
   "completedItems": [
     {
@@ -197,6 +197,183 @@
       ]
     },
     {
+      "title": "feat(sdm): flashblocks support for SDM",
+      "prNumber": 20738,
+      "type": "feature",
+      "body": "",
+      "files": [
+        "go.mod",
+        "go.sum",
+        "op-acceptance-tests/tests/flashblocks/flashblocks_sdm_test.go",
+        "op-acceptance-tests/tests/sdm/block_test.go",
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-chain-ops/cmd/sdm-devnet/main.go",
+        "op-chain-ops/pkg/sdmdevnet/flashblocks.go",
+        "op-chain-ops/pkg/sdmdevnet/workload.go",
+        "op-chain-ops/pkg/sdmreplay/payload.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_flashblocks.go",
+        "op-node/rollup/derive/span_batch_test.go",
+        "op-node/rollup/derive/span_batch_tx.go",
+        "op-node/rollup/derive/span_batch_tx_test.go",
+        "op-node/rollup/derive/span_batch_txs.go",
+        "op-node/rollup/derive/span_batch_txs_test.go",
+        "op-service/sources/flashblock_client.go",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-evm/src/post_exec/inspector.rs",
+        "rust/alloy-op-evm/src/post_exec/mod.rs",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/Cargo.toml",
+        "rust/op-rbuilder/Dockerfile",
+        "rust/op-rbuilder/Dockerfile.monorepo",
+        "rust/op-rbuilder/Makefile",
+        "rust/op-rbuilder/crates/op-rbuilder/src/args/op.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/builder_tx.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/context.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload_handler.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/service.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/generator.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/mod.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/standard/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/standard/service.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/launcher.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/metrics.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/mock_tx.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/primitives/reth/engine_api_builder.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/primitives/telemetry.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/tests/framework/driver.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/tests/framework/instance.rs",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/tests/it/builder.rs",
+        "rust/op-reth/crates/post-exec-replay/Cargo.toml",
+        "rust/op-reth/crates/post-exec-replay/src/lib.rs",
+        "rust/op-reth/crates/post-exec-replay/src/replay.rs",
+        "rust/op-reth/crates/post-exec-replay/src/types.rs",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/rpc/src/witness.rs",
+        "rust/op-reth/examples/custom-node/src/evm/executor.rs",
+        "rust/op-reth/crates/evm/src/post_exec_ext.rs",
+        "rust/op-reth/examples/custom-node/src/evm/config.rs",
+        "rust/rollup-boost/Cargo.lock",
+        "rust/rollup-boost/crates/flashblocks-rpc/src/tests/mod.rs",
+        "rust/rollup-boost/crates/rollup-boost/src/flashblocks/primitives.rs",
+        "justfile",
+        "op-acceptance-tests/tests/sdm/boundary_test.go",
+        "op-chain-ops/pkg/sdm/flashblocks.go",
+        "op-chain-ops/pkg/sdm/payload.go",
+        "op-chain-ops/pkg/sdm/workload.go",
+        "op-devstack/sysgo/l2_el_opreth.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-e2e/actions/helpers/l2_verifier.go",
+        "op-node/config/config.go",
+        "op-node/config/config_persistence.go",
+        "op-node/config/config_persistence_test.go",
+        "op-node/node/api.go",
+        "op-node/node/server_test.go",
+        "op-node/rollup/derive/batches.go",
+        "op-node/rollup/derive/batches_test.go",
+        "op-node/rollup/driver/config.go",
+        "op-node/rollup/driver/driver.go",
+        "op-node/rollup/sequencing/disabled.go",
+        "op-node/rollup/sequencing/iface.go",
+        "op-node/rollup/sequencing/sequencer.go",
+        "op-node/rollup/sequencing/sequencer_test.go",
+        "op-node/rollup/types_test.go",
+        "op-service/apis/rollup.go",
+        "op-service/sources/rollupclient.go",
+        "rust/kona/crates/proof/executor/src/builder/core.rs",
+        "rust/kona/crates/protocol/genesis/src/rollup.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/Cargo.toml",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/ctx.rs",
+        "Makefile",
+        "rust/.dockerignore",
+        "rust/alloy-op-evm/src/post_exec/inspector/tests.rs",
+        "rust/kona/bin/client/src/fpvm_evm/factory.rs"
+      ]
+    },
+    {
+      "title": "feat(op-reth/proofs): backfill the proofs window backward",
+      "prNumber": 20793,
+      "type": "feature",
+      "body": "**Description**\r\n\r\nAdds the ability to extend an OP proofs storage window backward — taking a node that's been running with a recent earliest and rewriting older historical records so the window covers earlier blocks. This is the foundation",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/backfill.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/mod.rs",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/trie/src/api.rs",
+        "rust/op-reth/crates/trie/src/backfill/changesets.rs",
+        "rust/op-reth/crates/trie/src/backfill/error.rs",
+        "rust/op-reth/crates/trie/src/backfill/job.rs",
+        "rust/op-reth/crates/trie/src/backfill/mod.rs",
+        "rust/op-reth/crates/trie/src/backfill/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/backfill.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/tests.rs",
+        "rust/op-reth/crates/trie/src/error.rs",
+        "rust/op-reth/crates/trie/src/in_memory.rs",
+        "rust/op-reth/crates/trie/src/initialize.rs",
+        "rust/op-reth/crates/trie/src/lib.rs",
+        "rust/op-reth/crates/trie/src/metrics.rs"
+      ]
+    },
+    {
+      "title": "docs: add U19 feature pages for L2CM and Osaka on L2",
+      "prNumber": 20971,
+      "type": "feature",
+      "body": "## Summary\n\n- Adds `/op-stack/features/l2-contract-manager` — new feature page explaining the L2 Contract Manager (L2CM) mechanism: how it upgrades all L2 predeploys atomically via a Network Upgrade Transaction, why it matters for decentral",
+      "files": [
+        "docs/public-docs/chain-operators/guides/features/switching-to-kona-proofs.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/notices/upgrade-19.mdx",
+        "docs/public-docs/op-stack/features/l2-contract-manager.mdx",
+        "docs/public-docs/op-stack/features/osaka-on-l2.mdx",
+        "docs/public-docs/op-stack/protocol/network-upgrades.mdx"
+      ]
+    },
+    {
+      "title": "docs(releases): add per-component release pages to docs.optimism.io",
+      "prNumber": 21035,
+      "type": "docs",
+      "body": "## Summary\n\n- Adds a new **Releases** section under the Notices tab in docs.optimism.io\n- Per-component release pages for 13 components across `ethereum-optimism/optimism` and `ethereum-optimism/infra`\n- Mintlify `<Update>` components with ",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/notices/index.mdx",
+        "docs/public-docs/package.json",
+        "docs/public-docs/pnpm-lock.yaml",
+        "docs/public-docs/pnpm-workspace.yaml",
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/kona-client.mdx",
+        "docs/public-docs/releases/kona-host.mdx",
+        "docs/public-docs/releases/kona-node.mdx",
+        "docs/public-docs/releases/op-acceptor.mdx",
+        "docs/public-docs/releases/op-batcher.mdx",
+        "docs/public-docs/releases/op-challenger.mdx",
+        "docs/public-docs/releases/op-conductor.mdx",
+        "docs/public-docs/releases/op-contracts.mdx",
+        "docs/public-docs/releases/op-deployer.mdx",
+        "docs/public-docs/releases/op-node.mdx",
+        "docs/public-docs/releases/op-proposer.mdx",
+        "docs/public-docs/releases/op-reth.mdx",
+        "docs/public-docs/releases/proxyd.mdx",
+        "docs/public-docs/scripts/generate-releases.ts",
+        "docs/public-docs/tsconfig.json"
+      ]
+    },
+    {
       "title": "fix(l2cm-upgrade-test): fix issues found during testing",
       "prNumber": 21091,
       "type": "bugfix",
@@ -234,6 +411,23 @@
         "op-interop-filter/filter/service.go",
         "op-interop-filter/flags/flags.go",
         "op-interop-filter/metrics/metrics.go"
+      ]
+    },
+    {
+      "title": "fix(op-node): preserve safedb across EL-sync restarts",
+      "prNumber": 21111,
+      "type": "bugfix",
+      "body": "## Summary\n\nop-node wiped the entire safedb whenever EL sync started. For op-reth/erigon (`SupportsPostFinalizationELSync`) running `--syncmode=execution-layer`, EL sync is (re-)entered on **every restart** even when the node is already syn",
+      "files": [
+        "op-node/node/api.go",
+        "op-node/node/safedb/disabled.go",
+        "op-node/node/safedb/safedb.go",
+        "op-node/node/server_test.go",
+        "op-node/rollup/driver/sync_deriver.go",
+        "op-node/rollup/engine/engine_controller.go",
+        "op-node/rollup/engine/engine_el_sync_completion_test.go",
+        "op-node/rollup/engine/engine_el_sync_offset_test.go",
+        "op-supernode/supernode/chain_container/virtual_node/virtual_node_test.go"
       ]
     },
     {
@@ -301,6 +495,20 @@
       ]
     },
     {
+      "title": "test(interop): follow-mode supernode interop on ELSync + #21119 proof",
+      "prNumber": 21122,
+      "type": "tests",
+      "body": "## Summary\nSwitches the follow-mode supernode interop devstack presets to EL sync and adds the end-to-end proof that a light op-node sequencer adopts the supernode's deposits-only invalid-message replacement.\n\nFixes #21119\n\n## Changes\n**Dev",
+      "files": [
+        "op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go",
+        "op-devstack/presets/twol2_from_runtime.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-acceptance-tests/tests/supernode/interop/follow_l2/light_sequencer_test.go"
+      ]
+    },
+    {
       "title": "ci: enable manual contract artifact publishing",
       "prNumber": 21140,
       "type": "other",
@@ -310,56 +518,263 @@
         ".circleci/continue/main.yml",
         ".circleci/scripts/test-decision-tree.sh"
       ]
+    },
+    {
+      "title": "op-devstack: add op-rbuilder as el option",
+      "prNumber": 21165,
+      "type": "other",
+      "body": "For now, using this for manual testing of Osaka on L2 against rbuilder. In the future we may want to run all tests against rbuilder in ci (and explicitly skip on tests where it is expected to fail due to feature gaps with op-reth).",
+      "files": [
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go"
+      ]
+    },
+    {
+      "title": "fix(op-supernode): block on VN readiness after Resume in rewind/invalidate",
+      "prNumber": 21163,
+      "type": "bugfix",
+      "body": "## Summary\n\n`TestSupernodeInteropInvalidMessageReplacement` flaked on deferred liveness: after invalidating a bad executing message, the test would send a fresh transfer and time out waiting for the sequencer to accept it (~10-20% failure r",
+      "files": [
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/chain_container_test.go"
+      ]
+    },
+    {
+      "title": "feat(op-supernode): pre-initialize interop decision metric series",
+      "prNumber": 21162,
+      "type": "feature",
+      "body": "Closes ethereum-optimism/optimism#21159.\n\n`supernode_interop_round_decisions_total` already counts every round decision (including `invalidate`, which means an invalid interop message was detected). But its label series only appear on first",
+      "files": [
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/metrics_test.go"
+      ]
+    },
+    {
+      "title": "docs: refresh releases pages with latest GitHub releases",
+      "prNumber": 21160,
+      "type": "docs",
+      "body": "## Summary\nPrepend the newest GitHub releases (as of June 2, 2026) to each tracked component's release page and refresh the Latest Releases card group on the overview.\n\n## Changes\n- `op-node.mdx`: added v1.19.0 (Karst hardfork mandatory upg",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/kona-client.mdx",
+        "docs/public-docs/releases/kona-host.mdx",
+        "docs/public-docs/releases/kona-node.mdx",
+        "docs/public-docs/releases/op-challenger.mdx",
+        "docs/public-docs/releases/op-contracts.mdx",
+        "docs/public-docs/releases/op-deployer.mdx",
+        "docs/public-docs/releases/op-node.mdx",
+        "docs/public-docs/releases/op-reth.mdx",
+        "docs/public-docs/releases/proxyd.mdx"
+      ]
+    },
+    {
+      "title": "fix(op-node): reorg follow-mode sequencer onto upstream chain on divergence",
+      "prNumber": 21155,
+      "type": "bugfix",
+      "body": "## Problem\r\n\r\nFixes #21119. A follow-mode op-node that also sequences (a light CL producing unsafe blocks while following a supernode's safe head) never adopted the supernode's deposits-only invalid-message replacement — the invalid executi",
+      "files": [
+        "op-node/rollup/engine/engine_controller.go",
+        "op-node/rollup/engine/engine_controller_test.go"
+      ]
+    },
+    {
+      "title": "fix(op-supernode): dial interop engine controller lazily",
+      "prNumber": 21152,
+      "type": "bugfix",
+      "body": "Alternative to #21137 for #21136.\n\nThe interop engine controller uses a separate EL connection from the virtual node and was set up inside the VN restart loop. A healthy VN keeps running and reconnects its own EL client without restarting, ",
+      "files": [
+        "op-acceptance-tests/tests/supernode/interop/startup_resync/startup_resync_test.go",
+        "op-devstack/sysgo/l2_el_opreth.go",
+        "op-node/config/l2_el_rpc.go",
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/chain_container_test.go",
+        "op-supernode/supernode/chain_container/engine_controller/engine_controller.go",
+        "op-supernode/supernode/chain_container/engine_controller/engine_controller_test.go",
+        "op-supernode/supernode/supernode.go"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 84.8005477931522,
-      "prScore": 77.6005477931522,
-      "issueScore": 2,
-      "reviewScore": 5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 61.06595947458875,
-      "prScore": 47.22595947458875,
+      "totalScore": 200.47306989444968,
+      "prScore": 181.19506989444966,
       "issueScore": 0,
-      "reviewScore": 13.5,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 18.5,
+      "commentScore": 0.7779999999999999,
       "summary": null
     },
     {
-      "username": "smartcontracts",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
-      "totalScore": 47.24914216883812,
-      "prScore": 47.04914216883812,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 142.60818308724845,
+      "prScore": 113.47018308724846,
+      "issueScore": 4,
+      "reviewScore": 24.5,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 129.68513109109958,
+      "prScore": 86.90513109109959,
+      "issueScore": 8.1,
+      "reviewScore": 34,
+      "commentScore": 0.6799999999999999,
       "summary": null
     },
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 37.5577738965761,
-      "prScore": 37.1197738965761,
+      "totalScore": 127.02357768836114,
+      "prScore": 126.14757768836114,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
       "username": "donoso-eth",
       "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 33.9457738965761,
-      "prScore": 33.9457738965761,
+      "totalScore": 74.970149761243,
+      "prScore": 74.970149761243,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 63.405754756364374,
+      "prScore": 43.06575475636437,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 60.3972544346932,
+      "prScore": 49.3972544346932,
+      "issueScore": 2,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 58.770850110377594,
+      "prScore": 35.07085011037759,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 51.52110747225647,
+      "prScore": 28.521107472256467,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ashitakah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
+      "totalScore": 48.680992241972476,
+      "prScore": 42.680992241972476,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 48.58786491299311,
+      "prScore": 17.087864912993112,
+      "issueScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 47.68714216883812,
+      "prScore": 47.04914216883812,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 42.616872820554384,
+      "prScore": 21.276872820554384,
+      "issueScore": 2,
+      "reviewScore": 19,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 39.00730614433405,
+      "prScore": 5.107306144334054,
+      "issueScore": 2,
+      "reviewScore": 31.5,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 38.258962754880955,
+      "prScore": 27.718962754880952,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 35.457386587284155,
+      "prScore": 30.857386587284157,
+      "issueScore": 4.2,
+      "reviewScore": 0,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 32.22401331733694,
+      "prScore": 26.884013317336944,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 31.009243251692858,
+      "prScore": 26.009243251692858,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -374,73 +789,33 @@
       "summary": null
     },
     {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 27.91896275488095,
-      "prScore": 27.718962754880952,
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 21.477813185442596,
+      "prScore": 16.277813185442596,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 5,
       "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 27.776872820554384,
-      "prScore": 21.276872820554384,
-      "issueScore": 2,
-      "reviewScore": 4.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 23.7,
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 20.84,
       "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 23.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 20.487834809141685,
-      "prScore": 6.147834809141684,
-      "issueScore": 0,
-      "reviewScore": 14,
+      "issueScore": 2,
+      "reviewScore": 18.5,
       "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 20.340424036192307,
-      "prScore": 10.340424036192307,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 17.087864912993112,
-      "prScore": 17.087864912993112,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 15.7,
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 14.278,
       "prScore": 0,
-      "issueScore": 2,
+      "issueScore": 0,
       "reviewScore": 13.5,
-      "commentScore": 0.2,
+      "commentScore": 0.7779999999999999,
       "summary": null
     },
     {
@@ -454,43 +829,13 @@
       "summary": null
     },
     {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 9.438,
-      "prScore": 0,
+      "username": "avalonche",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32314588?u=3017276666c036e22fdcfe0ffb05cb046249e00a&v=4",
+      "totalScore": 9.510292546497023,
+      "prScore": 9.510292546497023,
       "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 6.5,
-      "prScore": 0,
-      "issueScore": 2,
-      "reviewScore": 4.5,
+      "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "ashitakah",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
-      "totalScore": 6,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 6,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 5.34,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -504,8 +849,18 @@
       "summary": null
     },
     {
-      "username": "jyellick",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/7431583?v=4",
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "optibotpiper",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 4.5,
       "prScore": 0,
       "issueScore": 0,
@@ -514,13 +869,13 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 2.3000000000000003,
+      "username": "jyellick",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7431583?v=4",
+      "totalScore": 4.5,
       "prScore": 0,
-      "issueScore": 2.1,
-      "reviewScore": 0,
-      "commentScore": 0.2,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -554,9 +909,9 @@
       "summary": null
     }
   ],
-  "newPRs": 12,
-  "mergedPRs": 8,
-  "newIssues": 6,
-  "closedIssues": 4,
-  "activeContributors": 26
+  "newPRs": 31,
+  "mergedPRs": 20,
+  "newIssues": 12,
+  "closedIssues": 48,
+  "activeContributors": 37
 }
