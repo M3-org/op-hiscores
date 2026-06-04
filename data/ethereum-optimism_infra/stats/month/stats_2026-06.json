@@ -5,9 +5,21 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-06-01 to 2026-07-01, ethereum-optimism/infra had 0 new PRs (0 merged), 0 new issues, and 23 active contributors.",
+  "overview": "From 2026-06-01 to 2026-07-01, ethereum-optimism/infra had 6 new PRs (1 merged), 0 new issues, and 30 active contributors.",
   "topIssues": [],
   "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ87iYVkr",
+      "title": "feat(proxyd): add agreement interop validation strategy",
+      "author": "ajsutton",
+      "number": 640,
+      "body": "Adds an additive `agreement` interop-validation strategy to proxyd. It fans each `checkAccessList` out to all configured supervisor urls concurrently and combines the verdicts by quorum agreement.\n\n- A definitive verdict is valid, or **any** filter JSON-RPC rejection: the supervisor verdict codes (`-3204xx..-3215xx`) *and* the generic invalid-params code (`-32602`, e.g. a malformed/fabricated access list — \"failed to parse access entry\"). `ParseInteropError` reads the filter's actual JSON-RPC code (including for JSON-RPC errors returned over HTTP 200, which are `rpc.Error` not `rpc.HTTPError`), so rejections are identified by code, not message. Non-verdicts that do not count: failsafe (handled separately), JSON-RPC internal (`-32603`/`-32000`), cancellation (`499`), and transport/5xx.\n- **Fast-accept at the minimum:** the strategy decides as soon as `min_responses` definitive verdicts arrive and never awaits slow or unresponded endpoints.\n- **Failsafe takes priority among received verdicts:** if any *received* response reports failsafe enabled (dedicated code `-320602`), the message is rejected, even when the minimum accepts are also in hand. A failsafe verdict short-circuits the fan-out; before returning an accept the strategy does a non-blocking drain of already-buffered verdicts so a failsafe that has already arrived beats a met quorum. It never blocks on an endpoint that has not yet responded.\n- All-valid (with at least `min_responses` definitive verdicts) accepts; all-invalid rejects with the real error (e.g. a `-32602` parse rejection from every endpoint yields a clean reject, not quorum-not-reached); a mix logs and rejects; fewer than `min_responses` fails closed. Disagreement detection is best-effort (consistent with fast-accept).\n- `min_responses` defaults to `len(urls)` (unanimity) and is validated to `1..len(urls)` in `Start`.\n- Existing first-supervisor / multicall / health-aware strategies and `performCheckAccessListOp` are unchanged.\n\nSelected via `[interop_validation] strategy = \"agreement\"` + `min_responses`. Single-endpoint configs are equivalent to today (min defaults to 1).\n\n**Hard cutover:** failsafe detection keys on the dedicated RPC code `-320602` (`ParseInteropError` routes it independently of message/HTTP status). This relies on op-interop-filter emitting `-320602` — a prerequisite server PR — so filters must deploy that change before this lands.\n\nThis is the proxyd half of a multi-repo change; the op-reth mempool half ships separately.\n\nTest plan: `interop_strategy_test.go` unit tests (failsafe hard-reject by code, failsafe-priority-over-met-quorum, slow non-failsafe endpoint does not delay accept, failsafe short-circuits a slow backend, generic `-32602` parse rejection counts as a definitive invalid, verdict-classification coverage) plus `TestInteropValidation_AgreementStrategy` and config tests in `integration_tests/interop_validation_test.go`. Agreement + failsafe tests pass under `-race -count=20`. `gofmt -l .` and `golangci-lint run ./...` are clean; the interop package and interop integration tests pass under `-race`. Several unrelated, timing-sensitive integration tests (`TestMulticall`, `TestWSClientExceedReadLimit`, `TestFrontendMaxRPSLimit`, `TestMaxConcurrentRPCs`) flake under the race detector and reproduce unchanged on `main`.",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-06-03T19:26:24Z",
+      "mergedAt": null,
+      "additions": 787,
+      "deletions": 1
+    },
     {
       "id": "PR_kwDOL-xLQ87IkLib",
       "title": "feat(op-acceptor): add --shard-index/--shard-total for parallel gateless sharding",
@@ -19,24 +31,90 @@
       "mergedAt": null,
       "additions": 273,
       "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ87id08p",
+      "title": "feat(proxyd): add metrics for interop validation outcomes",
+      "author": "jelias2",
+      "number": 642,
+      "body": "## Summary\n\nAdds a per-transaction Prometheus metric tracking how many interop transactions are **passed through**, **filtered**, or **errored** by interop access list validation.\n\nNew counter: `proxyd_rpc_interop_validations_total`, with labels:\n- `result` — `passed` | `filtered` | `errored`\n- `strategy` — the configured interop validation strategy (e.g. `first-supervisor`, `multicall`, `health-aware-load-balancing`)\n\nIt's incremented exactly once per interop transaction in `validateInteropSendRpcRequest`, right after `ValidateAccessList`. This complements the existing per-supervisor-check `rpc_supervisor_checks_total` metric, which counts individual backend checks rather than transaction outcomes.\n\n## Result classification\n\n`interopValidationResult(err)` maps the validation outcome to a label:\n- **passed** — `err == nil`\n- **filtered** — a client-side `4xx` `*RPCErr` (the supervisor rejected the access list, or it failed a pre-check such as the access-list size limit)\n- **errored** — a `5xx` `*RPCErr` or any non-`RPCErr` error (e.g. no supervisor backend available, failsafe enabled, internal errors)\n\nThe 4xx/5xx split mirrors how outcomes are already encoded via `http_code` in `rpc_supervisor_checks_total`.\n\n## Testing\n\n- `go build ./...`\n- New unit test `TestInteropValidationResult` covering passed/filtered/errored cases (supervisor rejection, access-list-out-of-bounds, failsafe, internal error, backend-unavailable, no-RPC-source).\n\n---\n\n## Rename: `rpc_supervisor_checks_total` → `rpc_interop_filter_checks_total`\n\nAligns the existing per-check metric with the `InteropFilterClient` naming:\n\n| Before | After |\n| --- | --- |\n| `rpc_supervisor_checks_total` | `rpc_interop_filter_checks_total` |\n| label `supervisor_url` | label `interop_filter_url` |\n\n`http_code`, `rpc_error_code`, and `strategy` labels are unchanged. The matching debug log field was renamed too.\n\n⚠️ **Breaking change** for any dashboard/alert referencing the old metric name or `supervisor_url` label.\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-06-04T00:11:00Z",
+      "mergedAt": null,
+      "additions": 140,
+      "deletions": 49
+    },
+    {
+      "id": "PR_kwDOL-xLQ87iepEO",
+      "title": "feat(proxyd): add metrics for interop validation outcomes",
+      "author": "jelias2",
+      "number": 643,
+      "body": "## Summary\n\nAdds a per-transaction Prometheus metric tracking how many interop transactions are **passed through**, **filtered**, or **errored** by interop access list validation.\n\nNew counter: `proxyd_rpc_interop_validations_total`, with labels:\n- `result` — `passed` | `filtered` | `errored`\n- `strategy` — the configured interop validation strategy\n\nIncremented exactly once per interop transaction in `validateInteropSendRpcRequest`, right after `ValidateAccessList`. This complements the existing per-check supervisor/interop-filter checks metric, which counts individual backend checks rather than transaction outcomes.\n\n## Result classification\n\n`interopValidationResult(err)` maps the validation outcome to a label:\n- **passed** — `err == nil`\n- **filtered** — a client-side `4xx` `*RPCErr` (the access list was rejected, or it failed a pre-check such as the access-list size limit)\n- **errored** — a `5xx` `*RPCErr` or any non-`RPCErr` error (e.g. no backend available, failsafe enabled, internal errors)\n\n## Testing\n\n- `go build ./...`\n- `TestInteropValidationResult` covering passed/filtered/errored cases.\n\n---\nSplit out from #642. The supervisor→interop-filter rename is in #644.\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-06-04T01:04:35Z",
+      "mergedAt": null,
+      "additions": 91,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ87iepQH",
+      "title": "refactor(proxyd): rename interop validation supervisor naming to interop filter",
+      "author": "jelias2",
+      "number": 644,
+      "body": "## Summary\n\nAligns the interop validation path with the `InteropFilterClient` (`interop_checkAccessList`) by renaming `supervisor` → `interop filter` throughout:\n\n| Before | After |\n| --- | --- |\n| metric `rpc_supervisor_checks_total` | `rpc_interop_filter_checks_total` |\n| label `supervisor_url` | `interop_filter_url` |\n| const `FirstSupervisorStrategy` | `FirstInteropFilterStrategy` |\n| config value `\"first-supervisor\"` | `\"first-interop-filter\"` |\n\nAlso renames internal types/fields/options (`firstInteropFilterStrategyImpl`, `skipOnNoInteropFilterBackend`, `WithSkipOnNoInteropFilterBackend`, etc.), the `\"no healthy ... backends found\"` error message, and comments/log fields.\n\n**Left as-is:** the spec link `.../specs/interop/supervisor.md` in `backend.go` — it's a real filename and changing the path would 404.\n\n## ⚠️ Breaking changes\n- Dashboards/alerts referencing `rpc_supervisor_checks_total` or the `supervisor_url` label must be updated.\n- Deployments with `strategy = \"first-supervisor\"` must switch to `\"first-interop-filter\"` — **no backward-compat alias**.\n\n## Testing\n- `go build ./...`, `gofmt` clean\n- Interop unit + integration tests pass.\n\n---\nSplit out from #642. The new `rpc_interop_validations_total` metric is in a separate PR (#643).",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-06-04T01:04:46Z",
+      "mergedAt": null,
+      "additions": 49,
+      "deletions": 49
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 8,
+    "deletions": 8,
+    "files": 1,
+    "commitCount": 15
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "docs(op-conductor-ops): update README for installable package layout",
+      "prNumber": 639,
+      "type": "docs",
+      "body": "## Summary\n\n`op-conductor-ops` was converted to an installable Python package with a poetry script entry point in #638, but the README still documents the old invocation. This updates the setup/usage docs to match.\n\n### What was stale\n- Ref",
+      "files": [
+        "op-conductor-ops/README.md"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 330.89825820325393,
+      "prScore": 273.980258203254,
+      "issueScore": 16.299999999999997,
+      "reviewScore": 39.5,
+      "commentScore": 1.1179999999999999,
+      "summary": null
+    },
     {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 200.47306989444968,
-      "prScore": 181.19506989444966,
+      "totalScore": 241.66736005087193,
+      "prScore": 222.38936005087197,
       "issueScore": 0,
       "reviewScore": 18.5,
       "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 152.8263957363612,
+      "prScore": 141.02639573636122,
+      "issueScore": 6.2,
+      "reviewScore": 5,
+      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
@@ -50,6 +128,16 @@
       "summary": null
     },
     {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 131.142982925297,
+      "prScore": 131.142982925297,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
       "totalScore": 127.02357768836114,
@@ -60,53 +148,93 @@
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 114.53729628195791,
-      "prScore": 80.7572962819579,
-      "issueScore": 8.1,
-      "reviewScore": 25,
-      "commentScore": 0.6799999999999999,
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 103.34780938638627,
+      "prScore": 63.56980938638627,
+      "issueScore": 4,
+      "reviewScore": 35,
+      "commentScore": 0.7779999999999999,
       "summary": null
     },
     {
-      "username": "donoso-eth",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 74.970149761243,
-      "prScore": 74.970149761243,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 103.11113792258539,
+      "prScore": 35.773137922585384,
+      "issueScore": 2,
+      "reviewScore": 64.5,
+      "commentScore": 0.838,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 79.88573665145705,
+      "prScore": 69.00573665145706,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.8799999999999999,
       "summary": null
     },
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 63.405754756364374,
+      "totalScore": 70.40575475636437,
       "prScore": 43.06575475636437,
-      "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 60.3972544346932,
-      "prScore": 49.3972544346932,
       "issueScore": 2,
-      "reviewScore": 9,
-      "commentScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 58.770850110377594,
+      "totalScore": 68.7708501103776,
       "prScore": 35.07085011037759,
       "issueScore": 0,
-      "reviewScore": 23.5,
+      "reviewScore": 33.5,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 64.8972544346932,
+      "prScore": 49.3972544346932,
+      "issueScore": 2,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 61.33394763639919,
+      "prScore": 10.793947636399185,
+      "issueScore": 4,
+      "reviewScore": 46,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 58.02714216883812,
+      "prScore": 47.04914216883812,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.978,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 53.08786491299311,
+      "prScore": 17.087864912993112,
+      "issueScore": 0,
+      "reviewScore": 36,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -130,63 +258,23 @@
       "summary": null
     },
     {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 48.58786491299311,
-      "prScore": 17.087864912993112,
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 46.2000251005511,
+      "prScore": 45.4220251005511,
       "issueScore": 0,
-      "reviewScore": 31.5,
+      "reviewScore": 0,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 33.39339727056968,
+      "prScore": 28.39339727056968,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "smartcontracts",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
-      "totalScore": 47.68714216883812,
-      "prScore": 47.04914216883812,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.6379999999999999,
-      "summary": null
-    },
-    {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 42.616872820554384,
-      "prScore": 21.276872820554384,
-      "issueScore": 2,
-      "reviewScore": 19,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 39.00730614433405,
-      "prScore": 5.107306144334054,
-      "issueScore": 2,
-      "reviewScore": 31.5,
-      "commentScore": 0.4,
-      "summary": null
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 38.258962754880955,
-      "prScore": 27.718962754880952,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 35.457386587284155,
-      "prScore": 30.857386587284157,
-      "issueScore": 4.2,
-      "reviewScore": 0,
-      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -200,6 +288,16 @@
       "summary": null
     },
     {
+      "username": "dhyaniarun1993",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
+      "totalScore": 31.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ZakAyesh",
       "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
       "totalScore": 31.009243251692858,
@@ -210,13 +308,13 @@
       "summary": null
     },
     {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 23.17871895621705,
-      "prScore": 22.83871895621705,
+      "username": "fakedev9999",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/71915289?u=f73e198cb79fc2db8b768a87e3fafff378f5d6cd&v=4",
+      "totalScore": 22.65576722522779,
+      "prScore": 22.65576722522779,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.33999999999999997,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -230,13 +328,13 @@
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 20.84,
-      "prScore": 0,
-      "issueScore": 2,
-      "reviewScore": 18.5,
-      "commentScore": 0.33999999999999997,
+      "username": "optibotpiper",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 15.58122457733622,
+      "prScore": 6.58122457733622,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -260,12 +358,52 @@
       "summary": null
     },
     {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "avalonche",
       "avatarUrl": "https://avatars.githubusercontent.com/u/32314588?u=3017276666c036e22fdcfe0ffb05cb046249e00a&v=4",
       "totalScore": 9.510292546497023,
       "prScore": 9.510292546497023,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "warp-svg",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/230904805?u=fa9045fa0c125fa978dc491a64100e5393bfc5e0&v=4",
+      "totalScore": 7.9650965380214815,
+      "prScore": 7.765096538021481,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -280,18 +418,8 @@
       "summary": null
     },
     {
-      "username": "OptimismBot",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "optibotpiper",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "username": "karlb",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/144773?v=4",
       "totalScore": 4.5,
       "prScore": 0,
       "issueScore": 0,
@@ -310,6 +438,16 @@
       "summary": null
     },
     {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "cmdenney",
       "avatarUrl": "https://avatars.githubusercontent.com/u/164827431?u=62cfd455f1dda506ad28e649da04919504365654&v=4",
       "totalScore": 2,
@@ -317,6 +455,26 @@
       "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "wjmelements",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/799573?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -328,11 +486,21 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "MYSTIC-MATT",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192229539?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 6,
+  "mergedPRs": 1,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 23
+  "activeContributors": 30
 }

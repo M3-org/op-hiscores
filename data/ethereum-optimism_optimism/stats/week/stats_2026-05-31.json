@@ -5,8 +5,32 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-05-31 to 2026-06-07, ethereum-optimism/optimism had 31 new PRs (20 merged), 12 new issues, and 37 active contributors.",
+  "overview": "From 2026-05-31 to 2026-06-07, ethereum-optimism/optimism had 67 new PRs (30 merged), 24 new issues, and 47 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABESXi0g",
+      "title": "[Flake] op-e2e-fuzz: 'Too long with no output (15m)' — parallel buffers fuzz output until job completion",
+      "author": "ajsutton",
+      "number": 21191,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Filed by Claude (AI assistant) on behalf of Adrian Sutton.\n\n## Summary\n\nThe `op-e2e-fuzz` CircleCI job intermittently fails with:\n\n```\nToo long with no output (exceeded 15m0s): context deadline exceeded\n```\n\nThe `Fuzz` step is killed by CircleCI's `no_output_timeout: 15m` before producing any output.\n\n## Evidence\n\n- Failing run: https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/127181/workflows/3f6b0990-218b-47ef-9826-bd2df41f008f/jobs/5158358 (job `5158358`)\n- Step log (entire output before the kill):\n  ```\n  parallel --tag -N1 \"go test -run NOTAREALTEST -tags cgo_test -v -fuzztime 10s -fuzz {} ./opgeth\" ::: FuzzFjordCostFunction FuzzFastLzGethSolidity FuzzFastLzCgo\n  error: Recipe `fuzz` failed on line 72 with exit code 255\n  Too long with no output (exceeded 15m0s): context deadline exceeded\n  ```\n- Frequency (CircleCI Insights, `main` workflow): **3 failures / 733 runs (~99.6% success)**.\n- Job duration profile: median 395s, **p95 824s (~14m)**, max 1476s (~24m) — routinely runs close to the 15-minute no-output timeout.\n\n## Likely Mechanism\n\n`op-e2e/justfile` runs the three fuzz targets under GNU `parallel --tag` (line 72). `parallel` defaults to `--group`, which **buffers each job's output and only flushes it when that job completes**. CircleCI's `no_output_timeout` therefore measures the gap between job completions, not actual test progress.\n\n`FuzzFjordCostFunction` spins up a full op-geth system (`NewOpGeth`) in *every* fuzzing worker process. Under CPU contention on the shared CI box this setup is slow and is not bounded by the test's 60s context (`gethNode.Node.Start()` is not ctx-bounded). When `FuzzFjordCostFunction` finishes more than 15 minutes after the two fast targets, there is a >15-minute window with no output and CircleCI kills the step — even though the test is still making progress.\n\n## Affected\n- Package: `op-e2e/opgeth` (`github.com/ethereum-optimism/optimism/op-e2e/opgeth`)\n- Recipe: `op-e2e/justfile` `fuzz`\n- CI job: `op-e2e-fuzz`\n\nA fix PR is in progress. Root cause and fix will be validated by reproduction before the PR is opened.\n",
+      "createdAt": "2026-06-03T18:40:13Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM7ydM0t",
+      "title": "op-challenger-runner uses op-reth for OP Mainnet",
+      "author": "pauldowman",
+      "number": 19517,
+      "repository": "ethereum-optimism/optimism",
+      "body": "To ensure readiness of op-reth's historical proofs support (and kona's support for the `L2PayloadWitness` hint) we need to set up op-challenger-runner with kona using an op-reth node for OP Mainnet.",
+      "createdAt": "2026-03-12T22:53:34Z",
+      "closedAt": "2026-06-03T20:27:27Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
     {
       "id": "I_kwDODjvEJM8AAAABBC52Sw",
       "title": "Interop Proofs Devnet",
@@ -39,30 +63,6 @@
       "repository": "ethereum-optimism/optimism",
       "body": "## Summary\n\nIn `op-supernode`, interop activity can get **permanently stuck** with the error `output at block N: engine client not initialized`, even when every execution layer (EL) is fully synced and the in-process op-node virtual nodes (VNs) are processing blocks normally.\n\nThe interop activity uses a **separate, dedicated EL connection** (the \"engine controller\") that is distinct from each VN's own op-node engine connection. If that engine controller fails to connect at startup (e.g. the EL is briefly unreachable when the supernode boots), it is **never retried** for the lifetime of the VN, and interop never makes progress. Only restarting the **supernode** recovers it — restarting the EL does **not**.\n\n## Observed behavior\n\nOn an internal interop devnet (3 supernodes, 2 chains each), one supernode never started processing interop:\n\n- `supernode_interop_verified_timestamp = 0` (flat), `rate(supernode_interop_timestamps_verified_total) = 0`.\n- The cold-start backfill looped every ~2s, indefinitely:\n\n```\nlvl=info msg=\"log backfill: sealing logs\" activity=interop chain=420120124 from=0 to=5\nlvl=warn msg=\"interop cold start step failed, will retry\" activity=interop \\\n  err=\"backfill: chain 420120124: backfill: chain 420120124: output at block 0: engine client not initialized\"\n```\n\n- Meanwhile **both VNs were healthy**: inserting L2 unsafe blocks, advancing sync, `successfully processed payload`. So the ELs were reachable and synced — only interop's dedicated engine-controller connection was dead.\n- The two supernodes that had been **restarted** were processing interop fine (`verified_timestamp` advancing).\n\n### The supernode booted before its EL was ready\n\nThe stuck supernode started ~43 min before its dedicated `…-ops-reth-…` EL pods came up. With the engine controller's 10s setup timeout, the initial `NewEngineControllerFromConfig` call almost certainly failed → `c.engine` left `nil`.\n\n## Reproduction / confirmation experiment\n\nTo isolate whether the fault was the EL connection or the supernode, we restarted **both ELs** of the stuck supernode (without touching the supernode):\n\n- At restart, both VNs logged the disconnect and recovered:\n  ```\n  lvl=warn msg=\"Engine temporary error\" chain_id=420120124 vn_id=2f2c \\\n    err=\"...: Post \\\"http://execution-engine.<el>.svc.cluster.local:8551\\\": dial tcp ...: connect: connection refused\"\n  ```\n- 90s+ later: interop was **still stuck** (`engine client not initialized`, `verified_timestamp` still 0), and `\"virtual node exited\"` count since boot remained **0** — the VN reconnected to the EL transparently and never exited.\n\n**Conclusion:** an EL restart does not recover interop; only a supernode (or VN) restart does. This matches the code path below exactly.\n\n## Root cause\n\n[`op-supernode/supernode/chain_container/chain_container.go#L320-L333`](https://github.com/ethereum-optimism/optimism/blob/ca557b86e12b9f37bc28f407b1df8d2f7107e6ff/op-supernode/supernode/chain_container/chain_container.go#L320-L333):\n\n```go\n// Initialize engine controller if not yet connected (retries on each VN restart)\nif c.engine == nil && c.vncfg.L2 != nil {\n    setupCtx, setupCancel := context.WithTimeout(ctx, 10*time.Second)\n    engLog := c.log.New(\"chain_id\", c.chainID.String(), \"component\", \"engine_controller\")\n    if eng, engErr := engine_controller.NewEngineControllerFromConfig(setupCtx, engLog, c.vncfg); engErr != nil {\n        c.log.Error(\"failed to setup engine controller\", \"err\", engErr) // c.engine stays nil\n    } else {\n        c.engine = eng\n    }\n    setupCancel()\n}\n\n// start the virtual node\nerr := vn.Start(ctx) // blocks for the entire VN lifetime\n```\n\n- The engine controller (`NewEngineControllerFromConfig`, [`engine_controller.go#L77`](https://github.com/ethereum-optimism/optimism/blob/ca557b86e12b9f37bc28f407b1df8d2f7107e6ff/op-supernode/supernode/chain_container/engine_controller/engine_controller.go#L77)) is a **separate** EL connection used by interop, independent of op-node's own engine connection.\n- It is only (re)initialized when `c.engine == nil` at the **top of the chain-container restart loop**, immediately before `vn.Start(ctx)`.\n- `vn.Start(ctx)` **blocks for the whole VN lifetime**. The loop only iterates again when the VN exits. But op-node treats an EL disconnect as a **temporary** error and reconnects without exiting — so a healthy VN never triggers another loop iteration.\n- Therefore, if the initial engine-controller setup fails (EL down / 10s timeout at boot), `c.engine` stays `nil` and is **never retried**.\n- Every interop backfill call then fails: `chain.OutputV0AtBlockNumber` → `c.engine == nil` → `ErrNoEngineClient` ([`engine_controller.go#L90`](https://github.com/ethereum-optimism/optimism/blob/ca557b86e12b9f37bc28f407b1df8d2f7107e6ff/op-supernode/supernode/chain_container/engine_controller/engine_controller.go#L90), surfaced via [`super_authority.go#L149-L153`](https://github.com/ethereum-optimism/optimism/blob/ca557b86e12b9f37bc28f407b1df8d2f7107e6ff/op-supernode/supernode/chain_container/super_authority.go#L149-L153) and [`log_backfill.go#L181-L183`](https://github.com/ethereum-optimism/optimism/blob/ca557b86e12b9f37bc28f407b1df8d2f7107e6ff/op-supernode/supernode/activity/interop/log_backfill.go#L181-L183)).\n\nThe code comment \"retries on each VN restart\" is misleading: VN restarts effectively never happen for a healthy-but-engine-controllerless VN, so the retry never fires.\n\n## Suggested changes\n\n1. **Decouple engine-controller initialization from the VN restart loop.** Run a background goroutine that retries `NewEngineControllerFromConfig` (with backoff) until it connects, independent of VN lifecycle. This is the most direct fix.\n2. **Or make the engine client lazy / self-reconnecting** like op-node's own engine client, so an individual `OutputV0AtBlockNumber`/`PayloadByNumber` call re-dials instead of latching `nil` forever.\n3. **Guard `c.engine` with a mutex (or atomic.Pointer).** It is currently written in the chain-container loop goroutine and read concurrently from interop goroutines (`OutputV0AtBlockNumber`, `FetchReceipts`, etc.) without synchronization — a latent data race that any background-retry fix must address anyway.\n4. **Surface a clear, persistent signal** when the engine controller is unavailable (a metric/health gauge, or escalate the repeated `engine client not initialized` from warn to a sticky error), so this state is alertable instead of silently flat-lining `supernode_interop_verified_timestamp`.\n\n## Affected version\n\nReproduced at commit `ca557b86e12b9f37bc28f407b1df8d2f7107e6ff` (`op-interop-filter/v0.2.1-rc.1`).\n",
       "createdAt": "2026-06-01T19:54:44Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABEKV1xQ",
-      "title": "Invalid interop message recovery runbook",
-      "author": "ajsutton",
-      "number": 21161,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Write and test a runbook for recovering a chain after an invalid interop message is detected and a reorg is triggered.\n\nTesting has shown a number of systems which don't smoothly handle the large reorg caused by an invalid interop message. Since it's important that invalid messages are never accepted, requiring manual intervention is a reasonable \"safety over liveness\" policy. We need alerting in place to detect the situation and a clear runbook to follow in response.",
-      "createdAt": "2026-06-02T19:06:54Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABEIYFCA",
-      "title": "op-reth: interop tx pool does not resume after failsafe is disabled (requires restart)",
-      "author": "jelias2",
-      "number": 21149,
-      "repository": "ethereum-optimism/optimism",
-      "body": "## Summary\n\nWhen the op-interop-filter failsafe is enabled and then disabled, **op-reth's transaction pool does not resume accepting interop (executing-message) transactions** until op-reth is restarted. The filter and `proxyd` recover within seconds, but op-reth stays in the failsafe-evicted state and silently drops interop txs (accepted by the RPC, never included; receipt lookup returns `not found`).\n\nObserved on **interop-bench-3** with **op-reth `v2.2.6-rc.3`** on 2026-06-02.\n\n## Steps to reproduce\n\n1. Healthy two-chain interop devnet (executing messages land normally).\n2. Enable failsafe on the op-interop-filter: `admin_setFailsafeEnabled true`.\n3. Submit an executing message → correctly rejected (expected).\n4. Disable failsafe: `admin_setFailsafeEnabled false`.\n5. Submit executing messages → **still dropped for many minutes** (`not found` / never included), even though failsafe is off.\n\n## Evidence that op-reth is the stuck component\n\n- **Filter recovered:** `interop_checkAccessList([], \"unsafe\", …)` against the filter returns `null` (success), and a fabricated entry returns `failed to parse access entry` — i.e. the filter is healthy and actively validating, not in failsafe.\n- **proxyd recovered (~10s):** chain B `proxyd-public` logs flip back to `interop access list validated successfully` within ~10s of disabling failsafe (it marks the filter backend unhealthy for `load_balancing_unhealthiness_timeout`, default 10s, then re-probes).\n- **op-reth did NOT recover:** op-reth logged\n  ```\n  txpool::interop  failsafe enabled: evicting all interop transactions\n  ```\n  on activation and logged **no recovery**. Interop executing messages kept failing for >5 minutes after failsafe was cleared, while the filter and proxyd were both healthy. An independent `op-benchmark interop` re-check showed `0/1` executing messages succeeding post-toggle (vs `5/5` before any toggling).\n\nSo with the filter + proxyd healthy and failsafe off, op-reth's pool is the only layer still rejecting interop txs.\n\n## Expected\n\nAfter failsafe is disabled, op-reth should re-poll/re-validate and resume accepting interop transactions without operator intervention.\n\n## Actual\n\nop-reth's interop tx-pool stays evicted until the op-reth process is restarted:\n```\nkubectl rollout restart statefulset/op-reth -n <chain-op-reth-namespace>\n```\n\n## Notes\n\n- May be version-specific to `op-reth v2.2.6-rc.3`; please confirm against current builds.\n- Documented in the op-interop-filter failsafe runbook (RB-336).",
-      "createdAt": "2026-06-02T14:13:06Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 1
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 16675,
-    "deletions": 2070,
-    "files": 269,
-    "commitCount": 176
+    "additions": 19164,
+    "deletions": 5382,
+    "files": 414,
+    "commitCount": 299
   },
   "completedItems": [
     {
@@ -331,6 +331,16 @@
       ]
     },
     {
+      "title": "perf(ci): make rust skip jobs trivial",
+      "prNumber": 20863,
+      "type": "other",
+      "body": "\r\n\r\nFor docs-only / no-rust-change PRs, both Rust fast paths now complete essentially immediately:\r\n\r\n- `rust-ci-gate-short` → only `required-rust-ci`\r\n- `rust-e2e-gate-skip` → only `required-rust-e2e`\r\n\r\nThis keeps required check signaling",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
       "title": "docs: add U19 feature pages for L2CM and Osaka on L2",
       "prNumber": 20971,
       "type": "feature",
@@ -342,6 +352,39 @@
         "docs/public-docs/op-stack/features/l2-contract-manager.mdx",
         "docs/public-docs/op-stack/features/osaka-on-l2.mdx",
         "docs/public-docs/op-stack/protocol/network-upgrades.mdx"
+      ]
+    },
+    {
+      "title": "chore: reduce low-risk dependency surface",
+      "prNumber": 20988,
+      "type": "other",
+      "body": "## Summary\n\nThis PR removes a small set of low-risk dependency overreach in the Optimism monorepo to reduce supply-chain surface and simplify CVE management. Protocol behavior and validation decisions are unchanged. The user-visible changes",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".gitmodules",
+        "cannon/cmd/run.go",
+        "go.mod",
+        "go.sum",
+        "op-chain-ops/cmd/check-canyon/main.go",
+        "op-chain-ops/cmd/check-derivation/main.go",
+        "op-chain-ops/cmd/check-prestate/main.go",
+        "op-chain-ops/cmd/op-simulate/main.go",
+        "op-chain-ops/cmd/receipt-reference-builder/main.go",
+        "op-node/p2p/rpc_server.go",
+        "op-service/ioutil/progress.go",
+        "op-service/metrics/doc/cmd.go",
+        "op-service/testutils/kurtosisutil/kurtosis.go",
+        "op-service/testutils/kurtosisutil/runner.go",
+        "op-validator/pkg/validations/output.go",
+        "ops/check-changed/main.py",
+        "ops/check-changed/requirements.txt",
+        "packages/contracts-bedrock/foundry.toml",
+        "packages/contracts-bedrock/lib/solady-v0.0.245",
+        "packages/contracts-bedrock/scripts/check-runner/main.go",
+        "packages/contracts-bedrock/scripts/checks/common/util.go",
+        "packages/contracts-bedrock/scripts/checks/common/util_test.go",
+        "rust/op-rbuilder/.gitmodules",
+        "rust/package-lock.json"
       ]
     },
     {
@@ -371,6 +414,49 @@
         "docs/public-docs/releases/proxyd.mdx",
         "docs/public-docs/scripts/generate-releases.ts",
         "docs/public-docs/tsconfig.json"
+      ]
+    },
+    {
+      "title": "feat(kona): validate SDM PostExec in native single-chain proofs",
+      "prNumber": 21034,
+      "type": "feature",
+      "body": "   - Add acceptance coverage for `kona-host --native` validating SDM `PostExec` blocks across Interop-active and Interop-inactive Kona rollup configs.\r\n   - Add Kona-native devstack support for overriding Interop activation and passing depe",
+      "files": [
+        "op-acceptance-tests/tests/interop_and_sdm_on_l2_test.go",
+        "op-challenger/game/fault/trace/vm/kona_server_executor.go",
+        "op-devstack/presets/minimal_with_kona.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/shared/rustbin/kona_host_native.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "rust/kona/bin/client/src/single.rs",
+        "rust/kona/bin/host/src/single/cfg.rs",
+        "rust/kona/bin/host/src/single/local_kv.rs",
+        "rust/kona/crates/proof/proof/src/boot.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/core.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/mod.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/single.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/span.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/transactions.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/tx_data/mod.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/tx_data/wrapper.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/validity.rs",
+        "rust/kona/crates/protocol/protocol/src/lib.rs",
+        "rust/kona/crates/protocol/protocol/src/utils.rs",
+        "go.mod",
+        "go.sum",
+        "op-acceptance-tests/tests/interop/proofs-singlechain/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/superfaultproofs/singlechain.go",
+        "op-chain-ops/pkg/sdm/helpers.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/presets/options_test.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "rust/kona/crates/protocol/genesis/src/rollup.rs",
+        "rust/kona/crates/proof/executor/src/builder/core.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/transaction/envelope.rs"
       ]
     },
     {
@@ -441,6 +527,20 @@
       ]
     },
     {
+      "title": "feat(op-reth): seed slot-preimage DB during state-dump import",
+      "prNumber": 21108,
+      "type": "feature",
+      "body": "## Problem\n\nSyncing OP Mainnet from its bedrock state with a recent op-reth crashes during backfill:\n\n```\nERROR Stage encountered a fatal error: missing slot preimage for 0x… (addr=0x…) stage=Execution\nERROR backfill sync failed err=missing",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/op-reth/crates/cli/Cargo.toml",
+        "rust/op-reth/crates/cli/src/commands/init_state.rs",
+        "rust/op-reth/crates/cli/src/commands/mod.rs",
+        "rust/op-reth/crates/cli/src/commands/slot_preimages_seed.rs"
+      ]
+    },
+    {
       "title": "feat(op-supernode,op-sync-tester): drive supernode VN via sync-tester EL + finalize anchor at genesis",
       "prNumber": 21107,
       "type": "feature",
@@ -492,6 +592,72 @@
         "op-dispute-mon/mon/withdrawals_test.go",
         "packages/contracts-bedrock/snapshots/abi_loader.go",
         "packages/contracts-bedrock/snapshots/abi_loader_test.go"
+      ]
+    },
+    {
+      "title": "Lagoon hardfork rename",
+      "prNumber": 21105,
+      "type": "other",
+      "body": "Renames the Interop hardfork to Lagoon across the OP Stack. Relands the closed PR #20430; closes #20764.\n\n### What's renamed (fork identity)\n\n- rollup.Config.InteropTime → LagoonTime (Go)\n- HardForkConfig::interop_time → lagoon_time (Rust)\n",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/rollup.mdx",
+        "docs/public-docs/node-operators/reference/op-node-config.mdx",
+        "op-acceptance-tests/tests/interop/upgrade-no-supervisor/interop_contracts_test.go",
+        "op-acceptance-tests/tests/interop/upgrade-singlechain/crossl2inbox_test.go",
+        "op-acceptance-tests/tests/interop/upgrade/post_test.go",
+        "op-acceptance-tests/tests/interop/upgrade/pre_test.go",
+        "op-acceptance-tests/tests/superfaultproofs/activation_boundary.go",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-acceptance-tests/tests/supernode/interop/eth_bridge_test.go",
+        "op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go",
+        "op-chain-ops/genesis/config.go",
+        "op-chain-ops/genesis/config_test.go",
+        "op-chain-ops/genesis/genesis.go",
+        "op-chain-ops/genesis/layer_two.go",
+        "op-chain-ops/interopgen/config/json_test.go",
+        "op-chain-ops/interopgen/config/rollup_config_set.go",
+        "op-chain-ops/interopgen/config/testfiles/rollup_set.json",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-chain-ops/interopgen/deploy_test.go",
+        "op-chain-ops/interopgen/recipe.go",
+        "op-core/forks/forks.go",
+        "op-core/forks/forks_test.go",
+        "op-core/interop/depset/links.go",
+        "op-core/superchain/types.go",
+        "op-deployer/pkg/deployer/pipeline/l2genesis_test.go",
+        "op-deployer/pkg/deployer/state/deploy_config_test.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/world.go",
+        "op-e2e/actions/helpers/l2_sequencer.go",
+        "op-e2e/actions/proofs/nut_bundle_activation_test.go",
+        "op-e2e/config/init.go",
+        "op-e2e/e2eutils/setup.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-node/config/config.go",
+        "op-node/rollup/chain_spec.go",
+        "op-node/rollup/chain_spec_test.go",
+        "op-node/rollup/derive/attributes.go",
+        "op-node/rollup/derive/attributes_test.go",
+        "op-node/rollup/derive/l1_block_info_test.go",
+        "op-node/rollup/derive/span_batch_test.go",
+        "op-node/rollup/engine/engine_controller_test.go",
+        "op-node/rollup/sequencing/sequencer.go",
+        "op-node/rollup/superchain.go",
+        "op-node/rollup/superchain_test.go",
+        "op-node/rollup/types.go",
+        "op-node/rollup/types_test.go",
+        "op-node/service.go",
+        "op-devstack/sysgo/singlechain_supernode_synctester_variant.go",
+        "op-e2e/actions/proofs/helpers/env.go",
+        "op-node/rollup/derive/interop_activation_transactions.go",
+        "op-node/rollup/derive/interop_activation_transactions_test.go",
+        "op-node/rollup/derive/upgrade_transaction.go",
+        "op-acceptance-tests/tests/sdm/boundary_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-node/rollup/derive/batches_test.go"
       ]
     },
     {
@@ -595,17 +761,144 @@
         "op-supernode/supernode/chain_container/engine_controller/engine_controller_test.go",
         "op-supernode/supernode/supernode.go"
       ]
+    },
+    {
+      "title": "op-up: delete",
+      "prNumber": 21207,
+      "type": "other",
+      "body": "",
+      "files": [
+        ".circleci/continue/main.yml",
+        "README.md",
+        "op-chain-ops/cmd/check-interop/run.sh",
+        "op-up/.gitignore",
+        "op-up/.goreleaser.yaml",
+        "op-up/Dockerfile",
+        "op-up/install.sh",
+        "op-up/justfile",
+        "op-up/main.go",
+        "op-up/main_test.go",
+        "op-up/smoke.go"
+      ]
+    },
+    {
+      "title": "refactor: move kvstore to op-challenger and interop transition types to op-service/eth",
+      "prNumber": 21176,
+      "type": "refactor",
+      "body": "Two related relocations that remove cross-package coupling on op-program.\n\n- **kvstore → op-challenger.** The generic preimage key-value store moves from `op-program/host/kvstore` to `op-challenger/kvstore` with no op-program dependencies. ",
+      "files": [
+        "op-acceptance-tests/tests/superfaultproofs/optimistic_pairing.go",
+        "op-acceptance-tests/tests/superfaultproofs/singlechain.go",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-challenger/game/fault/trace/cannon/provider.go",
+        "op-challenger/game/fault/trace/super/provider.go",
+        "op-challenger/game/fault/trace/super/provider_test.go",
+        "op-challenger/game/fault/trace/super/split_adapter_test.go",
+        "op-challenger/game/fault/trace/utils/preimage_test.go",
+        "op-challenger/kvstore/directory.go",
+        "op-challenger/kvstore/directory_test.go",
+        "op-challenger/kvstore/file.go",
+        "op-challenger/kvstore/file_test.go",
+        "op-challenger/kvstore/format.go",
+        "op-challenger/kvstore/format_test.go",
+        "op-challenger/kvstore/kv.go",
+        "op-challenger/kvstore/kv_test.go",
+        "op-challenger/kvstore/mem.go",
+        "op-challenger/kvstore/mem_test.go",
+        "op-challenger/kvstore/pebble.go",
+        "op-challenger/kvstore/pebble_test.go",
+        "op-challenger/kvstore/splitter.go",
+        "op-challenger/kvstore/splitter_test.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-e2e/actions/proofs/block_data_hint_test.go",
+        "op-e2e/actions/proofs/helpers/runner.go",
+        "op-e2e/actions/proofs/precompile_test.go",
+        "op-program/client/interop/consolidate.go",
+        "op-program/client/interop/interop.go",
+        "op-program/client/interop/interop_test.go",
+        "op-program/client/interop/oracle.go",
+        "op-program/client/interop/oracle_test.go",
+        "op-program/client/l2/cache.go",
+        "op-program/client/l2/oracle.go",
+        "op-program/client/l2/test/stub_oracle.go",
+        "op-program/host/cmd/main_test.go",
+        "op-program/host/common/common.go",
+        "op-program/host/common/l2_store.go",
+        "op-program/host/common/l2_store_test.go",
+        "op-program/host/common/local_preimage.go",
+        "op-program/host/common/local_preimage_test.go",
+        "op-program/host/config/config.go",
+        "op-program/host/config/config_test.go",
+        "op-program/host/flags/flags.go",
+        "op-program/host/host.go",
+        "op-program/host/host_test.go",
+        "op-program/host/prefetcher/prefetcher.go",
+        "op-program/host/prefetcher/prefetcher_test.go",
+        "op-program/host/types/types.go",
+        "op-service/eth/transition_state.go",
+        "op-service/eth/transition_state_test.go"
+      ]
+    },
+    {
+      "title": "test(op-e2e): remove system_fpp_test.go",
+      "prNumber": 21174,
+      "type": "tests",
+      "body": "Removes `op-e2e/system/proofs/system_fpp_test.go` (and `build_helper.go`, which only it used).\r\n\r\nThis was the only full-system op-e2e test driving the legacy op-program client directly (in-process and as a detached subprocess). Its coverag",
+      "files": [
+        "op-e2e/system/proofs/build_helper.go",
+        "op-e2e/system/proofs/system_fpp_test.go"
+      ]
+    },
+    {
+      "title": "chore: remove unused kona interop action-test recipe",
+      "prNumber": 21173,
+      "type": "tests",
+      "body": "The `action-tests-interop` / `action-tests-interop-run` recipes in `rust/kona/tests/justfile` are dead code: they target `op-e2e/actions/interop`, which was deleted when interop fault-proof coverage moved to `op-acceptance-tests` (where it ",
+      "files": [
+        ".circleci/continue/rust-e2e.yml",
+        "rust/kona/tests/justfile"
+      ]
+    },
+    {
+      "title": "fix(ci): force always-succeed on rust skip-path gates",
+      "prNumber": 21172,
+      "type": "bugfix",
+      "body": "## Problem\n\nDocs-only PRs were failing CI with:\n\n```\nrequired-rust-e2e: ERROR: no dependency IDs found — possible API failure or gate job \"required-rust-e2e\" not found in workflow\n```\n\n#20863 (\"make rust skip jobs trivial\") correctly stripp",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
     }
   ],
   "topContributors": [
     {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 346.04609301239566,
+      "prScore": 280.12809301239565,
+      "issueScore": 16.299999999999997,
+      "reviewScore": 48.5,
+      "commentScore": 1.1179999999999999,
+      "summary": null
+    },
+    {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 200.47306989444968,
-      "prScore": 181.19506989444966,
+      "totalScore": 241.66736005087193,
+      "prScore": 222.38936005087197,
       "issueScore": 0,
       "reviewScore": 18.5,
       "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 152.8263957363612,
+      "prScore": 141.02639573636122,
+      "issueScore": 6.2,
+      "reviewScore": 5,
+      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
@@ -619,13 +912,13 @@
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 129.68513109109958,
-      "prScore": 86.90513109109959,
-      "issueScore": 8.1,
-      "reviewScore": 34,
-      "commentScore": 0.6799999999999999,
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 131.142982925297,
+      "prScore": 131.142982925297,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -639,43 +932,103 @@
       "summary": null
     },
     {
-      "username": "donoso-eth",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 74.970149761243,
-      "prScore": 74.970149761243,
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 103.34780938638627,
+      "prScore": 63.56980938638627,
+      "issueScore": 4,
+      "reviewScore": 35,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 103.11113792258539,
+      "prScore": 35.773137922585384,
+      "issueScore": 2,
+      "reviewScore": 64.5,
+      "commentScore": 0.838,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 79.88573665145705,
+      "prScore": 69.00573665145706,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.8799999999999999,
       "summary": null
     },
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 63.405754756364374,
+      "totalScore": 70.40575475636437,
       "prScore": 43.06575475636437,
-      "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 60.3972544346932,
-      "prScore": 49.3972544346932,
       "issueScore": 2,
-      "reviewScore": 9,
-      "commentScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 58.770850110377594,
+      "totalScore": 68.7708501103776,
       "prScore": 35.07085011037759,
       "issueScore": 0,
-      "reviewScore": 23.5,
+      "reviewScore": 33.5,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 64.8972544346932,
+      "prScore": 49.3972544346932,
+      "issueScore": 2,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 61.33394763639919,
+      "prScore": 10.793947636399185,
+      "issueScore": 4,
+      "reviewScore": 46,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 58.02714216883812,
+      "prScore": 47.04914216883812,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.978,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 53.08786491299311,
+      "prScore": 17.087864912993112,
+      "issueScore": 0,
+      "reviewScore": 36,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 53.03874405676815,
+      "prScore": 52.260744056768154,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.7779999999999999,
       "summary": null
     },
     {
@@ -699,63 +1052,13 @@
       "summary": null
     },
     {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 48.58786491299311,
-      "prScore": 17.087864912993112,
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 33.39339727056968,
+      "prScore": 28.39339727056968,
       "issueScore": 0,
-      "reviewScore": 31.5,
+      "reviewScore": 5,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "smartcontracts",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
-      "totalScore": 47.68714216883812,
-      "prScore": 47.04914216883812,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.6379999999999999,
-      "summary": null
-    },
-    {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 42.616872820554384,
-      "prScore": 21.276872820554384,
-      "issueScore": 2,
-      "reviewScore": 19,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 39.00730614433405,
-      "prScore": 5.107306144334054,
-      "issueScore": 2,
-      "reviewScore": 31.5,
-      "commentScore": 0.4,
-      "summary": null
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 38.258962754880955,
-      "prScore": 27.718962754880952,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 35.457386587284155,
-      "prScore": 30.857386587284157,
-      "issueScore": 4.2,
-      "reviewScore": 0,
-      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -769,6 +1072,16 @@
       "summary": null
     },
     {
+      "username": "dhyaniarun1993",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
+      "totalScore": 31.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ZakAyesh",
       "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
       "totalScore": 31.009243251692858,
@@ -779,13 +1092,13 @@
       "summary": null
     },
     {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 30.0174379124341,
-      "prScore": 29.6774379124341,
+      "username": "fakedev9999",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/71915289?u=f73e198cb79fc2db8b768a87e3fafff378f5d6cd&v=4",
+      "totalScore": 22.65576722522779,
+      "prScore": 22.65576722522779,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.33999999999999997,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -799,13 +1112,13 @@
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 20.84,
-      "prScore": 0,
-      "issueScore": 2,
-      "reviewScore": 18.5,
-      "commentScore": 0.33999999999999997,
+      "username": "optibotpiper",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 15.58122457733622,
+      "prScore": 6.58122457733622,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -829,12 +1142,52 @@
       "summary": null
     },
     {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "avalonche",
       "avatarUrl": "https://avatars.githubusercontent.com/u/32314588?u=3017276666c036e22fdcfe0ffb05cb046249e00a&v=4",
       "totalScore": 9.510292546497023,
       "prScore": 9.510292546497023,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "warp-svg",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/230904805?u=fa9045fa0c125fa978dc491a64100e5393bfc5e0&v=4",
+      "totalScore": 7.9650965380214815,
+      "prScore": 7.765096538021481,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -849,18 +1202,8 @@
       "summary": null
     },
     {
-      "username": "OptimismBot",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "optibotpiper",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "username": "karlb",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/144773?v=4",
       "totalScore": 4.5,
       "prScore": 0,
       "issueScore": 0,
@@ -876,6 +1219,16 @@
       "issueScore": 0,
       "reviewScore": 4.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -899,6 +1252,26 @@
       "summary": null
     },
     {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "wjmelements",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/799573?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "latifkasuli",
       "avatarUrl": "https://avatars.githubusercontent.com/u/105366031?u=264b50cfd1e24867982c44ccc0bd144da11d3623&v=4",
       "totalScore": 0.2,
@@ -907,11 +1280,21 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "MYSTIC-MATT",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/192229539?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 31,
-  "mergedPRs": 20,
-  "newIssues": 12,
-  "closedIssues": 48,
-  "activeContributors": 37
+  "newPRs": 67,
+  "mergedPRs": 30,
+  "newIssues": 24,
+  "closedIssues": 51,
+  "activeContributors": 47
 }
