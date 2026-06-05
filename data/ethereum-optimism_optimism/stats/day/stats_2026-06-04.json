@@ -5,9 +5,106 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-06-04 to 2026-06-05, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 2 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-06-04 to 2026-06-05, ethereum-optimism/optimism had 27 new PRs (32 merged), 5 new issues, and 28 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM76ofiS",
+      "title": "kona: Very high cardinality for exported metrics",
+      "author": "ngotchac",
+      "number": 19927,
+      "repository": "ethereum-optimism/optimism",
+      "body": "<!--\nNeed help?\nRefer to our contributing guidelines for additional information about making a good issue:\nhttps://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\n-->\n\n**Bug Description**\n<!--\nA clear and concise description of what the bug is.\n-->\n\nWhen scrapping the exported metrics of `kona` (from Prometheus for example), it creates a few series with **very high**cardinality:\n\nWhen fetching the `/metrics` endpoint, it fetches 80MB of data, and those metrics (top 7) have many many unique series:\n```\n    857 kona_node_dial_peer_error\n   1113 kona_node_dial_peer\n   1730 kona_node_peer_scores_count\n   1730 kona_node_peer_scores_sum\n   1802 kona_node_gossip_events\n  12110 kona_node_peer_scores\n1057180 kona_node_gossipsub_connection\n```\n\nThis destroys memory and disk usage on the ingester. \n\nI don't think it's wise nor useful to add each peer ID to `kona_node_gossipsub_connection` for example.\n\n**Steps to Reproduce**\n<!--\n1. Outline the steps to reproduce the bug.\n2. Be specific and detailed to help developers replicate the issue.\n-->\n\n**Expected behavior**\n<!--\nA clear and concise description of what you expected to happen.\n-->\n\n**Environment Information:**\n<!--\n - Operating System: [e.g. Ubuntu 20.04]\n - Package Version (or commit hash): [e.g. op-node v1.5.1, op-node c934019]\n-->\n\n**Configurations:**\n<!--\nCommand line flags or environment variables you're using.\n-->\n\n**Logs:**\n<!--\nLogs and/or error messages that help illustrate the issue.\n-->\n\n**Additional context**\n<!--\nAdd any other context about the problem here.\n-->\n\n---\n\n⚠️ **Notice:** Issues that do not include the following sections will be subject to closure:\n- Bug Description\n- Steps to Reproduce\n- Environment Information\n\nPlease ensure all required sections are filled out accurately to expedite the debugging process and improve issue resolution efficiency.",
+      "createdAt": "2026-04-04T13:15:33Z",
+      "closedAt": "2026-06-04T10:47:31Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABDsZGZw",
+      "title": "Integrate op-supernode with op-sync-tester + add extended nightly sync test",
+      "author": "karlfloersch",
+      "number": 21096,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWe have no automated sync-test coverage for **op-supernode**. The existing `op-sync-tester` harness (which mocks an EL to stress CL sync deterministically) is currently wired only to a standard **op-node** CL. We want to (1) integrate op-supernode with op-sync-tester so a supernode virtual node can be driven through sync scenarios, and (2) run an **extended sync test in nightly CI** so regressions (e.g. walkback/finality stalls) are caught automatically rather than discovered by hand on live devnets.\n\n## Current state\n\n- `op-sync-tester/synctester/` mocks an EL and exposes `SyncTesterEL` RPC endpoints that a CL drives for sync testing.\n- Devstack wiring exists for the op-node path:\n  - DSL: `op-devstack/dsl/sync_tester.go`, interface `op-devstack/stack/sync_tester.go`\n  - Preset: `op-devstack/presets/simple_with_synctester.go` (`NewSimpleWithSyncTester()`) wires sync tester -> `SyncTesterEL` -> a verifier op-node CL.\n  - Tests: `op-acceptance-tests/tests/sync_tester/` (`sync_tester_e2e`, `sync_tester_elsync`, `sync_tester_hfs`, `sync_tester_elsync_multi`).\n- op-supernode has a **separate** devstack path with no sync-tester hookup:\n  - `op-devstack/sysgo/l2_cl_supernode.go` (`SuperNode`, implements `L2CLNode`)\n  - Presets `NewTwoL2Supernode()` / `NewTwoL2SupernodeInterop()` in `op-devstack/presets/twol2.go`\n  - Acceptance tests under `op-acceptance-tests/tests/supernode/`\n- **Gap:** nothing points the sync tester's mocked EL at a supernode virtual node. Supernode sync behavior (EL sync, head-first sync, deep reorg/walkback, finality advancement) is untested in CI.\n\n## Proposed work\n\n### A. Integrate op-supernode with op-sync-tester\n- Add a devstack preset (e.g. `NewSupernodeWithSyncTester()` in `op-devstack/presets/`) that wires a sync-tester `SyncTesterEL` as the EL endpoint for one or more supernode virtual nodes (mirroring `simple_with_synctester.go`, but using `sysgo/l2_cl_supernode.go`).\n- Ensure the supernode VN engine config can target the sync-tester EL RPC (per-chain `ENGINE_KIND` / EL RPC plumbing).\n- Add a baseline acceptance test under `op-acceptance-tests/tests/supernode/sync_tester/` proving a supernode VN completes an EL sync against the mocked EL.\n\n### B. Extended sync test\n- Add a longer-running variant that exercises the failure modes we actually hit operationally: large unsafe<->safe gap / deep walkback, cross-safe advancement across the interop set, and finality advancing off genesis (local-finalized gating).\n- Tag it so it does **not** run on every PR (the acceptance suite currently has no gate/allowlist, so all tests in `tests/...` run by default). Use a build tag or env-gated skip so it is nightly-only.\n\n### C. Nightly CI wiring\n- Model on the existing `contracts-bedrock-heavy-fuzz-nightly` pattern:\n  - Define a job (e.g. `supernode-sync-tester-extended-nightly`) in `.circleci/continue/main.yml`.\n  - Add a workflow param `c-run_scheduled_supernode_sync_tester: {type: boolean, default: false}` and a `when:`-gated workflow.\n  - Route it under a schedule in `.circleci/config.yml` (the `scheduled_pipeline` case block, ~L211-217), e.g. under `build_daily` or a new `build_nightly`.\n  - Create the schedule in the CircleCI UI.\n\n## Acceptance criteria\n- [ ] A devstack preset wires op-supernode to op-sync-tester.\n- [ ] A baseline supernode sync-tester acceptance test passes locally and in the standard suite.\n- [ ] An extended supernode sync test exists, gated out of per-PR runs.\n- [ ] The extended test runs on a nightly schedule in CircleCI and reports to Slack on failure (matching existing scheduled jobs).\n\n## Pointers\n- Sync tester: `op-sync-tester/synctester/service.go`, `op-sync-tester/synctester/backend/sync_tester.go`\n- op-node hookup to copy: `op-devstack/presets/simple_with_synctester.go`\n- Supernode devstack: `op-devstack/sysgo/l2_cl_supernode.go`, `op-devstack/presets/twol2.go`\n- CI scheduled pattern: `.circleci/continue/main.yml` (`contracts-bedrock-heavy-fuzz-nightly`), `.circleci/config.yml` (schedule routing)\n\n_Context: motivated by debugging supernode finality stalls (cross-safe capped by a deep L1 walkback on one interop chain) where finalized stayed pinned at genesis — exactly the kind of regression an extended nightly sync test should catch._\n\n## Interop activity is required (added)\n\nThe sync test **must run with interop activity enabled**, not a plain non-interop sync. The failure modes we care about (cross-safe advancement, local-finality gating by the super-authority, deep walkback capping cross-safe cluster-wide) **only exist on the interop path** — a non-interop sync test would pass while the real bug ships. Concretely:\n\n- **Activate interop early in the chain, NOT from genesis.** Set a small *positive* interop activation timestamp shortly after genesis (a small number of blocks/seconds in), so the chain begins pre-interop and transitions into interop early in the sync. Do **not** activate at genesis block 0. The point is to exercise the pre-activation -> activation transition and the early-chain interop bookkeeping, which is more representative of real chains than activating at genesis — while still keeping the supernode running its cross-safe verification + super-authority finality bookkeeping for essentially the *entire* sync. This is doable even on an otherwise non-interop test network by enabling the interop activation flag and starting the supernode in interop mode (see `NewTwoL2SupernodeInterop()` in `op-devstack/presets/twol2.go`, which activates interop at a configurable timestamp; set it to a small positive offset just after genesis here). Related: branch `karlfloersch/issue-19918-supernode-interop-activation`.\n- **Exercise the interop bookkeeping during sync**, i.e. assert that cross-safe advances and that local-finalized advances off genesis (the exact gate in `op-node/rollup/engine/engine_controller.go` `promoteLocalFinalizedWithSuperAuthority` / `FinalizedHead`), not just that unsafe/safe heads move.\n- **Stretch goal — validate against a real interop network.** Even better than a single-network-with-interop-flag setup would be driving the sync test against an actual multi-chain interop cluster (two L2s with cross-chain messages), so cross-chain dependency validation is genuinely stressed. The `NewTwoL2SupernodeInterop()` preset is the starting point; the open question is wiring the sync tester's mocked EL into that multi-chain topology.\n\n### Additional acceptance criteria\n- [ ] The supernode sync test runs with interop activated early in the chain (a small positive activation timestamp shortly after genesis, NOT at block 0), exercising the pre-activation -> activation transition in supernode/interop mode.\n- [ ] The test asserts cross-safe advances AND local-finalized advances off genesis under the super-authority gate during/after sync.\n- [ ] (Stretch) A variant runs against a real two-chain interop topology with cross-chain messages, not just interop-flag-on-single-network.\n",
+      "createdAt": "2026-05-28T18:35:09Z",
+      "closedAt": "2026-06-04T14:49:52Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABD62jAA",
+      "title": "Follow-mode sequencer's `latestHead` fails to re-anchor past a `FollowSource` `forceReset` under EL-sync (follow-up to #21119)",
+      "author": "wwared",
+      "number": 21125,
+      "repository": "ethereum-optimism/optimism",
+      "body": "# Follow-mode sequencer's `latestHead` fails to re-anchor past a `FollowSource` `forceReset` under EL-sync\n\n> **Follow-up to the #21119 fix stack (#21120 → #21121 → #21122) — not a pre-existing `develop` bug.** This freeze is *introduced by the `forceReset` change proposed in #21121* (the `FollowSource` divergence branch). Replacing the old soft `followExternalRefs(true)` with a decisive `forceReset` is what now drives a follow-mode sequencer through the `SYNCING`-forkchoice path analysed below; on `develop` today the same scenario instead hits the original oscillation that #21119 describes, so #21121 effectively trades that oscillation for this freeze. The underlying engine-controller gap (a `SYNCING` forkchoice update never propagates the head to the sequencer) is pre-existing, but it is the #21121 `forceReset` that exposes it here. **This should be resolved before merging #21121/#21122, or explicitly accepted as a tracked follow-up** — the #21122 acceptance test flakes ~2% until it is fixed.\n\n## Summary\n\nAfter the `FollowSource` divergence `forceReset` (#21121), op-node's sequencer `latestHead` can stay pinned to the pre-reset head and never advance to the reset/canonical head — the `ForkchoiceUpdateEvent` that would advance it appears to be suppressed while the engine is in EL-sync. This single root cause surfaces two ways depending on deployment:\n\n- **(a) Non-conductor sequencer** (always active): it keeps building on the stale `latestHead`. If that head's payload was discarded in the reorg, the build loops on `could not get payload: not found` and the chain freezes at the replacement height, never making further validated progress.\n- **(b) Conductor-operated sequencer**: the conductor keeps candidates stopped until `StartSequencer` succeeds, so the stale `latestHead` never gets built on — instead `StartSequencer`'s head-check (`sequencer.go:691`) rejects it (`block hash does not match`) and the cluster churns leadership indefinitely with no live sequencer. **HA failover is broken**, not just single-sequencer liveness.\n\nIt is an intermittent **liveness** bug and the residual tail of #21119 — the divergence-reset fix (#21121) eliminated the *oscillation* failure mode but exposed this *freeze-after-reset* failure mode. Symptom (a) reproduces at ~2% in a local stress loop (1/50 on two independent 50× batches); symptom (b) at ~5–8% under a tighter health check + deeper reorg (5/100, see Symptom B). The fix is in op-node and must make `latestHead` re-anchor regardless of deployment — a conductor-side workaround would leave the non-conductor sequencer broken.\n\n## Impact\n\n- A follow-mode sequencer that diverges from the supernode (e.g. after an invalid-message deposits-only replacement) and gets reset onto the upstream chain can wedge and stop sequencing entirely — a stuck sequencer in production, not just a test flake.\n- **Under op-conductor this breaks HA failover entirely**: every candidate's `StartSequencer` is rejected on the stale `latestHead`, so no node in the cluster can start sequencing and leadership churns indefinitely. Worse than the single-sequencer case.\n- Surfaced by the acceptance test `TestSupernodeLightSequencerInteropInvalidMessageReplacement` (`op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go`), which flakes ~2% on the op-reth jobs (`memory-all-{opn,kona}-op-reth`). The test's `AdvancedFn(safety.CrossSafe, …)` settle gate correctly fails on the stall (`expected head to advance: safe`). The conductor manifestation is reproduced by a separate local test (see Reproduction → Symptom B).\n\n## Background\n\nPart of the #21119 fix stack:\n- #21120 — genesis bootstrap for ELSync follow-mode sequencers\n- #21121 — **divergence reorg-reset**: in `EngineController.FollowSource`, when the follower is also a sequencer (`originSelectorResetter != nil`), reorg decisively onto the upstream refs via `forceReset` instead of the soft `followExternalRefs(true)` (which oscillated). `engine_controller.go:1465`.\n- #21122 — devstack: switch follow-mode supernode presets to ELSync + the end-to-end test.\n\nThe relevant `forceReset` call (`signalOnlySeq=false`):\n```go\n// op-node/rollup/engine/engine_controller.go  (FollowSource, ~:1472)\nlogger.Warn(\"Follow Source: Reorg onto upstream chain\")\ne.forceReset(e.ctx, eLocalSafeRef, eLocalSafeRef, eLocalSafeRef, eSafeBlockRef, eFinalizedRef, false)\n```\n\n## Symptom (observed)\n\n### Symptom A — non-conductor sequencer (active build wedges on a discarded payload)\n\nStress run, chain B (the chain that took the invalid-message replacement). The sequencer had locally built a fork up to block 23 (`ecd7e9…8be199:23`). The supernode rejected that fork; `FollowSource` fired `forceReset` onto the upstream chain at block 15:\n\n```\n02:47:11.986  engine_controller.go:1184  Reset of Engine is completed  component=l2cl-sequencer\n                local_unsafe=4df8f2..82b74e:15  cross_safe=4df8f2..82b74e:15  finalized=…:0\n02:47:11.986  Engine reset confirmed, sequencer may continue  component=l2cl-sequencer  next=true\n02:47:13.986  Started sequencing new block  component=l2cl-sequencer  parent=ecd7e9..8be199:23   ← orphaned fork head, NOT 15\n02:47:13.986  sequencer.go:412  Engine failed temporarily, backing off sequencer\n                err=\"temp: failed to retrieve L2 parent block: failed to determine block-hash of\n                     hash 0xecd7e90b…8be199, could not get payload: not found\"\n   … \"Started sequencing new block parent=ecd7e9..8be199:23\" + backoff repeats every ~1s …\n   … for ~89s, until test teardown. unsafe head never advances past 15. …\n```\n\nMeanwhile the other chain's sequencer (which did not diverge) advances normally in the same process — so this is **not** CPU contention; it is a logic stall specific to the post-`forceReset` recovery on the diverged chain.\n\n`startBuildingBlock` builds on `d.latestHead` (`sequencer.go:524`), so the sequencer's `latestHead` is still pinned to the orphaned `ecd7e9…:23` after the reset — it never updated to the reset head `4df8f2…:15`.\n\n### Symptom B — conductor-operated sequencer (head-check rejects the stale `latestHead`)\n\nStress of a conductor-operated deep-reorg scenario (3-conductor cluster per chain, tight health check, depth-25 reorg). When the conductor asks a node to start sequencing, op-node compares the requested head against its own `latestHead` (`sequencer.go:690`):\n\n```go\nif head != d.latestHead.Hash {\n    return fmt.Errorf(\"block hash does not match: head %s, received %s\", d.latestHead, head)\n}\n```\n\n`head` is the conductor's requested (FSM) head; `d.latestHead` is op-node's stale sequencer head. The conductor's reorg-recovery FSM correctly tracks the EL forward to the canonical head, but op-node's `latestHead` is pinned at the first `forceReset` target, so every `StartSequencer` is rejected and leadership churns forever. 5/100 stress iterations failed, all with the identical, one-directional signature — op-node `latestHead` stale (~block 25), conductor request advanced (~block 55):\n\n| iter | op-node `latestHead` (stale) | conductor-requested = FSM head | leadership transfers | `could not get payload` |\n|------|------|------|------|:---:|\n| 053 | `0x33d1…:25` | `0x292d…:55` | ~191k | 0 |\n| 063 | `0xd1ec…:25` | `0x0b2b…:55` | — | 0 |\n| 078 | `0x0619…:25` | `0x0478…:55` | — | 0 |\n| 080 | `0x720d…:27` | `0x1276…:57` | — | 0 |\n| 083 | `0x0dde…:25` | `0x3681…:55` | — | 0 |\n\nAll three op-nodes in the cluster (the bootstrap sequencer and both candidates) are stuck the same way. **Zero `could not get payload`** in any of the five: because the conductor keeps candidates stopped, there is no active build, so the in-flight-build gaps (#1/#2 below) cannot apply — this isolates gap #3 (stale `latestHead`) as sufficient on its own. The engine is in EL-sync (`Inserting unsafe L2 execution payload to drive EL sync`) throughout the freeze window, matching the predicted `SYNCING` condition. The conductor's FSM commit trace (`25 → 53 → 25 → 55`) shows reorg-recovery faithfully tracking the EL through the deep reorg and ending on the canonical head — i.e. the FSM is healthy and the conductor is blameless; the stall is entirely op-node's un-advanced `latestHead`.\n\n## Reproduction\n\n### Symptom A (non-conductor) — upstream\n\n```\n# from the op-acceptance-tests-capable checkout (needs forge-artifacts)\nDEVSTACK_L2EL_KIND=op-reth RUST_JIT_BUILD=1 \\\n  go test ./op-acceptance-tests/tests/supernode/interop/reorg/ \\\n  -run 'TestSupernodeLightSequencerInteropInvalidMessageReplacement$' -count=1 -timeout 25m\n```\nRun ~50× serially; expect ~1 failure with `operation failed permanently after 45 attempts: expected head to advance: safe` (the `AdvancedFn(CrossSafe)` settle gate timing out on the frozen chain). The failing run takes ~135s vs ~64s for a passing run.\n\n(`DEVSTACK_L2CL_KIND` does not matter here: the supernode preset hardcodes op-node via `startL2CLNode`, so the `kona-op-reth` and `opn-op-reth` jobs exercise the same code.)\n\n### Symptom B (conductor-operated) — separate local test, not yet upstream\n\nThe conductor manifestation is reproduced by `TestConductorDeepReorgRecoveryTightHealth`, which lives on a local branch (`feat/conductor-reth-reorg-subscription`) that is **not yet upstreamed** — it stands up a 3-conductor cluster per chain with reorg-recovery enabled and drives a deep reorg under a tight health check:\n\n```\n# local conductor-reorg-recovery branch only\nOP_RUN_DEEP_REORG_TEST=1 OP_DEEP_REORG_DEPTH=25 \\\n  DEVSTACK_L2EL_KIND=op-reth RUST_JIT_BUILD=1 \\\n  go test ./op-acceptance-tests/tests/supernode/interop/reorg/ \\\n  -run 'TestConductorDeepReorgRecoveryTightHealth$' -count=1 -timeout 30m\n```\nRun ~100× serially; expect ~5–8 failures with the `block hash does not match` head-check churn described in Symptom B (the test's `assertSequencerLive` / deep-descendant-reorged settle gate times out on the frozen cluster). This repro is useful for fix validation but the harness is not available upstream yet, so it cannot gate CI; Symptom A's test can.\n\n## Root-cause analysis (gap #3 corroborated strongly by both test logs and code)\n\nThe conductor repro (Symptom B) sharpens this: a stopped candidate has no in-flight build, yet still wedges on a stale `latestHead` — so gaps #1/#2 below are **not** necessary, and **gap #3 is sufficient on its own**. It also shows the engine is in EL-sync across the entire freeze window, matching the predicted `SYNCING` condition for #3. The code path in #3 then accounts for the rest: under EL-sync a `SYNCING` forkchoice result is accepted but does **not** propagate the head to the sequencer. Between the test logs (stale `latestHead`, EL-sync active throughout) and the code (the `lastForkchoice`-recorded-but-head-not-emitted asymmetry), gap #3 is corroborated strongly from both directions; the one step not directly observed is the reset FCU literally returning `SYNCING` at that call — see Open questions.\n\nThree structural gaps in `forceReset` (`engine_controller.go:1141`) line up with the symptom. The sequencer re-anchors via three events — `rollup.ResetEvent` → `onReset` (cancels in-flight build, clears `d.latest`), `EngineResetConfirmedEvent` → `onEngineResetConfirmedEvent` (resume), and `ForkchoiceUpdateEvent` → `onForkchoiceUpdate` (sets `d.latestHead`). On this path:\n\n1. **`forceReset` emits no `rollup.ResetEvent`.** With `signalOnlySeq=false` it calls `tryUpdateEngine` (which *should* emit `ForkchoiceUpdateEvent`) and then `EngineResetConfirmedEvent`, but it never emits the `ResetEvent` that drives the sequencer's `onReset` (`sequencer.go:431`) — the only handler that cancels the in-flight build (`BuildCancelEvent`) and resets `d.latest = BuildingState{}`. So the sequencer's in-flight build state survives the reorg.\n\n2. **`onForkchoiceUpdate`'s stale-build-job drop is forward-only.** `sequencer.go:463`:\n   ```go\n   if d.latest != (BuildingState{}) && d.latest.Onto.Number < x.UnsafeL2Head.Number {\n       // drop stale job\n   }\n   ```\n   `forceReset` is a **backward** reorg (fork head 23 → upstream 15), so `d.latest.Onto.Number (23) < x.UnsafeL2Head.Number (15)` is false and the stale job is never dropped.\n\n3. **Load-bearing gap (corroborated strongly by logs + code): `latestHead` fails to advance across the `SYNCING` forkchoice update.** `setLatestHead(x.UnsafeL2Head)` runs unconditionally at the end of `onForkchoiceUpdate`, so *if* a `ForkchoiceUpdateEvent` reached the sequencer, `latestHead` would advance and the next `startBuildingBlock` (or, under conductor, the `StartSequencer` head-check) would use it. It clearly didn't — `latestHead` stays stuck where it was before the `SYNCING` FCU(s): in **Symptom A** at the **pre-reset fork head** (`ecd7e9…:23`, which is *above* the reset target `4df8f2…:15`), and in **Symptom B** at the **reset target** (`…:25`) while the canonical chain advances to `…:55`. (These are two presentations of one gap — \"head event not emitted on `SYNCING`\" — not the same stuck-point.) The code path explains why the FCU returns `SYNCING`: in `tryUpdateEngineInternal` (`engine_controller.go:668`) **the FCU target is a block this sequencer's EL does not have yet** — in A the upstream deposits-only replacement (`4df8f2…:15`), which this EL never built (it built its own fork's block 15); in B the deep-reorg canonical head it has not synced. (Reorg *direction* is irrelevant: an FCU to a block the EL already has returns `VALID`. This also explains A's `could not get payload: not found` — accepting the `SYNCING` FCU starts the EL syncing toward upstream and discards the local fork, including block 23, so the stale `latestHead=23` no longer exists in the EL.) The relevant code:\n   ```go\n   // :711  under ELSync, checkForkchoiceUpdatedStatus accepts SYNCING → no reset\n   if !e.checkForkchoiceUpdatedStatus(fcRes.PayloadStatus.Status) { /* reset */ }\n   e.lastForkchoice = fc                          // :714 recorded unconditionally\n   if fcRes.PayloadStatus.Status == eth.ExecutionValid {\n       e.requestForkchoiceUpdate(ctx)             // :716 calls requestForkchoiceUpdate → only emitter of ForkchoiceUpdateEvent (:438)\n   }\n   ```\n   `checkForkchoiceUpdatedStatus` (`:589`) returns true for `ExecutionValid` **and** `ExecutionSyncing` when `SyncMode == sync.ELSync` (`:595`). So on a `SYNCING` FCU it is accepted (no reset), `lastForkchoice` is recorded (`:714`), but `requestForkchoiceUpdate` — the only *production* emitter of `ForkchoiceUpdateEvent` (`:438`) — is skipped because the status isn't `ExecutionValid`. (The only other path into the sequencer's `onForkchoiceUpdate` is `ForkchoiceUpdateInitEvent`, emitted *solely* on the genesis `signalOnlySeq=true` path at `:1165` — not on this divergence path — so under `SYNCING` the sequencer receives no head signal at all.) The sequencer's `onForkchoiceUpdate`/`setLatestHead` never runs, so `latestHead` stays pinned; and because `lastForkchoice` is now recorded, the early-return at `:685` (`if fc == e.lastForkchoice { return nil }`) suppresses re-sending the *same* FCU later — so even if the EL subsequently finishes syncing and would now return `VALID`, that identical FCU is never re-attempted and no head event is ever emitted. Meanwhile `EngineResetConfirmedEvent` re-enables the sequencer with the stale head. **The precise culprit is the `:714`/`:715` asymmetry: `lastForkchoice` is recorded on `SYNCING`, but the head is pushed to the sequencer only on `ExecutionValid`.** The one step not directly observed in the logs is the FCU literally returning `SYNCING` at that call (vs `VALID` with a stale head); a focused mock-engine unit test would pin it.\n\nNote the genesis-bootstrap path (#21120) uses `signalOnlySeq=true`, which deliberately emits a `ForkchoiceUpdateInitEvent` *only* to the sequencer (`engine_controller.go:1161-1166`) precisely to drive `onForkchoiceUpdate` without the side effects of `tryUpdateEngine`. The divergence path (`signalOnlySeq=false`) does not — which may be why the sequencer's head signal is lost here.\n\n## Proposed fixes / investigation targets\n\n**Overriding constraint — do not regress existing behavior, and justify the chosen fix explicitly.** Every candidate below touches code with deliberate, load-bearing invariants. In particular, the placement of `lastForkchoice = fc` *after* the status check (`:714`) is **intentional**: the `:708-710` comment states it is \"Done before recording lastForkchoice so a rejected FCU doesn't short-circuit the next retry\" — i.e. it protects the EL-restart / `SYNCING`→reset recovery path (when an EL loses in-memory state and returns `SYNCING`, the reset must be re-discoverable on the next attempt). **Do not simply remove or move the `lastForkchoice` caching** without a written analysis proving that recovery path is preserved. Whatever fix is chosen, the PR must include an explicit justification of *why it is correct and exactly what behavior it preserves* (the EL-restart reset path, normal steady-state FCU dedup, and not advancing the sequencer onto a head the EL has not validated). A fix that removes the freeze but weakens any of those is not acceptable.\n\nCandidates are listed with trade-offs; **the mechanism's last step should be pinned by the unit test below before committing to one** — do not assume an ordering:\n\n- **(C1) Re-anchor `latestHead` once the EL leaves `SYNCING`.** This is the fundamental gap: after `lastForkchoice` is recorded on a `SYNCING` result, the identical FCU is never re-sent (`:685`), so when the EL later finishes syncing and *would* return `VALID`, no `ForkchoiceUpdateEvent` is ever emitted and `latestHead` never catches up. A correct fix ensures the head is (re-)propagated to the sequencer on the `SYNCING`→`VALID` transition (e.g. re-attempt the FCU until `VALID`, or emit the head event when sync completes). **This is the only candidate that covers both symptoms** (A: re-anchors once the EL has the target; B: advances as `VALID` resumes). **It is also the highest-regression-risk option** because it changes exactly the `lastForkchoice`/retry behavior the `:708-710` comment protects — so it carries the heaviest justification burden per the constraint above. Must be designed to preserve the EL-restart reset path, not bypass it.\n- **(C2) Signal the sequencer's head explicitly on the divergence `forceReset`** (e.g. also emit `ForkchoiceUpdateInitEvent{UnsafeL2Head: e.unsafeHead}` as the genesis `signalOnlySeq=true` path does at `:1162`). Localized to the new #21121 path and lower-risk. **But likely insufficient alone, and must be proven not to introduce a new failure:** it sets `latestHead` to the reset target *at reset time only*. For Symptom A that target is a block the EL is still syncing, so building on it still fails with `could not get payload` until EL-sync completes — this only helps if the sequencer backs off gracefully meanwhile rather than wedging (verify it does). For Symptom B it does nothing for the later `25→55` forward advances that also arrive as `SYNCING`. May be a useful *component* of the fix, but must be shown to actually resolve both repros, not relocate the stall.\n- **(C3) Cancel the stale in-flight build on the divergence reset** — emit a `rollup.ResetEvent` (so `onReset` clears `d.latest` and cancels the build via `BuildCancelEvent`) and/or make `onForkchoiceUpdate` drop the build on any reorg, not just forward advancement (`:463`). Addresses gaps #1/#2 (the orphaned in-flight build in Symptom A) but **not** gap #3 — Symptom B has no in-flight build and still wedges, so this cannot be the whole fix. Safety-net at best; if added, verify the `onReset`→`EngineResetConfirmedEvent` ordering (`onReset` sets `nextActionOK=false` until the confirmed event) is preserved.\n\n**Acceptance criteria (both deployment modes):** the fix must live in **op-node** (so `latestHead` re-anchors for *every* follow-mode sequencer) and must be validated against **both** repros — the non-conductor `TestSupernodeLightSequencerInteropInvalidMessageReplacement` freeze (Symptom A) **and** the conductor `TestConductorDeepReorgRecoveryTightHealth` churn (Symptom B). A conductor-side workaround (e.g. relaxing or reconciling around the `StartSequencer` head-check) is explicitly **not** acceptable: it would mask Symptom B while leaving the non-conductor sequencer (Symptom A) broken, and it would weaken the conductor's head-check invariant (letting a node lead on an unverified head). Re-run each stress loop (Symptom A ≥50×, Symptom B ≥100×, ideally under load) to confirm the freeze/churn is gone.\n\n## Open questions\n\n- The code shows `ForkchoiceUpdateEvent` is suppressed on a `SYNCING` FCU under EL-sync (`requestForkchoiceUpdate` is gated on `ExecutionValid` at `:715`). The one step not directly observed in the logs is the FCU literally returning `SYNCING` at that call (vs `VALID` with a stale head) — a focused unit test (`Sequencer` + a mock engine returning `SYNCING` for an FCU whose target the EL has *not* synced, asserting `latestHead` does not advance and no `ForkchoiceUpdateEvent` is emitted) or temporary FCU-status instrumentation would confirm it definitively. (Per-chain logs would also help; the `l2cl-sequencer` log component is not tagged with chain id, which made this harder to pin — improving that tagging would help.)\n- Does the orphaned fork head's payload truly get pruned from op-reth (hence `could not get payload: not found`), or is this op-reth-specific timing? Worth checking op-geth, though op-geth is being deprecated and the light-sequencer test is skipped there.\n\n## References\n\n- Symptom A discovered while stress-testing #21122 (the #21119 test): 98/100 pass, 2 identical freezes.\n- Symptom B discovered while stress-testing a local conductor reorg-recovery branch (`feat/conductor-reth-reorg-subscription`): 95/100 pass, 5 identical head-check-churn freezes, all with op-node `latestHead` stale (~block 25) vs the conductor's advanced FSM head (~block 55); EL-sync active throughout; 0 `could not get payload`.\n- `op-node/rollup/engine/engine_controller.go`: `forceReset` (:1141), `FollowSource` sequencer branch (:1465–1477).\n- `op-node/rollup/sequencing/sequencer.go`: `onReset` (:431), `onForkchoiceUpdate` (:455, stale-job guard :463), `startBuildingBlock` (:522, `l2Head := d.latestHead` :524), `onEngineTemporaryError` (:408), `StartSequencer` head-check (:690, `block hash does not match`).\n- Related: #21119, #21120, #21121, #21122.\n\nLabels: `H-interop`, `A-op-supernode` (matching #21119). Other relevant areas for triage: `A-op-node` (where the fix lives), `A-op-conductor` (Symptom B), `C-bug`, `T-protocol`.\n",
+      "createdAt": "2026-05-31T15:16:55Z",
+      "closedAt": "2026-06-04T04:04:03Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABEIYFCA",
+      "title": "op-reth: interop tx pool does not resume after failsafe is disabled (requires restart)",
+      "author": "jelias2",
+      "number": 21149,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWhen the op-interop-filter failsafe is enabled and then disabled, **op-reth's transaction pool does not resume accepting interop (executing-message) transactions** until op-reth is restarted. The filter and `proxyd` recover within seconds, but op-reth stays in the failsafe-evicted state and silently drops interop txs (accepted by the RPC, never included; receipt lookup returns `not found`).\n\nObserved on **interop-bench-3** with **op-reth `v2.2.6-rc.3`** on 2026-06-02.\n\n## Steps to reproduce\n\n1. Healthy two-chain interop devnet (executing messages land normally).\n2. Enable failsafe on the op-interop-filter: `admin_setFailsafeEnabled true`.\n3. Submit an executing message → correctly rejected (expected).\n4. Disable failsafe: `admin_setFailsafeEnabled false`.\n5. Submit executing messages → **still dropped for many minutes** (`not found` / never included), even though failsafe is off.\n\n## Evidence that op-reth is the stuck component\n\n- **Filter recovered:** `interop_checkAccessList([], \"unsafe\", …)` against the filter returns `null` (success), and a fabricated entry returns `failed to parse access entry` — i.e. the filter is healthy and actively validating, not in failsafe.\n- **proxyd recovered (~10s):** chain B `proxyd-public` logs flip back to `interop access list validated successfully` within ~10s of disabling failsafe (it marks the filter backend unhealthy for `load_balancing_unhealthiness_timeout`, default 10s, then re-probes).\n- **op-reth did NOT recover:** op-reth logged\n  ```\n  txpool::interop  failsafe enabled: evicting all interop transactions\n  ```\n  on activation and logged **no recovery**. Interop executing messages kept failing for >5 minutes after failsafe was cleared, while the filter and proxyd were both healthy. An independent `op-benchmark interop` re-check showed `0/1` executing messages succeeding post-toggle (vs `5/5` before any toggling).\n\nSo with the filter + proxyd healthy and failsafe off, op-reth's pool is the only layer still rejecting interop txs.\n\n## Expected\n\nAfter failsafe is disabled, op-reth should re-poll/re-validate and resume accepting interop transactions without operator intervention.\n\n## Actual\n\nop-reth's interop tx-pool stays evicted until the op-reth process is restarted:\n```\nkubectl rollout restart statefulset/op-reth -n <chain-op-reth-namespace>\n```\n\n## Notes\n\n- May be version-specific to `op-reth v2.2.6-rc.3`; please confirm against current builds.\n- Documented in the op-interop-filter failsafe runbook (RB-336).",
+      "createdAt": "2026-06-02T14:13:06Z",
+      "closedAt": "2026-06-04T20:37:05Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABETd7Wg",
+      "title": "op-up: TestRun not run in CI; requires op-reth binary the go-tests job doesn't build",
+      "author": "ajsutton",
+      "number": 21202,
+      "repository": "ethereum-optimism/optimism",
+      "body": "`op-up` has a test (`TestRun`) that is in no CI job, so it has never run in CI. It can't simply be added to the `go-tests` list because it requires the `op-reth` binary, which that job does not build.\n\n### Failure\n\n```\ngo test -tags=ci ./op-up/...\n```\n\n```\nError: Received unexpected error:\n    op-reth binary not found; run 'cd rust && just build-op-reth-debug'\n    (or just build-op-reth for release) or set RUST_JIT_BUILD=1:\n    no built binary found under target dir .../rust/target\nTest: TestRun\n```\n\n`TestRun` spins up an in-process `sysgo` devnet (`op-up/main.go`) that drives `op-reth`. The `go-tests` CircleCI job only attaches the Go build workspace + mise tools — it doesn't build Rust binaries (that happens in the rust-e2e / sysgo pipeline).\n\n### Options to enable\n- Run `op-up` in the rust-e2e / sysgo pipeline where `op-reth` is already built, or\n- Add an `op-reth` build prerequisite to a job that runs this package.\n\nNote: `TestRun` also dials a hardcoded `http://localhost:8545`, which may need attention for parallel CI execution.\n\nContext: follow-up to #21197.\n\n---\n*Filed by Claude (AI assistant) on Adrian's behalf.*",
+      "createdAt": "2026-06-03T21:34:55Z",
+      "closedAt": "2026-06-04T01:58:57Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7hXhwz",
+      "title": "feat(op-conductor): flag-gated interop reorg recovery (#20006)",
+      "author": "wwared",
+      "number": 21133,
+      "body": "## Summary\r\n\r\nAdds flag-gated **reorg recovery** to op-conductor (issue #20006). By default the Raft FSM only records forward-moving unsafe heads, so a backward interop reorg leaves the recorded head pinned to an orphaned block and wedges the cluster. With `--reorg-recovery.enabled` set, the leader subscribes to its op-reth's `reth_subscribeChainNotifications`, and on a reorg notification commits the EL's current canonical head — letting the recorded unsafe head move backward (last-write-wins).\r\n\r\n**The flag defaults OFF. With it off, behavior is byte-for-byte unchanged.** When on, it changes Raft FSM apply semantics and MUST be set identically on every conductor in the cluster (all-on or all-off, never mixed).\r\n\r\n### What's included\r\n\r\n- **Reth chain-notifications subscriber** (`chainevents/`): WebSocket subscription on the leader (`--execution.ws-url`); on each reorg reads the EL's canonical unsafe head, fetches the payload, and commits via the existing `CommitUnsafePayload`. The subscription has no replay, so the leader re-commits its EL head on every (re)subscribe to recover any reorg missed during a disconnect.\r\n- **Flag-gated FSM guard bypass** (`consensus/raft_fsm.go`): backward head moves are accepted only when the flag is on.\r\n- **Non-cancellable demotion grace (5s)** (`conductor/demotion_latch.go`, `service.go`): a deep reorg rewinds the unsafe head far enough to trip the unsafe-staleness health check, which would normally transfer leadership away before the leader processes the one-shot reorg notification. The first staleness observation keeps the leader reporting healthy for the grace so it can commit the post-reorg head, then demotes it **unconditionally** at expiry (a fresh block timestamp does not prove a correct chain, so a healthy poll during the grace cannot cancel the demotion). `ErrSequencerConnectionDown` still fails over immediately. Cost: up to ~5s added failover latency on a stuck-but-connected sequencer and one guaranteed handoff per deep reorg. Grace is 0 (today's immediate demotion) when the flag is off.\r\n- **`conductor_latestUnsafePayload` admin RPC** for inspection/recovery.\r\n- **Metrics**: reorg observations and resyncs.\r\n- **op-devstack interop harness**: 3-conductor cluster on op-reth ELSync follow-mode, with acceptance scenarios A–D plus a deep-reorg + tight-health recovery test asserting all-EL convergence.\r\n- **Docs**: README, RUNBOOK, and public chain-operator docs describe the flag, the fleet-uniform contract, and the demotion-grace trade-offs.\r\n\r\n## Stacking\r\n\r\nStacked on **#21122** (`feat/devstack-follow-mode-supernode-elsync`), which is itself stacked on #21121 → #21120. Review/merge those first. This PR's diff is only the 12 conductor commits on top.\r\n\r\n## Test plan\r\n\r\n- `go test ./op-conductor/...` — unit tests for the demotion latch (9 cases), service-level timer wiring (incl. a real 5s timer fire), subscriber reconnect/resubscribe, FSM guard bypass, and the reorg-event handler. All pass; race clean; custom linter clean.\r\n- op-acceptance: conductor reorg-recovery scenarios A–D and the deep-reorg + tight-health convergence test.\r\n- Stress: 100× deep-reorg + tight-health runs. 95/100 pass cleanly. The 5 failures were root-caused to a **separate upstream op-node `forceReset`/`latestHead` re-anchor bug** under EL-sync (op-node's sequencer `latestHead` stays pinned past a `FollowSource` reset; the conductor FSM correctly tracks the canonical head) — not a defect in this PR. That bug is tracked separately and needs an op-node-side fix; it is out of scope here.\r\n\r\n## Notes\r\n\r\nLeft as **draft** pending the base PRs and the upstream op-node fix discussion.\r\n\r\nCloses #20006 (recovery path; the upstream op-node bug is tracked in #21125).\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-01T12:51:52Z",
+      "mergedAt": null,
+      "additions": 3502,
+      "deletions": 181
+    },
+    {
+      "id": "PR_kwDODjvEJM7irkpf",
+      "title": "feat(op-conductor): flag-gated interop reorg recovery (#20006)",
+      "author": "wwared",
+      "number": 21230,
+      "body": "Draft — flag-gated op-conductor interop reorg recovery. Full description to follow.\n\nFixes #20006\n\nNote: this branch temporarily includes the supernode-VN-bootstrap commit (`08eb799140`) from the follow-mode ELSync work, which the conductor reorg-recovery acceptance tests depend on for genesis bootstrap (#21164). Once that lands on develop, this branch will be rebased onto develop and that commit will drop out.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-04T12:45:28Z",
+      "mergedAt": null,
+      "additions": 3475,
+      "deletions": 221
+    },
+    {
+      "id": "PR_kwDODjvEJM7b5I8D",
+      "title": "feat(op-reth/proofs): one-time trie-state snapshot [WIP]",
+      "author": "dhyaniarun1993",
+      "number": 20797,
+      "body": "**Description**\r\n\r\n- Adds a one-time trie-state snapshot at a single anchor block, stored in parallel V2*TrieSnapshot tables.\r\n- Once `Ready`, reads of the trie at the anchor become a current-state lookup — no history-bitmap walk, no per-key `find_source`. The intended consumer is backfill, but the cursor surface is generic.\r\n- New CLI: `op-reth op-proofs snapshot init` (build at `--proofs-history.snapshot-target-block`, defaults to `latest`) and `op-reth op-proofs snapshot drop`.\r\n\r\n**Tests**\r\n\r\n- [x] `cargo test -p reth-optimism-trie` — V2 provider unit tests, plain snapshot cursor tests, and end-to-end `SnapshotInitJob` tests against a real reth chain (happy path, target-outside-window, drift detection, refuse-on-Completed, clear+rebuild, storage-trie phase).\r\n\r\n**Additional context**\r\n\r\nNA\r\n\r\n**Metadata**\r\n\r\nCloses #20791 ",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-15T11:24:14Z",
+      "mergedAt": "2026-06-04T08:55:28Z",
+      "additions": 3258,
+      "deletions": 354
+    },
     {
       "id": "PR_kwDODjvEJM7KbIsB",
       "title": "Dependabot/go modules/go modules 2468a94907",
@@ -19,16 +116,593 @@
       "mergedAt": null,
       "additions": 1281,
       "deletions": 914
+    },
+    {
+      "id": "PR_kwDODjvEJM7f80td",
+      "title": "[claude] consolidate superchain-registry on a single committed zip",
+      "author": "joshklop",
+      "number": 21071,
+      "body": "## Summary\n\nSingle-commit replacement for the abandoned 5-PR stack (#21050–#21056). One Rust producer crate generates a single ~3.8 MB committed zip; one Go side reads it via the existing `archive/zip` path; one set of consumer build.rss extract per-chain artifacts into OUT_DIR.\n\n**Net diff: +1081 / -7279 lines + 1 new binary file.** No Go sync script. No KONA_BIND env var. No tar + zlib + fetch script. Drift gate is a real `git diff --exit-code` against committed bytes.\n\n## What's in the change\n\n**Producer (`rust/op-superchain/`):**\n- `bin/regenerate.rs` walks the `packages/contracts-bedrock/lib/superchain-registry` submodule and writes a deterministic zip (1980-01-01 mtimes, sorted entries, deflate-9) to two committed paths: `rust/op-superchain/data/superchain-configs.zip` (Rust canonical) and `op-core/superchain/superchain-configs.zip` (Go `//go:embed`).\n- `lib.rs` exposes reader helpers (`read_chain_list_json`, `read_superchains_json`, `read_depsets_json`, `read_chain_config_toml`, `read_chain_genesis_compressed`, `supported_chains`) consumed by downstream build.rss.\n\n**Go side (`op-core/superchain/`):**\n- `chain.go` unchanged — same `archive/zip` reader.\n- `init.go` simplified to one COMMIT-vs-op-geth check. Drops `.sha256` and `.txt` embeds.\n- Deletes `sync-superchain.sh`, `superchain-registry-commit.txt`, `superchain-configs.zip.sha256`.\n\n**`check-prestate`:** `fetchSuperchainRegistryCommit` reads the submodule pointer via `git ls-tree` instead of the deleted `.txt`.\n\n**kona-registry:** `build.rs` extracts the three aggregate JSONs from `op_superchain` into `$OUT_DIR`; `lib.rs`/`superchain.rs` `include_str!` from `$OUT_DIR`. `KONA_BIND` gone; `KONA_CUSTOM_CONFIGS` overlay path preserved against OUT_DIR. Deletes committed `etc/{chainList,configs,depsets}.json`.\n\n**reth-optimism-chainspec:** New `build.rs` extracts per-chain configs (TOML→JSON) + raw zstd genesis to `$OUT_DIR`; generates `chain_specs.rs` (macro invocation) and `lookups.rs` (match-based `config_str`/`genesis_bytes`). Runtime decompresses genesis via `zstd` with the embedded dictionary. Drops `superchain-configs.tar`, `fetch_superchain_config.sh`, `superchain_registry_commit`, and the committed `src/superchain/chain_specs.rs`.\n\n**CI:**\n- `prep-superchain` is now a thin sanity check (zip is in git, no rebuild needed). Drops the `.sha256` diff step.\n- `kona-registry-snapshot-check` re-pointed at the committed zips: init submodule, `cargo run --bin regenerate`, `git diff --exit-code` on both copies.\n- Cannon Docker: `COPY rust/op-superchain/` added.\n\n## Why one PR off develop, not stacked on the existing PRs\n\nThe 5-PR stack tried a gitignored-`gen/` approach. Two problems surfaced (publish-time stale-artifact risk; Docker can't find the submodule), and the fix for both was: commit the artifact. Rather than retrofit those PRs, this branch starts fresh from `develop` and lands the whole consolidation in one reviewable commit. The old PRs (#21050–#21056) are abandoned but left open for context.\n\n## Test plan\n\n- [x] `just sync-superchain` produces byte-identical zips across two cold runs (SHA-256 verified)\n- [x] `cargo test -p op-superchain -p kona-registry -p kona-genesis` — 137 + 15 + 2 doctests passing\n- [x] `cargo test -p reth-optimism-chainspec --features superchain-configs` — 35/35 passing\n- [x] `go test ./op-core/superchain/...` — `init.go`'s simplified `VerifyEmbeddedCommit` matches op-geth\n- [x] `cargo clippy --tests -- -D warnings` clean for each of the three modified Rust crates\n- [x] `cargo +nightly fmt --check` clean\n- [x] Idempotency: running `just sync-superchain` against an unchanged submodule produces no `git diff`\n- [ ] CI runs green\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-27T18:47:37Z",
+      "mergedAt": null,
+      "additions": 1098,
+      "deletions": 7285
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 7661,
+    "deletions": 2595,
+    "files": 183,
+    "commitCount": 146
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "feat(op-reth): compute miner fee on pool tx in payload builder",
+      "prNumber": 20382,
+      "type": "feature",
+      "body": "Move the `effective_tip_per_gas` call in `OpPayloadBuilderCtx::execute_best_transactions` to before `into_consensus()`, so the miner fee is computed from the pool transaction rather than the consensus transaction.\r\n\r\nSemantically identical ",
+      "files": [
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/payload/src/builder/tests.rs"
+      ]
+    },
+    {
+      "title": "feat(op-reth/proofs): one-time trie-state snapshot [WIP]",
+      "prNumber": 20797,
+      "type": "feature",
+      "body": "**Description**\r\n\r\n- Adds a one-time trie-state snapshot at a single anchor block, stored in parallel V2*TrieSnapshot tables.\r\n- Once `Ready`, reads of the trie at the anchor become a current-state lookup — no history-bitmap walk, no per-ke",
+      "files": [
+        "rust/op-reth/crates/cli/src/commands/op_proofs/mod.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/snapshot/drop.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/snapshot/init.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/snapshot/mod.rs",
+        "rust/op-reth/crates/trie/src/api.rs",
+        "rust/op-reth/crates/trie/src/backfill/tests.rs",
+        "rust/op-reth/crates/trie/src/cursor_factory.rs",
+        "rust/op-reth/crates/trie/src/db/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/snapshot.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/snapshot.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/snapshot_tests.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/snapshot_init.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/snapshot_read.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/snapshot_tests.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/snapshot_write.rs",
+        "rust/op-reth/crates/trie/src/error.rs",
+        "rust/op-reth/crates/trie/src/initialize.rs",
+        "rust/op-reth/crates/trie/src/lib.rs",
+        "rust/op-reth/crates/trie/src/snapshot/error.rs",
+        "rust/op-reth/crates/trie/src/snapshot/job.rs",
+        "rust/op-reth/crates/trie/src/snapshot/mod.rs",
+        "rust/op-reth/crates/trie/src/snapshot/tests.rs",
+        "rust/op-reth/crates/trie/src/test_utils.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/backfill.rs",
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/backfill.rs",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/trie/src/backfill/changesets.rs",
+        "rust/op-reth/crates/trie/src/backfill/error.rs",
+        "rust/op-reth/crates/trie/src/backfill/job.rs",
+        "rust/op-reth/crates/trie/src/backfill/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/tests.rs"
+      ]
+    },
+    {
+      "title": "feat(op-reth/proofs): integrate snapshot into backfill",
+      "prNumber": 20828,
+      "type": "feature",
+      "body": "**Description**\r\n\r\nThis PR adds `BackfillJob::run_with_snapshot` which reads trie state from the snapshot during backfill (instead of the V2 history merge-walk) and atomically advances the snapshot anchor with each prepended block.\r\n\r\nBehav",
+      "files": [
+        "rust/op-reth/crates/cli/src/commands/op_proofs/backfill.rs",
+        "rust/op-reth/crates/trie/src/api.rs",
+        "rust/op-reth/crates/trie/src/backfill/changesets.rs",
+        "rust/op-reth/crates/trie/src/backfill/error.rs",
+        "rust/op-reth/crates/trie/src/backfill/job.rs",
+        "rust/op-reth/crates/trie/src/backfill/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/backfill.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/tests.rs",
+        "rust/op-reth/crates/trie/src/in_memory.rs"
+      ]
+    },
+    {
+      "title": "op-supernode: add to release notes script",
+      "prNumber": 21166,
+      "type": "other",
+      "body": "",
+      "files": [
+        "justfile"
+      ]
+    },
+    {
+      "title": "feat(op-reth): add interop failsafe_enabled gauge metric",
+      "prNumber": 21151,
+      "type": "feature",
+      "body": "## What\n\nAdds a gauge `optimism_transaction_pool_interop_failsafe_enabled` (`1` = enabled, `0` = disabled) to op-reth's interop txpool metrics, reflecting the current interop **failsafe** state. It's refreshed on every failsafe poll (`query",
+      "files": [
+        "rust/op-reth/crates/txpool/src/interop_filter/client.rs",
+        "rust/op-reth/crates/txpool/src/interop_filter/metrics.rs",
+        "rust/op-reth/crates/txpool/src/maintain.rs"
+      ]
+    },
+    {
+      "title": "fix(op-chain-ops): support proving withdrawals with super roots",
+      "prNumber": 21143,
+      "type": "bugfix",
+      "body": "This updates the withdrawal prove flow to support super-root dispute games by using the withdrawal’s L2 timestamp, locating the matching L2 header, and selecting the latest usable game that covers the withdrawal. It also adds unit and devst",
+      "files": [
+        "op-acceptance-tests/tests/interop/proofs/withdrawal/withdrawal_test.go",
+        "op-chain-ops/cmd/withdrawal/prove.go",
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/presets/option_validation.go",
+        "op-e2e/e2eutils/wait/withdrawals.go",
+        "op-e2e/system/bridge/validity_test.go",
+        "op-e2e/system/helpers/withdrawal_helper.go",
+        "op-node/withdrawals/utils.go",
+        "op-node/withdrawals/utils_test.go"
+      ]
+    },
+    {
+      "title": "refactor(op-preimage): move FPP local preimage-key indices to op-preimage",
+      "prNumber": 21215,
+      "type": "refactor",
+      "body": "Moves the fault-proof program's local preimage-key index constants (`L1HeadLocalIndex`, `L2OutputRootLocalIndex`, `L2ClaimLocalIndex`, `L2ClaimBlockNumberLocalIndex`, `L2ChainIDLocalIndex`, and the custom-chain ones) from `op-program/client",
+      "files": [
+        "op-challenger/game/fault/trace/alphabet/provider.go",
+        "op-challenger/game/fault/trace/alphabet/provider_test.go",
+        "op-e2e/faultproofs/preimages_test.go",
+        "op-preimage/local_keys.go",
+        "op-program/client/boot/boot.go",
+        "op-program/client/boot/boot_interop.go",
+        "op-program/client/boot/boot_interop_test.go",
+        "op-program/client/boot/boot_test.go",
+        "op-program/client/boot/common.go",
+        "op-program/client/boot/common_test.go",
+        "op-program/host/common/local_preimage.go",
+        "op-program/host/host_test.go"
+      ]
+    },
+    {
+      "title": "chore(check-prestate): drop op-program prestate support",
+      "prNumber": 21214,
+      "type": "other",
+      "body": "Part of the op-program removal effort. Removes `check-prestate`'s dependency on `op-program/prestates` so the legacy `op-program` directory can be deleted.\n\n- Inlines the small `standard-prestates.toml` fetcher (registry-wide, not op-progra",
+      "files": [
+        "op-chain-ops/cmd/check-prestate/README.md",
+        "op-chain-ops/cmd/check-prestate/main.go",
+        "op-chain-ops/cmd/check-prestate/prestate/opprogram.go",
+        "op-chain-ops/cmd/check-prestate/prestate/releases.go"
+      ]
+    },
+    {
+      "title": "fix(ci): use shared go cache commands for acceptance tests",
+      "prNumber": 21213,
+      "type": "bugfix",
+      "body": "The `op-acceptance-tests` job hand-rolled its own go-mod cache keyed on `go-mod-v1-<go.sum>`, saving and restoring `/go/pkg/mod`. But the Go module cache on the CI image lives at `~/go/pkg/mod`, so the saved archive was empty (restore logs ",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/rust-e2e.yml",
+        ".circleci/scripts/merge-configs.sh"
+      ]
+    },
+    {
+      "title": "refactor(op-e2e): drop dead L1Miner.BlobSource, decouple from op-program",
+      "prNumber": 21212,
+      "type": "refactor",
+      "body": "**Stacked on #21193** (base: `aj/refactor/move-proof-tests-to-kona`).\n\n`L1Miner.BlobSource()` returned the blob store typed as `op-program/host/prefetcher.L1BlobSource`. Its only caller was the op-program in-process prefetcher path in the p",
+      "files": [
+        ".circleci/continue/rust-e2e.yml",
+        "justfile",
+        "op-e2e/actions/helpers/l1_miner.go",
+        "op-e2e/actions/proofs/block_data_hint_test.go",
+        "op-e2e/actions/proofs/helpers/runner.go",
+        "op-e2e/actions/proofs/precompile_test.go",
+        "op-e2e/config/init_test.go",
+        "op-e2e/faultproofs/precompile_test.go",
+        "rust/kona/tests/.gitignore",
+        "rust/kona/tests/justfile",
+        "rust/kona/tests/proofs/.gitignore",
+        "rust/kona/tests/proofs/activation_block_test.go",
+        "rust/kona/tests/proofs/bad_tx_in_batch_test.go",
+        "rust/kona/tests/proofs/batcher_change_test.go",
+        "rust/kona/tests/proofs/channel_timeout_test.go",
+        "rust/kona/tests/proofs/end_of_source_test.go",
+        "rust/kona/tests/proofs/fixtures.go",
+        "rust/kona/tests/proofs/garbage_channel_test.go",
+        "rust/kona/tests/proofs/helpers/env.go",
+        "rust/kona/tests/proofs/helpers/fixture.go",
+        "rust/kona/tests/proofs/helpers/kona.go",
+        "rust/kona/tests/proofs/helpers/l2_rpc_tracker.go",
+        "rust/kona/tests/proofs/helpers/matrix.go",
+        "rust/kona/tests/proofs/helpers/runner.go",
+        "rust/kona/tests/proofs/holocene_activation_test.go",
+        "rust/kona/tests/proofs/holocene_batches_test.go",
+        "rust/kona/tests/proofs/holocene_frame_test.go",
+        "rust/kona/tests/proofs/holocene_helpers_test.go",
+        "rust/kona/tests/proofs/holocene_invalid_batch_test.go",
+        "rust/kona/tests/proofs/isthmus_fork_test.go",
+        "rust/kona/tests/proofs/isthmus_requests_test.go",
+        "rust/kona/tests/proofs/isthmus_setcode_tx_test.go",
+        "rust/kona/tests/proofs/jovian_dafootprint_test.go",
+        "rust/kona/tests/proofs/jovian_minbasefee_test.go",
+        "rust/kona/tests/proofs/l1_blob_parameter_forks_test.go",
+        "rust/kona/tests/proofs/l1_lookback_test.go",
+        "rust/kona/tests/proofs/l1_prague_fork_test.go",
+        "rust/kona/tests/proofs/nut_bundle_activation_test.go",
+        "rust/kona/tests/proofs/operator_fee_fix_transition_test.go",
+        "rust/kona/tests/proofs/operator_fee_test.go",
+        "rust/kona/tests/proofs/pectra_blob_schedule_test.go",
+        "rust/kona/tests/proofs/precompile_test.go",
+        "rust/kona/tests/proofs/sequence_window_expiry_test.go",
+        "rust/kona/tests/proofs/simple_program_test.go",
+        "rust/kona/tests/proofs/system_config_test.go",
+        "rust/kona/tests/proofs/trace_extension_test.go",
+        "rust/typos.toml"
+      ]
+    },
+    {
+      "title": "chore(ci): test all Go packages by default via an exclude list",
+      "prNumber": 21210,
+      "type": "tests",
+      "body": "The `go-tests` package set was a hand-maintained **include** list (`TEST_PKGS` / `RPC_TEST_PKGS`), and nothing ran `go test ./...`. So new packages were silently skipped until someone remembered to add them — a gap this repo kept hitting (o",
+      "files": [
+        "justfile"
+      ]
+    },
+    {
+      "title": "feat(op-dispute-mon): monitor anchor state L2 sequence number",
+      "prNumber": 21209,
+      "type": "feature",
+      "body": "Adds anchor-state monitoring to op-dispute-mon. Publishes `anchor_state_l2_sequence_number`, a gauge labelled per `AnchorStateRegistry` address, sourced from `getAnchorRoot()`. This lets operators alert on a stalling anchor state by compari",
+      "files": [
+        "op-challenger/game/fault/contracts/anchorstateregistry.go",
+        "op-challenger/game/fault/contracts/anchorstateregistry_test.go",
+        "op-challenger/game/fault/contracts/faultdisputegame.go",
+        "op-challenger/game/fault/contracts/faultdisputegame080.go",
+        "op-challenger/game/fault/contracts/faultdisputegame_test.go",
+        "op-dispute-mon/metrics/metrics.go",
+        "op-dispute-mon/metrics/noop.go",
+        "op-dispute-mon/mon/anchor_state.go",
+        "op-dispute-mon/mon/anchor_state_test.go",
+        "op-dispute-mon/mon/extract/anchor_state_registry_enricher.go",
+        "op-dispute-mon/mon/extract/anchor_state_registry_enricher_test.go",
+        "op-dispute-mon/mon/extract/caller.go",
+        "op-dispute-mon/mon/extract/extractor_test.go",
+        "op-dispute-mon/mon/extract/super_permissioned_caller.go",
+        "op-dispute-mon/mon/extract/super_permissioned_caller_test.go",
+        "op-dispute-mon/mon/monitor.go",
+        "op-dispute-mon/mon/monitor_test.go",
+        "op-dispute-mon/mon/service.go",
+        "op-dispute-mon/mon/types/types.go",
+        "packages/contracts-bedrock/snapshots/abi_loader.go"
+      ]
+    },
+    {
+      "title": "test(op-supernode): fix rewind tests and enable them in CI",
+      "prNumber": 21206,
+      "type": "bugfix",
+      "body": "`op-e2e/actions/supernode` was absent from the `go-tests` package list (`TEST_PKGS`) and ran in no CI job, so `TestRewindToTimestamp` had never executed in CI — and it was failing.\n\n### The bug\nThe test set up a **pre-Holocene** chain, wher",
+      "files": [
+        "justfile",
+        "op-e2e/actions/supernode/rewind_test.go"
+      ]
+    },
+    {
+      "title": "feat(interop): dedicated RPC error code for failsafe (-320602)",
+      "prNumber": 21205,
+      "type": "feature",
+      "body": "Give the interop filter's failsafe rejection a dedicated JSON-RPC error code (`-320602`) so clients detect failsafe by code instead of matching the error message string.\n\n`ErrFailsafeEnabled` previously mapped to the generic `-32602`, share",
+      "files": [
+        "op-core/interop/interop.go",
+        "op-core/interop/interop_test.go"
+      ]
+    },
+    {
+      "title": "test(op-e2e): bound fuzz RPC/engine calls and stream output to diagnose no-output timeout",
+      "prNumber": 21203,
+      "type": "tests",
+      "body": "The `op-e2e-fuzz` step is intermittently killed by CircleCI's 15-min no-output timeout (3/733 on main). The job's healthy runtime is ~6.5 min, so this is an unbounded-wait hang, not slowness.\n\nThis does **not** fix the underlying hang — the",
+      "files": [
+        "op-e2e/justfile",
+        "op-e2e/opgeth/fastlz_test.go"
+      ]
+    },
+    {
+      "title": "test(proofs): move fault-proof action tests to rust/kona/tests, kona-only",
+      "prNumber": 21193,
+      "type": "tests",
+      "body": "Moves the fault-proof action tests from `op-e2e/actions/proofs` to `rust/kona/tests/proofs` and makes them kona-only.\n\nPreviously these ran under **op-program** by default in the `go-tests` suite (`KONA_HOST_PATH` unset) and under **kona-ho",
+      "files": [
+        ".circleci/continue/rust-e2e.yml",
+        "justfile",
+        "op-e2e/actions/proofs/block_data_hint_test.go",
+        "op-e2e/actions/proofs/helpers/runner.go",
+        "op-e2e/actions/proofs/precompile_test.go",
+        "op-e2e/config/init_test.go",
+        "op-e2e/faultproofs/precompile_test.go",
+        "rust/kona/tests/.gitignore",
+        "rust/kona/tests/justfile",
+        "rust/kona/tests/proofs/.gitignore",
+        "rust/kona/tests/proofs/activation_block_test.go",
+        "rust/kona/tests/proofs/bad_tx_in_batch_test.go",
+        "rust/kona/tests/proofs/batcher_change_test.go",
+        "rust/kona/tests/proofs/channel_timeout_test.go",
+        "rust/kona/tests/proofs/end_of_source_test.go",
+        "rust/kona/tests/proofs/fixtures.go",
+        "rust/kona/tests/proofs/garbage_channel_test.go",
+        "rust/kona/tests/proofs/helpers/env.go",
+        "rust/kona/tests/proofs/helpers/fixture.go",
+        "rust/kona/tests/proofs/helpers/kona.go",
+        "rust/kona/tests/proofs/helpers/l2_rpc_tracker.go",
+        "rust/kona/tests/proofs/helpers/matrix.go",
+        "rust/kona/tests/proofs/helpers/runner.go",
+        "rust/kona/tests/proofs/holocene_activation_test.go",
+        "rust/kona/tests/proofs/holocene_batches_test.go",
+        "rust/kona/tests/proofs/holocene_frame_test.go",
+        "rust/kona/tests/proofs/holocene_helpers_test.go",
+        "rust/kona/tests/proofs/holocene_invalid_batch_test.go",
+        "rust/kona/tests/proofs/isthmus_fork_test.go",
+        "rust/kona/tests/proofs/isthmus_requests_test.go",
+        "rust/kona/tests/proofs/isthmus_setcode_tx_test.go",
+        "rust/kona/tests/proofs/jovian_dafootprint_test.go",
+        "rust/kona/tests/proofs/jovian_minbasefee_test.go",
+        "rust/kona/tests/proofs/l1_blob_parameter_forks_test.go",
+        "rust/kona/tests/proofs/l1_lookback_test.go",
+        "rust/kona/tests/proofs/l1_prague_fork_test.go",
+        "rust/kona/tests/proofs/nut_bundle_activation_test.go",
+        "rust/kona/tests/proofs/operator_fee_fix_transition_test.go",
+        "rust/kona/tests/proofs/operator_fee_test.go",
+        "rust/kona/tests/proofs/pectra_blob_schedule_test.go",
+        "rust/kona/tests/proofs/precompile_test.go",
+        "rust/kona/tests/proofs/sequence_window_expiry_test.go",
+        "rust/kona/tests/proofs/simple_program_test.go",
+        "rust/kona/tests/proofs/system_config_test.go",
+        "rust/kona/tests/proofs/trace_extension_test.go",
+        "rust/typos.toml"
+      ]
+    },
+    {
+      "title": "docs(upgrade-19): update component versions",
+      "prNumber": 21189,
+      "type": "docs",
+      "body": "Updating component versions.",
+      "files": [
+        "docs/public-docs/notices/upgrade-19.mdx"
+      ]
+    },
+    {
+      "title": "chore(alloy-op-evm): drop dead-on-read sender/evm_gas_used from OpTxResult",
+      "prNumber": 21183,
+      "type": "other",
+      "body": "## Summary\n\nRemoves the two `OpTxResult` fields that are written during execution but never read on commit:\n\n- `pub sender: Address`\n- `pub evm_gas_used: u64`\n\nBoth are destructured as `_` in `commit_transaction`. After the reth v2.2.0 bump",
+      "files": [
+        "rust/alloy-op-evm/src/block/mod.rs"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests: run all osaka on l2 tests against osaka L1s",
+      "prNumber": 21170,
+      "type": "tests",
+      "body": "",
+      "files": [
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-chain-ops/cmd/check-karst/karsttest/checks.go",
+        "op-acceptance-tests/tests/interop/loadtest/l2.go"
+      ]
+    },
+    {
+      "title": "test(op-acceptance): skip kona-host runs on op-rbuilder",
+      "prNumber": 21169,
+      "type": "tests",
+      "body": "op-rbuilder does not run the proofs-history ExEx that op-reth uses to serve eth_getProof and debug_executePayload for historical blocks, so kona-host cannot prefetch state proofs from it (\"distance to target block exceeds maximum proof wind",
+      "files": [
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "rust/op-rbuilder/Cargo.lock"
+      ]
+    },
+    {
+      "title": "chore: safe dependency cleanups",
+      "prNumber": 21241,
+      "type": "refactor",
+      "body": "## Summary\r\n\r\nThis PR removes a small set of stale or unnecessary dependency references. The changes are intentionally narrow: metadata-only cleanups plus test-helper import swaps, with no contract compiler settings, remappings, generated a",
+      "files": [
+        "cannon/testdata/go-1-24/keccak/go.mod",
+        "cannon/testdata/go-1-25/keccak/go.mod",
+        "go.mod",
+        "go.sum",
+        "mise.toml",
+        "op-challenger/game/fault/trace/utils/preimage_test.go",
+        "op-deployer/pkg/deployer/artifacts/download_test.go"
+      ]
+    },
+    {
+      "title": "ci: wire merge-queue jobs into the required CI gates",
+      "prNumber": 21237,
+      "type": "other",
+      "body": "Several jobs run on `gh-readonly-queue` (merge queue) branches but were not part of any required gate's `requires` chain, so the merge queue could pass without them succeeding. The four gate jobs (`ci-gate`, `required-contracts-ci`, `requir",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
+      "title": "fix(op-challenger): restore ubuntu runtime image",
+      "prNumber": 21236,
+      "type": "bugfix",
+      "body": "## Summary\r\n\r\n`op-challenger` images on `develop` include `/usr/local/bin/cannon`, but it cannot execute:\r\n\r\n```sh\r\nsh: /usr/local/bin/cannon: not found\r\n```\r\n\r\n## Cause\r\n\r\nThe runtime image was changed from Ubuntu to Wolfi. `cannon` is dyn",
+      "files": [
+        "ops/docker/op-stack-go/Dockerfile"
+      ]
+    },
+    {
+      "title": "fix(rollup-boost): ship the real binary from the Docker build",
+      "prNumber": 21233,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe `rollup-boost` Docker image (now built/pushed by CI per #21229) ships a **~435 KB cargo-chef stub** — an empty `fn main(){}` with `rollup_boost::main` but none of its dependencies (no clap/tokio/alloy, no `--l2-url`, no CLI)",
+      "files": [
+        "rust/rollup-boost/.dockerignore",
+        "rust/rollup-boost/Dockerfile"
+      ]
+    },
+    {
+      "title": "ci(docker): build and push op-rbuilder and rollup-boost images",
+      "prNumber": 21229,
+      "type": "other",
+      "body": "## Problem\n\nThe vendored `op-rbuilder` and `rollup-boost` Rust workspaces (`rust/op-rbuilder`, `rust/rollup-boost`, vendored in #20669) were only **compiled and lint/test-checked** in CircleCI (`rust-build-vendored` / `rust-vendored-checks`",
+      "files": [
+        ".github/images.json",
+        "docker-bake.hcl",
+        "rust/rollup-boost/Cargo.lock"
+      ]
+    },
+    {
+      "title": "ci(ci-base-clang): preinstall sccache",
+      "prNumber": 21228,
+      "type": "other",
+      "body": "## What\n\nPreinstall a pinned sccache (0.9.1) into the `ci-base-clang` image used by Rust CI jobs. Arch-aware (amd64/arm64), statically linked musl build (runs on the glibc `cimg/base`).\n\n## Why\n\nRust CI is moving its compile cache to sccach",
+      "files": [
+        "ops/docker/ci-base-clang/Dockerfile"
+      ]
+    },
+    {
+      "title": "ci: gate contracts on fork-lock drift",
+      "prNumber": 21226,
+      "type": "other",
+      "body": "Follow up to #21224.\r\n\r\n#21224 fixes the immediate breakage (the `[interop]` → `[lagoon]` lock key). This PR closes the two CI gaps that let that breakage merge in the first place:\r\n\r\n1. **Path filter** — `contracts_changed` didn't watch `o",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "build: enforce locked dependencies in Docker builds",
+      "prNumber": 21225,
+      "type": "other",
+      "body": "## Summary\r\n\r\nMake every Docker image build from the committed dependency lockfiles instead of resolving versions at build time. This guarantees the bytes we ship match the bytes pinned in git, and fails fast if a lockfile drifts.\r\n\r\n- **Go",
+      "files": [
+        "cannon/Dockerfile.diff",
+        "op-program/Dockerfile.repro",
+        "op-program/Dockerfile.vmcompat",
+        "ops/docker/op-stack-go/Dockerfile",
+        "rust/kona/docker/apps/kona_app_generic.dockerfile",
+        "rust/op-rbuilder/Dockerfile",
+        "rust/op-rbuilder/crates/tdx-quote-provider/Dockerfile",
+        "rust/op-reth/DockerfileOp",
+        "rust/rollup-boost/Dockerfile",
+        "rust/rollup-boost/crates/websocket-proxy/Dockerfile"
+      ]
+    },
+    {
+      "title": "fix(nuts): key NUT bundle lock entry by the lagoon fork",
+      "prNumber": 21224,
+      "type": "bugfix",
+      "body": "The Lagoon hardfork rename (ethereum-optimism/optimism#21105) renamed the `interop` fork to `lagoon` and made `go-ffi nut-bundles` validate `fork_lock.toml` keys against `forks.All`, but left the lock entry keyed `[interop]`. Validation the",
+      "files": [
+        "op-core/nuts/fork_lock.toml",
+        "packages/contracts-bedrock/scripts/go-ffi/nut_bundles_test.go"
+      ]
+    },
+    {
+      "title": "kona: Reduce cardinality of exposed metrics",
+      "prNumber": 21223,
+      "type": "other",
+      "body": "See https://github.com/ethereum-optimism/optimism/issues/19927\r\n\r\nThe cardinality of the following metrics are always increasing, making fetching metrics from kona more and more painful overtime:\r\n    919 kona_node_dial_peer_error\r\n   1538 ",
+      "files": [
+        "rust/kona/crates/node/gossip/src/driver.rs",
+        "rust/kona/crates/node/gossip/src/gater.rs",
+        "rust/kona/crates/node/service/src/actors/network/handler.rs"
+      ]
+    },
+    {
+      "title": "test(devstack): make Reached/AdvancedFn tolerate transient block-ref lookups",
+      "prNumber": 21218,
+      "type": "tests",
+      "body": "## Summary\n\nThe DSL polling helpers `L2ELNode.ReachedFn` / `AdvancedFn` (and `L2CLNode.AdvancedFn`)\nwrap their reads in `retry.Do0`, but they read through the **infallible** getters\n(`BlockRefByLabel` / `HeadBlockRef`), which call `require.",
+      "files": [
+        "op-devstack/dsl/l2_cl.go",
+        "op-devstack/dsl/l2_el.go"
+      ]
+    },
+    {
+      "title": "test(op-e2e): use kona-host as Cannon.Server in op-e2e; drop op-program step test",
+      "prNumber": 21217,
+      "type": "tests",
+      "body": "Two parts of the op-program removal effort.\n\n### 1. op-e2e Cannon.Server → kona-host\nIn op-e2e the op-program cannon game type is never executed: output games use the **cannon-kona** game type (kona-host), and the permissioned game uses an ",
+      "files": [
+        "op-acceptance-tests/tests/proofs/cannon/step_test.go",
+        "op-devstack/shared/challenger/challenger.go",
+        "op-e2e/e2eutils/challenger/helper.go"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 290.35270983830867,
+      "prScore": 191.91470983830865,
+      "issueScore": 2,
+      "reviewScore": 96,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 161.0079991785241,
+      "prScore": 51.167999178524084,
+      "issueScore": 0,
+      "reviewScore": 109.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 121.64142902514452,
+      "prScore": 91.94142902514452,
+      "issueScore": 0,
+      "reviewScore": 29.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 118.38889893397997,
+      "prScore": 108.95089893397997,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 97.6337247592553,
+      "prScore": 75.9337247592553,
+      "issueScore": 2,
+      "reviewScore": 19.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 93.19946194554906,
+      "prScore": 58.25946194554906,
+      "issueScore": 6.1,
+      "reviewScore": 28.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
     {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
@@ -38,11 +712,151 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 61.89193768515804,
+      "prScore": 61.89193768515804,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 60.32506295743897,
+      "prScore": 40.48506295743897,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 53.558720770839926,
+      "prScore": 23.71872077083992,
+      "issueScore": 0,
+      "reviewScore": 29.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 34.5,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 32.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ngotchac",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2864519?u=808f20ca62701a0b71027869276d6d3709e8c7eb&v=4",
+      "totalScore": 30.065159756895888,
+      "prScore": 29.62715975689589,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "tensorium-labs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/289522670?v=4",
+      "totalScore": 15.49519732320115,
+      "prScore": 15.49519732320115,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 14.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "optibotpiper",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "julio4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30329843?u=5e4b677f4a818680ed0c3cb23c3671074324556d&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pjdurden",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48603194?u=fc4c66c8de08e2455f0d368ab90e9458e35abf1d&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 2
+  "newPRs": 27,
+  "mergedPRs": 32,
+  "newIssues": 5,
+  "closedIssues": 12,
+  "activeContributors": 28
 }
