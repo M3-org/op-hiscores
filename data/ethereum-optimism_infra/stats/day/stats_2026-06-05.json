@@ -5,20 +5,337 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-06-05 to 2026-06-06, ethereum-optimism/infra had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-06-05 to 2026-06-06, ethereum-optimism/infra had 1 new PRs (2 merged), 0 new issues, and 19 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ87VvI0l",
+      "title": "feat(proxyd): CL output root tiebreaking via ranked priority",
+      "author": "jelias2",
+      "number": 612,
+      "body": "## Summary\n- Adds a `consensus_cl_rank` config field to CL backends, enabling priority-based tiebreaking when output roots disagree and no majority exists\n- When a tie occurs, the backend with the lowest rank (highest priority) is treated as canonical; backends with disagreeing output roots are banned\n- Falls back to existing behavior (no bans, error log) when no backends have ranks configured\n- Adds `proxyd_consensus_cl_ranked_tiebreak_total` metric to track tiebreaking events\n\nRef: ethereum-optimism/core-team#2212\n\n## Configuration Example\n```toml\n[backends.op_node_primary]\nrpc_url = \"http://op-node-1:8545\"\nconsensus_cl_rank = 1  # highest priority\n\n[backends.op_node_secondary]\nrpc_url = \"http://op-node-2:8545\"\nconsensus_cl_rank = 2\n\n[backends.kona_node]\nrpc_url = \"http://kona-node:8545\"\nconsensus_cl_rank = 3\n```\n\n## Test plan\n- [x] Unit test: lowest rank wins tiebreak (`TestVerifyCLOutputRoots_RankedTiebreaking_LowestRankWins`)\n- [x] Unit test: higher rank gets banned (`TestVerifyCLOutputRoots_RankedTiebreaking_HigherRankBanned`)\n- [x] Unit test: unranked backends preserve existing no-ban behavior (`TestVerifyCLOutputRoots_NoRanks_NoBans`)\n- [x] Unit test: agreeing backends skip tiebreaking (`TestVerifyCLOutputRoots_RankedTiebreaking_SameRootNoAction`)\n- [x] All existing CL output root tests continue to pass\n- [x] `go test ./...` passes (integration test failures are pre-existing on main)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-04-26T15:33:11Z",
+      "mergedAt": null,
+      "additions": 515,
+      "deletions": 11
+    },
+    {
+      "id": "PR_kwDOL-xLQ87izx0M",
+      "title": "feat(proxyd): halt CL consensus on unresolvable output root split",
+      "author": "jelias2",
+      "number": 646,
+      "body": "**Description**\n\nAdds output-root split protection to proxyd's CL (consensus layer) routing. Each consensus cycle the poller calls `optimism_outputAtBlock` at the group's safe block on every candidate backend and compares the returned output roots:\n\n- **Strict-majority disagreement** — a backend whose root differs from a strict majority of responders is banned (now precisely defined as `topVotes*2 > responders`).\n- **No-majority disagreement** — a tie (1v1, 2-2) or an N-way split has no safe winner, so consensus **halts** instead of guessing:\n  - the served block height and the cached `optimism_syncStatus` body **freeze** at the last-agreed value, so clients keep seeing the previous response;\n  - the served consensus group is **emptied**, so general RPCs **fail closed** (`ErrNoBackends`) rather than being routed to a backend on an uncertain fork.\n\nBackends are **not** persistently banned during a halt — they are still polled and re-verified every cycle — so consensus **auto-recovers** as soon as a majority returns. A halt signals a potential chain split / derivation divergence and warrants operator attention.\n\nThis also removes the odd-backend-count startup guard: **any backend count is now permitted**, including even / 2-node cross-client groups (e.g. op-node + kona-node), since ties now halt rather than needing a majority to resolve.\n\nNew metrics:\n- `proxyd_consensus_cl_halted` — bool gauge, set to 1 while a group is halted (alert target).\n- `proxyd_consensus_cl_halt_total` — counter of halted consensus cycles.\n\n**Tests**\n\n- Unit decision tests for `verifyCLOutputRoots`: 1v1 / 3-way / 2-2-1 tie → halt; 2v1 majority bans the minority; unanimous and all-errored → no halt.\n- End-to-end `UpdateBackendGroupConsensus` test: a split freezes the served height and empties the group, then auto-recovers (group repopulates, block advances) once backends re-agree.\n- CL integration test (`TestConsensusCL`): the all-backends-disagree case now asserts the group fails closed (emptied) with nobody persistently banned.\n- All pass under `-race`; the full integration suite is green.\n\n**Additional context**\n\n- The halt is intentionally fail-closed (general RPCs error during a split) rather than serving possibly-forked data — a deliberate safety-over-availability choice for derivation divergence.\n- Known edge case: a slow / timing-out **majority** backend can momentarily collapse a 2v1 into a 1v1 tie and trigger a transient (single-cycle) halt that auto-recovers the next cycle. A persistence threshold could be added later if this proves noisy.\n\n**Metadata**\n\n- Fixes #[Link to Issue]\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-06-04T18:39:00Z",
+      "mergedAt": "2026-06-05T17:11:25Z",
+      "additions": 449,
+      "deletions": 48
+    },
+    {
+      "id": "PR_kwDOL-xLQ87jLrRe",
+      "title": "feat(peer-mgmt-service): add external peer support",
+      "author": "zhwrd",
+      "number": 647,
+      "body": "## Summary\n- Allow nodes in pms config to omit `rpc_address`; such \"external peers\" must carry `peer_id` + `peer_address` and are reachable only from internal nodes\n- Skip polling and reverse-RPC for external peers; dial them one-sided via static `peer_address`, with `prevent_inbound` still honored\n- Exclude external peers from the `network_peer_healthness` denominator so the metric reflects the internal mesh only\n- Validate external `peer_id` format at config load and reject networks composed entirely of external peers\n\n## Test plan\n- [x] `go test ./...` passes in `peer-mgmt-service/`\n- [x] `go vet ./...` clean\n- [ ] Verify on a devnet config: add an external peer entry and confirm internal nodes dial it\n- [ ] Confirm `network_peer_healthness` stays at 100% for the internal mesh when external peers are listed\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-06-05T16:47:26Z",
+      "mergedAt": "2026-06-05T20:50:57Z",
+      "additions": 317,
+      "deletions": 123
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 766,
+    "deletions": 171,
+    "files": 12,
+    "commitCount": 10
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "completedItems": [
+    {
+      "title": "feat(proxyd): halt CL consensus on unresolvable output root split",
+      "prNumber": 646,
+      "type": "feature",
+      "body": "**Description**\n\nAdds output-root split protection to proxyd's CL (consensus layer) routing. Each consensus cycle the poller calls `optimism_outputAtBlock` at the group's safe block on every candidate backend and compares the returned outpu",
+      "files": [
+        "proxyd/consensus_poller.go",
+        "proxyd/consensus_poller_cl.go",
+        "proxyd/consensus_poller_cl_test.go",
+        "proxyd/integration_tests/consensus_cl_test.go",
+        "proxyd/metrics.go",
+        "proxyd/proxyd.go"
+      ]
+    },
+    {
+      "title": "feat(peer-mgmt-service): add external peer support",
+      "prNumber": 647,
+      "type": "feature",
+      "body": "## Summary\n- Allow nodes in pms config to omit `rpc_address`; such \"external peers\" must carry `peer_id` + `peer_address` and are reachable only from internal nodes\n- Skip polling and reverse-RPC for external peers; dial them one-sided via ",
+      "files": [
+        "peer-mgmt-service/config.example.yaml",
+        "peer-mgmt-service/pkg/config/config.go",
+        "peer-mgmt-service/pkg/config/config_test.go",
+        "peer-mgmt-service/pkg/pms/network.go",
+        "peer-mgmt-service/pkg/pms/poll.go",
+        "peer-mgmt-service/pkg/pms/poll_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 208.06970685303463,
+      "prScore": 147.56970685303463,
+      "issueScore": 0,
+      "reviewScore": 60.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 112.58445999156247,
+      "prScore": 83.74445999156247,
+      "issueScore": 0,
+      "reviewScore": 28.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 100.47644249241306,
+      "prScore": 100.27644249241305,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 63.144672252277914,
+      "prScore": 53.144672252277914,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 59.41610152130937,
+      "prScore": 40.71610152130937,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 54.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 54,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 45.92513462634054,
+      "prScore": 45.92513462634054,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 40.590773896576096,
+      "prScore": 40.590773896576096,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 32.130683570116574,
+      "prScore": 32.130683570116574,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 30.328259952326007,
+      "prScore": 19.128259952326008,
+      "issueScore": 2,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 24.991292546497025,
+      "prScore": 15.151292546497023,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 24.20905020110221,
+      "prScore": 23.869050201102212,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 23.670947636399184,
+      "prScore": 23.232947636399185,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 23,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 10.254879734614025,
+      "prScore": 5.054879734614027,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "optibotpiper",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 2,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 19
 }

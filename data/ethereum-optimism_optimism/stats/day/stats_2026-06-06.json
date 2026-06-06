@@ -1,0 +1,74 @@
+{
+  "interval": {
+    "intervalStart": "2026-06-06T00:00:00.000Z",
+    "intervalEnd": "2026-06-07T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-06-06 to 2026-06-07, ethereum-optimism/optimism had 0 new PRs (1 merged), 0 new issues, and 2 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABEQ1vZQ",
+      "title": "op-acceptance-tests: switch to op-reth-only sequencing for Karst+",
+      "author": "sebastianst",
+      "number": 21182,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Context\n\nop-geth is being deprecated as of the **Karst** fork. The accompanying op-geth change ([op-geth#802](https://github.com/ethereum-optimism/op-geth/pull/802)) adds a kill switch: the beacon consensus engine refuses to build, seal, or import any block whose timestamp activates Karst. Consequently, **op-geth can no longer sequence or verify a Karst chain**, and every acceptance-test path that uses op-geth at Karst+ must move to op-reth (the official Karst EL client, which has full Karst support).\n\nThis issue tracks making **op-acceptance-tests sequence and verify on op-reth for Karst+** (op-geth remains valid up to and including Jovian).\n\n## Evidence (from the CI probe)\n\nDraft probe PR [#21167](https://github.com/ethereum-optimism/optimism/pull/21167) repins op-geth to the kill-switch commit. CircleCI `memory-all-*` acceptance results:\n\n| EL variant | Failures | Nature |\n|---|---|---|\n| `memory-all-opn-op-geth` (op-geth EL) | **93** | Broad — op-geth refuses to seal/import Karst blocks (expected) |\n| `memory-all-opn-op-reth` (op-reth EL) | **7** | All in supernode sync-tester + interop follow-L2 |\n\nThe 7 op-reth-variant failures were the actionable signal: even with `DEVSTACK_L2EL_KIND=op-reth`, these tests still spun up an **op-geth** node and hit the kill switch.\n\nFailing tests:\n- `op-acceptance-tests/tests/supernode/sync_tester`: `TestSupernodeVerifierAdvancesViaSyncTester`, `TestSupernodeVerifierELSyncsFromCold`, `TestSupernodeVerifierCatchesUpFromCold`, `TestSupernodeVerifierSyncsThroughInteropActivation`, `TestSupernodeVerifierELSyncsThroughInteropActivation`\n- `op-acceptance-tests/tests/supernode/interop/follow_l2`: `TestFollowSource_P2PSync`, `TestFollowSource_HeadsDivergeThenConverge`\n\n## Root cause: presets that hardcode op-geth\n\nTwo devstack constructors called `startL2ELNode` (op-geth) directly instead of the env-aware dispatch `startL2ELForKey` / `startSequencerEL` ([singlechain_build.go#L153](https://github.com/ethereum-optimism/optimism/blob/8a0fb5a914f8023a90baf9dfcd2c6a56515e6326/op-devstack/sysgo/singlechain_build.go#L153)):\n\n1. Sync-tester sequencer EL — [singlechain_supernode_synctester_variant.go#L59](https://github.com/ethereum-optimism/optimism/blob/8a0fb5a914f8023a90baf9dfcd2c6a56515e6326/op-devstack/sysgo/singlechain_supernode_synctester_variant.go#L59)\n2. Follow-L2 follower EL — [multichain_supernode_runtime.go#L515](https://github.com/ethereum-optimism/optimism/blob/8a0fb5a914f8023a90baf9dfcd2c6a56515e6326/op-devstack/sysgo/multichain_supernode_runtime.go#L515)\n\n## Approach (decided)\n\n**Karst-aware EL selection + auto-skip op-geth**, implemented at the single EL dispatch point:\n\n1. **De-hardcode op-geth** — route the two spots above through the env-aware dispatch (`startSequencerEL` / `startL2ELForKey`). No behavior change for the op-geth variant; the op-reth variant then truly runs op-reth everywhere.\n2. **Karst-aware guard** — in `startL2ELForKey` ([singlechain_build.go#L153](https://github.com/ethereum-optimism/optimism/blob/8a0fb5a914f8023a90baf9dfcd2c6a56515e6326/op-devstack/sysgo/singlechain_build.go#L153)) and the mixed-runtime per-node path ([mixed_runtime.go#L182](https://github.com/ethereum-optimism/optimism/blob/8a0fb5a914f8023a90baf9dfcd2c6a56515e6326/op-devstack/sysgo/mixed_runtime.go#L182)): when `l2Net.ChainConfig().IsKarst(genesis.Timestamp)` and the requested EL is op-geth, `t.Skipf(...)`; otherwise route to op-reth. Net: **on a Karst-at-genesis chain, no op-geth node is ever started** — op-geth-requested tests skip, everything else sequences/verifies on op-reth. No change for ≤ Jovian chains.\n\n### Resolved investigations\n- **op-reth as sequencer**: already first-class in devstack (`MixedL2ELOpReth`), driven by the EL-agnostic batcher + test-sequencer over RPC. No new plumbing.\n- **`--builder.interval=100ms` / `--builder.deadline`** ([mixed_runtime.go#L333](https://github.com/ethereum-optimism/optimism/blob/8a0fb5a914f8023a90baf9dfcd2c6a56515e6326/op-devstack/sysgo/mixed_runtime.go#L333)): confirmed via `op-reth node --help` these are payload-*job* parameters (how a *requested* payload is refined before `getPayload`/deadline), **not** autonomous sealing. The test-sequencer drives blocks via the Engine API, so there is no race and **no op-reth on-demand/test-mode flag is required** for acceptance.\n\n## Local verification\n\nBranch implementing the above, run against a Karst-at-genesis config:\n\n| Test | EL | Result |\n|---|---|---|\n| `sync_tester/TestSupernodeVerifierELSyncsFromCold` | op-reth | ✅ PASS (op-reth is the sequencer) |\n| `sync_tester/TestSupernodeVerifierELSyncsFromCold` | op-geth | ⏭️ SKIP (auto-skip fired) |\n| `interop/follow_l2/TestFollowSource_P2PSync` | op-reth | ✅ PASS (exercises the follower fix) |\n\n## Acceptance criteria\n- With Karst active, no op-geth node is started in any acceptance-test preset/runtime.\n- `memory-all-opn-op-reth` and `memory-all-kona-op-reth` are green against a Karst-activated config.\n- op-geth coverage for ≤ Jovian is preserved (op-geth variant skips Karst+ tests).\n\n## Out of scope (separate tracks)\n- **op-e2e/actions + proofs** — embed op-geth in-process as a Go library; op-reth coverage there is gated on the Rust `op-reth-test-engine` (#20415), which additionally needs *stateful incremental payload building* in op-reth (tx-by-tx). Tracked separately.\n- The op-geth kill switch itself ([op-geth#802](https://github.com/ethereum-optimism/op-geth/pull/802)) and the go.mod bump probe ([#21167](https://github.com/ethereum-optimism/optimism/pull/21167)).\n\n🤖 *Generated by Claude Code*\n",
+      "createdAt": "2026-06-03T15:02:11Z",
+      "closedAt": "2026-06-06T00:15:14Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7iUSWv",
+      "title": "op-devstack: sequence on op-reth for Karst+ in acceptance tests",
+      "author": "sebastianst",
+      "number": 21188,
+      "body": "## Summary\n\nop-geth is being deprecated as of the **Karst** fork and (with [op-geth#802](https://github.com/ethereum-optimism/op-geth/pull/802)) refuses to build, seal, or import Karst blocks. This makes the acceptance-test harness sequence and verify Karst-activated chains on **op-reth** — the official Karst EL client — instead of op-geth.\n\nResolves the op-reth-variant acceptance failures surfaced by the op-geth bump probe ([#21167](https://github.com/ethereum-optimism/optimism/pull/21167)), where presets that hardcoded op-geth hit the kill switch even under `DEVSTACK_L2EL_KIND=op-reth`.\n\n## Changes\n\n- **De-hardcode op-geth** in the two presets that bypassed the env-aware EL dispatch, so they honor `DEVSTACK_L2EL_KIND`:\n  - sync-tester sequencer EL (`singlechain_supernode_synctester_variant.go`) → `startSequencerEL`\n  - follow-L2 follower EL (`multichain_supernode_runtime.go`) → `startL2ELForKey`\n- **Karst-aware guard** at the EL dispatch point (`startL2ELForKey`) and the mixed-runtime per-node path:\n  - **env-selected op-geth** on a Karst-at-genesis chain → **skip** (the op-geth CI lane cannot cover Karst; it still runs ≤ Jovian).\n  - **explicit `spec.ELKind = op-geth`** on a Karst chain → **fail** (a test misconfiguration).\n  - everything else sequences/verifies on op-reth. No change for ≤ Jovian chains.\n\n## Local verification\n\nRun against a Karst-at-genesis config:\n\n| Test | EL | Result |\n|---|---|---|\n| `sync_tester/TestSupernodeVerifierELSyncsFromCold` | op-reth | ✅ PASS (op-reth is the sequencer) |\n| `sync_tester/TestSupernodeVerifierELSyncsFromCold` | op-geth | ⏭️ SKIP (auto-skip fired) |\n| `interop/follow_l2/TestFollowSource_P2PSync` | op-reth | ✅ PASS (exercises the follower fix) |\n\n## Notes\n\n- This lands ahead of the op-geth kill switch and is independently green: it's keyed on `ChainConfig.IsKarst(genesis)`, so the op-geth lane already skips Karst-activated tests while the op-reth lane runs them.\n- Out of scope: `op-e2e/actions`/proofs op-reth coverage, which is gated on the Rust `op-reth-test-engine` (#20415).\n\nCloses #21182.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-03T16:32:09Z",
+      "mergedAt": "2026-06-06T00:15:13Z",
+      "additions": 12,
+      "deletions": 2
+    }
+  ],
+  "codeChanges": {
+    "additions": 20,
+    "deletions": 2,
+    "files": 4,
+    "commitCount": 0
+  },
+  "completedItems": [
+    {
+      "title": "op-devstack: sequence on op-reth for Karst+ in acceptance tests",
+      "prNumber": 21188,
+      "type": "tests",
+      "body": "## Summary\n\nop-geth is being deprecated as of the **Karst** fork and (with [op-geth#802](https://github.com/ethereum-optimism/op-geth/pull/802)) refuses to build, seal, or import Karst blocks. This makes the acceptance-test harness sequence",
+      "files": [
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/singlechain_supernode_synctester_variant.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 0,
+  "mergedPRs": 1,
+  "newIssues": 0,
+  "closedIssues": 1,
+  "activeContributors": 2
+}

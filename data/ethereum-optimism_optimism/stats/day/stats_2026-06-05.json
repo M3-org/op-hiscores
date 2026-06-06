@@ -5,20 +5,602 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-06-05 to 2026-06-06, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-06-05 to 2026-06-06, ethereum-optimism/optimism had 17 new PRs (14 merged), 1 new issues, and 31 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM78cEz_",
+      "title": "op-conductor: gracefully recover from interop reorgs",
+      "author": "karlfloersch",
+      "number": 20006,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Problem\n\nWhen an interop cross-chain validation detects an invalid executing message and triggers a reorg, the EL is rewound to the last common ancestor (potentially hundreds or thousands of blocks behind the tip). After this rewind, op-conductor's health check compares the unsafe head timestamp to wall clock time, finds the sequencer far behind, declares it unhealthy, and calls `admin_stopSequencer`. With sequencing stopped, the unsafe head can never advance, creating a **permanent deadlock** that requires manual intervention (restarting the op-node pod).\n\nThis means every interop reorg currently requires manual recovery of the sequencer.\n\n## Mechanism\n\n1. Supernode interop activity detects an invalid executing message at block N\n2. The invalid block is replaced with a deposit-only block; supernode reports the corrected safe head\n3. Sequencer EL receives the forkchoice update, detects chain divergence at block N, and rewinds from the tip to block N-1\n4. The unsafe head is now far behind wall clock (e.g. 1400+ seconds behind after a rewind of ~1500 blocks)\n5. Conductor health check fires, sees the stale unsafe head, declares the sequencer unhealthy\n6. Conductor calls `admin_stopSequencer` — the sequencer can no longer produce blocks\n7. Since blocks can't be produced, the unsafe head never catches up — **circular deadlock**\n\n## Expected Behavior\n\nThe conductor should recognize that an EL rewind (reorg) is a transient event and allow the sequencer to recover by continuing to produce blocks from the rewound head. The sequencer will naturally catch up to the tip as it sequences new blocks.\n\n## Possible Solution Direction\n\nThe right fix isn't fully determined yet, but one promising direction:\n\n**Conductor queries the consensus layer (via consensus-layer HA) for safe chain state.** The conductor already participates in HA, so it could leverage the consensus layer to access safe head, cross-safe head, and local-safe head information. With this data, the conductor would have enough context to distinguish between:\n\n- A sequencer that is **genuinely stalled** (not making progress, something is wrong)\n- A sequencer that is **correctly responding to a local-safe reorg** (unsafe head is behind because the EL was rewound to follow a corrected safe chain)\n\nIf the conductor can see that a local-safe reorg occurred — e.g. the safe/local-safe heads moved backwards while the sequencer's state is consistent with that new safe chain — it can determine that the sequencer is actually healthy and should continue sequencing from the rewound head, rather than stopping it.\n\n## Additional Context\n\nThis issue was also observed on fresh devnet deployments: if a sequencer's op-node restarts and comes back with `sequencerEnabled=true, sequencerStopped=true`, the conductor won't re-activate it because the unsafe head is behind — the same circular deadlock pattern. The current workaround is manually calling `admin_startSequencer` with the current unsafe head hash.",
+      "createdAt": "2026-04-09T22:19:28Z",
+      "closedAt": "2026-06-05T16:07:52Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABEKNdmQ",
+      "title": "Devstack interop preset uses same EL for light node sequencer and supernode",
+      "author": "ajsutton",
+      "number": 21158,
+      "repository": "ethereum-optimism/optimism",
+      "body": "When using a light node sequencer, devstack is incorrectly sharing the EL between the supernode and the light node.\n\nPR: https://github.com/ethereum-optimism/optimism/pull/21122",
+      "createdAt": "2026-06-02T18:45:07Z",
+      "closedAt": "2026-06-05T16:20:25Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABBXxxUA",
+      "title": "op-node: support superroot_atTimestamp for non-interop chains",
+      "author": "wwared",
+      "number": 20552,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Context\n\nAfter the super-roots upgrade, fault dispute games for non-interop chains will reason over super roots rather than output roots. op-challenger and op-dispute-mon already consume super roots through the `superroot_atTimestamp` RPC, but today this method is only served by op-supernode, which is interop-specific infrastructure. Non-interop chains do not run op-supernode — they run op-node. Without an op-node-side implementation, op-challenger and op-dispute-mon cannot operate against non-interop chains once those chains move to super-root games.\n\n## Problem\n\nop-node does not implement `superroot_atTimestamp`. Consumers that depend on it today:\n\n- `op-challenger` — `SuperNodeTraceProvider` in `op-challenger/game/fault/trace/super/` (interface `SuperNodeRootProvider`, single method `SuperRootAtTimestamp(ctx, uint64) → eth.SuperRootAtTimestampResponse`)\n- `op-dispute-mon` — `SuperAgreementEnricher` in `op-dispute-mon/mon/extract/super_agreement_enricher.go` (interface `SuperRootProvider`, same method)\n\nBoth currently take `--supernode-rpc`. For a non-interop chain there is nothing reasonable to point that at.\n\n## Proposal\n\nImplement `superroot_atTimestamp` on op-node so that:\n\n- A single op-node endpoint can be used as the trace/agreement source for a non-interop chain post-super-roots upgrade.\n- The returned `eth.SuperRootAtTimestampResponse` is shaped so existing op-challenger and op-dispute-mon consumers Just Work — i.e. no client-side branching on whether the source is op-node or op-supernode.\n- For a single-chain (non-interop) deployment the response degenerates naturally: `ChainIDs` is the one local chain, `OptimisticAtTimestamp` has at most one entry, `CurrentL1` / `CurrentSafeTimestamp` / `CurrentLocalSafeTimestamp` / `CurrentFinalizedTimestamp` come from op-node's existing sync state, and `Data.Super` is built from the local L2 output at the requested timestamp.\n- op-challenger's `--supernode-rpc` and op-dispute-mon's `--supernode-rpc` can be pointed at an op-node URL for non-interop chains. (Whether to introduce a separate flag name vs. reusing `--supernode-rpc` is an open question — see below.)\n\n## Open questions\n\n- **Flag/URL plumbing.** Do op-challenger and op-dispute-mon accept op-node URLs under the existing `--supernode-rpc` flag (treating any `superroot_atTimestamp`-speaking endpoint uniformly), or do we add a new flag (e.g. `--rollup-superroot-rpc`)? Reusing the existing flag is simpler; a new flag is more explicit about intent.\n- **Namespacing.** op-supernode exposes the method under the `superroot` namespace (`superroot_atTimestamp`). op-node should match that exact method name to keep the client interfaces and existing call sites untouched.\n- **Pre-upgrade behavior.** Before the super-roots activation timestamp on a given chain, what should op-node return? Options: error with a clear \"not yet active\" message, or return `Data: nil` with current sync fields populated (mirroring how op-supernode behaves when there is no block at the requested timestamp).\n\n## Out of scope\n\n- Interop chains — op-supernode remains the source of truth there.\n- Any change to the super-root format itself or to `SuperRootAtTimestampResponse`.\n- Changes to op-challenger/op-dispute-mon trace logic. This issue is about adding the server side on op-node so the existing client code paths can be reused.\n\n## Acceptance criteria\n\n- [ ] op-node exposes `superroot_atTimestamp` returning `eth.SuperRootAtTimestampResponse` compatible with existing clients.\n- [ ] op-challenger configured against an op-node URL can play super-root games on a non-interop chain (covered by acceptance / e2e tests against a non-interop devstack).\n- [ ] op-dispute-mon configured against an op-node URL can monitor super-root games on a non-interop chain.\n- [ ] Behavior at and around the super-roots activation boundary is specified and tested.\n- [ ] In-repo docs / READMEs reflect that op-node is the source for non-interop chains.",
+      "createdAt": "2026-05-05T20:47:15Z",
+      "closedAt": "2026-06-05T13:23:56Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABELiQvQ",
+      "title": "Follow-mode ELSync sequencer cannot bootstrap a chain from genesis (deadlocks in syncStatusWillStartEL)",
+      "author": "wwared",
+      "number": 21164,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nA follow-mode op-node sequencer (`SequencerEnabled` + `L2FollowSource`, i.e. `NeedInitialResetEngine`) configured with `--syncmode=execution-layer` cannot bootstrap a chain from genesis. As the chain's sole block producer it has no peer to initial-EL-sync from, so it deadlocks before producing any block and the chain never advances.\n\n## Details\n\nAt startup in ELSync, `NewEngineController` sets `syncStatus = syncStatusWillStartEL` purely from config. While in `willStartEL`, `IsEngineInitialELSyncing()` is true, so `SyncStep` backs off and never reaches `TryInitialResetEngineForSequencer`; block building is gated behind the same back-off. The only exit from `willStartEL` is inside `insertUnsafePayload` (\"skip EL sync when a finalized block exists\"), which needs an incoming **unsafe payload** delivered via P2P gossip. For a sole-producer follow-mode sequencer at genesis, no peer produces a block to gossip, and `followUpstream()` early-returns while `IsEngineInitialELSyncing()` is true — so nothing ever delivers the payload. The chain never starts.\n\nThis also blocks a \"bootstrap on CLSync, then restart on ELSync\" workaround: on restart the controller re-enters `willStartEL` from config (it does not consult the EL's existing finalized head at construction), so an idle established chain re-deadlocks the same way.\n\n## Impact\n\nThe devstack light-sequencer interop presets (`NewTwoL2SupernodeLightSequencerInterop`) cannot run on ELSync from genesis. `TestSupernodeLightSequencerInteropInvalidMessageReplacement` and `TestLightSequencerSupernodeDerivesSafeChain` are affected and have been skipped pending a fix.\n\n## Notes\n\nThis looks like the same `willStartEL` deadlock as the (closed) #11016 — \"op-node: EL sync mode prevents active sequencer start-up\" — where an active sequencer *restarting* under EL sync couldn't resume because it needs an unsafe payload to leave `willStartEL` but cannot produce one until it does. Here it's a follow-mode sequencer at *genesis*, same root cause.\n\n#21120 attempted a fix but is left as a draft and is likely not the right solution.\n\nRelated: #21119 (parent), #21125 (follow-mode reorg-recovery flakiness), #11016 (prior closed issue, same mechanism).\n",
+      "createdAt": "2026-06-02T22:46:40Z",
+      "closedAt": "2026-06-05T10:26:42Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABEiW2Ag",
+      "title": "Uniswap Joint Devnet 4",
+      "author": "jelias2",
+      "number": 21260,
+      "repository": "ethereum-optimism/optimism",
+      "body": "# Description \nUniswap Joint Devnet 4.\n\nExcercise the following \n- [ ]  Interop Message Handling and invalid filtering on both chains\n- [ ]  Failsafe toggles on both networks stops interop\n- [ ] Run through restarting network on invalid message landing on chain\n- [ ] Full Fault proofs setup\n- [ ] Uni sequencing and batching for one chain\n",
+      "createdAt": "2026-06-05T19:08:21Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7jK75Q",
+      "title": "chore(op-e2e): drop op-program references",
+      "author": "ajsutton",
+      "number": 21257,
+      "body": "Decouples op-e2e from op-program so it can be deleted from the monorepo, part of ethereum-optimism/optimism#20276. After this PR, neither op-e2e nor op-devstack reference op-program.\n\n- Moves the `engineapi` package (the in-process L2 engine used by action tests) from `op-program/client/l2/engineapi` into `op-e2e/actions/helpers/engineapi`.\n- Stops deploying the legacy type-0 Cannon dispute game in the op-e2e deploy intent. It is no longer served by op-challenger, and it was the only reason op-e2e read `op-program/bin/prestate-proof-mt64.json`. The generic CannonKona (type 8) game still exercises the proof system.\n\nStacked on ethereum-optimism/optimism#21254 (Cannon game-type removal), which already cleared op-program out of op-devstack.\n\nTest plan: `go test ./op-e2e/actions/helpers/engineapi/...` and `TestL2EngineAPI` pass; `just lint-go` clean.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-05T16:09:14Z",
+      "mergedAt": null,
+      "additions": 2515,
+      "deletions": 71
+    },
+    {
+      "id": "PR_kwDODjvEJM7jCFYP",
+      "title": "feat(contracts): integrate L2CM into L2 genesis",
+      "author": "lumoswiz",
+      "number": 21248,
+      "body": "**Description**\r\n\r\nPoC for routing L2 genesis proxy-side predeploy setup through `L2ContractsManager`.\r\n\r\nThis adds a genesis-only `L2ContractsManager.deploy(FullConfig)` path. `upgrade()` remains the fork-upgrade path through `L2ProxyAdmin`.\r\n\r\nKey points:\r\n\r\n- No `L2ProxyAdmin` source/interface/semver changes.\r\n- Genesis still owns proxy/code etching, code-namespace implementations, implementation-account lock initialization, preinstalls, feature flags, fork activation setup, prefunds, and deprecated/non-proxied predeploys.\r\n- L2CM now owns the proxy-side upgrade/init/config sequence at genesis.\r\n- Genesis deploys a temporary L2CM, batch-swaps touched proxy admins to it, calls `deploy(config)`, restores admins to `0x18`, then wipes the temporary L2CM.\r\n- Intended as a draft PR to validate the approach before merge review.\r\n\r\n**Tests**\r\n\r\nAdded/updated coverage for:\r\n\r\n- L2CM deploy mode and existing upgrade mode\r\n- deploy-mode `L2ContractsManagerUtils` behavior\r\n- L2 genesis script paths: default, CGT, interop, CGT+interop\r\n- op-deployer L2 genesis alloc invariants\r\n- L2 fork-upgrade coverage\r\n\r\nLocally run:\r\n\r\n```bash\r\ncd packages/contracts-bedrock\r\nmise exec -- just test --match-contract L2ContractsManager\r\nmise exec -- just test --match-path test/scripts/L2Genesis.t.sol\r\nmise exec -- just test --match-path test/L2/L2GenesisForkUpgrade.t.sol\r\nmise exec -- just snapshots-check-no-build\r\nmise exec -- just semver-diff-check-no-build\r\n\r\ncd ../../op-deployer\r\nmise exec -- just test './pkg/deployer/integration_test -run TestL2GenesisAllocsInvariants -count=1'\r\nmise exec -- just test './pkg/deployer/integration_test -run ^TestEndToEndBootstrapApply$ -count=1'\r\n```\r\n\r\nKnown local note: `interfaces-check-no-build` currently fails on unrelated `IZKDisputeGame` interface/artifact mismatches, not on the L2CM interface changes in this branch.\r\n\r\n**Additional context**\r\n\r\nIssue #20903 asks for L2CM to become the source of truth for L2 genesis predeploy setup without regressing produced L2 allocs.\r\n\r\nThis PR uses `deploy(FullConfig)` instead of executing the NUT bundle during genesis. The NUT-bundle path changes the alloc shape through CREATE2 implementation addresses and helper execution state. This PoC keeps the current code-namespace implementation layout.\r\n\r\n**Metadata**\r\n\r\n- Refs ethereum-optimism/optimism#20903\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-05T08:56:32Z",
+      "mergedAt": null,
+      "additions": 1701,
+      "deletions": 228
+    },
+    {
+      "id": "PR_kwDODjvEJM7gKog6",
+      "title": "feat(op-reth/proofs): snapshot hashed-leaf tables for backfill",
+      "author": "dhyaniarun1993",
+      "number": 21088,
+      "body": "**Description**\r\n\r\n**Why**\r\nSnapshot-accelerated backfill was still bottlenecked on hashed-leaf reads. The trie snapshot replaced the V2-trie merge walk, but `compute_block_backfill_diff` were still constructing `OpProofsHashedAccountCursorFactory` at `block_number`, which does the full `V2HashedAccounts + History + ChangeSets` merge at each block. With the trie diff dominated by leaf reads under `StateRoot::root_with_updates`, the per-block cost stayed high.\r\n\r\n**What**\r\nExtend the snapshot to cache hashed leaves alongside trie nodes, so the snapshot read path for backfill is fully history-merge-free.\r\n\r\n**Tests**\r\n\r\n- [x] backfill tests covers the change as well.\r\n- [x] op-mainnet test run in progress \r\n\r\n**Additional context**\r\n\r\nNA\r\n\r\n**Metadata**\r\n\r\nNA",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-28T09:06:17Z",
+      "mergedAt": "2026-06-05T13:48:57Z",
+      "additions": 1042,
+      "deletions": 111
+    },
+    {
+      "id": "PR_kwDODjvEJM7RHm6x",
+      "title": "feat(ops): add component release check scripts",
+      "author": "nonsense",
+      "number": 19991,
+      "body": "Our release process document at https://www.notion.so/oplabs/Scaling-Team-Release-Process-330f153ee16280fc90fdcb041af9b67a#330f153ee16280ce83cbeaefaaa4c0c7 says:\r\n\r\n**The EOC can decide not to do a release for a component if there haven’t been any commits to the trunk branch.**\r\n\r\nWe should have a list of all components and a command we can run that shows changes between current `develop` and last release, so that we can easily see what components should be released.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-04-09T12:01:07Z",
+      "mergedAt": null,
+      "additions": 662,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7jPWyZ",
+      "title": "feat(op-chain-ops): add check-interop smoke-test CLI",
+      "author": "jelias2",
+      "number": 21262,
+      "body": "## Overview\n\nAdds a small CLI under `op-chain-ops/cmd/check-interop` for smoke-testing interop cross-chain messaging against a running pair of L2 chains.\n\n## Subcommands\n\n- **`roundtrip`** — bridges ETH `A -> B` and `B -> A` via the `SuperchainETHBridge` predeploy, relaying each message itself through `L2ToL2CrossDomainMessenger.relayMessage` (no autorelayer), and asserts a fresh recipient is credited the exact bridged amount on each destination chain. No contract deploys — it uses the predeploys that already exist on every OP chain.\n- **`failsafe`** — verifies the op-interop-filter failsafe lifecycle via the filter admin RPC: a bridge succeeds, its relay is rejected while failsafe is enabled (`admin_setFailsafeEnabled`), and succeeds again once disabled.\n\n## Usage\n\nFlags can be supplied via CLI, `CHECK_INTEROP_*` env vars, or a TOML config file (`--config`, see `config.example.toml`); CLI and env values override the file. Endpoints can be any reachable RPC URL (e.g. a devnet's direct ingress), so no `kubectl port-forward` is required.\n\n```\ngo run ./op-chain-ops/cmd/check-interop roundtrip \\\n  --l2-a <chain-A EL RPC> --l2-b <chain-B EL RPC> \\\n  --account <funded test key, no 0x> --relay-timeout 5m\n```\n\n## Testing\n\n- `roundtrip` verified live against the `interop-reorg-0` dev devnet (direct ingress URLs, no port-forward): full `A<->B` round-trip lands in ~20s when the network is healthy, with both legs asserting the recipient gained exactly 0.01 ETH on the destination chain.\n- `failsafe` is **not** exercised live in this PR — it requires the op-interop-filter admin RPC + JWT. It compiles and shares the verified `bridgeETH` / `Success.Eval` plumbing, but the enable→block→disable lifecycle has not been run against a live filter.\n- `go build`, `go vet`, `gofmt`, and the repo's custom `op-golangci-lint` all pass (0 issues).\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-05T19:44:15Z",
+      "mergedAt": null,
+      "additions": 591,
+      "deletions": 0
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 3162,
+    "deletions": 1651,
+    "files": 91,
+    "commitCount": 103
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "feat(op-node): serve superroot_atTimestamp for non-interop chains",
+      "prNumber": 20581,
+      "type": "feature",
+      "body": "## Summary\n\nAdds a new \\`superroot\\` JSON-RPC namespace on op-node with a single method \\`AtTimestamp(timestamp)\\`, mirroring op-supernode's wire contract exactly so existing dispute infrastructure (op-challenger, op-dispute-mon) can point ",
+      "files": [
+        "op-node/node/node.go",
+        "op-node/node/safedb/l1_at_safe_head.go",
+        "op-node/node/safedb/l1_at_safe_head_test.go",
+        "op-node/node/superroot_api.go",
+        "op-node/node/superroot_api_test.go",
+        "op-supernode/supernode/chain_container/virtual_node/virtual_node.go",
+        "op-supernode/supernode/chain_container/virtual_node/virtual_node_test.go",
+        "op-node/rollup/driver/driver.go"
+      ]
+    },
+    {
+      "title": "feat(op-reth/proofs): snapshot hashed-leaf tables for backfill",
+      "prNumber": 21088,
+      "type": "feature",
+      "body": "**Description**\r\n\r\n**Why**\r\nSnapshot-accelerated backfill was still bottlenecked on hashed-leaf reads. The trie snapshot replaced the V2-trie merge walk, but `compute_block_backfill_diff` were still constructing `OpProofsHashedAccountCursor",
+      "files": [
+        "rust/op-reth/crates/trie/src/api.rs",
+        "rust/op-reth/crates/trie/src/backfill/job.rs",
+        "rust/op-reth/crates/trie/src/cursor_factory.rs",
+        "rust/op-reth/crates/trie/src/db/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/backfill.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/cursor/snapshot.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/snapshot_init.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/snapshot_read.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/snapshot_tests.rs",
+        "rust/op-reth/crates/trie/src/lib.rs",
+        "rust/op-reth/crates/trie/src/snapshot/job.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/backfill.rs",
+        "rust/op-reth/crates/trie/src/backfill/changesets.rs",
+        "rust/op-reth/crates/trie/src/backfill/error.rs",
+        "rust/op-reth/crates/trie/src/backfill/tests.rs"
+      ]
+    },
+    {
+      "title": "rust: point to reth commit with fix",
+      "prNumber": 21247,
+      "type": "bugfix",
+      "body": "",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/Cargo.toml",
+        "rust/op-reth/crates/cli/src/commands/slot_preimages_seed.rs",
+        "rust/rollup-boost/Cargo.lock",
+        "rust/rollup-boost/crates/flashblocks-rpc/Cargo.toml",
+        "rust/rollup-boost/crates/rollup-boost/Cargo.toml"
+      ]
+    },
+    {
+      "title": "chore(ci): de-duplicate command/job defs and align rust base image default",
+      "prNumber": 21245,
+      "type": "other",
+      "body": "Three cleanups to the CircleCI continuation fragments. Verified by re-running `merge-configs.sh` and diffing the merged output against develop: the **only** functional change is the rust base image default (N4) — the de-dups produce a merge",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
+      "title": "fix(ci): correct BASE_REVISION typo (devlop -> develop)",
+      "prNumber": 21244,
+      "type": "bugfix",
+      "body": "`prepare-continuation-config` set `BASE_REVISION: devlop`. `collect-params.sh` computes the changed-file set with `git diff --name-only \"origin/${BASE_REVISION}...HEAD\"` and silently falls back to `git diff HEAD~1 HEAD` on failure. Since `o",
+      "files": [
+        ".circleci/config.yml"
+      ]
+    },
+    {
+      "title": "fix(op-e2e): lazily generate genesis allocs per alloc type",
+      "prNumber": 21238,
+      "type": "bugfix",
+      "body": "## What\n\n`op-e2e/config`'s `init()` ran a full genesis pipeline for all 4 alloc types × 9 hardfork modes (36 pipelines) at test-binary startup — minutes of CPU before any test runs. Generate each alloc type lazily and once instead, so a bin",
+      "files": [
+        "op-e2e/config/init.go"
+      ]
+    },
+    {
+      "title": "ci(rust): speed up Rust CI jobs with a shared sccache compile cache",
+      "prNumber": 21227,
+      "type": "other",
+      "body": "## What\n\nSpeed up Rust CI by giving the build jobs a shared [sccache](https://github.com/mozilla/sccache) compile cache backed by the `op-rust-sccache` GCS bucket, so compilation artifacts are reused across jobs and pipelines instead of eve",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        ".circleci/continue/helpers.yml"
+      ]
+    },
+    {
+      "title": "test(devstack): un-skip #21164 light-sequencer interop tests via VN-handoff bootstrap",
+      "prNumber": 21220,
+      "type": "tests",
+      "body": "Fixes #21164\r\n\r\n## Summary\r\n\r\nTwo supernode light-sequencer interop acceptance tests were skipped on #21122: a follow-mode ELSync sequencer can't bootstrap a chain from genesis as the sole block producer — with no peer payload to EL-sync fr",
+      "files": [
+        "op-acceptance-tests/tests/supernode/interop/follow_l2/light_sequencer_test.go",
+        "op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go",
+        "op-devstack/dsl/l2_el.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/presets/twol2.go",
+        "op-devstack/presets/twol2_from_runtime.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-devstack/sysgo/singlechain_build.go"
+      ]
+    },
+    {
+      "title": "chore(contracts-bedrock): mark SuperchainConfig as audited, bump to v2.4.3",
+      "prNumber": 21265,
+      "type": "other",
+      "body": "## Summary\n\n- Removes the stale `/// @custom:audit none This contracts is not yet audited.` annotation from `SuperchainConfig` now that the contract has been audited\n- Bumps version `2.4.2` → `2.4.3` (patch, per semver policy: comment-only ",
+      "files": [
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/SuperchainConfig.sol"
+      ]
+    },
+    {
+      "title": "docs: add op-batcher v1.16.10 release",
+      "prNumber": 21264,
+      "type": "docs",
+      "body": "## Summary\nAdds the new op-batcher v1.16.10 release (June 5, 2026) and updates the index card.\n\n## Changes\n- Prepend v1.16.10 entry to `releases/op-batcher.mdx` and demote v1.16.9 to `[\"Stable\"]`.\n- Update op-batcher card in `releases/index",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/op-batcher.mdx"
+      ]
+    },
+    {
+      "title": "docs: update Upgrade 19 + releases for op-reth v2.3.1",
+      "prNumber": 21263,
+      "type": "docs",
+      "body": "## Summary\n\n- Bumps **op-reth** to [`v2.3.1`](https://github.com/ethereum-optimism/optimism/releases/tag/op-reth%2Fv2.3.1) in the Upgrade 19 (Karst) chain-operator component table. v2.3.1 fixes a deadlock bug that could stall a node and sup",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/notices/upgrade-19.mdx",
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/kona-client.mdx",
+        "docs/public-docs/releases/kona-host.mdx",
+        "docs/public-docs/releases/kona-node.mdx",
+        "docs/public-docs/releases/op-challenger.mdx",
+        "docs/public-docs/releases/op-contracts.mdx",
+        "docs/public-docs/releases/op-deployer.mdx",
+        "docs/public-docs/releases/op-node.mdx",
+        "docs/public-docs/releases/op-reth.mdx",
+        "docs/public-docs/releases/proxyd.mdx",
+        "docs/public-docs/scripts/generate-releases.ts"
+      ]
+    },
+    {
+      "title": "chore(op-devstack): remove Cannon game type (op-program) support",
+      "prNumber": 21254,
+      "type": "other",
+      "body": "Removes the legacy Cannon game type (game type 0, served by op-program) from op-devstack **and op-e2e**, part of removing op-program from the monorepo (ethereum-optimism/optimism#20276). Neither harness references `op-program/bin/*` for the",
+      "files": [
+        "op-acceptance-tests/tests/base/withdrawal/cannon/withdrawal_test.go",
+        "op-acceptance-tests/tests/karst/withdrawal_test.go",
+        "op-acceptance-tests/tests/proofs/cannon_kona/setup_test.go",
+        "op-acceptance-tests/tests/proofs/cannon_kona/smoke_test.go",
+        "op-acceptance-tests/tests/proofs/cannon_kona/step_test.go",
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-devstack/presets/options_test.go",
+        "op-devstack/shared/challenger/challenger.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-e2e/e2eutils/challenger/helper.go",
+        "op-e2e/e2eutils/disputegame/helper.go",
+        "op-e2e/e2eutils/disputegame/super_dispute_system.go",
+        "op-e2e/system/e2esys/setup.go"
+      ]
+    },
+    {
+      "title": "refactor: host RootsOfUnity in op-service/kzg, off op-program",
+      "prNumber": 21253,
+      "type": "refactor",
+      "body": "Moves the EIP-4844 `RootsOfUnity` table out of `op-program/client/l1` into a new `op-service/kzg` package, so op-challenger no longer imports op-program. Consumers (op-challenger's blob preimage loader, op-program's `client/l1` and `host/pr",
+      "files": [
+        "op-challenger/game/fault/trace/utils/preimage.go",
+        "op-challenger/game/fault/trace/utils/preimage_test.go",
+        "op-program/client/l1/oracle.go",
+        "op-program/client/l1/oracle_test.go",
+        "op-program/host/prefetcher/prefetcher.go",
+        "op-program/host/prefetcher/prefetcher_test.go",
+        "op-service/kzg/roots_of_unity.go",
+        "op-service/kzg/roots_of_unity_test.go"
+      ]
+    },
+    {
+      "title": "ci: smoke-test bundled binaries in op-challenger image",
+      "prNumber": 21249,
+      "type": "tests",
+      "body": "## Problem\n\nThe image-build smoke check (`check-cross-platform` in `build-images.yaml`) runs `docker run <image> <image_name> --version`, exercising only each image's primary binary.\n\n`op-challenger` is the one \"fat\" image: it bundles helpe",
+      "files": [
+        ".github/workflows/build-images.yaml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 208.06970685303463,
+      "prScore": 147.56970685303463,
+      "issueScore": 0,
+      "reviewScore": 60.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 112.58445999156247,
+      "prScore": 83.74445999156247,
+      "issueScore": 0,
+      "reviewScore": 28.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 100.47644249241306,
+      "prScore": 100.27644249241305,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 63.144672252277914,
+      "prScore": 53.144672252277914,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 59.41610152130937,
+      "prScore": 40.71610152130937,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 54.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 54,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 45.92513462634054,
+      "prScore": 45.92513462634054,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 40.590773896576096,
+      "prScore": 40.590773896576096,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 32.130683570116574,
+      "prScore": 32.130683570116574,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 30.328259952326007,
+      "prScore": 19.128259952326008,
+      "issueScore": 2,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 24.991292546497025,
+      "prScore": 15.151292546497023,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 24.20905020110221,
+      "prScore": 23.869050201102212,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 23.670947636399184,
+      "prScore": 23.232947636399185,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 23,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 10.254879734614025,
+      "prScore": 5.054879734614027,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "serpixel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5087962?u=6f2fb80cc627356ef3e885f9cad13b4751cebd80&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "optibotpiper",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 17,
+  "mergedPRs": 14,
+  "newIssues": 1,
+  "closedIssues": 4,
+  "activeContributors": 31
 }
