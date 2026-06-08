@@ -5,20 +5,93 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-06-07 to 2026-06-08, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-06-07 to 2026-06-08, ethereum-optimism/optimism had 0 new PRs (2 merged), 0 new issues, and 3 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7jbASR",
+      "title": "fix(kona-host): retry witness fetches via the get_preimage loop, not debug_dbGet",
+      "author": "ajsutton",
+      "number": 21269,
+      "body": "`debug_executePayload` (the `L2PayloadWitness` hint) and the `L2BlockData` optimistic-block re-execution are \"high-level\" hints that bulk-populate the preimage store. They were fetched once when received and then discarded, so any error was terminal — the client fell back to per-node `debug_dbGet`, which op-reth doesn't implement, turning a transient failure into a permanent one.\n\nRather than introduce a separate retry/backoff path, this plugs them into the **existing `get_preimage` retry loop** (the same one that already retries `debug_dbGet` forever):\n\n- High-level hints are no longer fetched eagerly in `route_hint`; the latest one is **retained**.\n- On each `get_preimage` attempt the retained high-level hint is tried **first** (bulk-populating the store), then the fine-grained hints.\n- A high-level hint is **cleared once it succeeds** (its response is deterministic, so re-issuing it is pointless) and **kept while it fails**, so a transient error is retried indefinitely — and an unrelated later low-level hint won't re-trigger an already-satisfied high-level fetch.\n- Any failure is retried, **including JSON-RPC method-not-found** — it's cheap and lets the fetch start working if the node is upgraded. Even while the high-level fetch keeps failing, each loop attempt still falls through to the fine-grained `debug_dbGet` hint, so nodes that genuinely lack `debug_executePayload` are still served.\n\n### Behavioral change: high-level hints are now lazy\n\nPreviously a high-level (proactive) hint was fetched **eagerly and synchronously** in `route_hint` the moment it was received. Now it is only **retained** there and executed lazily by the `get_preimage` loop — i.e. **not until an actual preimage request arrives for a key that isn't already in the store**. If the requested preimage already exists, the loop never runs and the high-level fetch is skipped entirely.\n\nThis is functionally equivalent for the proof flow (the witness fetch just shifts from hint-receipt time to the first cache-missing `get_preimage`), and it **avoids redundant executions**: an expensive fetch like `debug_executePayload` or the `L2BlockData` re-execution is no longer re-run when the needed preimages are already available, and is cleared after its first success so subsequent requests don't repeat the identical call.\n\nThe `debug_executePayload` call is consolidated into `backend::util::fetch_execution_witness`, de-duplicating the single-chain and interop handlers. `L2BlockData`'s handler body is unchanged — it benefits from the retained-hint retry automatically. Regression coverage lives in `backend::online`'s test module (retry-to-success + clear, high-level-before-fine-grained, fine-grained fallback survival, and route separation).",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-06T12:05:14Z",
+      "mergedAt": "2026-06-07T01:55:19Z",
+      "additions": 336,
+      "deletions": 138
+    },
+    {
+      "id": "PR_kwDODjvEJM7ja7h8",
+      "title": "fix(op-challenger): tear down VM process group on timeout",
+      "author": "ajsutton",
+      "number": 21268,
+      "body": "The run-trace runner bounds each VM run with `--vm-timeout`, but the timeout did not reliably terminate a wedged run.\n\nThe VM (cannon) spawns the oracle/preimage server as its own child, which inherits the VM's stdout/stderr pipes. `exec.CommandContext` only SIGKILLs the direct child on cancellation, so the oracle server is orphaned and keeps the pipe write ends open. `cmd.Wait` then blocks forever waiting for EOF, so the VM timeout never actually tears the run down (we observed a run wedged ~18h despite the 3h default).\n\nFix: run the VM in its own process group, kill the whole group (negative pid) on cancellation, and set a bounded `WaitDelay` as a backstop so `RunCmd` always returns once the context is cancelled. The process-group bits are Unix-only and guarded behind a build tag with a no-op fallback so cross-compilation still works.\n\nAdds a regression test that spawns a grandchild holding stdout open and asserts `RunCmd` returns promptly and the grandchild is killed.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-06T12:00:26Z",
+      "mergedAt": "2026-06-07T02:30:04Z",
+      "additions": 122,
+      "deletions": 0
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 458,
+    "deletions": 138,
+    "files": 10,
+    "commitCount": 3
   },
-  "completedItems": [],
-  "topContributors": [],
+  "completedItems": [
+    {
+      "title": "fix(kona-host): retry witness fetches via the get_preimage loop, not debug_dbGet",
+      "prNumber": 21269,
+      "type": "bugfix",
+      "body": "`debug_executePayload` (the `L2PayloadWitness` hint) and the `L2BlockData` optimistic-block re-execution are \"high-level\" hints that bulk-populate the preimage store. They were fetched once when received and then discarded, so any error was",
+      "files": [
+        "rust/kona/bin/host/src/backend/online.rs",
+        "rust/kona/bin/host/src/backend/util.rs",
+        "rust/kona/bin/host/src/interop/cfg.rs",
+        "rust/kona/bin/host/src/interop/handler.rs",
+        "rust/kona/bin/host/src/single/cfg.rs",
+        "rust/kona/bin/host/src/single/handler.rs"
+      ]
+    },
+    {
+      "title": "fix(op-challenger): tear down VM process group on timeout",
+      "prNumber": 21268,
+      "type": "bugfix",
+      "body": "The run-trace runner bounds each VM run with `--vm-timeout`, but the timeout did not reliably terminate a wedged run.\n\nThe VM (cannon) spawns the oracle/preimage server as its own child, which inherits the VM's stdout/stderr pipes. `exec.Co",
+      "files": [
+        "op-challenger/game/fault/trace/vm/prestates.go",
+        "op-challenger/game/fault/trace/vm/prestates_other.go",
+        "op-challenger/game/fault/trace/vm/prestates_unix.go",
+        "op-challenger/game/fault/trace/vm/prestates_unix_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
   "newPRs": 0,
-  "mergedPRs": 0,
+  "mergedPRs": 2,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 3
 }
