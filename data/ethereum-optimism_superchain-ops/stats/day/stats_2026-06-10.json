@@ -5,20 +5,398 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/superchain-ops",
-  "overview": "From 2026-06-10 to 2026-06-11, ethereum-optimism/superchain-ops had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-06-10 to 2026-06-11, ethereum-optimism/superchain-ops had 3 new PRs (3 merged), 0 new issues, and 24 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOKIsnqM7kzC5A",
+      "title": "feat: Osaki Sepolia L1 + L2 ProxyAdmin owner transfers (097, 098)",
+      "author": "Wazabie",
+      "number": 1455,
+      "body": "## Summary\n\nTwo stacked tasks that move the **Osaki Sepolia** (chainId `9111973`) chain\nownership from the standard Sepolia L1PAO Safe to the new owner Safe\n`0xFB0F8937A0d6999C67E8a01310eBf7fe1859205F` (and its L1-to-L2 alias on L2).\n\n- **`097-osaki-l1-ownership-transfers`** — `TransferOwners` template\n  - `ProxyAdmin.transferOwnership(0xFB0F...)`\n  - `DisputeGameFactoryProxy.transferOwnership(0xFB0F...)`\n  - `DelayedWETH` (v1.5.0) is post-U16 / not ownable → the template logs a\n    \"not ownable, not performing transfer\" line and produces no state change.\n- **`098-osaki-l2pao-transfer`** — `TransferL2PAOFromL1` template\n  - `OptimismPortal.depositTransaction` targeting the L2 ProxyAdmin predeploy\n    (`0x4200000000000000000000000000000000000018`) with\n    `transferOwnership(alias(0xFB0F...))`.\n  - Aliased L2 owner: `0x0C208937a0D6999c67E8A01310ebF7fE18593170`.\n  - Stacked after `097`. A `stateOverride` pre-applies the L1 transfer so the\n    template's `proxyAdmin.owner() == newOwnerToAlias` check passes when\n    simulating in isolation.\n\nOsaki is not in the public `superchain-registry`; both tasks use\n`fallbackAddressesJsonPath` with chain addresses sourced from `op-deployer`\nstate. The chain reuses OP Sepolia's standard `SuperchainConfig`\n(`0xC2Be75506d5724086DEB7245bd260Cc9753911Be`), so\n`TransferOwners._validateSuperchainConfig` is satisfied.\n\nThe L1PAO is a 2-of-2 nested Safe (FoundationUpgradeSafe + SecurityCouncil).\nAll three Safe nonces are pinned via `stateOverrides` so the domain/message\nhashes in each `VALIDATION.md` are reproducible — signers must re-verify the\nlive nonces with `cast call <safe> \"nonce()\"` before signing and bump the\noverrides + re-simulate if anything has advanced.\n\n## Test plan\n\nBoth tasks simulate cleanly on Sepolia:\n\n- [x] `just simulate foundation` for 097 and 098 produces the hashes recorded\n      in each `VALIDATION.md`.\n- [x] `just simulate council` for 097 and 098 produces the hashes recorded in\n      each `VALIDATION.md`.\n- [x] `just simulate-stack sep 097-osaki-l1-ownership-transfers <foundation|council>`\n      passes the TaskManager hash check.\n- [x] `just simulate-stack sep 098-osaki-l2pao-transfer <foundation|council>`\n      passes the TaskManager hash check (stack: 097 → 098).\n- [x] Observed L1 state diff for 097: ProxyAdmin slot `0x00` and\n      DisputeGameFactoryProxy slot `0x33` flip from the old to the new owner.\n- [x] Observed L1 state diff for 098: OptimismPortalProxy params slot bump\n      with `_gasLimit = 0x30d40 (200,000)`; L2 effect is verified post-\n      execution per the manual steps in `098/VALIDATION.md`.\n\n## Pre-signing checklist (for reviewers)\n\n- [ ] Confirm `0xFB0F...205F` is the intended new owner (verified on-chain as\n      a 1-of-12 Gnosis Safe v1.4.1).\n- [ ] Confirm DGF + ProxyAdmin should be transferred together (DelayedWETH is\n      non-ownable and skipped automatically).\n- [ ] Re-verify the three live Safe nonces against `cast call <safe> \"nonce()\"`\n      and update the `stateOverrides` + re-simulate if any have advanced\n      since the values pinned in `config.toml`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-06-10T10:20:41Z",
+      "mergedAt": "2026-06-10T19:06:37Z",
+      "additions": 489,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOKIsnqM7kHkVo",
+      "title": "docs: add AGENTS.md AI agent guidance",
+      "author": "sebastianst",
+      "number": 1454,
+      "body": "## Summary\n\nAdds a root-level `AGENTS.md` with AI-agent (and human) guidance for working in\nthis repo, focused on the safety constraints around governance operations.\n\nThis is part of an ongoing migration of AI guidance out of an internal tooling\nplugin and into the repos it applies to, so the guidance lives as committed,\nreviewable docs alongside the code it governs.\n\n## What was migrated\n\nGovernance/task guidance previously held in the internal plugin has been\ndistilled into a single self-contained `AGENTS.md`. It captures:\n\n- What this repo is (tasks, templates, validation files, simulation) and its\n  layout (`src/tasks/eth`, `src/tasks/sep`, `src/template`, etc.).\n- The non-negotiable safety constraints: every task ships `config.toml` +\n  `README.md` + `VALIDATION.md`; calldata must be independently verifiable;\n  simulations must pass against forked state before signing; every address is\n  verified against the Superchain Registry; timelocks documented and respected.\n- Author / review workflows that point to the existing canonical `docs/` guides\n  rather than duplicating them.\n\nThe content was reconciled against the repo's actual structure (e.g. `src/tasks/`\nand `cd src/ && just test`, not the stale paths the plugin carried), and links\nto `docs/NEW_TASK_GUIDE.md`, `docs/NEW_TEMPLATE_GUIDE.md`, the SINGLE/NESTED\nexecution + validation docs, and `CONTRIBUTING.md`.\n\n## Source → destination mapping\n\n| Source (internal plugin) | Destination |\n|--------------------------|-------------|\n| governance rules (task constraints, review workflow) | `AGENTS.md` → safety constraints + review sections |\n| governance domain knowledge (concepts, process, safety) | `AGENTS.md` → key concepts + author task sections |\n| superchain-ops repo knowledge (layout, build/test, conventions) | `AGENTS.md` → repository layout + build/test sections |\n\n## Why `AGENTS.md` at the root\n\nThe repo had no `AGENTS.md`, `CLAUDE.md`, or `docs/ai/` directory. `AGENTS.md` is\nthe standard home for agent instructions and does not conflict with the existing\nhuman-facing `docs/` tree, which it references rather than duplicates.\n\n## Notes\n\n- Internal tooling mechanics (skill names, internal review-agent steps, plugin\n  paths) were intentionally dropped — only repo-applicable technical guidance was\n  migrated.\n- Draft for review; not ready to merge.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-06-08T22:17:40Z",
+      "mergedAt": "2026-06-10T21:03:08Z",
+      "additions": 169,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOKIsnqM7lENZ2",
+      "title": "chore: migrate mise aliases to tool_alias",
+      "author": "mds1",
+      "number": 1456,
+      "body": "## Summary\r\n- Replace deprecated `[alias]` with `[tool_alias]` in `mise.toml`.\r\n- Match the Optimism monorepo Foundry alias style with `github:foundry-rs/foundry[bin=...,version_prefix=v]`.\r\n- Bump the pinned `mise` installer to `v2026.5.18` and refresh static checksums so the documented setup path supports `[tool_alias]` and the `github:` backend.\r\n- Bump the CircleCI utils orb from `1.0.19` to `1.0.27`, matching the Optimism monorepo setup path so CI installs a compatible `mise`.\r\n- Keep Foundry effectively pinned to release tag `v1.1.0`.\r\n",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-06-10T22:25:14Z",
+      "mergedAt": null,
+      "additions": 28,
+      "deletions": 28
+    },
+    {
+      "id": "PR_kwDOKIsnqM7lEfGJ",
+      "title": "docs: mark Osaki Sepolia tasks 097 & 098 as EXECUTED",
+      "author": "Wazabie",
+      "number": 1457,
+      "body": "## Summary\n\nUpdates the status of the Osaki Sepolia ownership-transfer tasks from `READY TO SIGN` to `EXECUTED`, linking the on-chain execution transactions.\n\n- **097-osaki-l1-ownership-transfers** → [EXECUTED](https://sepolia.etherscan.io/tx/0xec5c2801dab2f9030df813116835799462d0695de793e971f08fc97c7f8eff3d) (L1 ProxyAdmin + DisputeGameFactory ownership transfers)\n- **098-osaki-l2pao-transfer** → [EXECUTED](https://sepolia.etherscan.io/tx/0x871edc6bf21c381ba84b848d82c539ccdb7760852cc68b73c53b68b1801169f7) (L2 ProxyAdmin owner transfer)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-06-10T22:39:30Z",
+      "mergedAt": "2026-06-10T23:00:15Z",
+      "additions": 2,
+      "deletions": 2
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 660,
+    "deletions": 2,
+    "files": 11,
+    "commitCount": 19
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "completedItems": [
+    {
+      "title": "docs: add AGENTS.md AI agent guidance",
+      "prNumber": 1454,
+      "type": "docs",
+      "body": "## Summary\n\nAdds a root-level `AGENTS.md` with AI-agent (and human) guidance for working in\nthis repo, focused on the safety constraints around governance operations.\n\nThis is part of an ongoing migration of AI guidance out of an internal t",
+      "files": [
+        "AGENTS.md"
+      ]
+    },
+    {
+      "title": "docs: mark Osaki Sepolia tasks 097 & 098 as EXECUTED",
+      "prNumber": 1457,
+      "type": "docs",
+      "body": "## Summary\n\nUpdates the status of the Osaki Sepolia ownership-transfer tasks from `READY TO SIGN` to `EXECUTED`, linking the on-chain execution transactions.\n\n- **097-osaki-l1-ownership-transfers** → [EXECUTED](https://sepolia.etherscan.io/",
+      "files": [
+        "src/tasks/sep/097-osaki-l1-ownership-transfers/README.md",
+        "src/tasks/sep/098-osaki-l2pao-transfer/README.md"
+      ]
+    },
+    {
+      "title": "feat: Osaki Sepolia L1 + L2 ProxyAdmin owner transfers (097, 098)",
+      "prNumber": 1455,
+      "type": "feature",
+      "body": "## Summary\n\nTwo stacked tasks that move the **Osaki Sepolia** (chainId `9111973`) chain\nownership from the standard Sepolia L1PAO Safe to the new owner Safe\n`0xFB0F8937A0d6999C67E8a01310eBf7fe1859205F` (and its L1-to-L2 alias on L2).\n\n- **`",
+      "files": [
+        "src/tasks/sep/097-osaki-l1-ownership-transfers/.env",
+        "src/tasks/sep/097-osaki-l1-ownership-transfers/README.md",
+        "src/tasks/sep/097-osaki-l1-ownership-transfers/VALIDATION.md",
+        "src/tasks/sep/097-osaki-l1-ownership-transfers/addresses.json",
+        "src/tasks/sep/097-osaki-l1-ownership-transfers/config.toml",
+        "src/tasks/sep/098-osaki-l2pao-transfer/.env",
+        "src/tasks/sep/098-osaki-l2pao-transfer/README.md",
+        "src/tasks/sep/098-osaki-l2pao-transfer/VALIDATION.md",
+        "src/tasks/sep/098-osaki-l2pao-transfer/addresses.json",
+        "src/tasks/sep/098-osaki-l2pao-transfer/config.toml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 114.83206523090334,
+      "prScore": 84.83206523090334,
+      "issueScore": 0,
+      "reviewScore": 30,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 110.47991437161984,
+      "prScore": 94.27991437161984,
+      "issueScore": 2,
+      "reviewScore": 14,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 103.07346486795747,
+      "prScore": 88.87346486795747,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 99.77146589461312,
+      "prScore": 81.07146589461311,
+      "issueScore": 4,
+      "reviewScore": 14.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 77.80992107713605,
+      "prScore": 72.60992107713605,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 61.48869398263353,
+      "prScore": 34.48869398263353,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 53.126153075592356,
+      "prScore": 37.126153075592356,
+      "issueScore": 0,
+      "reviewScore": 16,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 43.0437738965761,
+      "prScore": 33.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 36.171183468986484,
+      "prScore": 35.97118346898648,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 32.237738008550295,
+      "prScore": 27.237738008550295,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 24.907213344056217,
+      "prScore": 24.567213344056217,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 24.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 24.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 23,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 21.767866136776995,
+      "prScore": 21.767866136776995,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 20.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ashitakah",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/96790496?u=80675c580b8f8c18168ba6564d6d1811422eadc0&v=4",
+      "totalScore": 18.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 16.708576901751826,
+      "prScore": 11.708576901751826,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 14.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "akashj987",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/182627386?v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xCoati",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258754646?u=9061778e881129b6d25ac54f6453ca8a5565f1c4&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 4.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "InoMurko",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2582555?u=c2d86567e4b989e4430764fd60495e5527d63af6&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 3,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 24
 }
