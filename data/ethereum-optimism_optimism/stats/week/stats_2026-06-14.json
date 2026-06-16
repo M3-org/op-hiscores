@@ -5,30 +5,66 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-06-14 to 2026-06-21, ethereum-optimism/optimism had 2 new PRs (1 merged), 2 new issues, and 31 active contributors.",
+  "overview": "From 2026-06-14 to 2026-06-21, ethereum-optimism/optimism had 22 new PRs (8 merged), 6 new issues, and 55 active contributors.",
   "topIssues": [
     {
-      "id": "I_kwDODjvEJM8AAAABFc0aRw",
-      "title": "[PCD Milestone 4] Artifacts persistence over workflow phases",
-      "author": "0xiamflux",
-      "number": 21376,
+      "id": "I_kwDODjvEJM7Y-B5A",
+      "title": "dispute-mon: Support ZK games",
+      "author": "ajsutton",
+      "number": 18323,
       "repository": "ethereum-optimism/optimism",
-      "body": "## Context\nOn the permissionless codepath the deployment runs in two phases around the prestate. The first phase calculates everything that can be computed off-chain and persists the resulting artifacts. The run then pauses until the prestate, which produced out-of-band, is available to the workflow, it then proceeds to submit the deploy. If the prestate never arrives, the workflow must report a timeout failure rather than wait for ever.\n\n## Definition of Done\n- [ ] On the permissionless path, the first phase derives the off-chain artifacts and persists them.\n- [ ] The run pauses after the first phase and waits for the produced prestate before continuing.\n- [ ] The wait timeouts if the prestate never arrives; the run fails and alerts instead of hanging.\n- [ ] Tests cover the first-phase persist of the artifacts, the timeout path, and resume.",
-      "createdAt": "2026-06-14T21:43:00Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "body": "Monitor ZK games and report:\n* Output agreement\n* Expected root claim\n* Forecasted result\n\nA bunch of refactoring is likely to be required to separate the FaultDisputeGame specific properties and metric from the generic ones and new ZK specific ones.",
+      "createdAt": "2025-11-18T21:59:10Z",
+      "closedAt": "2026-06-15T18:51:43Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABC58eSA",
+      "title": "bug(op-reth): proofs-history exex SIGBUS crash and infinite retry loop during deep FCU rewinds",
+      "author": "jelias2",
+      "number": 20934,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe proofs-history exex has a race condition that causes **SIGBUS crashes** (exit code 135) during deep FCU-triggered rewinds, and an **infinite retry loop** that saturates logs and eventually makes the EL unresponsive. Both the deployed architecture (`LiveTrieCollector` + `spawn_sync_task`) and the new engine architecture on `develop` (`Engine`/`EngineState`) are affected.\n\nObserved on sdg-v1 devnet on 2026-05-20 when an invalid cross-chain executing message triggered a 1,405-block deep reorg on chain 420120085. The bug manifested differently across four op-reth versions deployed simultaneously:\n\n| EL Version | Symptom | \n|---|---|\n| **v2.1.0-rc.1** | **SIGBUS crash (exit 135)** during FCU rewind → permanent CL/EL deadlock |\n| **v2.2.0-rc.1** | Exex jammed on \"Missing block 1880583\" (thousands of retries/sec) → EL eventually unresponsive |\n| **v2.2.2** | Exex jammed on \"Missing block 1880582\" (thousands of retries/sec) → log buffer saturated |\n| **v2.2.3** | Appeared healthy — but only because the paired CL never triggered a rewind (bug still present in code) |\n\n## Root Causes\n\n### 1. `sync_target` is never lowered on rewind/unwind\n\n**Old architecture (deployed):** `sync_target_tx` is a `watch::Sender<u64>` set in `handle_chain_committed` but never lowered in `handle_chain_reverted`. After a revert, the sync loop continues trying to fetch blocks up to the old (now-truncated) target.\n\n**New architecture (develop):** `EngineState::update_sync_target()` at `rust/op-reth/crates/trie/src/engine/state.rs:228-232` is monotonically increasing:\n\n```rust\npub(crate) const fn update_sync_target(&mut self, block_number: u64) {\n    if block_number > self.sync_target {\n        self.sync_target = block_number;\n    }\n}\n```\n\nNeither `UnwindTask::run()` (`tasks/unwind.rs`) nor `ReorgTask::run()` (`tasks/reorg.rs`) reset `sync_target`. `handle_chain_reverted` in `lib.rs:376-389` sends an `Unwind` action but no `SyncTo` to lower the target.\n\n### 2. No synchronization between static file truncation and mmap readers\n\nThe exex engine thread reads blocks via `provider.recovered_block()` which accesses reth's mmap'd static files (`StaticFileProvider`). When the main engine tree does `ftruncate()` on static files during a reorg, the mmap'd pages for blocks beyond the new file length become invalid. The exex thread reading those pages gets **SIGBUS** (kernel delivers bus error for pages no longer backed by the file).\n\nThere is no read-write lock, no notification, and no coordination between the truncation and the exex reader.\n\n### 3. No backoff on retry when blocks are missing\n\n**Old architecture:** On error, does `task::yield_now().await` then immediately retries.\n\n**New architecture (develop):** The `crossbeam_channel::select!` fires `sync_rx` with `Duration::ZERO` when `needs_sync()` returns true. When `advance_sync()` fails with `BlockNotFound`, the error is logged and the loop immediately retries — **zero delay, full CPU spin**. This is actively worse than the old code.\n\n```rust\n// runner.rs, process_next_event():\nrecv(sync_rx) -> _ => if let Err(err) = self.advance_sync() {\n    error!(target: \"trie::engine::runner\", ?err, \"Sync step failed\");\n},\n// immediately loops back, sync_rx fires again with Duration::ZERO\n```\n\n## Crash Timeline (from sdg-v1 incident)\n\nSupernode CL detected an invalid executing message in block 1880582 and sent an FCU to rewind from block 1881986 → 1880581 (1,405-block deep reorg).\n\n```\nTime       Engine Tree (main)              ExEx Engine Thread\n─────      ──────────────────              ──────────────────\n15:33:50   FCU: rewind to 1880581          sync_target = ~1881986\n  ...      Rewinding (20 seconds)          advance_sync() → block 1881200\n  ...      (still rewinding)               advance_sync() → block 1881700\n15:34:10   ftruncate() static files        advance_sync() → block 1881918\n           pages beyond 1880581 gone       recovered_block() reads dead page\n                                           \"no state found\" × 5,305\n                                           \"Missing block\" × 392\n15:34:14                                   *** SIGBUS (exit 135) ***\n```\n\n### Log evidence\n\n**FCU timeout (20.25s, receiver dropped):**\n```\nts=2026-05-20T15:34:10 level=warn target=engine::tree\n  message=\"Failed to deliver forkchoiceUpdated response, receiver dropped (request cancelled)\"\n  state=\"ForkchoiceState {\n    head_block_hash: 0xcbbe67f1...20075771,\n    safe_block_hash: 0x4552f4f6...,\n    finalized_block_hash: 0x4552f4f6... }\"\n  elapsed=20.250721856s\n```\n\n**Exex cascade (5,305 state errors + 392 missing block errors in 0.4s):**\n```\nts=2026-05-20T15:34:10 level=error target=optimism::exex\n  message=\"Batch processing failed\"\n  error=\"no state found for block 0xbf5a8d5698b1237b543371cb479871ccf9fd2bfa339e357dd4cf5dd226974335\"\n  id=proofs-history\n\nts=2026-05-20T15:34:10 level=error target=optimism::exex\n  message=\"Batch processing failed\"\n  error=\"Missing block 1881918\\n\\nLocation:\\n    op-reth/crates/exex/src/lib.rs:381:32\"\n  id=proofs-history\n```\n\n**SIGBUS crash:**\n```\nLast State: Terminated\n  Reason: Error\n  Exit Code: 135   # = 128 + 7 (SIGBUS)\n```\n\n**Post-restart consistency check (static files at 1881985, DB at 1880580):**\n```\nChecking consistency for segment Headers\n  initial_highest_block=1881985 highest_block=1880580\n→ Setting unwind target = 1880580\n\nExecuting an unwind after a failed storage consistency check\n  unwind_target=Unwind(1880580)\n```\n\n**Infinite retry loop on other nodes (saturates entire log buffer):**\n```\nts=2026-05-20T16:39:17 level=error target=optimism::exex\n  message=\"Batch processing failed\"\n  error=\"Missing block 1880582\\n\\nLocation:\\n    op-reth/crates/exex/src/lib.rs:381:32\"\n  id=proofs-history\n# repeated thousands of times per second, pushing all other logs out of the buffer\n```\n\n## Impact\n\n1. **SIGBUS crash** leaves the EL in an inconsistent state (DB unwound one block too far), creating a permanent CL/EL deadlock where the CL needs block N but the EL only has up to N-1\n2. **Infinite retry loop** (thousands/sec) saturates log buffers, making debugging impossible, and eventually causes EL unresponsiveness through resource exhaustion\n3. On the sdg-v1 devnet, this bug took down 3 of 4 supernodes. The only \"healthy\" one was never triggered because its CL lacked interop validation\n\n## Suggested Fixes\n\n### Fix 1: Reset `sync_target` on unwind (critical)\n\nIn `rust/op-reth/crates/trie/src/engine/state.rs`, add to the `unwind()` method:\n\n```rust\npub(crate) fn unwind(&mut self, to: BlockWithParent) -> Result<(), EngineError> {\n    self.persistence.unwind(to, &self.memory)?;\n    self.memory.unwind(to.block.number);\n    // Reset sync_target so engine thread stops fetching truncated blocks\n    self.sync_target = self.sync_target.min(to.block.number.saturating_sub(1));\n    Ok(())\n}\n```\n\nFor the old architecture, `handle_chain_reverted` should send a lower value to `sync_target_tx`.\n\n### Fix 2: Bounds check before `recovered_block()` (defensive)\n\nIn `rust/op-reth/crates/trie/src/engine/runner.rs`, `advance_sync()`:\n\n```rust\nfn advance_sync(&mut self) -> Result<(), EngineError> {\n    let current_tip = self.state.get_tip()?.number;\n    if self.state.sync_target <= current_tip {\n        return Ok(());\n    }\n    let block_num = current_tip + 1;\n    // Don't read past what the provider actually has\n    if block_num > self.state.provider.best_block_number()? {\n        return Ok(());\n    }\n    let block = self.state.provider\n        .recovered_block(block_num.into(), TransactionVariant::NoHash)?\n        .ok_or(EngineError::BlockNotFound(block_num))?;\n    // ...\n}\n```\n\n### Fix 3: Add backoff on `BlockNotFound` errors\n\nIn `runner.rs`, the sync arm of `process_next_event()` should introduce a delay after errors instead of immediately retrying:\n\n```rust\nrecv(sync_rx) -> _ => if let Err(err) = self.advance_sync() {\n    error!(target: \"trie::engine::runner\", ?err, \"Sync step failed\");\n    // Don't spin — wait before retrying\n    std::thread::sleep(Duration::from_secs(1));\n},\n```\n\nOr better: disable `sync_rx` until a new `SyncTo` action arrives.\n\n## Affected Files\n\n- `rust/op-reth/crates/exex/src/lib.rs` — `handle_chain_reverted` doesn't lower sync_target\n- `rust/op-reth/crates/trie/src/engine/state.rs` — `update_sync_target()` monotonically increasing, `unwind()` doesn't reset it\n- `rust/op-reth/crates/trie/src/engine/runner.rs` — `advance_sync()` no bounds check, `process_next_event()` zero-delay retry\n- `rust/op-reth/crates/trie/src/engine/tasks/unwind.rs` — `run()` doesn't reset sync_target\n- `rust/op-reth/crates/trie/src/engine/tasks/reorg.rs` — `run()` doesn't reset sync_target\n\n## Additional Context\n\nFull incident writeup with per-supernode analysis: https://www.notion.so/oplabs/Interop-Reorg-Test-Conductor-366f153ee16280089019f11abaf3e360",
+      "createdAt": "2026-05-20T21:13:22Z",
+      "closedAt": "2026-06-15T15:34:07Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABFhiF0A",
+      "title": "followups to Queued rust: centralize OP fork → implied L1 fork mapping",
+      "author": "geoknee",
+      "number": 21380,
+      "repository": "ethereum-optimism/optimism",
+      "body": "```suggestion\r\n    fn eth_spec_id(l1_fork: EthereumHardfork) -> Result<SpecId> {\r\n```\r\n\r\n_Originally posted by @einar-oplabs in https://github.com/ethereum-optimism/optimism/pull/21368#discussion_r3413397018_\r\n            ",
+      "createdAt": "2026-06-15T13:48:15Z",
+      "closedAt": "2026-06-15T13:51:47Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABFEcxpQ",
+      "title": "Centralize the OP fork → implied L1 (Ethereum) fork mapping in the Rust stack",
+      "author": "sebastianst",
+      "number": 21338,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Idea\n\nEvery OP (L2) hardfork \"rides\" / implies a specific L1 (Ethereum) hardfork:\n\n| OP fork | implied L1 fork |\n|---|---|\n| Canyon | Shanghai |\n| Ecotone / Fjord / Granite / Holocene | Cancun |\n| Isthmus / Jovian | Prague |\n| Karst / Interop (Lagoon) | Osaka |\n\nThis mapping is currently **hand-maintained in several independent places** across the Rust stack. Adding a new hardfork means remembering to update each copy by hand, and missing one silently breaks consensus or the CL↔EL engine handshake.\n\nWe should define it **once** — ideally in [`alloy-op-hardforks`](https://github.com/ethereum-optimism/optimism/blob/25d2b951434611da855341996a50eae6cd9096ae/rust/alloy-op-hardforks/src/lib.rs) (which already owns `OpHardfork`) — as a single `OP fork → implied L1 fork` source of truth, and have every consumer derive from it instead of repeating the table.\n\n## Currently-duplicated mappings\n\n- **op-revm** — `OpSpecId::into_eth_spec` ([`rust/op-revm/src/spec.rs#L38-L46`](https://github.com/ethereum-optimism/optimism/blob/25d2b951434611da855341996a50eae6cd9096ae/rust/op-revm/src/spec.rs#L38-L46)): `OpSpecId → revm SpecId`.\n- **op-reth chainspec** — the builder `*_activated()` helpers ([`rust/op-reth/crates/chainspec/src/lib.rs#L156-L191`](https://github.com/ethereum-optimism/optimism/blob/25d2b951434611da855341996a50eae6cd9096ae/rust/op-reth/crates/chainspec/src/lib.rs#L156-L191)) and the `From<Genesis>` L1-fork derivation ([`rust/op-reth/crates/chainspec/src/lib.rs#L401-L403`](https://github.com/ethereum-optimism/optimism/blob/25d2b951434611da855341996a50eae6cd9096ae/rust/op-reth/crates/chainspec/src/lib.rs#L401-L403)): `OP fork → EthereumHardfork`.\n- **kona** — `EngineGetPayloadVersion::from_cfg` ([`rust/kona/crates/node/engine/src/versions.rs#L90`](https://github.com/ethereum-optimism/optimism/blob/25d2b951434611da855341996a50eae6cd9096ae/rust/kona/crates/node/engine/src/versions.rs#L90)) hand-encodes the correlated `OP fork → engine getPayload version`, which tracks the implied L1 fork (Isthmus/Prague→V4, Karst/Osaka→V5).\n\n(The Go op-node has a parallel mapping in [`op-node/rollup/types.go` `GetPayloadVersion`](https://github.com/ethereum-optimism/optimism/blob/25d2b951434611da855341996a50eae6cd9096ae/op-node/rollup/types.go#L731) — out of scope for a Rust crate, but the same conceptual duplication.)\n\n## Why now\n\nThis duplication has already bitten us:\n- op-reth's chainspec builder wasn't activating the implied L1 fork → #21330.\n- That in turn surfaced the missing Osaka engine `getPayloadV5` → #21337.\n- The op-revm `Karst ⇒ Osaka` implication itself was a manual fix.\n\nA single mapping would have made each of these a one-line change in one place.\n\n## Scope\n\nIdea-capture only — no design/API decided yet. Goal: a single canonical `OP fork → implied L1 fork` table (in `alloy-op-hardforks`, or wherever fits best) consumed by op-revm, op-reth, and kona, so future hardforks need updating in exactly one location.\n\n🤖 *Generated by Claude Code*\n",
+      "createdAt": "2026-06-10T21:39:00Z",
+      "closedAt": "2026-06-15T14:47:28Z",
+      "state": "CLOSED",
       "commentCount": 0
     },
     {
-      "id": "I_kwDODjvEJM8AAAABFcxJjg",
-      "title": "[PCD Milestone 4] Netchef workflow for Creating Netwokrs",
+      "id": "I_kwDODjvEJM8AAAABFGVMEw",
+      "title": "[PCD Milestone 1.5] Clear residual nonce",
       "author": "0xiamflux",
-      "number": 21375,
+      "number": 21339,
       "repository": "ethereum-optimism/optimism",
-      "body": "## Context\n\nToday `netchef`'s workflows drive the whole L1 deployment through a single `op-deployer apply` invocation. It must support both permissioned and permissionless deployments, chosen from the network's listed features in the manifest. A permissionless deployment requires an `op-deployer` version new enough to run the PCD flow. When the manifest requests permissionless games but the pinned `op-deployer` is too old, `netchef` must fail during validation, with a clear message. Permissioned deployments continue on the existing apply codepath across all `op-deployer` versions.\n\n## Definition of Done\n\n- [ ] netchef selects the deployment path from the manifest's permissioned/permissionless feature.\n- [ ] A permissionless deployment against an `op-deployer` or OPCM release that cannot support it fails during validation.\n- [ ] Permissioned deployments are unchanged, using the same path and artifacts as today, on all supported `op-deployer` versions.\n- [ ] Test suite covers path selection and each failure case.\n- [ ] Regression tests for permissioned deployments pass.",
-      "createdAt": "2026-06-14T21:24:06Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "body": "### Context\n\n`L2Genesis.s.sol` wraps `setPredeployImplementations` in `vm.startPrank(_input.opChainProxyAdminOwner)` so that initializers pass `_assertOnlyProxyAdminOrProxyAdminOwner()`.\n\nInside that prank block, `setEAS()` deploys a temporary EAS contract via `create`. Because the prank is active, the proxy admin owner is the `create` sender, so its nonce is bumped. The temporary contract is later erased, but the owner's nonce is never reset. `setGovernanceToken()` has the same issue.\n\nAs a result, every generated L2 genesis contains an `opChainProxyAdminOwner` account with nonce different than 0.\n\n### Definition of Done\n\n- [ ] The `opChainProxyAdminOwner` nonce is reset to 0 after `setEAS()` and `setGovernanceToken()` run inside the prank block.\n- [ ] The generated L2 genesis no longer contains an `opChainProxyAdminOwner` account with nonce different than 0.\n- [ ] A regression test covers the nonce reset and passes.",
+      "createdAt": "2026-06-11T04:12:55Z",
+      "closedAt": "2026-06-15T13:28:50Z",
+      "state": "CLOSED",
       "commentCount": 0
     }
   ],
@@ -70,6 +106,18 @@
       "deletions": 1017
     },
     {
+      "id": "PR_kwDODjvEJM7jCFYP",
+      "title": "feat(contracts): integrate L2CM into L2 genesis",
+      "author": "lumoswiz",
+      "number": 21248,
+      "body": "**Description**\r\n\r\nPoC for routing L2 genesis proxy-side predeploy setup through `L2ContractsManager`.\r\n\r\nThis adds a genesis-only `L2ContractsManager.deploy(FullConfig)` path. `upgrade()` remains the fork-upgrade path through `L2ProxyAdmin`.\r\n\r\nKey points:\r\n\r\n- No `L2ProxyAdmin` source/interface/semver changes.\r\n- Genesis still owns proxy/code etching, code-namespace implementations, implementation-account lock initialization, preinstalls, feature flags, fork activation setup, prefunds, and deprecated/non-proxied predeploys.\r\n- L2CM now owns the proxy-side upgrade/init/config sequence at genesis.\r\n- Genesis deploys a temporary L2CM, batch-swaps touched proxy admins to it, calls `deploy(config)`, restores admins to `0x18`, then wipes the temporary L2CM.\r\n- Intended as a draft PR to validate the approach before merge review.\r\n\r\n**Tests**\r\n\r\nAdded/updated coverage for:\r\n\r\n- L2CM deploy mode and existing upgrade mode\r\n- deploy-mode `L2ContractsManagerUtils` behavior\r\n- L2 genesis script paths: default, CGT, interop, CGT+interop\r\n- op-deployer L2 genesis alloc invariants\r\n- L2 fork-upgrade coverage\r\n\r\nLocally run:\r\n\r\n```bash\r\ncd packages/contracts-bedrock\r\nmise exec -- just test --match-contract L2ContractsManager\r\nmise exec -- just test --match-path test/scripts/L2Genesis.t.sol\r\nmise exec -- just test --match-path test/L2/L2GenesisForkUpgrade.t.sol\r\nmise exec -- just snapshots-check-no-build\r\nmise exec -- just semver-diff-check-no-build\r\n\r\ncd ../../op-deployer\r\nmise exec -- just test './pkg/deployer/integration_test -run TestL2GenesisAllocsInvariants -count=1'\r\nmise exec -- just test './pkg/deployer/integration_test -run ^TestEndToEndBootstrapApply$ -count=1'\r\n```\r\n\r\nKnown local note: `interfaces-check-no-build` currently fails on unrelated `IZKDisputeGame` interface/artifact mismatches, not on the L2CM interface changes in this branch.\r\n\r\n**Additional context**\r\n\r\nIssue #20903 asks for L2CM to become the source of truth for L2 genesis predeploy setup without regressing produced L2 allocs.\r\n\r\nThis PR uses `deploy(FullConfig)` instead of executing the NUT bundle during genesis. The NUT-bundle path changes the alloc shape through CREATE2 implementation addresses and helper execution state. This PoC keeps the current code-namespace implementation layout.\r\n\r\n**Metadata**\r\n\r\n- Refs ethereum-optimism/optimism#20903\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-05T08:56:32Z",
+      "mergedAt": null,
+      "additions": 2234,
+      "deletions": 326
+    },
+    {
       "id": "PR_kwDODjvEJM7J1SI7",
       "title": "feat(rust): karst-derive inlined derivation pipeline",
       "author": "theochap",
@@ -80,27 +128,55 @@
       "mergedAt": null,
       "additions": 1287,
       "deletions": 352
-    },
-    {
-      "id": "PR_kwDODjvEJM7ZJkCO",
-      "title": "Feat/kona pluggable dap and handler",
-      "author": "tonyvelichko",
-      "number": 20592,
-      "body": "**Description**\r\n\r\nAdds two narrow extension points to the kona rollup node so downstream OP Stack variants can plug in a custom `DataAvailabilityProvider` and/or a custom gossip `Handler` without forking the node service. Both extension points are introduced via default-bound generics, so every existing call site compiles unchanged and the default path is behaviourally identical to upstream.\r\n\r\nThree commits, all under `rust/kona/`:\r\n\r\n  - `feat(kona/gossip): generic Handler injection seam` — `GossipDriver`, `NetworkDriver`, `NetworkActor`, and their builders become generic over `H: Handler` (default `BlockHandler`). Adds `build_with_handler` / `with_handler` constructors. The `Handler` trait grows `l2_chain_id() / topic() / encode()` so the driver can dispatch generically; `BlockHandler` implements them by delegating to its inherent methods.\r\n  - `feat(kona/providers-alloy): generic OnlinePipeline<DAP>` — `OnlinePipeline` gains a `DAP` type parameter (default `OnlineDataProvider`). Adds `new_polled_with_dap` / `new_indexed_with_dap` constructors that mirror `new_polled` / `new_indexed` shape-for-shape, taking a caller-supplied `DataAvailabilityProvider`.\r\n  - `feat(kona/service): generic RollupNode<DAP, H>` — `RollupNode` and `RollupNodeBuilder` become generic over `(DAP, H)` with the same defaults. Adds `RollupNodeBuilder::with_data_availability_provider(factory)` and `with_block_handler(handler, signer_tx)`, both of which flip the corresponding type parameter. Factory closures run inside `RollupNode::start` so overrides receive the kona-built L1 chain provider and blob provider.\r\n\r\n  No public API is removed or renamed. The default-types builder keeps the no-arg `build()`; only the custom-types path uses `build_with_overrides()`.\r\n\r\n  **Tests**\r\n\r\n  Three new unit tests cover the override seams:\r\n\r\n  - `test_handler_trait_shims_match_inherent_methods` (`crates/node/gossip/src/handler.rs`) — calls `Handler::topic / l2_chain_id / topics` through `&dyn Handler` to verify the trait dispatch reaches the inherent `BlockHandler` methods.\r\n  - `test_default_handler_matches_build_handler` (`crates/node/service/src/actors/network/builder.rs`) — asserts `NetworkBuilder::default_handler()` produces the same chain-id and rollup-config wiring the default `build()` path used.\r\n  - `test_build_with_handler_installs_caller_handler` — exercises `NetworkBuilder::build_with_handler` with a stub `Handler` impl and confirms the custom handler is installed on the resulting `GossipDriver`.\r\n\r\n The default path preserves bit-identical construction order, so the entire existing test suite covers it.\r\n\r\n  **Additional context**\r\n\r\n  The motivation is to remove the ongoing maintenance tax for downstream OP Stack variants that today have no choice but to fork `RollupNode::start`, `OnlinePipeline`, and `NetworkActor` to substitute a DA source or a gossip validation rule. Every kona release bump becomes a manual three-way merge for those downstream forks.\r\n\r\n  The seams are the minimum needed to unblock that use case:\r\n\r\n  - The `DataAvailabilityProvider` and `Handler` traits already exist publicly in kona — the patches just let them actually be used as extension points, which is presumably why they exist as traits.\r\n  - All extension points use default-bound generics rather than `Box<dyn Trait>`, so the default path has zero runtime cost and the override path keeps full type information (the pipeline stage chain needs the DAP's associated `Item` type at compile time).\r\n  - Factory closures (rather than pre-built instances) let kona finish constructing its own L1 chain / blob providers before calling the override, so the consumer doesn't have to reconstruct them.\r\n\r\n  Concrete consumer: a downstream rollup variant that filters L1 batcher transactions by a set membership rule, which requires both a custom DA source (filter at the L1 layer) and a custom gossip validation rule (rotating valid-set per epoch). With these seams, that variant can stay a thin set of crates depending on kona instead of a hard fork.",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-07T12:53:34Z",
-      "mergedAt": null,
-      "additions": 828,
-      "deletions": 158
     }
   ],
   "codeChanges": {
-    "additions": 593,
-    "deletions": 72,
-    "files": 27,
-    "commitCount": 3
+    "additions": 1331,
+    "deletions": 233,
+    "files": 48,
+    "commitCount": 64
   },
   "completedItems": [
+    {
+      "title": "fix(op-reth): verify embedded PostExec tx when rebuilding derived blocks",
+      "prNumber": 21321,
+      "type": "bugfix",
+      "body": "Fixes reproducing the trailing SDM PostExec tx (`0x7D`) when rebuilding a derived block. OP consensus requires at most one PostExec tx, and it must be last.\n\n### op-reth — derived-block rebuild\nRebuilding a derived block via FCU-with-attrib",
+      "files": [
+        "op-acceptance-tests/tests/sdm/block_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs"
+      ]
+    },
+    {
+      "title": "fix(contracts): clear residual proxy admin owner nonce in L2 genesis",
+      "prNumber": 21343,
+      "type": "bugfix",
+      "body": "**Description**\r\n\r\n`setPredeployImplementations` pranks as `opChainProxyAdminOwner`, and the `create` calls in `setEAS()` and `setGovernanceToken()` bump its nonce. Every generated L2 genesis therefore contained the owner account with a non",
+      "files": [
+        "packages/contracts-bedrock/scripts/L2Genesis.s.sol",
+        "packages/contracts-bedrock/test/scripts/L2Genesis.t.sol"
+      ]
+    },
+    {
+      "title": "rust: centralize OP fork → implied L1 fork mapping",
+      "prNumber": 21368,
+      "type": "other",
+      "body": "## Summary\n\nImplements the plan from #21338 (see the [investigation comment](https://github.com/ethereum-optimism/optimism/issues/21338#issuecomment-4693050388)):\n\n- **Canonical table**: `OpHardfork::activates_l1_fork()` in `alloy-op-hardfo",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/kona/crates/node/engine/Cargo.toml",
+        "rust/kona/crates/node/engine/src/versions.rs",
+        "rust/kona/crates/protocol/genesis/src/rollup.rs",
+        "rust/op-reth/crates/chainspec/src/lib.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/chain_metadata.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs"
+      ]
+    },
     {
       "title": "refactor(op-e2e): run L2 EL on op-reth by default",
       "prNumber": 21363,
@@ -135,37 +211,194 @@
         "op-e2e/system/verifier/legacy_pending_test.go",
         "rust/op-reth/crates/node/src/proof_history.rs"
       ]
+    },
+    {
+      "title": "docs: add proxyd v4.28.1 release",
+      "prNumber": 21373,
+      "type": "docs",
+      "body": "## Summary\nAdds the latest proxyd v4.28.1 release entry and updates the releases index card.\n\n## Changes\n- Prepend `proxyd/v4.28.1` (June 12, 2026) `<Update>` entry; demote v4.28.0 to `Stable`.\n- Update `releases/index.mdx` proxyd card to v",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/proxyd.mdx"
+      ]
+    },
+    {
+      "title": "docs(ai): note canonical OP→L1 fork mapping in rust-dev",
+      "prNumber": 21384,
+      "type": "docs",
+      "body": "Follow-up to #21368 (which centralized the OP fork → implied L1 fork mapping in the Rust stack).\n\nAdds a short **Hardforks** section to `docs/ai/rust-dev.md` pointing engineers at the single place to add a new OP→implied-L1 fork arm: `OpHar",
+      "files": [
+        "docs/ai/rust-dev.md"
+      ]
+    },
+    {
+      "title": "docs(notices): warn op-reth operators on OP Sepolia about SCR loading bug",
+      "prNumber": 21381,
+      "type": "bugfix",
+      "body": "## Summary\n\n- Adds a `<Warning>` banner to the Upgrade 19 / Karst node operator section calling out that op-reth does **not** load the Karst activation timestamp from the Superchain Registry for `op-sepolia` and `op`\n- Updates Step 2 to sep",
+      "files": [
+        "docs/public-docs/notices/upgrade-19.mdx"
+      ]
+    },
+    {
+      "title": "feat(op-reth/txpool): impl ValidatingPool for OpPool",
+      "prNumber": 21378,
+      "type": "feature",
+      "body": "Implement new upstream trait.\r\n\r\nadd validation capability for `OpPool`.",
+      "files": [
+        "rust/op-reth/crates/txpool/src/pool.rs"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 29.01804814432097,
-      "prScore": 28.818048144320972,
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 116.77035436214818,
+      "prScore": 84.83235436214818,
+      "issueScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 101.4592867302634,
+      "prScore": 91.4592867302634,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 63.96626528344731,
+      "prScore": 54.46626528344731,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 59.7406756713829,
+      "prScore": 54.5406756713829,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 54.60040597171994,
+      "prScore": 54.60040597171994,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 40.88821948958322,
+      "prScore": 21.688219489583222,
+      "issueScore": 0,
+      "reviewScore": 19,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 38.82276710053802,
+      "prScore": 33.62276710053802,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 28.223615092183948,
+      "prScore": 20.78561509218395,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 25.573462965278754,
+      "prScore": 15.573462965278754,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 13.946879734614027,
+      "prScore": 8.606879734614028,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 8.710213344056214,
+      "totalScore": 9.148213344056215,
       "prScore": 8.510213344056215,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
       "username": "OrderofChaos33",
       "avatarUrl": "https://avatars.githubusercontent.com/u/192753151?u=c9914bf8d077dcf47fa14e777a9feaaa79b3634d&v=4",
-      "totalScore": 8.359371757896163,
+      "totalScore": 8.559371757896162,
       "prScore": 8.159371757896164,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 8,
+      "prScore": 0,
+      "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -179,8 +412,18 @@
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -189,19 +432,29 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 4,
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2,
       "prScore": 0,
-      "issueScore": 4,
+      "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
     }
   ],
-  "newPRs": 2,
-  "mergedPRs": 1,
-  "newIssues": 2,
-  "closedIssues": 0,
-  "activeContributors": 31
+  "newPRs": 22,
+  "mergedPRs": 8,
+  "newIssues": 6,
+  "closedIssues": 5,
+  "activeContributors": 55
 }
