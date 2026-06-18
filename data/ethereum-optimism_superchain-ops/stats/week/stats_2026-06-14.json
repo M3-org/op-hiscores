@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/superchain-ops",
-  "overview": "From 2026-06-14 to 2026-06-21, ethereum-optimism/superchain-ops had 6 new PRs (2 merged), 1 new issues, and 21 active contributors.",
+  "overview": "From 2026-06-14 to 2026-06-21, ethereum-optimism/superchain-ops had 11 new PRs (5 merged), 2 new issues, and 25 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDOKIsnqM6lr9kx",
@@ -70,15 +70,15 @@
   ],
   "topPRs": [
     {
-      "id": "PR_kwDOKIsnqM7mgkxl",
-      "title": "Ink Sepolia migration tasks (Gelato → OP Enterprise)",
-      "author": "Wazabie",
-      "number": 1464,
-      "body": "## Summary\n\nAdds the three superchain-ops tasks for the **Ink Sepolia** (`chainId 763373`) rollup-operator migration from **Gelato → OP Enterprise** (Type A Standard OP Stack takeover; cutover **2026-06-22**). Inputs were verified against the _Ink Sepolia Testnet Migration — Engineering Plan_ and cross-checked against live Sepolia state.\n\n| # | Task | Template | Cutover step | Status |\n|---|------|----------|--------------|--------|\n| 104 | [`ink-sepolia-set-batcher-unsafe-signer`](../tree/af/ink-sepolia-migration/src/tasks/sep/104-ink-sepolia-set-batcher-unsafe-signer) | `SetBatcherAndOrSigner` | 2 & 3 | ✅ simulates; DRAFT |\n| 105 | [`ink-sepolia-proposer-rotation`](../tree/af/ink-sepolia-migration/src/tasks/sep/105-ink-sepolia-proposer-rotation) | `SetDisputeGameArgs` | 4 | ✅ simulates; re-sim after U19 |\n| 106 | [`ink-sepolia-fee-vault-update`](../tree/af/ink-sepolia-migration/src/tasks/sep/106-ink-sepolia-fee-vault-update) | `FeeVaultUpgradeTemplate` | 15 | ⚠️ **blocked** (see below) |\n\nAll three **simulate successfully** on Sepolia (`SIMULATE_WITHOUT_LEDGER=1 just … simulate`). All tasks are **DRAFT, NOT READY TO SIGN**.\n\n## What each task does\n\n### 104 — Set batcher + unsafe block signer\nBatches `setBatcherHash` + `setUnsafeBlockSigner` on `SystemConfig` (`0x05C993…bD525`):\n- batcher `0x21e57C…002F` (Gelato) → **`0x42c4dBdD6C573b9C2a8657F59EE8E84AE45F2695`** (OPE)\n- unsafe signer `0x43ec57…D1a0` (Gelato) → **`0x900C36E0CcAC26F9F49ECa6bbD748e347531864b`** (OPE)\n\nSigned by the **OPE SystemConfig-owner Safe** (`0x837DE4…Fd5E`, 2-of-13). The Gelato→OPE `transferOwnership` is performed off-repo by Gelato (plan step W26); a `SystemConfig.owner()` slot-`0x33` override lets the setters authorize in simulation and **must be removed once W26 lands**.\n\n### 105 — Proposer rotation (proposer-only)\nRotates the **PermissionedDisputeGame** (game type 1) proposer `0xb15d79…4543` (Gelato) → **`0x2282d49d805333D8cd6ddda52B32aC07d6e4e51B`** (OPE) on the DisputeGameFactory (`0x860e62…3D5d`).\n\nInk's DGF (v1.4.0) uses the **gameArgs blob pattern** (per-chain data lives in `gameArgs(gameType)`, not impl immutables), so `SetDisputeGameArgs` field-diffing is used: only `proposer` is set; **challenger** (`0xfd1d2e…4301`, already the OP Sepolia challenger — OP governance, plan §3.1 \"no action\") and **prestate** are read live and preserved. Because the prestate is read live, the task is robust to **U19 (2026-06-17)** bumping it — **re-simulate after U19 before signing.** Verified in simulation: the new proposer is set, the old Gelato proposer is fully gone, challenger + prestate unchanged.\n\n### 106 — Fee vault update ⚠️ blocked\nUpgrades the 4 fee-vault predeploys to v1.6.0 and re-initializes each recipient via `OptimismPortal2.depositTransaction → L2 ProxyAdmin.upgradeAndCall` (7 deposits). **Two blockers, both documented in the task README/VALIDATION:**\n\n1. **Recipient is a placeholder.** The Kraken fee recipient is an open item in the plan (§1, §3.3 empty placeholder). Current on-chain recipient is the Gelato Safe on L2. `0xdead…00XX` placeholders are used so the state diff is obvious — **replace before signing.**\n2. **L2 ProxyAdmin owner = `address(0)`** (verified on-chain, vs. OP Sepolia which returns the aliased L1PAO). The v1.5.0 recipient is immutable, so the change needs a proxy upgrade through the L2 ProxyAdmin — which **reverts on L2** while the owner is unset. **Prerequisite (not in the current plan):** transfer L2 ProxyAdmin ownership to the aliased L1PAO `0x2fc3ff…67f3`. The L1 simulation passes regardless (deposits only emit events on L1) — do not mistake a green L1 sim for a successful L2 effect.\n\n## Verification\n\n- All addresses cross-checked against the migration plan **and** live Sepolia (`SystemConfig`, `DisputeGameFactory.gameArgs(1)`, fee-vault predeploys, safe owners/nonces).\n- Domain hashes computed independently and confirmed against the simulation output (104 single-safe; 105/106 nested via the L1PAO = Foundation + Security Council).\n- Local simulations succeed for all three (104 produced final domain/message/safe hashes; 105/106 nested message hashes to be regenerated via the nested signing flow before signing).\n\n## Notes for reviewers\n\n- Tasks are numbered **104–106**, following the in-flight `migration-src-0` exercise (101–103) on a separate branch. No directory overlap.\n- 105 **must be re-simulated after U19** (2026-06-17); 106 is held until its two blockers are resolved.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "id": "PR_kwDOKIsnqM7nQcJl",
+      "title": "U19/Karst gas-limit reset reference tasks for all U19 chains",
+      "author": "sbvegan",
+      "number": 1470,
+      "body": "## Context\n\nKarst (U19) has an op-node / kona-node / kona-program bug that leaves each chain's **effective** L2 block gas limit ~55 MGas above the value stored in its `SystemConfig` after the activation block (see Notion *\"P/PS: Karst Gas Limit Bug\"*). The approved mitigation (option 2b) is a per-chain **SystemConfig transaction** that re-emits the gas `ConfigUpdate`, resetting the effective gas limit back to the on-chain value.\n\n- Sepolia activates **2026-06-17**; Mainnet **2026-07-08**. These tasks run *after* activation on each network.\n\n## What this adds\n\nReference `SystemConfigGasParams` tasks for the U19 chains (OP, Ink, Metal, Mode, Zora, Soneium, Unichain) on both networks, each re-affirming the chain's **current on-chain gas params** (`gasLimit` re-set to the same value; EIP-1559 params re-affirmed). The template is used **unmodified** — each task is rooted at the chain's real SystemConfig owner via `safeAddressString = \"SystemConfigOwner\"` (auto-discovered from `SystemConfig.owner()`).\n\n### Mainnet (`src/tasks/eth/`)\n| Task | Chain(s) | gasLimit | eip1559 (denom/elast) |\n|---|---|---|---|\n| `055-gas-params-op` | OP Mainnet | 40M | 250 / 2 |\n| `056-gas-params-ink` | Ink | 60M | 250 / 6 | _(calldata-only — see below)_ |\n| `057-gas-params-metal-mode` | Metal + Mode (bundled) | 30M | 250 / 6 |\n| `058-gas-params-zora` | Zora | 30M | 250 / 6 |\n| `059-gas-params-soneium` | Soneium | 40M | 250 / 10 |\n| `060-gas-params-unichain` | Unichain | 60M | 250 / 12 |\n\n### Sepolia (`src/tasks/sep/`)\n| Task | Chain(s) | gasLimit | eip1559 (denom/elast) |\n|---|---|---|---|\n| `101-gas-params-op` | OP Sepolia | 40M | 250 / 2 | _(calldata-only — EOA owner)_ |\n| `102-gas-params-ink` | Ink Sepolia | 30M | 250 / 6 |\n| `103-gas-params-metal-mode-zora` | Metal + Mode + Zora (bundled) | 30M | 250 / 6 |\n| `104-gas-params-soneium-minato` | Soneium Minato | 40M | 250 / 10 |\n| `105-gas-params-unichain` | Unichain Sepolia | 60M | 50 / 12 |\n\nThese SystemConfigs are owned by the **chain operators**, so the tasks are reference artifacts for the operators to execute via their own owner Safe.\n\n## Notes\n\n- **EIP-1559 `(0,0)` chains** (Ink/Metal/Mode/Zora): their SystemConfig getters return `0` because they predate on-chain EIP-1559 config. They run on the genesis/Canyon defaults from the superchain-registry (`denominator = 250`, `elasticity = 6`), confirmed via the L2 block-header `extraData`. The tasks write these explicitly — a behavioral no-op. (`setEIP1559Params(0,0)` would revert with `denominator must be >= 1`, which is why explicit values are used.)\n- **Shared-owner bundling**: Metal+Mode (Mainnet) and Metal+Mode+Zora (Sepolia) share one operator Safe and identical params, so they're bundled into one task each.\n- **`055-gas-params-op`** is rooted at the Foundation Upgrade Safe (it owns OP Mainnet's SystemConfig); its nonce override is `59` (live + the two nonces consumed by U19 tasks 053/054). Every config carries a \"verify the live nonce before signing\" note — nonces and captured hashes are point-in-time.\n- **Calldata-only tasks**: OP Sepolia's SystemConfig owner is an EOA (no Safe to simulate), and Ink Mainnet's owner Safe has an EIP-7702-delegated signer that trips the simulator's \"owner-with-code ⇒ Safe\" heuristic (`MultisigTask` calls `nonce()` on it → revert). Both ship as `README.md`-only with the exact `cast` calldata.\n\n## Validation\n\nAll 9 full Safe tasks simulate cleanly via `just simulate-stack` (both per-network stacks). The simulator verifies the data-to-sign against each `VALIDATION.md`, so the recorded **Safe Tx / Domain / Message hashes** are confirmed.\n\n## Follow-up (separate PR)\n\nA gas-limit-only template (`SystemConfigGasLimit`) and the EIP-7702 simulator robustness fix are split into their own PRs.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/superchain-ops",
-      "createdAt": "2026-06-15T11:19:48Z",
+      "createdAt": "2026-06-17T01:03:42Z",
       "mergedAt": null,
-      "additions": 591,
+      "additions": 1138,
       "deletions": 0
     },
     {
@@ -94,6 +94,18 @@
       "deletions": 0
     },
     {
+      "id": "PR_kwDOKIsnqM7mgkxl",
+      "title": "Ink Sepolia migration tasks (Gelato → OP Enterprise)",
+      "author": "Wazabie",
+      "number": 1464,
+      "body": "## Summary\n\nAdds the three superchain-ops tasks for the **Ink Sepolia** (`chainId 763373`) rollup-operator migration from **Gelato → OP Enterprise** (Type A Standard OP Stack takeover; cutover **2026-06-22**). Inputs were verified against the _Ink Sepolia Testnet Migration — Engineering Plan_ and cross-checked against live Sepolia state.\n\n| # | Task | Template | Cutover step | Status |\n|---|------|----------|--------------|--------|\n| 104 | [`ink-sepolia-set-batcher-unsafe-signer`](../tree/af/ink-sepolia-migration/src/tasks/sep/104-ink-sepolia-set-batcher-unsafe-signer) | `SetBatcherAndOrSigner` | 2 & 3 | ✅ simulates; DRAFT |\n| 105 | [`ink-sepolia-proposer-rotation`](../tree/af/ink-sepolia-migration/src/tasks/sep/105-ink-sepolia-proposer-rotation) | `SetDisputeGameArgs` | 4 | ✅ simulates; re-sim after U19 |\n| 106 | [`ink-sepolia-fee-vault-update`](../tree/af/ink-sepolia-migration/src/tasks/sep/106-ink-sepolia-fee-vault-update) | `FeeVaultUpgradeTemplate` | 15 | ⚠️ **blocked** (see below) |\n\nAll three **simulate successfully** on Sepolia (`SIMULATE_WITHOUT_LEDGER=1 just … simulate`). All tasks are **DRAFT, NOT READY TO SIGN**.\n\n## What each task does\n\n### 104 — Set batcher + unsafe block signer\nBatches `setBatcherHash` + `setUnsafeBlockSigner` on `SystemConfig` (`0x05C993…bD525`):\n- batcher `0x21e57C…002F` (Gelato) → **`0x42c4dBdD6C573b9C2a8657F59EE8E84AE45F2695`** (OPE)\n- unsafe signer `0x43ec57…D1a0` (Gelato) → **`0x900C36E0CcAC26F9F49ECa6bbD748e347531864b`** (OPE)\n\nSigned by the **OPE SystemConfig-owner Safe** (`0x837DE4…Fd5E`, 2-of-13). The Gelato→OPE `transferOwnership` is performed off-repo by Gelato (plan step W26); a `SystemConfig.owner()` slot-`0x33` override lets the setters authorize in simulation and **must be removed once W26 lands**.\n\n### 105 — Proposer rotation (proposer-only)\nRotates the **PermissionedDisputeGame** (game type 1) proposer `0xb15d79…4543` (Gelato) → **`0x2282d49d805333D8cd6ddda52B32aC07d6e4e51B`** (OPE) on the DisputeGameFactory (`0x860e62…3D5d`).\n\nInk's DGF (v1.4.0) uses the **gameArgs blob pattern** (per-chain data lives in `gameArgs(gameType)`, not impl immutables), so `SetDisputeGameArgs` field-diffing is used: only `proposer` is set; **challenger** (`0xfd1d2e…4301`, already the OP Sepolia challenger — OP governance, plan §3.1 \"no action\") and **prestate** are read live and preserved. Because the prestate is read live, the task is robust to **U19 (2026-06-17)** bumping it — **re-simulate after U19 before signing.** Verified in simulation: the new proposer is set, the old Gelato proposer is fully gone, challenger + prestate unchanged.\n\n### 106 — Fee vault update ⚠️ blocked\nUpgrades the 4 fee-vault predeploys to v1.6.0 and re-initializes each recipient via `OptimismPortal2.depositTransaction → L2 ProxyAdmin.upgradeAndCall` (7 deposits). **Two blockers, both documented in the task README/VALIDATION:**\n\n1. **Recipient is a placeholder.** The Kraken fee recipient is an open item in the plan (§1, §3.3 empty placeholder). Current on-chain recipient is the Gelato Safe on L2. `0xdead…00XX` placeholders are used so the state diff is obvious — **replace before signing.**\n2. **L2 ProxyAdmin owner = `address(0)`** (verified on-chain, vs. OP Sepolia which returns the aliased L1PAO). The v1.5.0 recipient is immutable, so the change needs a proxy upgrade through the L2 ProxyAdmin — which **reverts on L2** while the owner is unset. **Prerequisite (not in the current plan):** transfer L2 ProxyAdmin ownership to the aliased L1PAO `0x2fc3ff…67f3`. The L1 simulation passes regardless (deposits only emit events on L1) — do not mistake a green L1 sim for a successful L2 effect.\n\n## Verification\n\n- All addresses cross-checked against the migration plan **and** live Sepolia (`SystemConfig`, `DisputeGameFactory.gameArgs(1)`, fee-vault predeploys, safe owners/nonces).\n- Domain hashes computed independently and confirmed against the simulation output (104 single-safe; 105/106 nested via the L1PAO = Foundation + Security Council).\n- Local simulations succeed for all three (104 produced final domain/message/safe hashes; 105/106 nested message hashes to be regenerated via the nested signing flow before signing).\n\n## Notes for reviewers\n\n- Tasks are numbered **104–106**, following the in-flight `migration-src-0` exercise (101–103) on a separate branch. No directory overlap.\n- 105 **must be re-simulated after U19** (2026-06-17); 106 is held until its two blockers are resolved.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-06-15T11:19:48Z",
+      "mergedAt": "2026-06-17T12:51:26Z",
+      "additions": 394,
+      "deletions": 0
+    },
+    {
       "id": "PR_kwDOKIsnqM7nMb4S",
       "title": "fix(FeeVaultUpgradeTemplate): configure fee vaults via setters, not initialize",
       "author": "Wazabie",
@@ -102,39 +114,27 @@
       "repository": "ethereum-optimism/superchain-ops",
       "createdAt": "2026-06-16T21:01:07Z",
       "mergedAt": null,
-      "additions": 48,
+      "additions": 219,
       "deletions": 10
     },
     {
-      "id": "PR_kwDOKIsnqM7mrQP3",
-      "title": "executed",
+      "id": "PR_kwDOKIsnqM7nqEc4",
+      "title": "Add SystemConfigGasLimit template (gas-limit-only)",
       "author": "sbvegan",
-      "number": 1465,
-      "body": "## Summary\r\n\r\n<!-- Briefly describe the changes in this PR -->\r\n\r\n---\r\n\r\n## For Task PRs\r\n\r\n<!-- Delete this section if your PR doesn't add/modify tasks in src/tasks/ -->\r\n\r\n**Task path**: `src/tasks/<network>/<task-name>`\r\n\r\n**Tenderly simulation link**: <!-- paste your Tenderly link here -->\r\n\r\n### Simulation Checklist\r\n\r\n> These boxes must be checked before your PR can be merged.\r\n\r\n- [ ] I have run a Tenderly simulation for this task\r\n- [ ] I have reviewed and understand all state changes in the simulation\r\n- [ ] I have verified that every state change reflects the **exact expected value** (e.g., if setting an `absolutePrestate`, confirm the precise `bytes32` hash matches expectations)\r\n- [ ] All state changes match the expected behavior documented in `VALIDATION.md`\r\n- [ ] I can explain every state diff to reviewers and signers\r\n\r\n### Task Checklist\r\n\r\n- [ ] `README.md` is complete with accurate task description\r\n- [ ] `VALIDATION.md` documents expected state changes with correct domain/message hashes\r\n- [ ] Task status is set appropriately\r\n- [ ] All TODOs in generated files have been addressed\r\n\r\n---\r\n\r\n## Additional context\r\n\r\n<!-- Any additional notes, risks, or considerations for reviewers -->\r\n",
+      "number": 1474,
+      "body": "## Summary\n\nAdds **`src/template/SystemConfigGasLimit.sol`** — a minimal `L2TaskBase` template that calls only `SystemConfig.setGasLimit` (no EIP-1559 params). It's the gas-limit-only counterpart to the existing `SystemConfigGasParams`.\n\n## Why\n\nRe-issuing `setGasLimit` re-emits the gas `ConfigUpdate` without touching EIP-1559 params — useful whenever only the gas limit needs to change. The immediate motivation is the **Karst (U19) gas-limit reset**, where re-emitting the `ConfigUpdate` (to clear the post-activation +55 MGas op-node/kona bug) is the *entire* mitigation; the EIP-1559 params are unrelated.\n\n## Details\n\n- Reads `gasParams.gasLimit` from `config.toml` and applies it to each chain in `l2chains`.\n- Validates `SystemConfig.gasLimit()` post-execution.\n- The gas limit is authorized by the SystemConfig owner, so `safeAddressString` defaults to `\"SystemConfigOwner\"` (resolved per-chain from `SystemConfig.owner()`); override in `config.toml` if a different root safe is required.\n- Does not modify the shared `SystemConfigGasParams` template — fully additive.\n\n## Status / follow-ups\n\nSplit out from the U19 gas-reset tasks PR (#1470) so the template can be reviewed independently. No example task / unit test is included yet — happy to add one mirroring `test/tasks/example/eth/006-system-config-gas-params` + the `SystemConfigGasParams` entries in `TaskManager.t.sol` / `Regression.t.sol` if desired before merge.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/superchain-ops",
-      "createdAt": "2026-06-15T18:28:34Z",
-      "mergedAt": "2026-06-15T18:41:56Z",
-      "additions": 1,
-      "deletions": 1
-    },
-    {
-      "id": "PR_kwDOKIsnqM7m3tCR",
-      "title": "Update Uni sepolia U19 status",
-      "author": "Wazabie",
-      "number": 1468,
-      "body": "Update Uni sepolia U19 status",
-      "repository": "ethereum-optimism/superchain-ops",
-      "createdAt": "2026-06-16T06:19:30Z",
-      "mergedAt": "2026-06-16T06:53:51Z",
-      "additions": 1,
-      "deletions": 1
+      "createdAt": "2026-06-17T20:25:13Z",
+      "mergedAt": null,
+      "additions": 118,
+      "deletions": 0
     }
   ],
   "codeChanges": {
-    "additions": 2,
-    "deletions": 2,
-    "files": 2,
-    "commitCount": 14
+    "additions": 730,
+    "deletions": 19,
+    "files": 25,
+    "commitCount": 36
   },
   "completedItems": [
     {
@@ -147,6 +147,26 @@
       ]
     },
     {
+      "title": "Ink Sepolia migration tasks (Gelato → OP Enterprise)",
+      "prNumber": 1464,
+      "type": "other",
+      "body": "## Summary\n\nAdds the three superchain-ops tasks for the **Ink Sepolia** (`chainId 763373`) rollup-operator migration from **Gelato → OP Enterprise** (Type A Standard OP Stack takeover; cutover **2026-06-22**). Inputs were verified against t",
+      "files": [
+        "src/tasks/sep/104-ink-sepolia-set-batcher-unsafe-signer/.env",
+        "src/tasks/sep/104-ink-sepolia-set-batcher-unsafe-signer/README.md",
+        "src/tasks/sep/104-ink-sepolia-set-batcher-unsafe-signer/VALIDATION.md",
+        "src/tasks/sep/104-ink-sepolia-set-batcher-unsafe-signer/config.toml",
+        "src/tasks/sep/105-ink-sepolia-proposer-rotation/.env",
+        "src/tasks/sep/105-ink-sepolia-proposer-rotation/README.md",
+        "src/tasks/sep/105-ink-sepolia-proposer-rotation/VALIDATION.md",
+        "src/tasks/sep/105-ink-sepolia-proposer-rotation/config.toml",
+        "src/tasks/sep/106-ink-sepolia-fee-vault-update/.env",
+        "src/tasks/sep/106-ink-sepolia-fee-vault-update/README.md",
+        "src/tasks/sep/106-ink-sepolia-fee-vault-update/VALIDATION.md",
+        "src/tasks/sep/106-ink-sepolia-fee-vault-update/config.toml"
+      ]
+    },
+    {
       "title": "Update Uni sepolia U19 status",
       "prNumber": 1468,
       "type": "other",
@@ -154,17 +174,64 @@
       "files": [
         "src/tasks/sep/100-U19-unichain/README.md"
       ]
+    },
+    {
+      "title": "Update ink sepolia task numbers and status",
+      "prNumber": 1473,
+      "type": "other",
+      "body": "Update ink sepolia task numbers and status",
+      "files": [
+        "src/tasks/sep/101-ink-sepolia-set-batcher-unsafe-signer/.env",
+        "src/tasks/sep/101-ink-sepolia-set-batcher-unsafe-signer/README.md",
+        "src/tasks/sep/101-ink-sepolia-set-batcher-unsafe-signer/VALIDATION.md",
+        "src/tasks/sep/101-ink-sepolia-set-batcher-unsafe-signer/config.toml",
+        "src/tasks/sep/102-ink-sepolia-proposer-rotation/.env",
+        "src/tasks/sep/102-ink-sepolia-proposer-rotation/README.md",
+        "src/tasks/sep/102-ink-sepolia-proposer-rotation/VALIDATION.md",
+        "src/tasks/sep/102-ink-sepolia-proposer-rotation/config.toml"
+      ]
+    },
+    {
+      "title": "docs: complete signing/execution commands in task READMEs + scaffold",
+      "prNumber": 1472,
+      "type": "docs",
+      "body": "## What\n\nTask READMEs `053`/`054` (and the `README.template.md` scaffold) had incomplete signing/execution commands. Restored the full copy-paste flow used by the executed `040`/`041`/`042` tasks — **cd → simulate → sign → approve → execute",
+      "files": [
+        "src/tasks/eth/053-U19-op-ink-mmz-soneium/README.md",
+        "src/tasks/eth/054-U19-unichain/README.md",
+        "src/template/boilerplate/README.template.md"
+      ]
     }
   ],
   "topContributors": [
     {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 229.75199953033734,
+      "prScore": 219.35199953033734,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 209.87237787893434,
+      "totalScore": 222.87237787893434,
       "prScore": 177.73437787893434,
-      "issueScore": 0,
-      "reviewScore": 31.5,
+      "issueScore": 2,
+      "reviewScore": 42.5,
       "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 143.06103056402478,
+      "prScore": 123.56103056402476,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -178,53 +245,53 @@
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 139.9011303185032,
-      "prScore": 129.70113031850317,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 127.38382068944425,
+      "prScore": 103.34382068944424,
       "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.2,
+      "reviewScore": 23.5,
+      "commentScore": 0.54,
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 122.38382068944425,
-      "prScore": 103.34382068944424,
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 121.78236702099248,
+      "prScore": 101.54236702099247,
       "issueScore": 0,
-      "reviewScore": 18.5,
-      "commentScore": 0.54,
+      "reviewScore": 19.5,
+      "commentScore": 0.74,
       "summary": null
     },
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 84.15444059059284,
+      "totalScore": 84.35444059059284,
       "prScore": 64.65444059059284,
       "issueScore": 0,
       "reviewScore": 19.5,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
       "username": "pauldowman",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 74.538,
+      "totalScore": 80.976,
       "prScore": 0,
-      "issueScore": 74.1,
+      "issueScore": 80.1,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 68.84857142778137,
-      "prScore": 59.348571427781366,
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 73.28132847917453,
+      "prScore": 63.08132847917454,
       "issueScore": 0,
-      "reviewScore": 9.5,
-      "commentScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -238,6 +305,26 @@
       "summary": null
     },
     {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 61.16621948958322,
+      "prScore": 21.688219489583222,
+      "issueScore": 0,
+      "reviewScore": 38.5,
+      "commentScore": 0.978,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 50.98552449980444,
+      "prScore": 50.98552449980444,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
       "totalScore": 50.954753852588055,
@@ -248,53 +335,43 @@
       "summary": null
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 47.24160770833462,
-      "prScore": 42.041607708334624,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 45.728219489583225,
-      "prScore": 21.688219489583222,
-      "issueScore": 0,
-      "reviewScore": 23.5,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 41.79152228720175,
-      "prScore": 26.25152228720175,
-      "issueScore": 0,
-      "reviewScore": 15,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 28.223615092183948,
+      "totalScore": 34.56361509218395,
       "prScore": 20.78561509218395,
-      "issueScore": 2,
+      "issueScore": 8,
       "reviewScore": 5,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "smartcontracts",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
+      "totalScore": 32.889918433002165,
+      "prScore": 22.349918433002166,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.54,
       "summary": null
     },
     {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 26.2,
+      "totalScore": 26.4,
       "prScore": 0,
       "issueScore": 8,
       "reviewScore": 18,
-      "commentScore": 0.2,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 26.088390788535776,
+      "prScore": 24.812390788535776,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.2759999999999998,
       "summary": null
     },
     {
@@ -308,13 +385,43 @@
       "summary": null
     },
     {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 17.779802066295993,
-      "prScore": 16.941802066295995,
+      "username": "asdv23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
+      "totalScore": 15.596224577336221,
+      "prScore": 15.596224577336221,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.838,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 14.880306144334055,
+      "prScore": 5.680306144334055,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -338,13 +445,13 @@
       "summary": null
     },
     {
-      "username": "donoso-eth",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 10,
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.438,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -358,38 +465,28 @@
       "summary": null
     },
     {
-      "username": "OptimismBot",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 5.880306144334055,
-      "prScore": 5.680306144334055,
+      "username": "ekonomikmobil",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220848520?v=4",
+      "totalScore": 6.144,
+      "prScore": 5.944,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "smartcontracts",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14298799?u=fc611223360f6bddb7d404becaaf1ee8ccbf5529&v=4",
-      "totalScore": 5.2,
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 5.438,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 5,
-      "commentScore": 0.2,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
       "username": "sjonpaulbrown",
       "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -418,13 +515,33 @@
       "summary": null
     },
     {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 0.43799999999999994,
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 4.5,
       "prScore": 0,
       "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jonathanudd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/13311260?v=4",
+      "totalScore": 4.3,
+      "prScore": 0,
+      "issueScore": 4.1,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "APshenkin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14344430?u=22e0fbc10ce0fe32cd278e9605772e7e1aa5d23f&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -458,9 +575,9 @@
       "summary": null
     }
   ],
-  "newPRs": 6,
-  "mergedPRs": 2,
-  "newIssues": 1,
+  "newPRs": 11,
+  "mergedPRs": 5,
+  "newIssues": 2,
   "closedIssues": 15,
-  "activeContributors": 21
+  "activeContributors": 25
 }

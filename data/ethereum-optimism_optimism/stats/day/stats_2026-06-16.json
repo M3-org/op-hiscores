@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-06-16 to 2026-06-17, ethereum-optimism/optimism had 13 new PRs (10 merged), 35 new issues, and 34 active contributors.",
+  "overview": "From 2026-06-16 to 2026-06-17, ethereum-optimism/optimism had 13 new PRs (10 merged), 35 new issues, and 33 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM72QJ6m",
@@ -78,8 +78,8 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-06-16T21:18:33Z",
       "mergedAt": null,
-      "additions": 8570,
-      "deletions": 660
+      "additions": 13666,
+      "deletions": 645
     },
     {
       "id": "PR_kwDODjvEJM7GhLFf",
@@ -118,16 +118,16 @@
       "deletions": 1074
     },
     {
-      "id": "PR_kwDODjvEJM7mlidp",
-      "title": "test(alloy-op-evm): cover SDM post-exec settlement conservation",
+      "id": "PR_kwDODjvEJM7m-zV2",
+      "title": "fix(alloy-op-evm): skip SDM warming rebates for never-cold accesses; harden test suite",
       "author": "nonsense",
-      "number": 21382,
-      "body": "## Description\r\n\r\nAdds unit coverage for the SDM post-exec **fee settlement** — the per-recipient balance changes applied when a refund fires (sender credit + beneficiary / base-fee-vault / operator-fee-vault debits). This path was previously only exercised indirectly (the producer/verifier roundtrip runs at base fee 0, so all settlement deltas were zero), leaving the economic correctness unasserted.\r\n\r\n## Tests added (`rust/alloy-op-evm/src/block/tests.rs`, `mod sdm`)\r\n\r\n- **`test_post_exec_settlement_deltas_conserve_value`** — pins each per-recipient share against the spec formula (`base = refund × basefee`, `beneficiary = refund × (effective_gas_price − basefee)`, operator-fee debit `> 0` post-Isthmus) and asserts the **sender credit equals the sum of the three debits** — the ETH-supply-conservation / \"no infinite mint\" invariant.\r\n- **`test_post_exec_settlement_deltas_skip_non_refunding_txs`** — deposits, the post-exec (`0x7D`) tx itself, and zero-refund txs produce no settlement.\r\n- **`test_post_exec_settlement_underflow_is_rejected`** — a debit exceeding a recipient's balance fails with `PostExecSettlementUnderflow` rather than saturating.\r\n\r\n## Supporting change\r\n\r\nThreads a `base_fee` parameter through the test-only `build_executor` / `SDMExecutorFixture` (defaults to `0`, so existing tests are unchanged) — a non-zero base fee is required for the settlement deltas to be non-trivial.\r\n\r\n## Notes\r\n\r\nThese close the two items called out by name in the SDM test-hardening ticket (#21324): the ETH-supply-conservation test and the `PostExecSettlementUnderflow` path. Test-only change; no production code touched.\r\n\r\n## Verification\r\n\r\n- New tests pass; full `alloy-op-evm` lib suite green (56 → 59).\r\n- Formatted with the pinned nightly rustfmt (`just fmt-check` recipe).\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\r\n\r\nRelated: https://github.com/ethereum-optimism/optimism/issues/21324",
+      "number": 21434,
+      "body": "Hardens SDM post-exec fee path with new unit coverage and fixes two over-refund bugs where warming rebates were granted for accesses that were never cold (so no cold→warm surcharge was ever paid). These leak value from the fee recipients to the sender.\r\n\r\nThe consensus `refund <= evm_gas_used` bound and settlement conservation already prevented an ETH mint, so this is a mis-metering fix, not a supply-inflation one.\r\n\r\n## Bugs fixed\r\n\r\n1. **Fee-vault settlement touch claimed a rebate** — the per-tx fee-vault settlement write (`note_account_touch` on the L1 / base-fee / operator-fee recipients) observed with `allow_refund=true`. That is a protocol-level state write, not an EIP-2929 opcode access, so a later non-deposit tx wrongly claimed a 2500-gas `WarmAccount` rebate per fee vault — the fee-vault drain from Immunefi report #81847.\r\n\r\nFix: observe the settlement touch with `allow_refund=false` (the vault stays in `warmed_accounts`, so a genuine later opcode access still earns its legitimate rebate).\r\n\r\n2. **A tx's own sender / `to` / created address claimed a rebate** — EIP-2929 pre-warms a tx's caller, call target, and (for CREATE) the created address, so they are billed warm and never incur a cold→warm surcharge. The inspector excluded the beneficiary, precompiles, access list, and 7702 authorities but not these, so a later tx whose sender or `to` (or CREATE address) had been warmed by an earlier tx in the block claimed a spurious 2500-gas rebate.\r\n\r\nFix: mark `caller` and the call `target` intrinsically warm in `collect_intrinsic_warmth`, and the top-level CREATE address in the `create` hook (still recorded in `warmed_accounts`, so a *different* later tx touching them via an opcode still rebates).\r\n\r\n## Tests added\r\n\r\n- `test_post_exec_settlement_deltas_conserve_value` — pins each per-recipient share against the spec formula and asserts the sender credit equals the sum of the three debits (ETH-supply conservation / \"no infinite mint\").\r\n- `test_post_exec_settlement_deltas_skip_non_refunding_txs` — deposits, the post-exec (`0x7D`) tx itself, and zero-refund txs produce no settlement.\r\n- `test_post_exec_settlement_underflow_is_rejected` — a debit exceeding a recipient's balance fails with `PostExecSettlementUnderflow` rather than saturating.\r\n- `test_fee_recipient_settlement_touch_is_not_rebated` — end-to-end over the L1 / base-fee / operator-fee recipients (bug 1).\r\n- `settlement_note_warms_without_claiming_but_opcode_access_still_rebates` (inspector) — the settlement re-touch claims nothing, but a genuine opcode access still rebates (bug 1).\r\n- `test_intrinsic_warm_to_address_is_not_rebated`, `test_intrinsic_warm_sender_is_not_rebated`, `test_intrinsic_warm_created_address_is_not_rebated` — executor-level coverage of bug 2.\r\n\r\n## Tests modified\r\n\r\nThe existing SDM executor tests previously relied on the now-removed spurious sender/`to`/fee-vault rebates from plain transfers (which touch only intrinsically-warm accounts and correctly earn nothing). They are reworked to drive genuine cross-tx warming through a contract that SLOADs a shared slot:\r\n\r\n- `test_post_exec_producer_verifier_roundtrip`\r\n- `test_evm_gas_used_tracks_pre_refund_gas_under_sdm`\r\n- `test_pre_refund_gas_limit_counts_sdm_refunded_gas`\r\n- `op_evm_post_exec_tracking_runs_when_inspector_is_otherwise_disabled` (`lib.rs`)\r\n\r\nA test-only `base_fee` parameter is also threaded through `build_executor` / `SDMExecutorFixture` (defaults to `0`) so settlement deltas are non-trivial.\r\n\r\nRelated: https://github.com/ethereum-optimism/optimism/issues/21324\r\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-06-15T14:37:14Z",
+      "createdAt": "2026-06-16T11:35:32Z",
       "mergedAt": null,
-      "additions": 985,
-      "deletions": 202
+      "additions": 994,
+      "deletions": 208
     }
   ],
   "codeChanges": {
@@ -543,5 +543,5 @@
   "mergedPRs": 10,
   "newIssues": 35,
   "closedIssues": 9,
-  "activeContributors": 34
+  "activeContributors": 33
 }
