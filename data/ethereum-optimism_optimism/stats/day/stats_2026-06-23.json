@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-06-23 to 2026-06-24, ethereum-optimism/optimism had 18 new PRs (14 merged), 5 new issues, and 28 active contributors.",
+  "overview": "From 2026-06-23 to 2026-06-24, ethereum-optimism/optimism had 18 new PRs (14 merged), 5 new issues, and 27 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABFBp-4Q",
@@ -82,6 +82,18 @@
       "deletions": 645
     },
     {
+      "id": "PR_kwDODjvEJM7pqsrJ",
+      "title": "devstack: run op-con-node as an L2 CL verifier (opql integration)",
+      "author": "teddyknox",
+      "number": 21527,
+      "body": "## Summary\n\nWires **op-con-node** (the [opql](https://github.com/ethereum-optimism/opql) consensus-only OP node) into `op-devstack` as an external-subprocess L2 CL kind, selectable via `DEVSTACK_L2CL_KIND=op-con-node`. This lets the devstack acceptance suite run op-con-node as a verifier CL in place of op-node/kona.\n\nop-con-node is **verifier-only** — no sequencing, no P2P gossip. It derives the safe chain from L1 and drives its own EL (op-reth) over the Engine API; the unsafe head is followed from the sequencer's L2 EL.\n\n## Changes\n\n- **`op-devstack/sysgo/l2_cl_opcon.go`** — `OpConNode` launcher: spawns `op-con-node run`, polls the RPC for readiness, fronts it. Binary resolved via rustbin overrides (`RUST_BINARY_PATH_OP_CON_NODE` / `RUST_SRC_DIR_OP_CON_NODE`) since op-con-node lives in the sibling opql repo.\n- **`op-devstack/sysgo/mixed_runtime.go`** — `MixedL2CLOpCon` kind + `SkipOnOpConNode`.\n- **`op-devstack/sysgo/singlechain_build.go`** — dispatch verifier slots to op-con-node, keep the sequencer on op-node.\n- **`op-devstack/sysgo/singlechain_variants.go`** / **`op-devstack/presets/singlechain_multinode.go`** — no-fault-proofs multinode runtime + preset (avoids requiring cannon), with the verifier's follow source wired to the sequencer L2 EL.\n- **`op-acceptance-tests/tests/opcon/verifier_test.go`** — `TestOpConVerifierDerivesSafeHead`.\n\n## Status\n\nThe acceptance test **passes** (`TestOpConVerifierDerivesSafeHead` → `ok`). The earlier safe-head-stuck blocker (op-con-node ingested from `anchor_L1_origin + 1`, so a genesis anchor never ingested L1 block 0 and `derive_batch` could not advance) was fixed on the opql side; op-con-node now derives the safe head from L1 against the devstack.\n\n> Local opql integration. Opening per request to make the branch reviewable; not necessarily intended to merge into `develop` as-is.\n\n## Test plan\n\n```\nDEVSTACK_L2CL_KIND=op-con-node DEVSTACK_L2EL_KIND=op-reth \\\nRUST_BINARY_PATH_OP_CON_NODE=<opql>/target/debug/op-con-node \\\ngo test -run TestOpConVerifierDerivesSafeHead ./op-acceptance-tests/tests/opcon/\n```\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-23T13:26:43Z",
+      "mergedAt": null,
+      "additions": 1195,
+      "deletions": 7
+    },
+    {
       "id": "PR_kwDODjvEJM7pcfYx",
       "title": "feat: migration path C zkdg",
       "author": "ashitakah",
@@ -94,16 +106,16 @@
       "deletions": 14
     },
     {
-      "id": "PR_kwDODjvEJM7pwZ7O",
-      "title": "karst: acceptance test for upgrade-gas revert across activation",
-      "author": "sebastianst",
-      "number": 21533,
-      "body": "## Summary\n\nAdds a Karst-activation **acceptance test** (`op-acceptance-tests/tests/karst/upgrade_gas_test.go`) that exercises the upgrade-gas leak fix from #21441.\n\nIt activates Karst **mid-chain** (offset 10s after L2 genesis) so there are pre-activation, activation, and post-activation blocks to inspect, and asserts the gas limit across the activation boundary:\n\n1. activation block gas limit **>** pre-activation gas limit — the activation block carries the one-time NUT-bundle upgrade gas; and\n2. post-activation block gas limit reverts to the pre-activation steady state (default), so the upgrade gas does not leak onto every later block.\n\nThis mirrors the action-test assertions in `rust/kona/tests/proofs/nut_bundle_activation_test.go` (`actHeader.GasLimit > preActivation.GasLimit`, `postActivation.GasLimit == preActivation.GasLimit`) at the acceptance-test level, against the live devstack.\n\n### Two variants\n\n- **`TestKarstUpgradeGasRevertsAfterActivation`** (default): post-activation gas limit reverts to the pre-activation value.\n- **`TestKarstUpgradeGasKeptAfterActivation`** (`keep_karst_upgrade_gas = true`): the chain opts out of the revert, so the post-activation gas limit keeps the inflated activation-block value (`post == activation`).\n\nThis `keep` variant is new coverage — the existing action test only covers the default (revert) case.\n\n### kona-client fault proof\n\nEach variant ends by running the kona-client fault proof via the established `MinimalWithKona` / `RunKonaNative(agreedBlock, claimBlock)` mechanism (same one used in `tests/osaka_on_l2_test.go`). It agrees on the pre-activation block and proves forward across the activation boundary into the post-activation block, so the fault-proof program covers the gas-limit behaviour too (skipped under op-rbuilder, which can't prefetch state proofs — matching existing tests). The `keep_karst_upgrade_gas` flag reaches kona-host because `MinimalWithKona`'s VMConfig marshals the live `rollup.Config` (which now carries the flag) into kona's `rollup.json`.\n\n## Plumbing for `keep_karst_upgrade_gas`\n\nTo let the second variant opt out, the bool is plumbed through the deploy path (it was only readable from a bundled rollup config / CLI override before, with no devstack hook):\n\n- `op-chain-ops/genesis/config.go`: new `KeepKarstUpgradeGas` field on `UpgradeScheduleDeployConfig` (JSON `keepKarstUpgradeGas`), assigned into `rollup.Config` in `DeployConfig.RollupConfig()` next to `KarstTime`.\n- `op-e2e/e2eutils/intentbuilder/builder.go`: `WithKeepKarstUpgradeGas()` on the L2 configurator (sets the deploy override; merged into `DeployConfig` via the existing `MergeJSON` path), declared on `L2HardforkConfigurator`.\n- `op-devstack/sysgo/deployer.go`: `WithKeepKarstUpgradeGas` deployer option, sets it on all L2s.\n- `op-devstack/dsl/l2_el.go`: small `L2ELNode.GasLimitAtBlock(num)` DSL getter so the test reads gas limits at the DSL level.\n\n## Verification status\n\nVerified locally:\n- `go build` / `go vet` / `go test -c` of the new test package and all touched package trees (`op-acceptance-tests/...`, `op-devstack/...`, `op-e2e/e2eutils/intentbuilder`, `op-chain-ops/genesis`, `op-node/...`, `op-deployer/...`) — all green.\n- Unit tests for `op-e2e/e2eutils/intentbuilder` and `op-chain-ops/genesis` pass.\n- Confirmed the override plumbing end-to-end with a throwaway test: `DeployOverrides[\"keepKarstUpgradeGas\"] = true` merges into `DeployConfig.KeepKarstUpgradeGas` via `jsonutil.MergeJSON` (the same path `CombineDeployConfig` uses), then flows into `rollup.Config`. The throwaway test was removed after confirming.\n\nNot run locally (heavy; left for CI): the full acceptance run + kona-client fault proof end-to-end. The structure mirrors the existing `tests/osaka_on_l2_test.go` `RunKonaNative` usage and the `tests/karst/withdrawal_test.go` mid-chain Karst setup.\n\n## Stacking\n\nStacked on `seb/fix-upgrade-gas` (#21441) — this PR's base is that branch, not `develop`.\n\n🤖 *Generated by Claude Code*\n",
+      "id": "PR_kwDODjvEJM7pu9f8",
+      "title": "feat(sdm): add premium extraction seams and tests",
+      "author": "nonsense",
+      "number": 21530,
+      "body": "Fixes: https://github.com/ethereum-optimism/protocol-team/issues/97",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-06-23T17:15:09Z",
+      "createdAt": "2026-06-23T16:13:18Z",
       "mergedAt": null,
-      "additions": 940,
-      "deletions": 261
+      "additions": 1054,
+      "deletions": 768
     },
     {
       "id": "PR_kwDODjvEJM7bqnMK",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 936,
       "deletions": 1825
-    },
-    {
-      "id": "PR_kwDODjvEJM7pu9f8",
-      "title": "feat(sdm): add premium extraction seams and tests",
-      "author": "nonsense",
-      "number": 21530,
-      "body": "Fixes: https://github.com/ethereum-optimism/protocol-team/issues/97",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-06-23T16:13:18Z",
-      "mergedAt": null,
-      "additions": 906,
-      "deletions": 354
     }
   ],
   "codeChanges": {
     "additions": 3160,
     "deletions": 1013,
     "files": 171,
-    "commitCount": 104
+    "commitCount": 106
   },
   "completedItems": [
     {
@@ -678,5 +678,5 @@
   "mergedPRs": 14,
   "newIssues": 5,
   "closedIssues": 5,
-  "activeContributors": 28
+  "activeContributors": 27
 }
