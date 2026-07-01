@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-06-28 to 2026-07-05, ethereum-optimism/optimism had 7 new PRs (0 merged), 0 new issues, and 11 active contributors.",
+  "overview": "From 2026-06-28 to 2026-07-05, ethereum-optimism/optimism had 8 new PRs (0 merged), 0 new issues, and 11 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABC3DWXg",
@@ -34,6 +34,18 @@
   ],
   "topPRs": [
     {
+      "id": "PR_kwDODjvEJM7f2Gw5",
+      "title": "[codex] simplify SuperAuthority safe fallback",
+      "author": "karlfloersch",
+      "number": 21066,
+      "body": "Stacked on #21049.\n\nThis keeps the smaller approach: make SuperAuthority safe-head failures and anchor results fall back to finalized instead of local-safe, while preserving Adrian's tri-state verifier model.\n\nWhat changed:\n- safe head HoldPrevious falls back to FinalizedHead\n- safe head Anchor falls back to FinalizedHead\n- verified safe heads use a single canonical number/hash check before publishing\n- finalized anchor resolution preserves the existing finalized cache monotonicity\n- tests/docs updated around the fallback semantics\n\nValidation:\n- go test ./op-supernode/supernode/chain_container ./op-supernode/supernode/activity/internal/syncstatus ./op-node/rollup/engine ./op-supernode/supernode/activity/interop\n- git diff --check",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-05-27T13:48:06Z",
+      "mergedAt": null,
+      "additions": 1037,
+      "deletions": 632
+    },
+    {
       "id": "PR_kwDODjvEJM7fO1mU",
       "title": "Add check-glamsterdam CLI and share its loops with the acceptance test",
       "author": "joshklop",
@@ -44,6 +56,18 @@
       "mergedAt": null,
       "additions": 616,
       "deletions": 31
+    },
+    {
+      "id": "PR_kwDODjvEJM7sEdJY",
+      "title": "Feat/proof backfill batching",
+      "author": "dhyaniarun1993",
+      "number": 21602,
+      "body": "**Description**\r\n\r\n`op-proofs backfill` writes one MDBX transaction per block. On a 1.2 M-block extension that's 1.2 M commit/fsync round-trips. This PR batches K blocks into a single transaction.\r\n\r\n- New flag: `--proofs-history.backfill-batch-size` (range 1..=100, default 50).\r\n- Backfill on op-mainnet improvements: **8.3 → 22.5 blk/s (~2.7×)** on a 1.2 M-block run.\r\n- See Caveats before assuming the same multiplier on your host.\r\n\r\n**Failure semantics** \r\nA crash or validation error mid-batch drops the open RW transaction; up to K blocks of progress are lost. `earliest` in the proofs DB is unchanged, so the next run resumes from the same anchor and redoes them. Atomicity is preserved at batch granularity, not block granularity.\r\n\r\n**Caveats**\r\n- Hardware-sensitive - The 2.7× figure is from a 64 GB server. MDBX is memory-mapped and relies on the OS page cache for hot pages — at 64 GB, most of the trie working set stays resident, so the dominant per-block cost shifts to commit/fsync (which batching attacks directly). On a smaller host, per-block I/O would dominates instead, and the commit-reduction win shrinks.\r\n- Cache-warmup ramp - When the proofs DB already has populated history tables (continuing a paused backfill, or re-running on an existing snapshot), the first several minutes run noticeably below the steady-state rate while the OS page cache reloads the hot trie/history pages. Throughput climbs as residency grows.\r\n\r\n**Tests**\r\n\r\n<!--\r\nPlease describe any tests you've added. If you've added no tests, or left important behavior untested, please explain why not.\r\n-->\r\n\r\n**Additional context**\r\n\r\n<!--\r\nAdd any other context about the problem you're solving.\r\n-->\r\n\r\n**Metadata**\r\n\r\n<!-- \r\nInclude a link to any github issues that this may close in the following form:\r\n- Fixes #[Link to Issue]\r\n-->\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-30T04:56:49Z",
+      "mergedAt": null,
+      "additions": 383,
+      "deletions": 99
     },
     {
       "id": "PR_kwDODjvEJM7r9ljt",
@@ -68,37 +92,13 @@
       "mergedAt": null,
       "additions": 208,
       "deletions": 0
-    },
-    {
-      "id": "PR_kwDODjvEJM7ed_vC",
-      "title": "[codex] Keep EL sync targets out of unsafe head",
-      "author": "karlfloersch",
-      "number": 20990,
-      "body": "## Summary\n\nPrevent EL-sync targets from polluting op-node's derivation-facing unsafe head before the execution engine has validated the forkchoice.\n\nThis keeps the EL-sync direct insertion path able to submit future/non-contiguous payloads to reth as sync targets, but only promotes the payload into op-node's `unsafeHead` after the FCU response is `VALID`.\n\n## Root Cause\n\nThe EL-sync path can legitimately submit future payloads to the execution engine. Reth may return `SYNCING`, which means the payload is useful as a sync target but is not yet a validated canonical head.\n\nPreviously op-node could treat that accepted sync target as its local unsafe head. Safe derivation then interpreted `pending_safe < unsafe` as evidence that reth had a contiguous, queryable unsafe chain and attempted to look up `pending_safe + 1`; if reth was still canonical at the pending safe block, this produced a `not found` reset and could truncate SafeDB.\n\n## Impact\n\nA future EL-sync target can still be sent to reth, but it will not advance op-node's local unsafe head unless reth returns `VALID` from FCU. EL-sync completion head updates are now delayed until after that validated FCU response, so `NewPayload=VALID` followed by `FCU=SYNCING` also cannot mutate the unsafe/safe/finalized heads.\n\n## Validation\n\n- `go test ./op-node/rollup/engine ./op-node/rollup/driver`\n- `go test ./op-node/rollup/...`\n\nAdded regression coverage for both:\n\n- `NewPayload=SYNCING`, `FCU=SYNCING` does not promote unsafe/local-safe/finalized.\n- `NewPayload=VALID`, `FCU=SYNCING` does not promote unsafe/local-safe/finalized.\n---\n\n## JNT v2 Supernode Incident RCA\n\nNetwork/context:\n- `chain_id=420120103`\n- JNT v2 supernodes, especially `bn-interop-jnt-v2-supernode-2`\n- Same broad failure pattern was visible on multiple supernodes, so this did not look like an sn2-only local disk/db glitch.\n\n### Observed Timeline\n\nAt `2026-05-22T07:57:31Z`, op-node logged an L1 head discontinuity / possible reorg warning:\n\n```text\nlvl=warn msg=\"L1 head signal indicates a possible L1 re-org\"\nchain_id=420120103\nold_l1_head        =0x684de4c7...:10896552\nnew_l1_head_parent =0x1b6ea503...\nnew_l1_head        =0xfaff40a5...:10896554\n```\n\nA similar warning followed around `07:58:19Z` for the `10896556 -> 10896558` head movement. Later parent checks suggested the intermediate L1 blocks existed canonically, so I would treat these logs as evidence of L1-head discontinuity / possible reorg handling pressure, not as sole proof of a canonical L1 reorg. The fix here does not depend on proving that part either way.\n\nAt about `07:57:42Z`, local L2 derivation was still around `825802` and had consolidated that block against L1:\n\n```text\nmsg=\"Inserted new L2 unsafe block\" hash=0x61ca5389... number=825802\nmsg=\"Sync progress\" reason=\"consolidated block with L1\"\nl2_pending_safe=0x61ca5389...:825802 l2_unsafe=0x61ca5389...:825802\n```\n\nThe L1 origin for that local derived block was around `0xa36f3de7...:10896544`, i.e. before the later L1-head warning area.\n\nImmediately after, from about `07:57:42Z` to `07:57:44Z`, the node received far-future unsafe payloads via the unsafe / EL-sync path:\n\n```text\nmsg=\"Inserting unsafe L2 execution payload to drive EL sync\" id=0x6166718...:832736\n... 832738, 832744, 832746, 832747, 832756, 832767, 832770, 832772\nmsg=\"Inserted new L2 unsafe block (synchronous)\" hash=0x6166718... number=832736\n```\n\nThen the deriver started resetting because it could not reconcile the op-node unsafe-head view with what reth could actually serve canonically:\n\n```text\nt=2026-05-22T07:57:44Z lvl=warn\nmsg=\"Deriver system is resetting\"\nchain_id=420120103\nerr=\"expected engine was synced and had unsafe block to reconcile, but cannot find the block: not found\"\n```\n\nThe important state mismatch was:\n- op-node/supernode local safe was around `825802`\n- op-node had been driven toward an EL-sync unsafe target around `832736+`\n- reth did not have canonical/queryable block `825803`\n\nThat combination is invalid for derivation-facing unsafe-head bookkeeping. If op-node says unsafe is far ahead of safe, derivation assumes there is a contiguous unsafe chain it can reconcile through. In this incident, that assumption was false.\n\n### Code Path That Matched The Logs\n\nThe relevant code path is `EngineController.insertUnsafePayload` in `op-node/rollup/engine/engine_controller.go`.\n\nBefore this PR, an EL-sync payload could be sent to reth and then promoted into op-node's derivation-facing state even when FCU had not returned `VALID`. In particular, when completing EL sync / setting the offset-derived safe+finalized hashes, the old code mutated op-node state before the FCU result was known:\n\n```go\ne.SetUnsafeHead(ref)\ne.emitter.Emit(ctx, UnsafeUpdateEvent{Ref: ref})\ne.SetLocalSafeHead(safeRef)\ne.SetDeprecatedSafeHead(safeRef)\ne.onSafeUpdate(ctx, safeRef, safeRef)\ne.SetFinalizedHead(finalizedRef)\n```\n\nThen after FCU, it also unconditionally set unsafe head again on the accepted statuses. That meant a payload could be usable as an EL-sync target for reth without being safe to expose as op-node's contiguous unsafe head.\n\nThe failure loop was therefore:\n\n1. Local safe/pending safe is around `825802`.\n2. A far-future unsafe payload, e.g. `832736`, arrives.\n3. op-node sends it to reth with `engine_newPayload` / FCU to drive EL sync.\n4. reth can respond in a way that is acceptable for EL sync progress, e.g. `SYNCING`, without having canonical block `825803` queryable.\n5. Old op-node code still promoted the payload into `unsafeHead` / emitted unsafe updates.\n6. Derivation sees `safe=825802`, `unsafe=832736`, and tries to reconcile `825803`.\n7. reth returns `not found` for canonical `825803`.\n8. The deriver resets/truncates SafeDB and retries against the same poisoned unsafe-head state.\n9. Local safe stalls, so cross-safe/finalized also appear pinned.\n\n### Why This Looked Like Op-Node Logic, Not Supernode Authority Logic\n\nThe supernode verifier/cross-safe symptoms were downstream of local op-node safe progress getting stuck. The decisive mismatch was between op-node's derivation-facing `unsafeHead` and reth's canonical/queryable chain. Supernode did not need to invent an invalid cross-safe decision to cause this; it was enough for embedded op-node state to say \"unsafe is 832736\" while reth could not serve canonical `825803`.\n\nSo the bug fixed here is in op-node engine-controller bookkeeping under EL sync. Supernode exposed the issue because it runs the op-node logic and depends on local safe/SafeDB for cross-safe verification.\n\n### What This PR Changes\n\nThis PR keeps the EL-sync behavior but prevents the unsafe-head poisoning:\n\n- op-node may still send a far-future payload to reth as an EL-sync target.\n- op-node only promotes that payload into derivation-facing `unsafeHead` after FCU returns `VALID`.\n- if `SyncMode == ELSync` and FCU status is not `VALID`, op-node logs and returns without mutating unsafe/safe/finalized state:\n\n```text\nEL sync payload accepted as sync target, but not promoted to unsafe head\n```\n\nThis preserves the useful EL-sync target behavior while avoiding the false local invariant that there is a contiguous unsafe chain available from local safe to that target.\n\n### Tests Added\n\nThe PR adds regression coverage for the two cases that matter for this incident:\n\n- `TestInsertUnsafePayload_ELSyncSyncingDoesNotPromoteUnsafe`\n  - `NewPayload=SYNCING`, `FCU=SYNCING`\n  - asserts `unsafeHead`, local safe, and finalized are not advanced\n\n- `TestInsertUnsafePayload_ELSyncValidNewPayloadSyncingFCUDoesNotPromoteUnsafe`\n  - `NewPayload=VALID`, `FCU=SYNCING`\n  - asserts `unsafeHead`, local safe, and finalized are not advanced\n\nThe second case is important: `NewPayload=VALID` alone is not enough. The derivation-facing state should not move unless FCU says the engine accepted that forkchoice as `VALID`.\n\n### Local Validation\n\nLocal test runs performed on this branch:\n\n```text\ngo test ./op-node/rollup/engine ./op-node/rollup/driver\ngo test ./op-node/rollup/...\n```\n\nBoth passed before publishing the test image.\n\nAd hoc `op-supernode` image built from this commit:\n\n```text\nus-docker.pkg.dev/oplabs-tools-artifacts/dev-images/op-supernode:c93edd8bca89107c727f8e90f81ea24722d43ac7\nsha256:9ef10a0a4daf9c15af3ada18b91fe671b4069f8c58ed20ab82da53f9035e054a\n```\n\nBinary version check:\n\n```text\nop-supernode version c93edd8bca89107c727f8e90f81ea24722d43ac7-c93edd8b-1779483099\n```",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-05-22T19:16:45Z",
-      "mergedAt": null,
-      "additions": 67,
-      "deletions": 8
-    },
-    {
-      "id": "PR_kwDODjvEJM7XNI2r",
-      "title": "feat(op-supernode): exclude supernode-owned flags from VN flag cloning",
-      "author": "jelias2",
-      "number": 20468,
-      "body": "## Summary\n\n- Adds `ExcludedVNFlags` map to `op-supernode/flags` that prevents specified op-node flags from being cloned into `vn.all.*` / `vn.<id>.*` variants\n- Excludes 9 flags the supernode already overrides: data paths (`safedb.path`, `p2p.peerstore.path`, `p2p.discovery.path`, `p2p.priv.path`), P2P listen ports (`p2p.listen.tcp`, `p2p.listen.udp`), and L1 endpoints (`l1`, `l1.beacon`, `l1.http-poll-interval`)\n- These flags appeared in `--help` and accepted `OP_SUPERNODE_VN_ALL_*` env vars, but values were silently discarded — now they're removed from the CLI surface entirely\n- To exclude more flags in the future, add an entry to the `ExcludedVNFlags` map\n\n## Motivation\n\nThe supernode derives data paths from `--data-dir`, forces dynamic P2P listen ports, and shares a single L1 client across all virtual nodes. Exposing these as per-VN flags was misleading — operators could set them without error but they had no effect.\n\n## Test plan\n\n- [x] `go test ./op-supernode/flags/ -v` — all pass\n- [x] Existing `TestFullDynamicFlags_ClonesAllFlagsForChainsAndGlobal` updated to skip excluded flags\n- [x] New `TestFullDynamicFlags_ExcludesExcludedVNFlags` verifies excluded flags don't appear in output\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-04-30T17:47:17Z",
-      "mergedAt": null,
-      "additions": 57,
-      "deletions": 7
     }
   ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 17
+    "commitCount": 19
   },
   "completedItems": [],
   "topContributors": [
@@ -113,10 +113,10 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 17.11250137794722,
-      "prScore": 17.11250137794722,
+      "username": "dhyaniarun1993",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
+      "totalScore": 40.14034250745473,
+      "prScore": 40.14034250745473,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -125,11 +125,21 @@
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 16.199825632724327,
-      "prScore": 15.999825632724328,
+      "totalScore": 24.539738449086492,
+      "prScore": 23.999738449086493,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 21.61250137794722,
+      "prScore": 17.11250137794722,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -143,6 +153,16 @@
       "summary": null
     },
     {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "blackflytech",
       "avatarUrl": "https://avatars.githubusercontent.com/u/229591178?u=1be32b0713b68f3df72f9338ac25858adca6637a&v=4",
       "totalScore": 10.800197381662155,
@@ -151,29 +171,9 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
-    },
-    {
-      "username": "dhyaniarun1993",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
-      "totalScore": 7.098292546497023,
-      "prScore": 7.098292546497023,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
-      "totalScore": 4.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0,
-      "summary": null
     }
   ],
-  "newPRs": 7,
+  "newPRs": 8,
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 2,
