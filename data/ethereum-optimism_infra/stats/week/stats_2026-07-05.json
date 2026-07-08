@@ -5,90 +5,185 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-07-05 to 2026-07-12, ethereum-optimism/infra had 0 new PRs (0 merged), 0 new issues, and 12 active contributors.",
+  "overview": "From 2026-07-05 to 2026-07-12, ethereum-optimism/infra had 1 new PRs (0 merged), 0 new issues, and 21 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ87ux73t",
+      "title": "proxyd: parallelize EL consensus-poller RPCs in UpdateBackend",
+      "author": "danielllek",
+      "number": 665,
+      "body": "<!-- Contributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md -->\n\n**Description**\n\nUpdateBackend previously issued eth_syncing, eth_getBlockByNumber(\"latest\"), (\"safe\"), and (\"finalized\") sequentially against the same backend, so one poll cycle cost the sum of four round trips. In our production deployment this measured at ~690ms/poll even with consensus_poller_interval set to 250ms, since the call chain itself exceeded the configured interval and became the real bottleneck.\n\nFire the four RPCs concurrently instead; a cycle now costs roughly one round trip. Error/zero-value precedence on failure is unchanged from the sequential version (sync error > latest > safe > finalized), just evaluated after all four results are in rather than short-circuiting between calls.\n\nAlso fixes MockBackend.wrappedHandler in the integration test harness, which held its mutex across the full handler invocation and serialized concurrent requests to the same mock backend — harmless for the old sequential poller, but it caused the new concurrent calls to queue behind each other and time out in tests that simulate a slow backend. The lock now only guards the shared request log and handler reference, not handler execution, matching how a real backend actually behaves under concurrent load.\n\n**Tests**\n\n- `go test ./...` (full `proxyd` module) — pass\n- `go test ./... -race` — pass, no data races introduced by the new concurrent goroutines\n- `go test ./integration_tests/... -run TestConsensus -count=3` — repeated to rule out flakiness from the new concurrency, pass\n- Added a new case (\"prevent using a backend when eth_syncing errors\") covering an actual RPC/transport-level failure on the concurrent isELInSync path, distinct from the existing not-in-sync case which only covers a successful-but-not-synced response\n- Manual end-to-end smoke test: built the Docker image from this branch and ran it with a config pointed at real production backends. Confirmed it forms a healthy 3-backend consensus group, serves `eth_blockNumber` correctly, shows no bans/errors, and reports a lower `proxyd_consensus_backend_update_delay` than the previous sequential implementation under the same `consensus_poller_interval`.\n\nThe existing `TestConsensus` suite in `integration_tests/` already exercised `UpdateBackend`'s success/error/zero-block paths end-to-end through the mock backends and passes unchanged (the mock harness fix above was needed for it to keep doing so under real concurrency instead of only proving it works when serialized).\n\n**Additional context**\n\nRoot-caused via production instrumentation rather than guesswork: `proxyd_consensus_backend_update_delay` is `time.Since(lastUpdate)` recorded on every poll (see `RecordConsensusBackendUpdateDelay` in `metrics.go`), so it directly reports the achieved loop period, not a random-phase staleness sample. In our deployment, it measured ~690-694ms with `consensus_poller_interval = \"250ms\"` configured — meaning the four sequential RPCs inside `UpdateBackend`, not the poller's idle wait, were the actual bottleneck. This change removes that bottleneck; it does not change proxyd's consensus semantics (the served head is still `min(latest_block)` across in-consensus backends).\n\n**Metadata**\n\nFixes #[Link to Issue]\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-07-07T10:42:49Z",
+      "mergedAt": null,
+      "additions": 83,
+      "deletions": 69
+    },
+    {
+      "id": "PR_kwDOL-xLQ87MQCna",
+      "title": "Refactor IP address extraction using net.SplitHostPort",
+      "author": "danielllek",
+      "number": 574,
+      "body": "<!-- Contributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md -->\r\n\r\n**Description**\r\n\r\nIt's necessary to add X-Forwarded-For header for any request to proxyd, but looking at the code it shouldn't be needed.\r\n\r\nFailing request:\r\n```\r\n$ curl -X POST http://localhost:8080 \\\r\n    -H \"Content-Type: application/json\" \\\r\n    -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'\r\n{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"request does not include a remote IP\"},\"id\":null}\r\n```\r\n\r\nRequest with X-Forwarded-For header works:\r\n```\r\n$curl -X POST http://localhost:8080     -H \"Content-Type: application/json\" -H \"X-Forwarded-For: 127.0.0.1\"    -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'\r\n{\"jsonrpc\":\"2.0\",\"result\":\"0x178e8e3\",\"id\":1}\r\n```\r\n\r\nIt seems that's caused by ipv6 stack enabled on my machine - ipv6 can't be parsed with simple `strings.Split`.\r\n\r\nChanging it to `net.SplitHostPort` should fix the issue.\r\n\r\n**Tests**\r\n\r\nBuilt locally with the change and it works:\r\n\r\n```\r\n$ curl -X POST http://localhost:8080     -H \"Content-Type: application/json\"     -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'\r\n{\"jsonrpc\":\"2.0\",\"result\":\"0x178e987\",\"id\":1}\r\n```\r\n**Additional context**\r\n\r\n\r\n**Metadata**\r\n\r\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-03-20T20:45:30Z",
+      "mergedAt": null,
+      "additions": 3,
+      "deletions": 4
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 2
   },
   "completedItems": [],
   "topContributors": [
     {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 157.58716209572967,
+      "prScore": 129.91116209572968,
+      "issueScore": 2.1,
+      "reviewScore": 24.5,
+      "commentScore": 1.0759999999999998,
+      "summary": null
+    },
+    {
       "username": "mds1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 69.3953989252089,
-      "prScore": 36.395398925208895,
+      "totalScore": 147.56072868236157,
+      "prScore": 114.56072868236159,
       "issueScore": 0,
       "reviewScore": 33,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 46.000026915173976,
-      "prScore": 36.500026915173976,
-      "issueScore": 0,
-      "reviewScore": 9.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 44.9249151470985,
-      "prScore": 39.2869151470985,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.6379999999999999,
-      "summary": null
-    },
-    {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 32.55113472639153,
-      "prScore": 32.211134726391535,
-      "issueScore": 0,
-      "reviewScore": 0,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 74.13486837254999,
+      "prScore": 39.194868372549976,
+      "issueScore": 2.1,
+      "reviewScore": 32.5,
       "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 64.74827552735869,
+      "prScore": 54.74827552735869,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 31.58886321054632,
-      "prScore": 31.58886321054632,
+      "totalScore": 64.2593850149396,
+      "prScore": 55.25938501493959,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 9,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 18.5,
-      "prScore": 0,
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 56.17442727288855,
+      "prScore": 55.39642727288855,
       "issueScore": 0,
-      "reviewScore": 18.5,
+      "reviewScore": 0,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 55.02083480914169,
+      "prScore": 24.820834809141683,
+      "issueScore": 0,
+      "reviewScore": 30,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 51.000026915173976,
+      "prScore": 36.500026915173976,
+      "issueScore": 0,
+      "reviewScore": 14.5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 13.5,
+      "totalScore": 27,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 13.5,
+      "reviewScore": 27,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "danielllek",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/4323252?u=762a4b2f35245b3510cd1226621dead500969ee5&v=4",
+      "totalScore": 26.830656882088654,
+      "prScore": 26.490656882088654,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 25.248371757896166,
+      "prScore": 24.810371757896167,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 23.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
       "username": "pcw109550",
       "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 14.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
       "totalScore": 10,
       "prScore": 0,
       "issueScore": 0,
@@ -97,12 +192,12 @@
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 10,
-      "prScore": 0,
+      "username": "weifanglab",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/240157838?u=f477cdb0aefa7f3e17acaac31156a00089d1a675&v=4",
+      "totalScore": 9.710371757896166,
+      "prScore": 9.710371757896166,
       "issueScore": 0,
-      "reviewScore": 10,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -117,6 +212,16 @@
       "summary": null
     },
     {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 5.278,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
       "totalScore": 5.2,
@@ -127,8 +232,8 @@
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -137,8 +242,18 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -157,13 +272,23 @@
       "summary": null
     },
     {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "username": "karlb",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/144773?v=4",
       "totalScore": 4.84,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 4.5,
       "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "dhyaniarun1993",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32865026?u=cc589dd6afab67aee3407075d44a402d309a4c42&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -187,9 +312,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
+  "newPRs": 1,
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 12
+  "activeContributors": 21
 }
