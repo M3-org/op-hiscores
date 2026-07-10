@@ -5,8 +5,44 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-09 to 2026-07-10, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 1 active contributors.",
+  "overview": "From 2026-07-09 to 2026-07-10, ethereum-optimism/optimism had 17 new PRs (7 merged), 7 new issues, and 29 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABA0YViw",
+      "title": "op-reth,kona: unify configs and superchain-registry loading",
+      "author": "sebastianst",
+      "number": 20420,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2026-04-29T10:51:56Z",
+      "closedAt": "2026-07-09T13:24:11Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABIJ261Q",
+      "title": "ci(kona-sp1): verify SP1 guest ELF vkey reproducibility",
+      "author": "wwared",
+      "number": 21661,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Stacked after #21553. Once SP1 guest ELFs are built in CI and current verification keys are committed in `rust/kona/sp1/elf/vkeys.toml`, add the slower reproducibility coverage outside the per-PR path.\n\nScope:\n- Add a scheduled rebuild that regenerates the SP1 guest ELFs and diffs their `cargo prove vkey` bytes32 values against the expected pins.\n- Add a `just check-vkeys` primitive that rebuilds/regenerates into a temp location and fails on drift.\n- Confirm whether arm64 and amd64 builds produce identical vkeys; keep the committed canonical values linux/amd64 until cross-arch reproducibility is proven.\n- At release time, add version-keyed SP1 guest vkey pins to superchain-registry.\n\nInitial model: before `kona-sp1/v*` release tags exist, this is a scheduled HEAD self-consistency check against the in-repo `vkeys.toml`. After release tags and registry pins exist, it should mirror `preimage-reproducibility`: rebuild each released tag and diff against the superchain-registry pin.\n\nThis should remain scheduled, not a per-PR vkey gate, matching the prestate lifecycle where PR CI catches build breakage and release/scheduled jobs catch reproducibility drift.",
+      "createdAt": "2026-07-09T00:43:35Z",
+      "closedAt": "2026-07-09T14:47:03Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7cHU_h",
+      "title": "kona-sp1: Dedup logic",
+      "author": "Inphi",
+      "number": 18494,
+      "repository": "ethereum-optimism/optimism",
+      "body": "In the following areas, we can replace kona-sp1's implementation with the kona-proof's. Refer to the TODOs in the following functions:\n- [ ] kona_sp1::client::client::advance_to_target",
+      "createdAt": "2025-12-04T04:55:36Z",
+      "closedAt": "2026-07-09T16:20:52Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
     {
       "id": "I_kwDODjvEJM8AAAABID61NQ",
       "title": "Lumi Security Audit: Security Feedback for Features.sol",
@@ -18,20 +54,420 @@
       "closedAt": "2026-07-09T00:05:04Z",
       "state": "CLOSED",
       "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABIRojLQ",
+      "title": "bug(alloy-op-evm): eth_createAccessList reports gasUsed of the run without the discovered access list",
+      "author": "milando12",
+      "number": 21682,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nOn op-reth, `eth_createAccessList` returns a `gasUsed` that corresponds to executing the request **without** the access list it just discovered, instead of the intended \"exact gas used\" of a re-run **with** the list attached. Ethereum reth returns the with-list gas for the identical request shape, and geth/op-geth's `AccessList` implementation also returns the with-list gas — op-reth is the odd one out.\n\nThe root cause is a 3-line wrapper impl in `alloy-op-evm` that assigns the access-list field directly instead of delegating to `TxEnv::set_access_list`, silently dropping the Legacy→EIP-2930 tx-type upgrade that makes the list effective in revm.\n\n## Reproduction (any public op-reth OP-mainnet endpoint)\n\n```bash\nURL=https://optimism-rpc.publicnode.com   # reth/v2.3.0 as of writing\nREQ='{\"to\":\"0x94b008aA00579c1307B0EF2c499aD98a8ce58e58\",\"data\":\"0x70a0823100000000000000000000000000000000000000000000000000000000deadbeef\"}'\n\n# 1) createAccessList discovers a 1-address/1-key list and reports gasUsed = 23759 (0x5ccf)\ncurl -s $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_createAccessList\",\"params\":['$REQ',\"latest\"]}'\n\n# 2) eth_estimateGas WITHOUT the list ≈ 24097; WITH the returned accessList attached ≈ 26401.\n#    Executing with the list genuinely costs ~2300 more (2400/addr + 1900/key EIP-2930 intrinsic\n#    minus a 2000 warm-SLOAD saving) — yet createAccessList reports the without-list number.\n\n# 3) Smoking gun: add a semantically-empty \"accessList\":[] to the SAME request. The only effect\n#    is that the request-derived tx type becomes EIP-2930 instead of Legacy — and the reported\n#    gasUsed flips from 23759 to 26059 (the correct with-list value):\nREQ2='{\"to\":\"0x94b008aA00579c1307B0EF2c499aD98a8ce58e58\",\"data\":\"0x70a0823100000000000000000000000000000000000000000000000000000000deadbeef\",\"accessList\":[]}'\ncurl -s $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_createAccessList\",\"params\":['$REQ2',\"latest\"]}'\n```\n\nOn nodes with `debug` enabled, `debug_traceCall` of the same request with/without the returned `accessList` shows the two numbers directly: the reported `gasUsed` always equals the **without-list** execution. (Values above move slightly with state; the structure — \"reported = without-list, flips when the request carries any accessList field\" — is stable and reproduces on every op-reth v2.3.x endpoint we tried. Ethereum-mainnet reth of the same version reports the with-list value.)\n\n## Root cause\n\n`eth_createAccessList` goes through reth's generic `create_access_list_with`, which after the inspection pass does:\n\n```rust\ntx_env.set_access_list(access_list.clone());\n...\n// transact again to get the exact gas used\nlet result = this.transact(&mut db, evm_env, tx_env)?;\n```\n\nFor a list-less request the first-pass tx env derives `TxType::Legacy` (`minimal_tx_type()`). The base implementation `TransactionEnvMut for TxEnv` (alloy-evm 0.36.0, `src/env.rs`) handles this by upgrading the type:\n\n```rust\nfn set_access_list(&mut self, access_list: AccessList) {\n    self.access_list = access_list;\n    if self.tx_type == TransactionType::Legacy as u8 {\n        self.tx_type = TransactionType::Eip2930 as u8;\n    }\n}\n```\n\nbut the OP wrapper impl bypasses it ([`rust/alloy-op-evm/src/tx.rs#L271-L273`](https://github.com/ethereum-optimism/optimism/blob/b40d2ce097b928fe1a4ec79a8a1925eb231c675e/rust/alloy-op-evm/src/tx.rs#L271-L273)):\n\n```rust\nfn set_access_list(&mut self, access_list: alloy_eips::eip2930::AccessList) {\n    self.0.base.access_list = access_list;\n}\n```\n\nrevm treats an access list on a Legacy-typed transaction as fully inert — no EIP-2930 intrinsic pricing (revm-context-interface 19.0.3, `gas_params.rs`, `initial_tx_gas_for_tx`: \"Legacy is the only tx type that does not have an access list\") and no prewarming (revm-handler 20.0.3, `pre_execution.rs`, same gate). So the \"transact again\" re-run is a byte-for-byte repeat of the first run, and the reported `gasUsed` is the without-list gas.\n\nThe exact-gas re-run semantics were introduced deliberately in paradigmxyz/reth#10416 / paradigmxyz/reth#10422. Before the `TransactionEnvMut` migration, reth carried a correct **delegating** impl for this exact wrapper shape (`impl<T: TransactionEnv> TransactionEnv for op_revm::OpTransaction<T>` delegated to `self.base.set_access_list(...)`; removed in paradigmxyz/reth#23218) — so this is a regression relative to the previously-established pattern, not a design choice. The in-repo example `rust/op-reth/examples/custom-node/src/evm/env.rs` also delegates for its wrapper type.\n\n## Expected behavior\n\n`eth_createAccessList.gasUsed` should be \"the gas the transaction consumes if submitted with the returned access list\" — matching geth/op-geth (`internal/ethapi/api.go`, `AccessList` attaches the list to the message each iteration and returns that execution's `UsedGas`) and matching reth's behavior on Ethereum mainnet.\n\n## Proposed fix\n\nOne line — delegate to the base impl so the type upgrade applies (deposit transactions are unaffected; the upgrade only fires for Legacy):\n\n```rust\nfn set_access_list(&mut self, access_list: alloy_eips::eip2930::AccessList) {\n    self.0.base.set_access_list(access_list);\n}\n```\n\nPR with the fix + regression tests: https://github.com/ethereum-optimism/optimism/pull/21683\n",
+      "createdAt": "2026-07-09T22:21:01Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
     }
   ],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7v8pM7",
+      "title": "feat(kona-sp1): add super-range acceptance smoke",
+      "author": "Inphi",
+      "number": 21684,
+      "body": "Smoke test covering the base case for the super-range program, operating in range and consolidation modes.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-09T23:23:38Z",
+      "mergedAt": null,
+      "additions": 1449,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDODjvEJM7vzRoZ",
+      "title": "feat(kona-sp1): execute super-range range proofs",
+      "author": "Inphi",
+      "number": 21671,
+      "body": "## Summary\r\n\r\n`super-range` now proves optimistic per-chain transitions over timestamp spans instead of only committing claimed outputs. The range proof is rectangular over `timestamp x dependency-set chains`, binds the previous super root for every timestamp, and runs witness-backed derivation for every progressing transition.\r\n\r\nRange execution now:\r\n- reads one proof-wide witness blob for the whole range and reuses its preimage/blob data across all `(timestamp, chain)` transitions\r\n- constructs each transition boot from public super-range inputs plus preimage-linked output roots and L2 headers, instead of loading per-transition witness boot inputs\r\n- treats timestamps before the chain’s next L2 block as no-ops\r\n- derives exactly one next block for progressing transitions\r\n- passes the canonical interop dependency set into the derivation pipeline, preserving message-expiry overrides\r\n\r\nAggregation validation now has enough public data to bind range proofs to consolidation outputs: the first range timestamp must use the game starting root, later timestamps must use the previous consolidation result, and optimistic block/output commitments must match consolidation inputs.\r\n\r\nConsolidation remains intentionally shallow in this PR: it sanity-checks that claimed consolidated outputs match the optimistic outputs and carries the claimed super root forward. Full interop message graph consolidation is still follow-up work.\r\n\r\n## Meta\r\n\r\nPart of https://github.com/ethereum-optimism/optimism/issues/21576",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-09T15:41:48Z",
+      "mergedAt": null,
+      "additions": 1079,
+      "deletions": 42
+    },
+    {
+      "id": "PR_kwDODjvEJM7pvJqk",
+      "title": "feat(op-reth): make OpPoolBuilder ordering and validator injectable",
+      "author": "op-will",
+      "number": 21531,
+      "body": "## Summary\r\n\r\n`OpPoolBuilder` previously fixed the pool's transaction ordering (`CoinbaseTipOrdering`) and validator at construction time, so any downstream builder wanting a custom ordering or an extra validation layer had to reimplement `build_pool` wholesale (duplicating the interop/failsafe/maintenance wiring and re-syncing it on every dependency bump).\r\n\r\nThis PR adds two **defaulted, general-purpose** extension seams to `OpPoolBuilder`:\r\n\r\n- **Ordering generic** `O = CoinbaseTipOrdering<T>` with `with_ordering(..)` — substitute a custom `TransactionOrdering` for the pool.\r\n- **Validator-wrapper generic** `W = IdentityValidatorWrapper` with `with_validator_wrapper(..)` — wrap the built `OpTransactionValidator` to add validation behavior (e.g. admission control) before transactions enter the mempool.\r\n\r\nThe defaults reproduce the standard pool exactly, so the **default op-reth configuration and every existing call site are unchanged and zero-cost** (static dispatch; the identity wrapper returns the validator untouched).\r\n\r\nSupporting changes:\r\n- `txpool`: the pool type alias is split into `OpCustomTransactionPool<S, V, O>` (the single definition of the pool's type structure) and `OpTransactionPool<Client, S, Evm, T>` defined in terms of it, so the standard and customized pools cannot structurally diverge. The public `OpTransactionPool` signature is unchanged.\r\n- `build_pool` applies the validator wrapper and threads the ordering through a direct `reth_transaction_pool::Pool::new(..)`. This inlines the body of upstream `TxPoolBuilder::build` (which hardcodes `CoinbaseTipOrdering` and intentionally does not spawn maintenance) only to substitute the ordering; the surrounding interop filter, failsafe polling, conditional, and maintenance-task wiring call op-reth's own code unchanged.\r\n\r\n## Testing\r\n\r\nBehavioral integration tests under `tests/it/custom_pool/` exercise both seams end-to-end through a real node (launch → inject competing txs → build a block → assert outcome), each pairing a default-build test with a custom-build test:\r\n\r\n- [x] **Ordering** (`custom_pool/ordering.rs`): a custom gas-descending ordering reorders block composition versus the default tip ordering for the same transactions — proving the ordering seam drives selection, not just node launch.\r\n- [x] **Validator** (`custom_pool/validator.rs`): a custom gas-limit-filtering wrapper rejects an oversized transaction at ingress so it never reaches a built block, while the default (identity) wrapper admits the same transaction — proving the wrapper gates admission.\r\n- [x] `cargo check` / `cargo clippy` clean (zero warnings) on `reth-optimism-node` and `reth-optimism-txpool`; `cargo +nightly fmt` applied.\r\n- [x] Existing `tests/it/{builder,priority}` suites pass unchanged (no regression to the default path).\r\n\r\nNote: the stock `OpAddOns` attach to a custom-ordering / custom-wrapper node unchanged — they are ordering-agnostic, and the add-ons builder is generic over the node's components. No op-reth add-ons change was required.\r\n\r\n## Follow-ups (optional, not blocking)\r\n\r\n- [ ] Upstream a non-spawning `TxPoolBuilder::build_with_ordering<BS, O>` to `paradigmxyz/reth` — the missing twin of `build` (which hardcodes `CoinbaseTipOrdering`) and `build_with_ordering_and_spawn_maintenance_task` (which spawns maintenance on the unwrapped pool, before `OpPool` wrapping). With it, `build_pool` could call `TxPoolBuilder::new(ctx).with_validator(..).build_with_ordering(ordering, blob_store, cfg)` instead of the inlined `reth_transaction_pool::Pool::new(..)`, removing the one-line divergence from upstream. Deferred intentionally: the inline construction is a faithful copy of `build`'s body against the stable `Pool::new` primitive, so this is cleanup, not a correctness gap.\r\n\r\n## Post-Deploy Monitoring & Validation\r\n\r\nNo additional operational monitoring required — this is a library/API change with no behavioral effect on the default node (the defaults reproduce the prior pool exactly), and no binary currently ships a non-default ordering or wrapper.\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-23T16:21:06Z",
+      "mergedAt": "2026-07-09T18:56:18Z",
+      "additions": 918,
+      "deletions": 62
+    },
+    {
+      "id": "PR_kwDODjvEJM7v6sKY",
+      "title": "feat(kona-sp1): execute super-range consolidation proofs",
+      "author": "Inphi",
+      "number": 21677,
+      "body": "## Summary\r\n\r\nBuilds on https://github.com/ethereum-optimism/optimism/pull/21671 by implementing the `Consolidation` mode in the unified `super-range` SP1 guest.\r\n\r\n## Meta\r\nCloses https://github.com/ethereum-optimism/optimism/issues/21576",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-09T21:26:05Z",
+      "mergedAt": null,
+      "additions": 513,
+      "deletions": 55
+    },
+    {
+      "id": "PR_kwDODjvEJM7q1gli",
+      "title": "ci: make CircleCI workflow routing declarative",
+      "author": "ajsutton",
+      "number": 21580,
+      "body": "Separates the CircleCI routing **data** from the routing **logic**. Stacked on #21579.\n\nA new `.circleci/routing.yml` holds the declarative data:\n- `schedules` — schedule name → workflows\n- `api_dispatch` — dispatch flag → workflows (including `main_dispatch` and `labeled_pr`, whose conditions stay in the script)\n- `change_patterns` — `any`/`all` ERE patterns matched against changed files\n- `passthrough_params` — params forwarded to continuation configs\n\n`compute-workflow-conditions.sh` now holds only the conditions; `collect-params.sh` reads the change patterns from `routing.yml`; and `test-schedule-triggers.js` reads the schedule map directly instead of regex-parsing the routing script.\n\nNo routing behavior changes — the same `c-run_*` flags are enabled for every trigger/branch/schedule/dispatch case.\n\n## Test plan\n- `mise exec -- bash .circleci/scripts/test-decision-tree.sh` — 19/19 scenarios pass (now reads `routing.yml`)\n- `mise exec -- shellcheck .circleci/scripts/*.sh`\n- `mise exec -- bash .circleci/scripts/merge-configs.sh && mise exec -- bash .circleci/scripts/test-continuation-params.sh /tmp/merged-config.yml`\n- `mise exec -- bun build .circleci/scripts/test-schedule-triggers.js --outfile=/tmp/x.js`\n- offline run of `bun .circleci/scripts/test-schedule-triggers.js` (live API portion needs `CIRCLE_API_TOKEN`)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-26T04:31:32Z",
+      "mergedAt": "2026-07-09T01:26:20Z",
+      "additions": 204,
+      "deletions": 110
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 1582,
+    "deletions": 472,
+    "files": 39,
+    "commitCount": 64
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 1,
-  "activeContributors": 1
+  "completedItems": [
+    {
+      "title": "feat(op-reth): make OpPoolBuilder ordering and validator injectable",
+      "prNumber": 21531,
+      "type": "feature",
+      "body": "## Summary\r\n\r\n`OpPoolBuilder` previously fixed the pool's transaction ordering (`CoinbaseTipOrdering`) and validator at construction time, so any downstream builder wanting a custom ordering or an extra validation layer had to reimplement `",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/tests/it/custom_pool/mod.rs",
+        "rust/op-reth/crates/node/tests/it/custom_pool/ordering.rs",
+        "rust/op-reth/crates/node/tests/it/custom_pool/validator.rs",
+        "rust/op-reth/crates/node/tests/it/main.rs",
+        "rust/op-reth/crates/txpool/src/lib.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/payload/src/lib.rs"
+      ]
+    },
+    {
+      "title": "ci: make CircleCI workflow routing declarative",
+      "prNumber": 21580,
+      "type": "other",
+      "body": "Separates the CircleCI routing **data** from the routing **logic**. Stacked on #21579.\n\nA new `.circleci/routing.yml` holds the declarative data:\n- `schedules` — schedule name → workflows\n- `api_dispatch` — dispatch flag → workflows (includ",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        ".circleci/routing.yml",
+        ".circleci/scripts/collect-params.sh",
+        ".circleci/scripts/compute-workflow-conditions.sh",
+        ".circleci/scripts/test-schedule-triggers.js",
+        ".circleci/scripts/workflow-helpers.sh",
+        "docs/ai/ci-config-review.md"
+      ]
+    },
+    {
+      "title": "kona-host: Clarify handling of precompile status.",
+      "prNumber": 21640,
+      "type": "other",
+      "body": "Make precompile statuses more explicit via an enum rather than just using Err returns.\r\n\r\nFixes https://github.com/ethereum-optimism/optimism-private/issues/569",
+      "files": [
+        "rust/kona/bin/host/src/eth/precompiles.rs",
+        "rust/kona/bin/host/src/interop/handler.rs",
+        "rust/kona/bin/host/src/single/handler.rs"
+      ]
+    },
+    {
+      "title": "(docs) post karst activation cleanup",
+      "prNumber": 21660,
+      "type": "refactor",
+      "body": "Removing u19 callouts\r\nFixing the u19 notice page to denote that Mode, Metal, and Zora Mainnet did not use the keep_karst_upgrade_gas flag\r\n",
+      "files": [
+        "docs/public-docs/notices/upgrade-19.mdx",
+        "docs/public-docs/op-stack/features/l2-contract-manager.mdx",
+        "docs/public-docs/op-stack/features/osaka-on-l2.mdx"
+      ]
+    },
+    {
+      "title": "docs: reorder create-l2-rollup entry page — prerequisites before setup paths",
+      "prNumber": 21659,
+      "type": "docs",
+      "body": "## What\n\nRestructures the entry page of the multi-part **\"Creating your own L2 rollup testnet\"** tutorial (`docs/public-docs/chain-operators/tutorials/create-l2-rollup/create-l2-rollup.mdx`) so it reads as a clean, linear getting-started fl",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/create-l2-rollup.mdx"
+      ]
+    },
+    {
+      "title": "refactor(kona-sp1): dedup advance_to_target onto kona-driver (#18494)",
+      "prNumber": 21656,
+      "type": "refactor",
+      "body": "## Overview\n\nCloses #18494.\n\nkona-sp1 carried a near-verbatim copy of `kona_driver`'s `advance_to_target` loop, kept only so it could emit SP1 `cycle-tracker` markers around the derivation and execution phases. Duplicating consensus-critica",
+      "files": [
+        "rust/kona/crates/proof/driver/src/core.rs",
+        "rust/kona/crates/proof/driver/src/lib.rs",
+        "rust/kona/crates/proof/driver/src/metrics.rs",
+        "rust/kona/sp1/crates/client/src/client.rs",
+        "rust/kona/sp1/crates/client/src/lib.rs",
+        "rust/kona/sp1/crates/client/src/metrics.rs",
+        "rust/kona/sp1/crates/client/src/witness/executor.rs"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: support post-migration fork live setup",
+      "prNumber": 21643,
+      "type": "other",
+      "body": "Adds a fork-live lifecycle regression test for rerunning setup after the current upgrade has already landed, then fixes fork-live discovery for post-SUPER_ROOT_GAMES_MIGRATION state.\r\n\r\nThe setup path now resolves active permissioned and pe",
+      "files": [
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerMigrationValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/setup/DisputeGames.sol",
+        "packages/contracts-bedrock/test/setup/ForkL1Live.s.sol"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 100.43175192293674,
+      "prScore": 95.43175192293674,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 93.68913436059549,
+      "prScore": 93.34913436059549,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 80.28999075951621,
+      "prScore": 64.08999075951621,
+      "issueScore": 2,
+      "reviewScore": 14,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 77.91027442868027,
+      "prScore": 38.972274428680265,
+      "issueScore": 0,
+      "reviewScore": 38.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 45.22967932454126,
+      "prScore": 23.789679324541254,
+      "issueScore": 6.1,
+      "reviewScore": 15,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 29.409195449570685,
+      "prScore": 15.569195449570685,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 26.9928642567265,
+      "prScore": 22.9928642567265,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "asdv23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
+      "totalScore": 23.31727273946428,
+      "prScore": 22.97727273946428,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "jyellick",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/7431583?v=4",
+      "totalScore": 20.12236449411482,
+      "prScore": 20.12236449411482,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 20.010999777848706,
+      "prScore": 20.010999777848706,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?u=bd98496e19d29e205a65c081ac4872e13162e0a0&v=4",
+      "totalScore": 16.64529478161056,
+      "prScore": 16.64529478161056,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "milando12",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/92939392?u=086600e5fe4b5f7ac1655836823f3f28b25a8a9a&v=4",
+      "totalScore": 15.063793079863194,
+      "prScore": 13.063793079863194,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.5117207708399185,
+      "prScore": 7.073720770839919,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlb",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/144773?v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ccgood-sys",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/259656442?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bLd75",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18489502?u=4cffab28eda430f974edb81f3c3d6bd5a1724899&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    }
+  ],
+  "newPRs": 17,
+  "mergedPRs": 7,
+  "newIssues": 7,
+  "closedIssues": 4,
+  "activeContributors": 29
 }

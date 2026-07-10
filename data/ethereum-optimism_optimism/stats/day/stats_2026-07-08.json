@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-08 to 2026-07-09, ethereum-optimism/optimism had 16 new PRs (6 merged), 4 new issues, and 27 active contributors.",
+  "overview": "From 2026-07-08 to 2026-07-09, ethereum-optimism/optimism had 16 new PRs (6 merged), 4 new issues, and 25 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABCRQArQ",
@@ -32,30 +32,6 @@
       "commentCount": 0
     },
     {
-      "id": "I_kwDODjvEJM8AAAABGviBdA",
-      "title": "kona-sp1: Implement super aggregation program",
-      "author": "Inphi",
-      "number": 21577,
-      "repository": "ethereum-optimism/optimism",
-      "body": "### Goal\n\nAdd an SP1 `super-aggregation` program that recursively verifies `super-range` and consolidation proofs, then emits the public values expected by `ZKDisputeGame.prove`.\n\n### Inputs\n\n- `l1Head`\n- `startingRootHash`\n- `rootClaim`\n- `l2SequenceNumber`\n- `prover`\n- range proof public values + proofs\n- consolidation proof public values + proofs\n- Interim vkey for range/consolidation programs (Depends on https://github.com/ethereum-optimism/optimism/issues/21412. This can be omitted for the time being until we're ready for integration testing with the `ZKDisputeGame`.)\n\n### Behavior\n\nThe aggregation program should recursively verify all child proofs and enforce:\n\n- full timestamp coverage through `l2SequenceNumber`\n- full chain coverage for each timestamp\n- range outputs match corresponding consolidation outputs\n- previous-super-root chaining across ranges\n- final computed super root equals `rootClaim`\n- every child range proof is bound to the same `l1Head` as the dispute game\n- prover address is bound into the final public values\n\n### Final Public Values\n\nCommit exactly the ABI encoding used by `ZKDisputeGame.prove`:\n\n```solidity\nabi.encode(\n    l1Head,\n    startingRootHash,\n    rootClaim,\n    l2SequenceNumber,\n    prover\n)\n```\n\n### Interim Vkey Mode\n\nFor initial development, aggregation may accept range/consolidation vkey as private or host-supplied inputs.\nThis is **not production-sound** until range program vkey is embedded in the aggregation program or publicly bound by the verifier path.\n\n### Tests\n\nAdd coverage for:\n\n- final public-values ABI encoding\n- dynamic-vkey input serialization\n- valid range/consolidation aggregation\n- timestamp coverage gaps\n- chain coverage gaps\n- broken range/consolidation matching\n- broken previous-super-root chaining\n- L1 ancestry mismatch\n- final root-claim mismatch\n- prover binding",
-      "createdAt": "2026-06-25T21:16:25Z",
-      "closedAt": "2026-07-08T18:50:16Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABGvh0SA",
-      "title": "kona-sp1: Implement super range program",
-      "author": "Inphi",
-      "number": 21576,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Implement the range program component for the ZK super STF.",
-      "createdAt": "2026-06-25T21:15:50Z",
-      "closedAt": "2026-07-08T18:50:16Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
       "id": "I_kwDODjvEJM8AAAABIAerHA",
       "title": "Re-enable or retire fuzzing",
       "author": "geoknee",
@@ -65,6 +41,30 @@
       "createdAt": "2026-07-07T21:24:05Z",
       "closedAt": "2026-07-08T13:21:11Z",
       "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABIJKO_g",
+      "title": "kona-sp1: dedup derivation prologue against the native fault-proof path",
+      "author": "digorithm",
+      "number": 21658,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Follow-up to #18494. That issue deduped the derivation *loop* (`advance_to_target`); this one covers the derivation *prologue* that precedes it, which is still duplicated across the native fault-proof and kona-sp1 paths.\n\n## Problem\n\nThe prologue that sets up derivation is near-identical in (at least) two places, and consensus-critical:\n\n- kona-sp1: [`sp1/crates/client/src/witness/executor.rs:33` (`get_inputs_for_pipeline`)](https://github.com/ethereum-optimism/optimism/blob/89e14a66eff1e6663233b76f5ad75346b270dd53/rust/kona/sp1/crates/client/src/witness/executor.rs#L33)\n- native single-chain: [`bin/client/src/single.rs:43` (`run`, prologue portion)](https://github.com/ethereum-optimism/optimism/blob/89e14a66eff1e6663233b76f5ad75346b270dd53/rust/kona/bin/client/src/single.rs#L43)\n\nBoth perform the same sequence:\n\n1. `BootInfo::load`\n2. `fetch_safe_head_hash` (see #21657)\n3. build `OracleL1ChainProvider` / `OracleL2ChainProvider`\n4. `header_by_hash` + `Sealed::new_unchecked` for the safe head\n5. reject `claimed_l2_block_number < safe_head.number`\n6. trace-extension short-circuit on `claimed_l2_block_number == safe_head.number` (identical `\"Trace extension detected. State transition is already agreed upon.\"` log + the agreed==claimed output-root check)\n7. `new_oracle_pipeline_cursor` + `set_cursor`\n\nThe cursor-construction tail (steps 6-7) also recurs in the interop path ([`bin/client/src/interop/transition.rs:117`](https://github.com/ethereum-optimism/optimism/blob/89e14a66eff1e6663233b76f5ad75346b270dd53/rust/kona/bin/client/src/interop/transition.rs#L117)) and the host ([`bin/host/src/interop/handler.rs:578`](https://github.com/ethereum-optimism/optimism/blob/89e14a66eff1e6663233b76f5ad75346b270dd53/rust/kona/bin/host/src/interop/handler.rs#L578)).\n\nDuplicating the block-number validation and the trace-extension short-circuit across paths is the same drift risk #18494 addressed for the loop: a fix or hardening applied to one path can silently miss the other.\n\n## Proposed change\n\nExtract a shared prologue helper into `kona-proof` that, given an oracle + boot info, performs steps 1-7 and returns either:\n\n- a \"trace extension / zero-step\" signal (claim already agreed, no derivation needed), or\n- the constructed `(cursor, l1_provider, l2_provider)` ready for pipeline construction.\n\nThen:\n\n- `get_inputs_for_pipeline` (kona-sp1) becomes a thin adapter over it.\n- `single.rs::run` calls it, mapping the signal to its `FaultProofProgramError` / `anyhow` error shapes as needed.\n\n## Design considerations\n\n- The two callers differ in shape today: kona-sp1 returns `(BootInfo, Option<(cursor, l1, l2)>)` and builds the pipeline separately; `single.rs` builds inline and uses `FaultProofProgramError` (vs kona-sp1's `anyhow`). The shared helper should return a neutral result the caller maps to its own error type.\n- Keep the existing kona-sp1 tests (`get_inputs_for_pipeline_short_circuits_zero_step_claim`, `get_inputs_for_pipeline_rejects_zero_step_root_mismatch`) green; add native-path coverage for the shared helper.\n- Interop prologue is a variant (different `BootInfo`/`PreState`); folding it in is a stretch goal, not required for the first pass.\n\n## Acceptance\n\n- One shared prologue helper in a library crate; `get_inputs_for_pipeline` and `single.rs::run` both delegate to it with no duplicated validation/short-circuit logic.\n- Existing tests preserved; native + kona-sp1 range guest build and pass.\n- Depends on / pairs well with #21657 (shared `fetch_safe_head_hash`).\n\n## Scope\n\nLarger than #21657 and touches consensus-critical validation shared by the native fault-proof program: needs review, not a drive-by.\n",
+      "createdAt": "2026-07-08T22:01:36Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABIJKGZw",
+      "title": "kona-sp1: hoist fetch_safe_head_hash into kona-proof (dedup)",
+      "author": "digorithm",
+      "number": 21657,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Follow-up to #18494 (same dedup theme: kona-sp1 was vendored wholesale from op-succinct and carries copies of kona logic).\n\n## Problem\n\n`fetch_safe_head_hash` exists as three byte-identical copies:\n\n- [`sp1/crates/client/src/client.rs:19`](https://github.com/ethereum-optimism/optimism/blob/89e14a66eff1e6663233b76f5ad75346b270dd53/rust/kona/sp1/crates/client/src/client.rs#L19) (`pub(crate)`)\n- [`bin/client/src/single.rs:194`](https://github.com/ethereum-optimism/optimism/blob/89e14a66eff1e6663233b76f5ad75346b270dd53/rust/kona/bin/client/src/single.rs#L194) (`pub`)\n\nEach also carries its own duplicate test (`sp1 .../client.rs` tests + [`bin/client/tests/output_root.rs`](https://github.com/ethereum-optimism/optimism/blob/89e14a66eff1e6663233b76f5ad75346b270dd53/rust/kona/bin/client/tests/output_root.rs)).\n\nThe reason it was never deduped: the \"canonical\" copy lives in a **binary** crate (`bin/client`), so it cannot be imported. It is pure oracle logic (`HintType::StartingL2Output` hint + `get_exact` + output-version check), with no fault-proof-specific dependency.\n\n## Proposed change\n\n- Move `fetch_safe_head_hash` into a library crate. Natural home: `kona-proof` (its sibling `new_oracle_pipeline_cursor` already lives in `kona_proof::sync`).\n- Update `bin/client/src/single.rs` and `sp1/crates/client` to call the shared function; delete both copies.\n- Consolidate the duplicate tests onto the shared location (keep the existing coverage: unknown-output-version rejection and wrong-preimage-length rejection).\n\n## Acceptance\n\n- One definition of `fetch_safe_head_hash` in a library crate; no copies remain in `bin/client` or `sp1/crates/client`.\n- Existing tests preserved and passing.\n- `bin/client` (native fault-proof) and the kona-sp1 range guest build unchanged.\n\n## Scope\n\nSmall, mechanical, low risk. Independent of the larger prologue dedup (separate issue).\n",
+      "createdAt": "2026-07-08T22:01:12Z",
+      "closedAt": null,
+      "state": "OPEN",
       "commentCount": 0
     }
   ],
@@ -94,16 +94,16 @@
       "deletions": 1097
     },
     {
-      "id": "PR_kwDODjvEJM7hUOLU",
-      "title": "docs(chain-operators): migrate create-l2-rollup sequencer step to op-reth",
-      "author": "donoso-eth",
-      "number": 21130,
-      "body": "Refs ethereum-optimism/solutions#692, ethereum-optimism/solutions#693\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "id": "PR_kwDODjvEJM7vIR46",
+      "title": "Joshklop/rust versioning",
+      "author": "joshklop",
+      "number": 21645,
+      "body": "",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-06-01T10:11:17Z",
+      "createdAt": "2026-07-08T05:15:56Z",
       "mergedAt": null,
-      "additions": 425,
-      "deletions": 718
+      "additions": 380,
+      "deletions": 412
     },
     {
       "id": "PR_kwDODjvEJM7vULpE",
@@ -118,16 +118,16 @@
       "deletions": 40
     },
     {
-      "id": "PR_kwDODjvEJM7vGOfT",
-      "title": "op-acceptance-tests: fix bug that incorrectly sets fork schedule ",
-      "author": "joshklop",
-      "number": 21642,
-      "body": "op-deployer merges user configs with defaults, potentially overwriting\r\nthe user's configs in some cases.\r\n\r\nThe intentbuilder.WithForkAtOffset would incorrectly *delete* a key in\r\nits hardfork mapping when the caller wanted to deactivate a fork. When\r\nmerged with op-deployer's default config, the default would take\r\nprecedence because there is no explicit override.\r\n\r\nThe fix in the intentbuilder is twofold:\r\n\r\n1. Explicitly set the deactivated hardfork to `nil` in the\r\n   intentbuilder's mapping.\r\n2. Set all subsequent forks to `nil` in the intentbuilder's mapping,\r\n   so caller's don't need to remember to do that themselves.\r\n\r\nThe op-e2e/config/init.go file has a similar bug, except the configuration\r\nis done by hand rather than through the intenbuilder abstraction. This\r\ncommit fixes both cases and introduce a shared function\r\nForkOverridesAtGenesis to limit duplicated code.\r\n\r\nThis bug unfortunately was causing some acceptance tests to pass when\r\nthey should have failed. Fortunately, none of those failures look serious.\r\nThe other changes in this commit address those test failures.\r\n\r\nThe confusing op-deployer configuration handling is worth cleaning\r\nup at some point, but would snowball this PR.",
+      "id": "PR_kwDODjvEJM7vHvsv",
+      "title": "feat(devfeatures): enable super root games migration by default",
+      "author": "ajsutton",
+      "number": 21644,
+      "body": "Stacked on ethereum-optimism/optimism#21643.\n\nEnables `SUPER_ROOT_GAMES_MIGRATION` by default in Foundry test config while keeping the Go/Solidity bitmap predicates unchanged. The contracts feature matrix now runs the explicit opt-out row as `NO_SUPER_ROOT_GAMES_MIGRATION`, preserving coverage for the old path.\n\nLocal checks:\n- `mise exec -- go test ./op-core/devfeatures`\n- `mise exec -- forge fmt --check scripts/libraries/Config.sol src/libraries/DevFeatures.sol test/L1/opcm/OPContractsManagerContainer.t.sol test/L2/L2DevFeatureFlags.t.sol test/libraries/DevFeatures.t.sol test/setup/ForkL1Live.s.sol test/setup/DisputeGames.sol test/L1/opcm/OPContractsManagerV2.t.sol test/L1/opcm/OPContractsManagerMigrationValidator.t.sol`\n- `mise exec -- just nut-bundle-check-no-build`\n- `mise exec -- forge test --match-path test/libraries/DevFeatures.t.sol --match-contract DevFeatures_isDevFeatureEnabled_Test -vv`\n- `mise exec -- forge test --match-path test/L1/opcm/OPContractsManagerContainer.t.sol --match-contract OPContractsManagerContainer_IsDevFeatureEnabled_Test -vv`\n- `mise exec -- forge test --match-path test/L2/L2DevFeatureFlags.t.sol --match-contract L2DevFeatureFlags_IsDevFeatureEnabled_Test -vv`\n- `mise exec -- forge test --match-path test/L1/OPContractsManagerStandardValidator.t.sol --match-contract OPContractsManagerStandardValidator_SuperModeCoreValidation_Test -vv`\n\nNot run locally: fork-live upgrade jobs require CI RPC credentials.",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-08T03:01:37Z",
+      "createdAt": "2026-07-08T04:40:11Z",
       "mergedAt": null,
-      "additions": 233,
-      "deletions": 64
+      "additions": 240,
+      "deletions": 101
     }
   ],
   "codeChanges": {
@@ -419,6 +419,6 @@
   "newPRs": 16,
   "mergedPRs": 6,
   "newIssues": 4,
-  "closedIssues": 5,
-  "activeContributors": 27
+  "closedIssues": 3,
+  "activeContributors": 25
 }
