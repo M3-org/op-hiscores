@@ -5,20 +5,78 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-12 to 2026-07-19, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-07-12 to 2026-07-19, ethereum-optimism/optimism had 3 new PRs (0 merged), 0 new issues, and 3 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7wveyD",
+      "title": "fix(kona,security): close three unauthenticated attack surfaces",
+      "author": "MattHintz",
+      "number": 21713,
+      "body": "# fix(kona,security): close three unauthenticated attack surfaces\n\n**Type:** security fix\n**Scope:** `rust/kona/`\n**Base branch:** `develop`\n**Head branch (in fork):** `security/kona-triple-fix-2026-07-12`\n**Companion disclosure:** public 0-day gist (linked in the first comment)\n\n## Summary\n\nThis PR closes three live, unauthenticated attack surfaces in the Rust OP Stack consensus client. Each bug is disclosed publicly in the linked gist; each is addressed here with a minimal, targeted patch plus a regression test.\n\n| # | Class | File(s) touched | Commit |\n|---|---|---|---|\n| **B1** | Cross-client L2 state divergence | `crates/protocol/protocol/src/batch/bits.rs`, `crates/protocol/protocol/src/batch/errors.rs` | 3e84f427 |\n| **B2** | Unbounded snappy decompression → OOM-kill | `crates/node/gossip/src/config.rs` | 837a8ccc |\n| **B3** | Unauthenticated admin JSON-RPC on public bind | `crates/node/service/src/service/node.rs`, `bin/node/src/flags/rpc.rs`, `crates/node/rpc/src/admin.rs`, `crates/node/rpc/src/config.rs` | 8b1d0634 |\n\nAll three are live at `develop` HEAD `a71cadff` (2026-07-11 17:45 UTC). Under Upgrade 18 + Karst (Sepolia 2026-06-17), `CANNON_KONA` is the respected fault-proof program by default on every OP Stack chain, so B1's cross-client divergence in Kona-in-Cannon can decide dispute games. B2 and B3 compound the impact by knocking challengers offline and injecting divergent unsafe heads during the dispute window.\n\n## B1 — reject truncated span-batch bitlist (commit 3e84f427)\n\n`SpanBatchBits::decode` silently zero-padded truncated input. Op-node's parallel `decodeSpanBatchBits` uses `io.ReadFull` and returns `io.ErrUnexpectedEOF` for the same input, so Kona and op-node diverge on the same L1 calldata. For a legacy transaction with `protected_bits = [0x01]`, truncating the byte flips the EIP-155 protection flag from `true` to `false` in Kona while op-node rejects the batch entirely — different derived L2 state.\n\n**Fix:** add `SpanBatchError::BitfieldTooShort` and return it when `b.len() < buffer_len`.\n\n**Test:** `decode_rejects_truncated_input` covers empty input at `bit_length=1` and 1-byte input at `bit_length=16`; `decode_accepts_full_input` covers the positive case.\n\n## B2 — bound gossipsub snappy pre-alloc by `MAX_GOSSIP_SIZE` (commit 837a8ccc)\n\n`compute_message_id` (the gossipsub `message_id_fn`, invoked on every inbound PUBLISH before signature validation) called `snap::raw::Decoder::decompress_vec(&msg.data)` unconditionally. `decompress_vec` pre-allocates `vec![0; decompress_len(input)]` — up to `u32::MAX` (~4 GiB) — before inspecting any frame content. A 7-byte snappy frame declaring `u32::MAX` decompressed length forces the process into `handle_alloc_error` (SIGABRT) or the Linux OOM killer (SIGKILL). Amplification: **613,566,756×**. Persistent restart-loop; gossipsub mesh (`mesh_D = 8`) fans out.\n\n**Fix:** pre-check `snap::raw::decompress_len(&msg.data) <= MAX_GOSSIP_SIZE` before calling `decompress_vec`, matching op-node's `BuildMsgIdFn` in `op-node/p2p/gossip.go`. Oversized headers take the invalid-snappy hash branch without allocating.\n\n**Test:** `compute_message_id_rejects_snappy_bomb_without_alloc` feeds the exact 7-byte bomb payload `[0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x00, 0x41]` and asserts that the invalid-snappy branch is taken.\n\n**Sibling site (not touched in this PR, but flagged for follow-up):** `rust/op-alloy/crates/rpc-types-engine/src/envelope.rs::decode_v{1,2,3,4}` share the same primitive. Fix upstream in `op-alloy`.\n\n## B3 — gate admin RPC, restrict `admin_postUnsafePayload`, default bind to `127.0.0.1` (commit 8b1d0634)\n\nFour related sub-fixes in one commit:\n\n1. **`crates/node/service/src/service/node.rs`** — Gate the `AdminRpc::new(...).into_rpc()` merge on `config.enable_admin()`. Previously merged unconditionally on every Kona node, while `dev_enabled()` and `ws_enabled()` on adjacent lines already had this gate.\n2. **`bin/node/src/flags/rpc.rs`** — Change `--rpc.addr` default from `0.0.0.0` (all interfaces) to `127.0.0.1` (localhost). Matches op-geth's default posture and op-node's admin-API opt-in shape. Operators who need remote RPC opt in explicitly.\n3. **`crates/node/rpc/src/admin.rs`** — Add `sequencer_admin_client.is_some()` gate to `admin_post_unsafe_payload`, matching every other handler in the same trait. Previously reachable on non-sequencer nodes for unsafe-head injection.\n4. **`crates/node/rpc/src/config.rs`** — Add `RpcBuilder::enable_admin()` accessor used by (1).\n\n**Test posture:** the existing `test_parse_rpc_args` `rstest` in `bin/node/src/flags/rpc.rs` covers `--rpc.enable-admin` parsing. A full end-to-end admin-RPC test requires the RPC service to be spun up; that scaffolding exists in `service/node.rs` unit tests but is out of scope for this fix — adding a \"boot Kona without `--rpc.enable-admin`, then `curl rpc_modules`, assert admin absent\" integration test is a good follow-up.\n\n## How to verify\n\n```bash\ngit fetch origin pull/<PR_NUMBER>/head:kona-triple-fix\ngit checkout kona-triple-fix\n\n# B1 + B2 (fast; no full workspace build required)\ncargo check -p kona-protocol -p kona-gossip -p kona-rpc -p kona-node-service\n\n# Regression tests (may hit unrelated pre-existing test-compile issues in\n# other files under kona-protocol; the new tests themselves are inline\n# in the modified files and compile clean at cargo check).\ncargo test -p kona-gossip --lib\n```\n\n## Disclosure track\n\n- Bug 2 was filed on Immunefi's Optimism program on 2026-05-02 as `#76170`. Closed as \"not production ready\".\n- Bug 1 was in preparation for a consolidated Primacy-of-Impact re-filing under the same program (activation gate change: CANNON_KONA became default-respected on Karst 2026-06-17).\n- Bug 3 was scope-preflight-killed on 2026-05-02 under Optimism Immunefi's JSON-RPC-exposure OOS clause; not filed.\n\nThe private track was exhausted. This PR + public gist are the public disclosure. Anyone reading this has the same information window as the maintainers. This reflects the researcher's judgment about the private track's productivity, not a general recommendation.\n\n**Public disclosure gist:** to be linked in the first comment on this PR.\n\n## Suggested review order\n\n1. `crates/protocol/protocol/src/batch/errors.rs` — one line, adds the new error variant.\n2. `crates/protocol/protocol/src/batch/bits.rs` — the B1 fix + tests.\n3. `crates/node/gossip/src/config.rs` — the B2 fix + test.\n4. `crates/node/rpc/src/config.rs` — the accessor.\n5. `crates/node/service/src/service/node.rs` — the gating (surrounding lines have identical shape for `dev_enabled` and `ws_enabled`).\n6. `bin/node/src/flags/rpc.rs` — default-bind change + doc.\n7. `crates/node/rpc/src/admin.rs` — the sequencer-only gate on `admin_post_unsafe_payload`.\n\n## Backport recommendation\n\nAll three fixes should be backported to any release branch that ships Kona for Upgrade-18-compliant chains, and to any downstream OP Stack Rust fork (op-reth, op-rbuilder, Base Azul, and others) that inherited the vulnerable code shapes.\n\n## Compatibility notes\n\n- **B1:** breaking behavior change — batches that were previously silently zero-padded will now be rejected. This aligns Kona with op-node's canonical behavior; any node currently divergent because of the leniency was already producing a wrong state.\n- **B2:** no behavior change on valid gossipsub traffic; oversized-header messages now take the invalid-snappy hash branch (which was already the fallback for decompression failure).\n- **B3:** operator-visible change — Kona started with defaults will no longer bind to `0.0.0.0`; operators who relied on the previous default should add `--rpc.addr=0.0.0.0` explicitly. Note the corresponding security implication of that flag.\n\n## License\n\nPatches under the same MIT / Apache-2.0 dual license as the rest of the workspace.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-12T12:51:11Z",
+      "mergedAt": null,
+      "additions": 142,
+      "deletions": 30
+    },
+    {
+      "id": "PR_kwDODjvEJM7w1khK",
+      "title": "op-service: serialize call fee caps",
+      "author": "ajsutton",
+      "number": 21714,
+      "body": "Summary\n- serialize maxFeePerGas and maxPriorityFeePerGas in sources.EthClient call args\n- keep txplan read-only eth_call requests from inheriting default EIP-1559 fee caps\n- add coverage for call arg fee serialization and read call fee fields\n\nThis keeps eth_estimateGas requests from dropping EIP-1559 fee caps before they reach the RPC client, while avoiding default txplan fees on read-only eth_call requests.\n\nValidation\n- mise exec -- just build-superchain-go\n- mise exec -- go test ./op-service/sources ./op-service/txplan",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-12T23:01:10Z",
+      "mergedAt": null,
+      "additions": 87,
+      "deletions": 4
+    },
+    {
+      "id": "PR_kwDODjvEJM7w2Gw2",
+      "title": "Remove op-geth CI variants",
+      "author": "ajsutton",
+      "number": 21715,
+      "body": "Removes the remaining op-geth CI variants from the CircleCI continuation configs:\n\n- Drops `memory-all-opn-op-geth` from the main workflow and `ci-gate` fan-in.\n- Drops `simple-kona-geth` from the rust E2E matrix and `required-rust-e2e` fan-in.\n\nValidation:\n\n- `mise exec -- bash .circleci/scripts/merge-configs.sh`\n- `mise exec -- bash .circleci/scripts/test-decision-tree.sh`\n- `circleci config validate /tmp/merged-config-stubbed.yml` with a local stub for the private CircleCI orb\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-12T23:57:58Z",
+      "mergedAt": null,
+      "additions": 1,
+      "deletions": 21
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 16
   },
   "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
+  "topContributors": [
+    {
+      "username": "MattHintz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275132365?v=4",
+      "totalScore": 37.23652058074223,
+      "prScore": 37.03652058074223,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 32.22107137002723,
+      "prScore": 23.221071370027232,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 3
 }
