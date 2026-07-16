@@ -5,8 +5,20 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-01 to 2026-08-01, ethereum-optimism/optimism had 119 new PRs (66 merged), 49 new issues, and 74 active contributors.",
+  "overview": "From 2026-07-01 to 2026-08-01, ethereum-optimism/optimism had 174 new PRs (107 merged), 55 new issues, and 75 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABI6Ln3g",
+      "title": "kona/protocol: brotli decoder (brotli-decompressor) is more lenient than op-node (andybalholm) — accepts malformed channels op-node rejects",
+      "author": "sebastianst",
+      "number": 21793,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nDifferential testing of the two brotli decoders used in OP Stack derivation — `brotli-decompressor` 5.0.1 (kona, [`decompress_brotli`](https://github.com/ethereum-optimism/optimism/blob/44e40ba521c9ec2ad02f3ed7db3e79055afa9877/rust/kona/crates/protocol/protocol/src/brotli.rs#L19-L90)) vs `andybalholm/brotli` v1.1.0 (op-node, [`BatchReader`](https://github.com/ethereum-optimism/optimism/blob/44e40ba521c9ec2ad02f3ed7db3e79055afa9877/op-node/rollup/derive/channel.go#L174-L219)) — shows the two disagree on brotli **validity**. The consensus-relevant direction: **kona's decoder accepts malformed channels that op-node rejects.** kona would then RLP-decode batches op-node discards. If any such batch is valid, kona advances the safe chain where op-node does not → consensus split. This is the mirror image of #20666 (which worried about the opposite direction — that one turns out to be structurally impossible for the current eager decoder).\n\nThis is the *residual* decoder gap behind [protocol-team#84 (strict channel decompression)](https://github.com/ethereum-optimism/protocol-team/issues/84): strict semantics remove the unbounded partial-output surface but leave this validity-boundary disagreement, which needs decoder conformance work.\n\n## Evidence\n\nOver 70,526 adversarial streams (corruptions + truncations + fuzz), classifying each by whether the decoder reaches a *clean* end-of-stream:\n\n| | count |\n|---|---|\n| both decoders accept | 58,695 |\n| …of which **byte-length mismatch** | **0** |\n| both reject | 5,941 |\n| **kona accepts, op-node rejects** (kona too lenient) | **242** |\n| kona rejects, op-node accepts (op-node too lenient) | 5,648 |\n\nKey facts:\n- **Accepted streams never diverge** (0 length mismatches) — valid brotli is deterministic. All divergence is at the accept/reject boundary.\n- The 242 kona-too-lenient cases collapse to two root causes: `BLOCK_LENGTH_1/2` (98) and `excessive input` (144).\n\n## Root cause 1 — `BLOCK_LENGTH` (confirmed, fix in hand)\n\n`brotli-decompressor`'s `BROTLI_STATE_METABLOCK_DONE` handler is **missing the `meta_block_remaining_len < 0` check** that andybalholm ([decode.go#L2464-L2468](https://github.com/andybalholm/brotli/blob/v1.1.0/decode.go#L2464-L2468)) and the C reference enforce. When a metablock's insert-copy commands overshoot the declared MLEN, `meta_block_remaining_len` goes negative; the command loop breaks to `METABLOCK_DONE`, which runs cleanup and proceeds to `SUCCESS` without validating. andybalholm rejects with `BLOCK_LENGTH_2`.\n\nConfirmed by red/green in an isolated copy of the crate: unpatched accepts **98/98** of the malformed streams; with a 5-line check added it accepts **0/98** (matching andybalholm), and all valid streams still decode:\n\n```diff\n         BrotliRunningState::BROTLI_STATE_METABLOCK_DONE => {\n+          if (s.meta_block_remaining_len < 0) {\n+            result = BrotliDecoderErrorCode::BROTLI_DECODER_ERROR_FORMAT_BLOCK_LENGTH_2;\n+            break;\n+          }\n           s.BrotliStateCleanupAfterMetablock();\n```\n\nThis is the **same class** as the PADDING_2 fix ([dropbox/rust-brotli-decompressor#44](https://github.com/dropbox/rust-brotli-decompressor/pull/44)) — a missing end-of-metablock validation in the very same state handler. It needs an **upstream fix in `brotli-decompressor`**, then a version bump here (like #21505 did for PADDING_2).\n\n## Root cause 2 — `excessive input` (trailing bytes)\n\nandybalholm rejects a stream with bytes remaining after the final metablock (`excessive input`); `brotli-decompressor` stops at the ISLAST metablock and returns success, ignoring the trailing bytes. **Fixable at the kona wrapper** by requiring the input reader to be fully consumed — the `decompress_brotli_strict` \"reader fully consumed\" check floated in #20666 (the one sound idea there). Under strict semantics this is the natural rule: a channel with trailing garbage is invalid.\n\n## Reverse direction (for completeness)\n\nThe 5,648 \"op-node accepts, kona rejects\" cases are **89% truncations**: andybalholm treats a truncated stream as clean (returns partial output, nil error), while `brotli-decompressor` correctly rejects it (RFC 7932: a truncated stream is invalid). Here **andybalholm** is the lenient/non-conformant side. This direction also causes divergence (op-node ahead) and needs an op-node-side decision, since op-node is the incumbent.\n\n## Relationship to strict decompression (protocol-team#84)\n\nStrict semantics are the right foundation and should land regardless — they guarantee accepted channels produce identical output and delete the entire best-effort partial-output surface. But strict is **necessary, not sufficient**: it reduces the problem from \"identical partial bytes on every malformed stream\" (implementation-defined, ~impossible) to \"agree on validity\" (a spec-defined boolean) — and the decoders still disagree on that boolean. Closing it is the bounded conformance work below.\n\n## Proposed work\n\n- [ ] Upstream `brotli-decompressor`: add the `BLOCK_LENGTH_2` check to `METABLOCK_DONE` (patch above; sibling to #44) — PR up at dropbox/rust-brotli-decompressor#47; then bump the pin here once it releases.\n- [ ] kona wrapper: require the input reader fully consumed → rejects `excessive input` — **#84-gated; do NOT land standalone.** Under today's best-effort rule op-node already keeps the valid-portion batches from an `excessive input` channel (its \"excessive input\" error routes through the same `NextChannel` + keep-partial path as `io.EOF`), and kona agrees (it ignores the trailing bytes and decodes the same batches). Adding this check now would make kona drop those batches (0 for the whole channel, via `decompress_brotli(...)?`) → a *new* kona-too-strict divergence. It reaches parity only once #84 makes op-node reject the whole channel too. (Same #84-gating applies to every \"make the decoder stricter\" step here, incl. the dropbox#47 `BLOCK_LENGTH` bump: today both clients keep partial batches and agree; tightening one side alone breaks that.)\n- [x] op-node/andybalholm truncation direction — bumped op-node to andybalholm v1.2.2 (#21799, **merged**). The decoder now rejects truncated streams per RFC 7932 §9.3, matching the C reference and kona. The bump is behaviorally inert on its own (verified byte-identical batch output v1.1.0 vs v1.2.2); it provides the `io.ErrUnexpectedEOF` signal that the strict-decompression rule handling (below) acts on.\n- [ ] Land protocol-team#84 (strict decompression) as the foundational rule change — includes the op-node rule handling that acts on the new `ErrUnexpectedEOF` signal to reject truncated channels, plus kona going strict.\n- [ ] Gate a Go↔Rust differential *validity* fuzzer in CI (now feasible — it compares a boolean, not byte sequences).\n\n## Methodology\n\nDifferential harness: kona's `brotli-decompressor` decode status vs `andybalholm/brotli` `io.ReadAll` over a shared corpus (corruptions of valid streams, truncations, random fuzz). Root cause confirmed by red/green against an isolated copy of `brotli-decompressor` 5.0.1. Harnesses and the 98 `BLOCK_LENGTH` reproducers are available on request.\n\n## References\n\n- #20666 — proposed the opposite-direction fix (refuted; the current eager decoder can't lag op-node)\n- #19333 / #20598 / #20004 — original brotli divergence investigation and Bug 1/Bug 2 fixes\n- #21505 — the PADDING_2 bump (brotli-decompressor 5.0.1)\n- [dropbox/rust-brotli-decompressor#44](https://github.com/dropbox/rust-brotli-decompressor/pull/44) — PADDING_2 fix (same bug class)\n- [protocol-team#84](https://github.com/ethereum-optimism/protocol-team/issues/84) — strict channel decompression\n\n🤖 *Generated by Claude Opus 4.8*\n\n",
+      "createdAt": "2026-07-15T13:19:16Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 4
+    },
     {
       "id": "I_kwDODjvEJM8AAAABIRYjXw",
       "title": "Simplify op-challenger permissioned dispute game handling after transition to `SuperPermissionedDisputeGame` is complete",
@@ -18,6 +30,18 @@
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 3
+    },
+    {
+      "id": "I_kwDODjvEJM7a74sg",
+      "title": "kona: Review host game input and witness generation for soundness.",
+      "author": "pauldowman",
+      "number": 18430,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2025-11-27T22:15:56Z",
+      "closedAt": "2026-07-15T02:20:28Z",
+      "state": "CLOSED",
+      "commentCount": 2
     },
     {
       "id": "I_kwDODjvEJM8AAAABA0YViw",
@@ -32,40 +56,16 @@
       "commentCount": 2
     },
     {
-      "id": "I_kwDODjvEJM8AAAABF4_LiQ",
-      "title": "default syncmode.offset-el-safe to 12h fails for --minimal nodes",
-      "author": "Creamers158",
-      "number": 21465,
+      "id": "I_kwDODjvEJM8AAAABB-YK6w",
+      "title": "kona/protocol: switch decompress_brotli to BrotliDecompressCustomIoCustomDict for incremental-flush parity with op-node",
+      "author": "sebastianst",
+      "number": 20666,
       "repository": "ethereum-optimism/optimism",
-      "body": "Running op-node v1.19.0 + op-reth v2.3.1 on multiple Superchain registry chains (Zora, BOB, Mode, etc.) with `--syncmode=execution-layer` Repeatedly seeing:\n\n```\nlvl=warn msg=\"Failed to insert unsafe payload for EL sync\"\nerr=\"temp: EL sync offset-derived head at block XXXXXXX: l2 block is missing L1 info deposit tx, block hash: 0x...\"\n```\nThe error advances block-by-block and never resolves. Switching to `--syncmode=consensus-layer` masks it.\n\nSetting `--syncmode.offset-el-safe=0` on op-node fixes it, EL sync proceeds normally with no errors.\n\nWe were also running op-reth with `--minimal`, which keeps only ~10,064 blocks of history. The default --syncmode.offset-el-safe=12h translates to ~21,600 blocks behind tip at 2s block time — could it be that the offset-derived head is pointing to a block that has already been pruned by --minimal, causing the L1 info deposit tx to appear missing? Would make sense why `--syncmode.offset-el-safe=0` resolves it.\n\nAssumption / hypothesis:\nThe 12h default seems designed to protect sequencers from marking blocks as safe before L1 confirms them within the sequencing window.\nFor standard RPC/replica nodes that don't produce blocks, this protection has no meaningful effect, but it does silently break EL sync when paired with any pruned node profile (--minimal, --full) where the offset points beyond the retained history window.\n\n**Suggestion**:\nWould it make sense to either document this incompatibility explicitly, or only apply the 12h default when running as a sequencer?",
-      "createdAt": "2026-06-18T07:40:17Z",
-      "closedAt": "2026-07-14T20:09:11Z",
+      "body": "## Context\n\nFollow-up from #19333 / #20598.\n\n#20598 fixed a wrapper-level bug where `kona::decompress_brotli` under-produced output bytes on the truncation path (`NeedsMoreInput` raised with both `available_in` and `available_out` at 0). With that fix and the brotli crate's PADDING_2 fall-through patched upstream, the OP-Stack differential sweep on a 20-batch fixture (`investigate/brotli-divergence/driver.py` on branch `seb/investigate/kona-brotli-divergence`) converges to **0 BatchReader-level divergences** between kona and op-node.\n\nBut there's a residual **byte-level** divergence on the `ResultFailure with bytes already produced` path that hasn't been observed to affect batch counts in our existing fixtures, but is reachable in principle.\n\n## The remaining divergence\n\nEmpirically (using `investigate/brotli-lib-diff/` on the same branch), on the *patched* Rust `brotli` crate, the high-level `BrotliDecompress` and the equivalent Go libraries differ on mid-stream `ResultFailure`:\n\nTest input: 4 KB ascending-bytes plaintext, 259 B compressed by cbrotli, single-byte XOR at offset 19.\n\n|   | status | partial bytes returned |\n|---|---|---|\n| `brotli::BrotliDecompress` (patched) | err | **0** |\n| `andybalholm/brotli` via `io.ReadAll` | err | **512** |\n| `google/brotli/go/cbrotli` via `io.ReadAll` | err | **512** |\n\nSame difference shows up in our wrapper (`decompress_brotli`) vs op-node's `BatchReader`:\n\n|   | DECOMPRESS_RESULT | bytes | BATCH_COUNT |\n|---|---|---|---|\n| kona (`decompress_brotli`) | err | 0 | 0 |\n| op-node (`BatchReader`) | err | 512 | 0 |\n\nThey agree at the batch level *here* because the 512 partial bytes happen not to RLP-decode into a valid `BatchData`. But there is a class of adversarial inputs — a multi-batch channel where corruption is placed past the first batch boundary — where op-node's incremental flush would decode batch 1 successfully and then fail on batch 2, while kona would emit zero bytes and decode zero batches. That's a real, latent consensus-relevant divergence in op-node's favor.\n\n## Root cause\n\n`brotli::BrotliDecompressStream` only flushes its internal ringbuffer to the caller's output buffer at certain points (most notably `WriteRingBuffer` invocations). When the caller-supplied output buffer is large enough to hold the entire stream, brotli accumulates many decoded bytes in the ringbuffer before flushing. If `ResultFailure` is signaled before that flush happens, the bytes are lost from the caller's perspective even though they are valid decoded output up to the point of corruption.\n\nGo's `brotli.NewReader` and `cbrotli.NewReader` paper over this by repeatedly invoking the C decoder with the small per-call read buffer the user supplies. Each `Read()` triggers a flush from the ringbuffer into the user's buffer, so the partial bytes for earlier metablocks are returned to the caller (via `io.ReadAll`) before a later metablock errors.\n\nkona's hand-rolled wrapper in `rust/kona/crates/protocol/protocol/src/brotli.rs` does not replicate that pattern. It grows a single output buffer and re-enters `BrotliDecompressStream` rather than draining the ringbuffer between calls, so it tracks the underlying decoder's flush granularity rather than imposing its own.\n\n## Proposed fix\n\nReplace the hand-rolled `BrotliDecompressStream` loop in `kona::decompress_brotli` with `brotli::BrotliDecompressCustomIoCustomDict`. The crate exposes this no_std-friendly equivalent of the high-level Reader-based decompression:\n\n- `CustomRead` / `CustomWrite` traits in `brotli::CustomRead` / `brotli::CustomWrite` are *not* `std`-gated (only the high-level `brotli::Decompressor` / `brotli::BrotliDecompress` are).\n- `BrotliDecompressCustomIoCustomDict(reader, writer, in_buf, out_buf, ...)` runs the same incremental-flush loop as `BrotliDecompress` but on `CustomRead`/`CustomWrite`. It calls `BrotliDecompressStream` with a small fixed-size output buffer and writes each batch of produced bytes to the `CustomWrite` before continuing — exactly the pattern Go's reader uses.\n\nConcretely:\n\n1. Implement `CustomRead` for `&[u8]` (a few lines — track a cursor).\n2. Implement `CustomWrite` for `Vec<u8>` with the size cap baked in: appends bytes, returns an error once `MAX_RLP_BYTES_PER_CHANNEL` is reached so the loop terminates per spec.\n3. Replace the body of `decompress_brotli` with one call to `BrotliDecompressCustomIoCustomDict`. The existing `decompress_brotli_strict` variant becomes a thin wrapper that additionally checks the reader has been fully consumed.\n\nThis deletes the buffer-growth dance, the `NeedsMoreInput`-with-full-buffer workaround (#20598), and the implicit \\\"return what we have on `ResultFailure`\\\" behavior — and inherits Go-equivalent flush granularity for free, while preserving no_std compatibility.\n\n## Validation\n\n- Re-run the differential sweep (`investigate/brotli-divergence/driver.py`) at `N_BATCHES=20` and a few additional fixtures (multi-batch, multi-metablock, mid-stream corruption) and confirm 0 divergences at both the byte and batch level.\n- Construct an adversarial multi-batch fixture where corruption is placed past the first batch boundary and confirm kona and op-node now agree on the batch count (op-node currently decodes batch 1; kona currently produces 0 batches).\n- All existing `kona-protocol` tests continue to pass.\n\n## Risks / considerations\n\n- The change is wider than #20598 — it replaces the entire decompression loop rather than fixing a single match arm. Should land independently and get its own focused review.\n- The `MAX_RLP_BYTES_PER_CHANNEL` size-cap-as-truncation semantics need to be preserved precisely (currently: cap exceeded → return truncated output, not an error). The `CustomWrite` impl needs to handle this carefully.\n- Coordination point: the upstream `brotli-decompressor` PADDING_2 fix at the (independent) Rust crate level is necessary for this work to fully eliminate the kona/op-node divergence. Tracking upstream at dropbox/rust-brotli-decompressor#44.\n\n## References\n\n- #19333 — original divergence report (split into Bug 1 and Bug 2; this issue covers the residual byte-level part of Bug 1)\n- #20598 — wrapper-bug fix that eliminates the truncation-side divergence\n- #20004 — Bug 2 fix (Fjord gating via L1 origin)\n- Investigation branch: https://github.com/ethereum-optimism/optimism/tree/seb/investigate/kona-brotli-divergence/investigate\n- Upstream brotli-decompressor PADDING_2 fix: dropbox/rust-brotli-decompressor#44\n\n🤖 *Generated by Claude Code*\n",
+      "createdAt": "2026-05-12T08:24:06Z",
+      "closedAt": "2026-07-15T13:26:04Z",
       "state": "CLOSED",
       "commentCount": 2
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABAEuyFg",
-      "title": "flaky test: `TestReorgUnsafeHead`",
-      "author": "ajsutton",
-      "number": 20198,
-      "repository": "ethereum-optimism/optimism",
-      "body": "**Claude:** Filed by Claude on behalf of @ajsutton.\n\n**CI run:** https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/123078/workflows/4327c7d8-ab80-44a4-9508-0c99d5bc2fe0/jobs/4868463/tests\n\n**Job:** `memory-all-kona-op-reth` (acceptance tests)\n**Date:** 2026-04-21\n**Branch:** `gh-readonly-queue/develop/pr-20165-4df50ca0801bf0dd7049995d5a7c8cc8396023df` (merge queue)\n**Test file:** `op-acceptance-tests/tests/interop/reorgs/unsafe_head_test.go:113`\n\n**Error:**\n```\nError Trace: /home/circleci/project/op-acceptance-tests/tests/interop/reorgs/unsafe_head_test.go:113\nError:       Should not be: 0xae78b3b90db8d7d10c044465707fc30e969695515bb3e778accb1554867a7831\nTest:        TestReorgUnsafeHead\nMessages:    Expected to get different heads on divergence block number, but got the same hash, so no reorg happened on chain A\n```\n\nPreceding log lines:\n\n```\nunsafe_head_test.go:111: Reorged chain A on divergence block number (prior the reorg) number=9 head=ae78b3..7a7831 parent=5aaa56..e2828e\nunsafe_head_test.go:112: Reorged chain A on divergence block number (after the reorg) number=9 head=ae78b3..7a7831 parent=5aaa56..e2828e\n```\n\n**Context:**\n- The test was unskipped and migrated to `TwoL2SupernodeInterop` in #20136 (commit `4df50ca080`).\n- After `StopSequencer()`, the test uses `op-test-sequencer` to sequence a conflicting block at the unsafe head height, then calls `StartSequencer()` on the CL and waits for a new block.\n- At the assertion, the block at the divergence height is still the original block — the EL's view of the unsafe head was never replaced by the test-sequencer's conflicting block (or the CL's resumed sequencing reverted the reorg).\n- The test intersperses two `time.Sleep(2 * time.Second)` calls between `ia.New()` / `ia.Next()` at lines 97 and 101 — likely a timing race.\n\nWill investigate and propose a fix.",
-      "createdAt": "2026-04-21T02:39:44Z",
-      "closedAt": "2026-07-10T13:43:15Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABEQMi_g",
-      "title": "Unichain Mainnet Replicas Supernode",
-      "author": "sbvegan",
-      "number": 21177,
-      "repository": "ethereum-optimism/optimism",
-      "body": "",
-      "createdAt": "2026-06-03T13:42:09Z",
-      "closedAt": "2026-07-06T19:32:33Z",
-      "state": "CLOSED",
-      "commentCount": 1
     }
   ],
   "topPRs": [
@@ -118,23 +118,23 @@
       "deletions": 4
     },
     {
-      "id": "PR_kwDODjvEJM7irkpf",
-      "title": "feat(op-conductor): flag-gated interop reorg recovery (#20006)",
-      "author": "wwared",
-      "number": 21230,
-      "body": "Draft — flag-gated op-conductor interop reorg recovery. Full description to follow.\n\nFixes #20006\n\nNote: this branch temporarily includes the supernode-VN-bootstrap commit (`08eb799140`) from the follow-mode ELSync work, which the conductor reorg-recovery acceptance tests depend on for genesis bootstrap (#21164). Once that lands on develop, this branch will be rebased onto develop and that commit will drop out.",
+      "id": "PR_kwDODjvEJM7yN8Hz",
+      "title": "Formally-Verified Dafny Model of the Supernode",
+      "author": "lucasmt",
+      "number": 21820,
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\nAn abstract model of the OP Supernode implemented in the Dafny language. Critical properties of the Supernode design have been formally verified in the model using Dafny's formal verification capabilities, including core invariants, cross-validity of `VerifiedDB` entries, and recovery of database consistency after successful pending transition application. Also includes a report produced by an AI-based analysis checking the model specifications over the Go code.\r\n\r\n**Tests**\r\n\r\nNo tests have been added since there were no changes to the Go code, and the Dafny model has been formally verified.\r\n\r\n**Additional context**\r\n\r\n**Metadata**\r\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-06-04T12:45:28Z",
+      "createdAt": "2026-07-15T21:09:33Z",
       "mergedAt": null,
-      "additions": 3297,
-      "deletions": 166
+      "additions": 4628,
+      "deletions": 0
     }
   ],
   "codeChanges": {
-    "additions": 15110,
-    "deletions": 5410,
-    "files": 315,
-    "commitCount": 521
+    "additions": 27767,
+    "deletions": 13917,
+    "files": 523,
+    "commitCount": 747
   },
   "completedItems": [
     {
@@ -260,6 +260,53 @@
         "melange/pipelines/op-deployer/install-forge.yaml",
         "melange/pipelines/op-stack-go/sync-superchain.yaml",
         "pipelines"
+      ]
+    },
+    {
+      "title": "feat(sdm): make the operator opt-in flag consistent across clients",
+      "prNumber": 21551,
+      "type": "feature",
+      "body": "## Overview\n\nCloses #21360. Makes the SDM PostExec **operator opt-in** gate consistent across the OP Stack clients. The gate was previously named inconsistently (`post_exec_opt_in`, `operator_opted_in`, `opt_in`, `sdm_post_exec_opt_in`) and",
+      "files": [
+        "op-acceptance-tests/tests/flashblocks/flashblocks_sdm_test.go",
+        "op-chain-ops/cmd/sdm-devnet/main.go",
+        "op-e2e/actions/helpers/l2_verifier.go",
+        "op-node/config/config.go",
+        "op-node/config/config_persistence.go",
+        "op-node/config/config_persistence_test.go",
+        "op-node/node/api.go",
+        "op-node/node/server_test.go",
+        "op-node/rollup/driver/config.go",
+        "op-node/rollup/driver/driver.go",
+        "op-node/rollup/sequencing/disabled.go",
+        "op-node/rollup/sequencing/iface.go",
+        "op-node/rollup/sequencing/sequencer.go",
+        "op-node/rollup/sequencing/sequencer_test.go",
+        "op-service/apis/rollup.go",
+        "op-service/sources/rollupclient.go",
+        "rust/Cargo.lock",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/context.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/ctx.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/mod.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/standard/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/launcher.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/sdm_admin.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/tests/framework/instance.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/tests/sdm.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/payload/src/config.rs",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/rpc/src/sdm_admin.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/metrics.rs",
+        "rust/op-reth/crates/chainspec/src/lib.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt.rs",
+        "op-acceptance-tests/tests/interop/proofs-singlechain/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go"
       ]
     },
     {
@@ -719,6 +766,26 @@
       ]
     },
     {
+      "title": "op-acceptance-tests: fix bug that incorrectly sets fork schedule ",
+      "prNumber": 21642,
+      "type": "bugfix",
+      "body": "op-deployer merges user configs with defaults, potentially overwriting\r\nthe user's configs in some cases.\r\n\r\nThe intentbuilder.WithForkAtOffset would incorrectly *delete* a key in\r\nits hardfork mapping when the caller wanted to deactivate a",
+      "files": [
+        "op-chain-ops/genesis/fork_overrides.go",
+        "op-chain-ops/genesis/fork_overrides_test.go",
+        "op-core/forks/forks.go",
+        "op-core/forks/forks_test.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-e2e/config/init.go",
+        "op-e2e/e2eutils/intentbuilder/builder.go",
+        "op-e2e/e2eutils/intentbuilder/builder_test.go",
+        "op-node/rollup/types.go",
+        "op-node/rollup/types_test.go",
+        "op-service/jsonutil/merge.go",
+        "go.mod"
+      ]
+    },
+    {
       "title": "op-challenger: tolerate missing prestate for permissioned games with --prestates-url",
       "prNumber": 21681,
       "type": "other",
@@ -754,6 +821,24 @@
       ]
     },
     {
+      "title": "feat(kona-sp1): execute super-range consolidation proofs",
+      "prNumber": 21677,
+      "type": "feature",
+      "body": "## Summary\r\n\r\nBuilds on https://github.com/ethereum-optimism/optimism/pull/21671 by implementing the `Consolidation` mode in the unified `super-range` SP1 guest.\r\n\r\n## Meta\r\nCloses https://github.com/ethereum-optimism/optimism/issues/21576",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/ethereum/client/Cargo.toml",
+        "rust/kona/sp1/crates/ethereum/client/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_consolidation.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/src/main.rs",
+        "rust/kona/crates/proof/proof-interop/src/consolidation.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/test_utils.rs"
+      ]
+    },
+    {
       "title": "fix(op-node): sync Karst gas compatibility configs",
       "prNumber": 21674,
       "type": "bugfix",
@@ -786,6 +871,35 @@
         "docs/public-docs/node-operators/tutorials/node-from-docker.mdx",
         "docs/public-docs/node-operators/tutorials/run-node-from-source.mdx",
         "docs/public-docs/notices/op-geth-deprecation.mdx"
+      ]
+    },
+    {
+      "title": "feat(kona-sp1): execute super-range range proofs",
+      "prNumber": 21671,
+      "type": "feature",
+      "body": "## Summary\r\n\r\n`super-range` now proves optimistic per-chain transitions over timestamp spans instead of only committing claimed outputs. The range proof is rectangular over `timestamp x dependency-set chains`, binds the previous super root ",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/client/src/super_root.rs",
+        "rust/kona/sp1/crates/ethereum/client/Cargo.toml",
+        "rust/kona/sp1/crates/ethereum/client/src/executor.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/src/main.rs",
+        "rust/kona/bin/client/tests/interop_trace_extension.rs",
+        "rust/kona/bin/client/tests/trace_extension.rs",
+        "rust/kona/bin/host/src/interop/local_kv.rs",
+        "rust/kona/bin/host/src/single/local_kv.rs",
+        "rust/kona/crates/proof/preimage/src/lib.rs",
+        "rust/kona/crates/proof/preimage/src/local_keys.rs",
+        "rust/kona/crates/proof/proof-interop/src/boot.rs",
+        "rust/kona/crates/proof/proof/src/boot.rs",
+        "rust/kona/sp1/crates/client/src/range.rs",
+        "rust/kona/sp1/crates/client/src/witness/executor.rs",
+        "rust/kona/sp1/crates/range-executor/src/main.rs"
       ]
     },
     {
@@ -877,6 +991,16 @@
         "op-node/metrics/metrics_test.go",
         "op-node/node/node.go",
         "op-node/rollup/types.go"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: add post-fork L2 predeploy verification",
+      "prNumber": 21697,
+      "type": "other",
+      "body": "Closes https://github.com/ethereum-optimism/protocol-team/issues/202\r\n\r\nAdds `just post-fork-ops` for verifying L2 predeploy contracts after a fork activation. Named `post-fork-ops` this way we can add more checks to it in the future, aside",
+      "files": [
+        "packages/contracts-bedrock/justfile",
+        "packages/contracts-bedrock/scripts/post-fork-ops/verify-predeploys.sh"
       ]
     },
     {
@@ -1010,6 +1134,16 @@
       ]
     },
     {
+      "title": "dependabot(gomod): bump golang.org/x/mod from 0.37.0 to 0.38.0",
+      "prNumber": 21729,
+      "type": "other",
+      "body": "Bumps [golang.org/x/mod](https://github.com/golang/mod) from 0.37.0 to 0.38.0.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/golang/mod/commit/792ac169a90372d88fb14e712cb793061ba0c104\"><code>792ac16</code></a> go",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
       "title": "docs: revisit op-geth decoupling plan — widen scope, trim to strategy",
       "prNumber": 21721,
       "type": "docs",
@@ -1017,6 +1151,32 @@
       "files": [
         "AGENTS.md",
         "docs/ai/opgeth-decoupling.md"
+      ]
+    },
+    {
+      "title": "feat: support super-root fault games at initial deployment",
+      "prNumber": 21720,
+      "type": "feature",
+      "body": "**Description**\r\n\r\nEnforces that initial game types match `SUPER_ROOT_GAMES_MIGRATION`. Disabled mode permits `PERMISSIONED_CANNON` and `CANNON_KONA`. Enabled mode permits `SUPER_PERMISSIONED` and `SUPER_CANNON_KONA`. Adds initial `SUPER_CA",
+      "files": [
+        "op-chain-ops/interopgen/deploy.go",
+        "op-chain-ops/interopgen/deploy_anchor_test.go",
+        "op-deployer/pkg/deployer/forge/encoding.go",
+        "op-deployer/pkg/deployer/forge/encoding_test.go",
+        "op-deployer/pkg/deployer/opcm/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "packages/contracts-bedrock/scripts/deploy/ChainAssertions.sol",
+        "packages/contracts-bedrock/scripts/deploy/Deploy.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol",
+        "packages/contracts-bedrock/scripts/libraries/Types.sol",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/opcm/DeployOPChain.t.sol",
+        "op-deployer/pkg/deployer/prepare.go",
+        "op-deployer/pkg/deployer/prepare_test.go"
       ]
     },
     {
@@ -1029,6 +1189,19 @@
         "justfile",
         "op-core/nuts/README.md",
         "op-core/nuts/state/README.md"
+      ]
+    },
+    {
+      "title": "docs: move chain-operator network design example from reference to guides",
+      "prNumber": 21770,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784067317292149)_\n\n## What changed\n\nMoves the chain-operator **\"Network Design Example\"** page out of the **R",
+      "files": [
+        "docs/public-docs/chain-operators/guides/management/network-architecture.mdx",
+        "docs/public-docs/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/public/img/chain-operators/network-design-example-op-reth.png",
+        "docs/public-docs/public/img/chain-operators/network-design-example.png"
       ]
     },
     {
@@ -1051,6 +1224,77 @@
       ]
     },
     {
+      "title": "chore: bump reth to include #26398 fix (validate_block_post_execution_with_hashed_state)",
+      "prNumber": 21766,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Josh Klopfenstein** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0A3E04GDMX/p1784054235311919?thread_ts=1784054235.311919&cid=C0A3E04GDMX)_\n\nRefs #21524\n\n## Before\n\nThe Rust workspac",
+      "files": [
+        "rust/Cargo.toml",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/op-rbuilder/Cargo.toml",
+        "rust/op-reth/crates/cli/src/commands/slot_preimages_seed.rs",
+        "rust/rollup-boost/Cargo.toml",
+        "rust/rollup-boost/crates/flashblocks-rpc/Cargo.toml",
+        "rust/rollup-boost/crates/rollup-boost/Cargo.toml",
+        "docs/ai/reth-update-review.md",
+        "mise.toml",
+        "ops/docker/op-stack-go/Dockerfile",
+        "rust/Cargo.lock",
+        "rust/UPDATING-RETH.md",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-hardforks/Cargo.toml",
+        "rust/clippy.toml",
+        "rust/kona/crates/node/engine/src/test_utils/attributes.rs",
+        "rust/kona/crates/proof/executor/src/test_utils.rs",
+        "rust/kona/crates/proof/executor/src/util.rs",
+        "rust/kona/crates/proof/proof-interop/src/consolidation.rs",
+        "rust/kona/crates/protocol/derive/src/attributes/stateful.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/core.rs",
+        "rust/kona/crates/protocol/derive/src/stages/attributes_queue.rs",
+        "rust/kona/docker/apps/kona_app_generic.dockerfile",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile",
+        "rust/kona/sp1/crates/host/src/stats.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/op-alloy/crates/rpc-types-engine/src/attributes.rs",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/Dockerfile",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/generator.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/standard/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/flashtestations/args.rs",
+        "rust/op-rbuilder/crates/tdx-quote-provider/Cargo.toml",
+        "rust/op-rbuilder/rust-toolchain.toml",
+        "rust/op-reth/DockerfileOp",
+        "rust/op-reth/crates/cli/Cargo.toml",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/src/worker.rs",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/src/utils.rs",
+        "rust/op-reth/crates/node/tests/e2e-testsuite/testsuite.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/post-exec-replay/src/replay.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/backfill.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/write.rs"
+      ]
+    },
+    {
+      "title": "dependabot(gomod): bump github.com/pion/dtls/v3 from 3.0.6 to 3.0.11",
+      "prNumber": 21765,
+      "type": "other",
+      "body": "Bumps [github.com/pion/dtls/v3](https://github.com/pion/dtls) from 3.0.6 to 3.0.11.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/pion/dtls/releases\">github.com/pion/dtls/v3's releases</a>.</em><",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
       "title": "op-node: bump Go dependencies",
       "prNumber": 21762,
       "type": "other",
@@ -1064,6 +1308,57 @@
       ]
     },
     {
+      "title": "docs: surface node system requirements on the node-operator overview",
+      "prNumber": 21761,
+      "type": "docs",
+      "body": "## What and why\n\nA prospective node operator's first practical question is \"what machine do I need?\" The docs answer it — but only inside `node-operators/tutorials/run-node-from-source.mdx`. The **recommended getting-started path** (`tutori",
+      "files": [
+        "docs/public-docs/node-operators/overview.mdx"
+      ]
+    },
+    {
+      "title": "dev: add version-controlled git hooks + install-git-hooks target",
+      "prNumber": 21755,
+      "type": "other",
+      "body": "Adds a committed `.githooks/` directory and an idempotent `just install-git-hooks` target (`git config core.hooksPath .githooks`). Run once per clone; the setting is shared across a clone's worktrees.\n\nInitial hook — **`pre-push`** — blocks",
+      "files": [
+        ".githooks/README.md",
+        ".githooks/pre-push",
+        "docs/ai/dev-workflow.md",
+        "justfile",
+        "rust/justfile"
+      ]
+    },
+    {
+      "title": "fix(kona,security): close three unauthenticated kona attack surfaces",
+      "prNumber": 21753,
+      "type": "bugfix",
+      "body": "Supersedes #21713 — carries @MattHintz's three security commits (authorship preserved) and completes/corrects them in two follow-up commits.\n\nThree unauthenticated attack surfaces in the kona (Rust) consensus client:\n\n- **B1 — truncated spa",
+      "files": [
+        "op-devstack/sysgo/mixed_runtime.go",
+        "rust/kona/bin/node/src/flags/rpc.rs",
+        "rust/kona/crates/node/gossip/src/config.rs",
+        "rust/kona/crates/node/gossip/src/handler.rs",
+        "rust/kona/crates/node/rpc/src/config.rs",
+        "rust/kona/crates/node/service/src/service/node.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/bits.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/errors.rs"
+      ]
+    },
+    {
+      "title": "test(op-e2e): prepare production super-root proposal source",
+      "prNumber": 21742,
+      "type": "tests",
+      "body": "Extracts the pre-activation portions of ethereum-optimism/optimism#21738 onto `develop`.\n\nThe action proposer now accepts a production `ProposalSource`, while the existing test explicitly keeps using `RollupProposalSource` and the legacy re",
+      "files": [
+        "op-e2e/actions/helpers/l2_proposer.go",
+        "op-e2e/actions/helpers/l2_verifier.go",
+        "op-e2e/actions/proposer/l2_proposer_test.go",
+        "op-proposer/proposer/driver.go",
+        "op-proposer/proposer/driver_test.go"
+      ]
+    },
+    {
       "title": "fix(op-proposer): scan common game metadata",
       "prNumber": 21741,
       "type": "bugfix",
@@ -1071,6 +1366,18 @@
       "files": [
         "op-proposer/contracts/disputegamefactory.go",
         "op-proposer/contracts/disputegamefactory_test.go"
+      ]
+    },
+    {
+      "title": "test(contracts): select active dispute game fixtures",
+      "prNumber": 21740,
+      "type": "bugfix",
+      "body": "Makes contract test fixtures derive permissioned and permissionless game configuration from registered implementations, preferring super games when active while ignoring stale args for disabled implementations. Fork-oriented StandardValidat",
+      "files": [
+        "packages/contracts-bedrock/test/L1/OPContractsManagerStandardValidator.t.sol",
+        "packages/contracts-bedrock/test/setup/DisputeGames.sol",
+        "packages/contracts-bedrock/test/setup/DisputeGames.t.sol",
+        ".circleci/continue/main.yml"
       ]
     },
     {
@@ -1082,48 +1389,420 @@
         "op-challenger/game/fault/register_task.go",
         "op-challenger/game/fault/register_task_test.go"
       ]
+    },
+    {
+      "title": "test(op-e2e): use production super-root proposal source",
+      "prNumber": 21738,
+      "type": "tests",
+      "body": "Stacked on ethereum-optimism/optimism#21689.\n\nUpdates the action proposer test to use op-node's production single-chain `superroot_atTimestamp` API and op-proposer's `SuperNodeProposalSource` instead of constructing super-root proposals in ",
+      "files": [
+        "op-e2e/actions/helpers/l2_proposer.go",
+        "op-e2e/actions/helpers/l2_verifier.go",
+        "op-e2e/actions/proposer/l2_proposer_test.go",
+        "op-e2e/system/proofs/proposer_fp_test.go",
+        "op-proposer/proposer/driver.go"
+      ]
+    },
+    {
+      "title": "docs: add snapshot restore how-to for node operators",
+      "prNumber": 21819,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n> **Scoped down per review:** the op-acceptor and bridged-USDC pages are descoped per revi",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/guides/management/restore-from-snapshot.mdx",
+        "docs/public-docs/op-mainnet/network-information/snapshots.mdx",
+        "docs/public-docs/op-stack/features/bridged-usdc-standard.mdx"
+      ]
+    },
+    {
+      "title": "docs: split app-developer standard-bridge and integrating-wallets pages by mode",
+      "prNumber": 21818,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What\n\n**Before:** two app-developer pages each made readers switch modes mid-page. *Usi",
+      "files": [
+        "docs/public-docs/app-developers/guides/bridging/standard-bridge.mdx",
+        "docs/public-docs/app-developers/guides/bridging/verify-bridged-tokens.mdx",
+        "docs/public-docs/app-developers/guides/configuring-actions.mdx",
+        "docs/public-docs/app-developers/guides/connect-wallet-to-actions.mdx",
+        "docs/public-docs/app-developers/reference/actions/integrating-wallets.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: split governance FAQ into reference pages and add identity explanation",
+      "prNumber": 21817,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What changed\n\n**Before:** the governance FAQ (`governance/gov-faq.mdx`) was a 47 KB acc",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/governance/attestation-schemas.mdx",
+        "docs/public-docs/governance/capital-allocation.mdx",
+        "docs/public-docs/governance/eas-attestations.mdx",
+        "docs/public-docs/governance/evolution-and-experimentation.mdx",
+        "docs/public-docs/governance/gov-faq.mdx",
+        "docs/public-docs/governance/protocol-upgrades.mdx",
+        "docs/public-docs/governance/resources.mdx"
+      ]
+    },
+    {
+      "title": "docs: split mode-mixed rust/kona pages into how-to, reference, and explanation pages",
+      "prNumber": 21816,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## Before / After\n\n**Before:** four kona pages each tried to serve two readers at once. An",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/rust/kona/node/configuration.mdx",
+        "docs/public-docs/rust/kona/node/design/sequencer.mdx",
+        "docs/public-docs/rust/kona/node/install/overview.mdx",
+        "docs/public-docs/rust/kona/node/install/source.mdx",
+        "docs/public-docs/rust/kona/node/monitoring.mdx",
+        "docs/public-docs/rust/kona/node/run/binary.mdx",
+        "docs/public-docs/rust/kona/node/run/docker.mdx",
+        "docs/public-docs/rust/kona/node/run/mechanics.mdx",
+        "docs/public-docs/rust/kona/node/run/overview.mdx",
+        "docs/public-docs/rust/kona/node/run/rpc-trust.mdx",
+        "docs/public-docs/rust/kona/node/run/sequencer.mdx",
+        "docs/public-docs/rust/kona/sdk/examples/frames-to-batch.mdx",
+        "docs/public-docs/rust/kona/sdk/proof/custom-backend.mdx",
+        "docs/public-docs/rust/kona/sdk/proof/fpvm-backend.mdx",
+        "docs/public-docs/rust/kona/sdk/proof/stf.mdx",
+        "docs/public-docs/rust/kona/sdk/protocol/derive/providers.mdx",
+        "docs/public-docs/rust/op-alloy/intro.mdx"
+      ]
+    },
+    {
+      "title": "docs: split node-operator supernode, legacy-geth, and regenesis-history pages by mode",
+      "prNumber": 21815,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What a reader sees\n\n**Before:** three node-operators pages each made readers wade throu",
+      "files": [
+        "docs/public-docs/app-developers/tools/block-explorers.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/guides/configuration/legacy-geth.mdx",
+        "docs/public-docs/node-operators/guides/configuration/supernode.mdx",
+        "docs/public-docs/node-operators/overview.mdx",
+        "docs/public-docs/node-operators/reference/legacy-geth-config.mdx",
+        "docs/public-docs/node-operators/reference/op-supernode-config.mdx",
+        "docs/public-docs/notices/interop-prep.mdx",
+        "docs/public-docs/op-mainnet/pre-bedrock-history/lost-pre-regenesis-data.mdx",
+        "docs/public-docs/op-mainnet/pre-bedrock-history/regenesis-history.mdx",
+        "docs/public-docs/op-stack/interop/supernode.mdx"
+      ]
+    },
+    {
+      "title": "docs: split flashblocks docs into explanation, app how-to, and operator how-to",
+      "prNumber": 21814,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What changed\n\n**Before:** a reader landing on the Flashblocks feature page got one long",
+      "files": [
+        "docs/public-docs/app-developers/guides/transactions/flashblocks-and-gas-usage.mdx",
+        "docs/public-docs/app-developers/guides/transactions/integrating-flashblocks.mdx",
+        "docs/public-docs/chain-operators/guides/features/flashblocks-guide.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/features/flashblocks.mdx",
+        "docs/public-docs/op-stack/transactions/flashblocks.mdx"
+      ]
+    },
+    {
+      "title": "docs: split batcher configuration into a how-to guide and a reference catalogue",
+      "prNumber": 21813,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What changed\n\n**Before:** a chain operator opening \"Batcher configuration\" got one 900-",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/batcher.mdx",
+        "docs/public-docs/chain-operators/reference/batcher-configuration.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-batcher-setup.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: split op-deployer releases page into reference and contributor how-to",
+      "prNumber": 21812,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What changed\n\n**Before:** a reader opening the OP Deployer **Releases** reference page ",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/releases.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/release-workflows.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "fix(contracts-bedrock): make batch upgrade test SUPER_ROOT_GAMES_MIGRATION-aware",
+      "prNumber": 21803,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested via [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1784133058651019)_\n\n**Before:** the `SUPER_ROOT_GAMES_MIGRATION` variants of `contracts-bedrock-tests` (and `contracts-bedrock-t",
+      "files": [
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol"
+      ]
+    },
+    {
+      "title": "docs: move op-deployer custom-deployments guide from reference to usage",
+      "prNumber": 21802,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\n## Before / After\n\n**Before:** the OP Deployer **Custom Deployments** page lived in the si",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "deps: bump andybalholm/brotli to v1.2.2",
+      "prNumber": 21799,
+      "type": "other",
+      "body": "## Summary\n\nBumps `github.com/andybalholm/brotli` v1.1.0 → v1.2.2 (the brotli decoder op-node derivation uses in `BatchReader`, `rollup/derive/channel.go:203`).\n\nandybalholm **v1.2.0** fixed its handling of truncated streams: `Reader.Read` ",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "docs: split op-conductor into explanation, setup guide, and reference",
+      "prNumber": 21796,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\n## Before / After\n\n**Before:** the OP Conductor page (`chain-operators/tools/op-conductor.",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-conductor.mdx",
+        "docs/public-docs/chain-operators/tools/op-conductor/reference.mdx",
+        "docs/public-docs/chain-operators/tools/op-conductor/setup.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "test(op-devstack): funder waits for balance >= target, not exact",
+      "prNumber": 21790,
+      "type": "tests",
+      "body": "## Problem\n\n`TestPreNoInbox` (job `memory-all-opn-op-reth`) failed with:\n\n```\nop-acceptance-tests/tests/interop/upgrade/pre_test.go:88\n  → op-devstack/dsl/funder.go (FundAtLeast → WaitForBalance)\n  → op-devstack/dsl/eoa.go\nError: Condition ",
+      "files": [
+        "op-acceptance-tests/tests/base/deposit/deposit_test.go",
+        "op-acceptance-tests/tests/base/faucet_test.go",
+        "op-devstack/dsl/eoa.go",
+        "op-devstack/dsl/funder.go",
+        "op-devstack/dsl/operator_fee.go"
+      ]
+    },
+    {
+      "title": "op-node/op-service: swap ChainOpConfig to op-core/params + HardforkConfig interface for BlockAsPayload",
+      "prNumber": 21789,
+      "type": "other",
+      "body": "§5 of `docs/ai/opgeth-decoupling.md`: remove op-service's direct dependency on op-geth's `params.ChainConfig` for OP-hardfork detection, and move `ChainOpConfig` off op-geth's `params.OptimismConfig`.\n\n- `rollup.Config.ChainOpConfig`: `*par",
+      "files": [
+        "op-chain-ops/genesis/config.go",
+        "op-e2e/e2eutils/setup.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-node/chaincfg/chains_test.go",
+        "op-node/rollup/attributes/engine_consolidate_test.go",
+        "op-node/rollup/types.go",
+        "op-node/rollup/types_test.go",
+        "op-node/superchain/superchain.go",
+        "op-service/eth/types.go"
+      ]
+    },
+    {
+      "title": "ci: pin proven APKO factory workflows",
+      "prNumber": 21788,
+      "type": "other",
+      "body": "## Summary\n\nPin the APKO workflow to the previously validated factory workflow set with Cargo profile selection and isolated APK artifacts.\n\n## Validation\n\n- `mise exec -- actionlint .github/workflows/build-images.apko.yaml`\n",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    },
+    {
+      "title": "rust: address reth bump review findings",
+      "prNumber": 21785,
+      "type": "other",
+      "body": "Companion fix for #21766.\n\n## Summary\n\n- add a regression test proving Isthmus withdrawals-root validation uses the engine-supplied parent-state overlay rather than canonical storage\n- remove unrelated TDX SDK lock drift by pinning the pre-",
+      "files": [
+        "docs/ai/reth-update-review.md",
+        "rust/Cargo.lock",
+        "rust/UPDATING-RETH.md",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/crates/tdx-quote-provider/Cargo.toml",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/engine.rs"
+      ]
+    },
+    {
+      "title": "docs: Diátaxis relabel sweep — declare quadrants on 17 mislabeled pages",
+      "prNumber": 21784,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\nBatch of 17 independently verified Diátaxis mislabel → relabel findings, applied as one sw",
+      "files": [
+        "docs/public-docs/app-developers/tutorials/interoperability/contract-calls.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/event-contests.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/event-reads.mdx",
+        "docs/public-docs/chain-operators/guides/configuration/batcher.mdx",
+        "docs/public-docs/chain-operators/guides/configuration/proposer.mdx",
+        "docs/public-docs/chain-operators/guides/management/key-management.mdx",
+        "docs/public-docs/chain-operators/reference/opcm.mdx",
+        "docs/public-docs/chain-operators/reference/standard-configuration.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/architecture/engine.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/architecture/pipeline.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/upgrade.mdx",
+        "docs/public-docs/chain-operators/tutorials/l1-contract-upgrades/superchain-ops-guide.mdx",
+        "docs/public-docs/chain-operators/tutorials/l1-contract-upgrades/upgrade-op-contracts-1-3-1-8.mdx",
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "docs/public-docs/chain-operators/tutorials/migrating-permissionless.mdx",
+        "docs/public-docs/chain-operators/tutorials/upgrade-chain-to-super-roots.mdx",
+        "docs/public-docs/node-operators/reference/features/snap-sync.mdx"
+      ]
+    },
+    {
+      "title": "docs: relabel three app-developer pages as explanations",
+      "prNumber": 21783,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\nBundles three low-lift Diátaxis relabels in the app-developers section — three pages that ",
+      "files": [
+        "docs/public-docs/app-developers/guides/interoperability/message-passing.mdx",
+        "docs/public-docs/app-developers/guides/interoperability/reading-logs.mdx",
+        "docs/public-docs/app-developers/guides/transactions/flashblocks-and-gas-usage.mdx"
+      ]
+    },
+    {
+      "title": "docs: relabel L1/L2 messaging page as an explanation",
+      "prNumber": 21782,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\n## Before / After\n\n**Before:** the [Sending data between L1 and L2](https://docs.optimism.",
+      "files": [
+        "docs/public-docs/app-developers/guides/bridging/messaging.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: fix dead-end and chained legacy redirects",
+      "prNumber": 21781,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\nTracks ethereum-optimism/solutions#930\n\n## Before / After\n\n**Before:** a reader following ",
+      "files": [
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: retire the \"run an OP Stack node\" link-hub page, fold it into the node-operators overview",
+      "prNumber": 21777,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\nTracks ethereum-optimism/solutions#929\n\n## Before / After\n\n**Before:** the Node Operators ",
+      "files": [
+        "docs/public-docs/app-developers/reference/rpc-providers.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/overview.mdx",
+        "docs/public-docs/node-operators/reference/architecture/rollup-node.mdx",
+        "docs/public-docs/op-mainnet/network-information/connecting-to-op.mdx"
+      ]
+    },
+    {
+      "title": "Update issue number in TODO",
+      "prNumber": 21776,
+      "type": "other",
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\nUpdate TODO comment to point at correct issue: https://github.com/ethereum-optimism/optimism/issues/21773\r\n",
+      "files": [
+        "rust/kona/sp1/crates/host/src/fetcher.rs"
+      ]
+    },
+    {
+      "title": "test(op-acceptance-tests): remove redundant Cannon-Kona smoke test",
+      "prNumber": 21774,
+      "type": "tests",
+      "body": "Removes the Cannon-Kona smoke test that only checked registered game arguments and implementation presence.\n\nThe surviving acceptance tests create and actively dispute Cannon-Kona games and exercise permissioned/Cannon-Kona withdrawal lifec",
+      "files": [
+        "op-acceptance-tests/tests/proofs/cannon_kona/smoke_test.go"
+      ]
+    },
+    {
+      "title": "test(op-devstack): support explicit super game routing",
+      "prNumber": 21772,
+      "type": "tests",
+      "body": "Prepares the devstack runtime to exercise super dispute games before the default-on cutover in ethereum-optimism/optimism#21689.\n\nExisting explicit configuration now routes game types 5 and 9 through the super proposal source, configures ty",
+      "files": [
+        "op-acceptance-tests/tests/interop/super-at-genesis/super_dispute_game_at_initial_deployment_test.go",
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/proofs/fault_dispute_game.go",
+        "op-devstack/shared/challenger/challenger.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "op-devstack/sysgo/singlechain_runtime.go"
+      ]
+    },
+    {
+      "title": "test(contracts): validate ZK after super root migration",
+      "prNumber": 21771,
+      "type": "tests",
+      "body": "Reworks the ZK StandardValidator fixture to model post-super-root-migration state: legacy games are disabled while super permissioned, super permissionless, and ZK games are enabled. Updates the contracts feature matrix and required-check d",
+      "files": [
+        ".circleci/continue/main.yml",
+        "packages/contracts-bedrock/test/L1/OPContractsManagerStandardValidator.t.sol"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 677.4345838805664,
-      "prScore": 537.9785838805664,
-      "issueScore": 14,
-      "reviewScore": 123.5,
-      "commentScore": 1.956,
+      "totalScore": 1014.6102495875074,
+      "prScore": 814.9162495875073,
+      "issueScore": 16.3,
+      "reviewScore": 181,
+      "commentScore": 2.3939999999999997,
       "summary": "sebastianst: Focused on hardening the superchain registry and streamlining configuration loading, notably by implementing stricter validation for registry configs in ethereum-optimism/optimism #21648 and centralizing rollup-config logic in #21650. They demonstrated high technical engagement through 20 pull request reviews and addressed architectural debt by closing issues related to op-reth and kona configuration unification (#20420). Their work spanned significant documentation updates and code refactors, with a primary focus on testing and bugfixes to improve the stability of the op-node and superchain infrastructure."
     },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 565.4401098966532,
-      "prScore": 444.8861098966532,
+      "totalScore": 817.6618110153581,
+      "prScore": 669.169811015358,
       "issueScore": 4.1,
-      "reviewScore": 114,
-      "commentScore": 2.4539999999999997,
+      "reviewScore": 141.5,
+      "commentScore": 2.892,
       "summary": "ajsutton: Focused on strengthening the robustness of the Optimism ecosystem by managing complex state transitions and refining development features, notably handling disabled Cannon fork states and post-migration live setups in the bedrock contracts via PR #21621 and PR #21643. They played a key role in maintaining system reliability by identifying and documenting several flaky tests in the op-node and interop components, such as issues #21635 and #20198, while also streamlining the CI pipeline and repository documentation. With 11 reviews and 46 commits, their work demonstrated a high level of technical oversight across 220 modified files. Their primary focus this month centered on test infrastructure and feature development, specifically regarding the migration to super root games and the integration of Kona."
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/81847?u=577eaff0520b33aadc0f9fb6d11f5cdb2dd9486e&v=4",
+      "totalScore": 562.8050019928139,
+      "prScore": 544.3670019928139,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0.43799999999999994,
+      "summary": "claude: Focused on operational maintenance and registry synchronization within the superchain-ops repository, ensuring the integrity of task execution and system checks. They successfully resolved a validation issue by updating the superchain-registry submodule in PR #1496 and finalized task statuses in PR #1494. Their work this month primarily centered on bug fixes and testing infrastructure, with a specific emphasis on documentation and registry consistency."
     },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 442.18637635273876,
-      "prScore": 348.94637635273875,
+      "totalScore": 510.0427941670541,
+      "prScore": 373.86479416705413,
       "issueScore": 4,
-      "reviewScore": 88.5,
-      "commentScore": 0.74,
+      "reviewScore": 131,
+      "commentScore": 1.178,
       "summary": "joshklop: Focused on enhancing system stability and deployment configurations, notably improving the reliability of the sequencer by ensuring stale actions are ignored after a stop command in PR #21690. They executed a significant refactor of Rust versioning across the codebase in PR #21645 and streamlined the build process by optimizing Docker contexts. Their work also involved critical updates to the op-deployer and devstack, alongside identifying and closing issues related to fork terminology and L2 configurations. Overall, their contributions centered on infrastructure maintenance, bug fixes, and testing, supported by a high volume of code changes across 180 files."
     },
     {
       "username": "mds1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 431.04957012274986,
+      "totalScore": 440.54957012274986,
       "prScore": 291.6495701227498,
       "issueScore": 0,
-      "reviewScore": 139,
+      "reviewScore": 148.5,
       "commentScore": 0.4,
       "summary": "mds1: Focused on protocol maintenance and technical debt reduction, specifically leading the deprecation and removal of legacy SystemConfig getters across the Optimism ecosystem as seen in PRs #21641, #1798, and #1491. They demonstrated significant cross-functional impact by ensuring downstream compatibility in the superchain-registry and op-analytics repositories, while also strengthening post-fork security through new L2 predeploy verification (#21697). Beyond their 20 commits, they were a prolific contributor to the codebase's quality, providing 23 thorough peer reviews. Their primary focus this month centered on smart contract refactoring, configuration updates, and enhancing the robustness of the testing suite."
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 325.32374777268245,
+      "prScore": 137.42374777268242,
+      "issueScore": 6,
+      "reviewScore": 181.5,
+      "commentScore": 0.4,
+      "summary": "Inphi: Focused on quality assurance and code health this month, contributing to the development process through peer review. They provided a formal approval on a pull request to ensure code standards were met before integration. Their primary focus was on supporting the team's output through technical oversight and review."
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 274.94610458296245,
+      "prScore": 132.74610458296243,
+      "issueScore": 0,
+      "reviewScore": 142,
+      "commentScore": 0.2,
+      "summary": "sbvegan: Focused on enhancing developer onboarding by initiating a new \"getting-started\" tutorial for contract deployment on OP Mainnet. This work, currently tracked in open PR #21607 within the ethereum-optimism/optimism repository, involved substantial documentation and configuration updates totaling over 260 lines of new content. Their primary focus this month was split between technical documentation and foundational project configuration."
     },
     {
       "username": "jelias2",
@@ -1136,82 +1815,52 @@
       "summary": "jelias2: Focused on critical infrastructure maintenance and network configuration within the Superchain ecosystem, notably managing the lifecycle of devnets by adding the sepolia-devnet-2 configuration (#1283) and decommissioning obsolete rehearsal networks (#1285). They also initiated work to improve network observability by authoring several open pull requests aimed at exposing hardfork activation metrics within the op-node and op-reth components (#21704, #21701). Across 17 commits and over 2,200 lines of code changes, their efforts primarily targeted configuration management and system monitoring. Their work this month centered on registry artifacts, network stability, and enhancing diagnostic data for the Optimism stack."
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 235.4339222694016,
-      "prScore": 113.7339222694016,
-      "issueScore": 4,
-      "reviewScore": 117.5,
-      "commentScore": 0.2,
-      "summary": "Inphi: Focused on quality assurance and code health this month, contributing to the development process through peer review. They provided a formal approval on a pull request to ensure code standards were met before integration. Their primary focus was on supporting the team's output through technical oversight and review."
-    },
-    {
-      "username": "claude",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/81847?u=577eaff0520b33aadc0f9fb6d11f5cdb2dd9486e&v=4",
-      "totalScore": 233.81041425281953,
-      "prScore": 233.81041425281953,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": "claude: Focused on operational maintenance and registry synchronization within the superchain-ops repository, ensuring the integrity of task execution and system checks. They successfully resolved a validation issue by updating the superchain-registry submodule in PR #1496 and finalized task statuses in PR #1494. Their work this month primarily centered on bug fixes and testing infrastructure, with a specific emphasis on documentation and registry consistency."
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 191.7426160585639,
-      "prScore": 91.10261605856387,
-      "issueScore": 2.1,
-      "reviewScore": 98,
-      "commentScore": 0.54,
-      "summary": "geoknee: Focused on improving CI efficiency and documentation clarity, notably retiring legacy Go fuzz CI jobs in ethereum-optimism/optimism #21639 and resolving a flaky test in op-service/eth via PR #21647. They demonstrated strong technical oversight by providing 13 code reviews and identifying versioning inconsistencies in metrics through issue #20832. Their work also included critical documentation updates for the Ecotone specs (#923) and gas configuration checks for network upgrades. Overall, their contributions centered on test stability, documentation, and configuration management."
-    },
-    {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 182.45051413368296,
+      "totalScore": 261.45051413368293,
       "prScore": 48.61051413368294,
-      "issueScore": 10.1,
-      "reviewScore": 123,
+      "issueScore": 12.1,
+      "reviewScore": 200,
       "commentScore": 0.74,
       "summary": "wwared: Focused on enhancing the reliability and performance of the Kona stack, notably resolving a critical gas consumption issue in the FPVM provider via PR #21634. They demonstrated strong technical leadership through 16 code reviews and by initiating key tracking for ZK proving performance and guest ELF reproducibility in CI (#21651, #21661). Their contributions also included implementing optimizations for the Kona-SP1 ZKVM and improving guest ELF build processes (#21670, #21673). Overall, their work centered on bug fixes and infrastructure enhancements for ZK-related components and CI stability."
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 162.24610458296243,
-      "prScore": 132.74610458296243,
-      "issueScore": 0,
-      "reviewScore": 29.5,
-      "commentScore": 0,
-      "summary": "sbvegan: Focused on enhancing developer onboarding by initiating a new \"getting-started\" tutorial for contract deployment on OP Mainnet. This work, currently tracked in open PR #21607 within the ethereum-optimism/optimism repository, involved substantial documentation and configuration updates totaling over 260 lines of new content. Their primary focus this month was split between technical documentation and foundational project configuration."
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 229.2426160585639,
+      "prScore": 91.10261605856387,
+      "issueScore": 2.1,
+      "reviewScore": 135.5,
+      "commentScore": 0.54,
+      "summary": "geoknee: Focused on improving CI efficiency and documentation clarity, notably retiring legacy Go fuzz CI jobs in ethereum-optimism/optimism #21639 and resolving a flaky test in op-service/eth via PR #21647. They demonstrated strong technical oversight by providing 13 code reviews and identifying versioning inconsistencies in metrics through issue #20832. Their work also included critical documentation updates for the Ecotone specs (#923) and gas configuration checks for network upgrades. Overall, their contributions centered on test stability, documentation, and configuration management."
     },
     {
       "username": "lumoswiz",
       "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
-      "totalScore": 149.57101577338995,
+      "totalScore": 176.57101577338995,
       "prScore": 107.07101577338995,
       "issueScore": 2,
-      "reviewScore": 40.5,
+      "reviewScore": 67.5,
       "commentScore": 0,
       "summary": "lumoswiz: Focused on advancing the deployment capabilities of the `op-deployer` within the optimism repository, primarily through the development of features to commit prestates and source permissionless deploy inputs (PR #21611, PR #21610). Their work involved significant code changes across 41 files, totaling over 1,300 lines of new code and tests, while also contributing to the codebase through technical reviews. This month’s efforts demonstrate a strong emphasis on feature implementation and system reliability, with a balanced focus on bug fixes and architectural refactoring. Their primary impact centered on enhancing the deployment infrastructure and ensuring robust test coverage for new functionality."
     },
     {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 133.14209348234445,
+      "totalScore": 173.64209348234445,
       "prScore": 34.442093482344454,
       "issueScore": 4,
-      "reviewScore": 94.5,
+      "reviewScore": 135,
       "commentScore": 0.2,
       "summary": "0xiamflux: Focused on development lifecycle improvements and codebase maintenance, notably initiating the removal of development features within the L2CM via issue ethereum-optimism/optimism#21616. While no pull requests were merged this month, they remained active in the codebase with 12 commits modifying 57 files (+759/-306 lines) and provided technical feedback through 6 pull request reviews. Their work demonstrated a balanced commitment to both feature development and bugfix tasks across various file types."
     },
     {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 123.0321030179808,
+      "totalScore": 143.5321030179808,
       "prScore": 107.6921030179808,
       "issueScore": 4,
-      "reviewScore": 11,
+      "reviewScore": 31.5,
       "commentScore": 0.33999999999999997,
       "summary": "digorithm: Focused on streamlining the Kona codebase within the optimism repository, primarily through architectural refactors aimed at deduplication and code hoisting. They successfully merged two significant PRs, including #21656 which deduplicated the target advancement logic and #21696 which hoisted safe head hash fetching into the proof layer. These efforts, totaling over 600 lines of changes across 27 files, were supported by their proactive identification of technical debt in issues #21657 and #21658. Their work this month centered on improving the maintainability and structural integrity of the Kona driver and SP1 components through targeted refactoring and bugfixes."
     },
@@ -1238,12 +1887,22 @@
     {
       "username": "einar-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 97.47165901940406,
+      "totalScore": 107.17165901940406,
       "prScore": 25.971659019404058,
       "issueScore": 2,
-      "reviewScore": 69.5,
-      "commentScore": 0,
+      "reviewScore": 79,
+      "commentScore": 0.2,
       "summary": "einar-oplabs: Focused primarily on large-scale architectural improvements, executing a substantial refactor that involved modifying 250 files and over 11,000 lines of code across 10 commits. While they did not merge any pull requests this month, they remained active in the peer review process by providing five reviews, including one approval and four detailed comments. Their work demonstrates a heavy emphasis on codebase maintenance and feature development, with a primary focus on refactoring and structural enhancements."
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 106.24685393748624,
+      "prScore": 96.24685393748624,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "karlfloersch",
@@ -1256,6 +1915,16 @@
       "summary": "karlfloersch: Focused on enhancing security protocols within the optimism repository by initiating a fix to reject deposit transactions in the CrossL2Inbox via PR #21693. This work involved modifying seven files with a focus on testing and configuration to ensure the integrity of cross-layer messaging. Their activity this month was primarily centered on contract safety and system configuration."
     },
     {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 82.42794534817614,
+      "prScore": 41.92794534817614,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0,
+      "summary": "op-will: Focused on enhancing modularity within the op-reth codebase, notably by extracting the standard pool builder for improved reuse in PR #21688. Beyond this feature work, they demonstrated a strong commitment to code quality by providing nine detailed reviews on peer contributions. Their technical output involved modifying 17 files with over 1,100 lines of code, reflecting a balanced focus on feature development and bug fixes. Overall, their efforts centered on architectural refinement and supporting the broader team through consistent technical feedback."
+    },
+    {
       "username": "bitwiseguy",
       "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
       "totalScore": 81.86644374187,
@@ -1266,14 +1935,44 @@
       "summary": "bitwiseguy: Focused on enhancing the robustness of the superchain-registry build pipeline by implementing a mechanism to prune removed superchains during codegen (#1286). This contribution involved modifying 17 files across code, tests, and configuration to ensure registry integrity, while also providing high-quality feedback through four pull request approvals. Their work demonstrates a strong commitment to CI/CD reliability and codebase maintenance within the Ethereum Optimism ecosystem."
     },
     {
-      "username": "op-will",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
-      "totalScore": 69.47722457733622,
-      "prScore": 28.97722457733622,
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 81.8508111954262,
+      "prScore": 68.3508111954262,
       "issueScore": 0,
-      "reviewScore": 40.5,
+      "reviewScore": 13.5,
       "commentScore": 0,
-      "summary": "op-will: Focused on enhancing modularity within the op-reth codebase, notably by extracting the standard pool builder for improved reuse in PR #21688. Beyond this feature work, they demonstrated a strong commitment to code quality by providing nine detailed reviews on peer contributions. Their technical output involved modifying 17 files with over 1,100 lines of code, reflecting a balanced focus on feature development and bug fixes. Overall, their efforts centered on architectural refinement and supporting the broader team through consistent technical feedback."
+      "summary": "falcorocks: Maintained a steady presence this month by contributing targeted code updates across the codebase. Their work involved a single commit that modified one file with 9 additions and 2 deletions. This activity was categorized as general project support, reflecting a focus on miscellaneous maintenance tasks."
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 81.01710085704198,
+      "prScore": 70.61710085704198,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 80.51048089341357,
+      "prScore": 22.99248089341357,
+      "issueScore": 2,
+      "reviewScore": 54,
+      "commentScore": 1.5179999999999998,
+      "summary": "0xarktos: Focused on quality assurance and stability for the Super ZK game, initiating a comprehensive QA and fix cycle within the ethereum-optimism/optimism repository (#21603). They managed a substantial codebase update involving over 4,600 lines of code across 200 files to address identified issues, currently tracked in an open PR for Super ZK game fixes (#21615). Their work this month demonstrated a high-effort commitment to system reliability, with a primary technical focus on testing infrastructure, configuration, and bug fixes."
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 78.95917040106055,
+      "prScore": 45.62117040106055,
+      "issueScore": 28,
+      "reviewScore": 4.5,
+      "commentScore": 0.838,
+      "summary": "pauldowman: Focused on advancing the Super Roots and ZK initiatives within the ethereum-optimism/optimism repository, notably driving the architectural scoping for ZK guest program testing and full interop support. They identified and triaged critical technical debt and functional requirements across 13 new issues, including necessary refinements for the SuperPermissionedDisputeGame (#21678, #21680) and end-to-end withdrawal coverage (#21712). Their technical contributions included a PR to improve op-challenger resilience by tolerating missing prestates (#21681) and significant updates to 22 files to support super-root migration runbooks. Overall, their work centered on bugfixes and refactoring to ensure the stability of permissioned dispute games and the broader superchain registry."
     },
     {
       "username": "opsuperchain",
@@ -1296,34 +1995,14 @@
       "summary": "asdv23: Focused on enhancing transaction pool validation logic within the ethereum-optimism/optimism repository. They identified a discrepancy where the Isthmus operator fee was omitted during balance checks (#21608) and subsequently authored a feature PR to ensure these fees are properly reserved in the op-reth txpool (#21609). This work involved over 100 lines of code changes to a single file, demonstrating a targeted effort toward improving the accuracy of transaction processing and fee accounting."
     },
     {
-      "username": "pauldowman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 50.1308642567265,
-      "prScore": 22.9928642567265,
-      "issueScore": 22,
-      "reviewScore": 4.5,
-      "commentScore": 0.6379999999999999,
-      "summary": "pauldowman: Focused on advancing the Super Roots and ZK initiatives within the ethereum-optimism/optimism repository, notably driving the architectural scoping for ZK guest program testing and full interop support. They identified and triaged critical technical debt and functional requirements across 13 new issues, including necessary refinements for the SuperPermissionedDisputeGame (#21678, #21680) and end-to-end withdrawal coverage (#21712). Their technical contributions included a PR to improve op-challenger resilience by tolerating missing prestates (#21681) and significant updates to 22 files to support super-root migration runbooks. Overall, their work centered on bugfixes and refactoring to ensure the stability of permissioned dispute games and the broader superchain registry."
-    },
-    {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 48.81048089341357,
-      "prScore": 22.99248089341357,
-      "issueScore": 2,
-      "reviewScore": 22.5,
-      "commentScore": 1.3179999999999998,
-      "summary": "0xarktos: Focused on quality assurance and stability for the Super ZK game, initiating a comprehensive QA and fix cycle within the ethereum-optimism/optimism repository (#21603). They managed a substantial codebase update involving over 4,600 lines of code across 200 files to address identified issues, currently tracked in an open PR for Super ZK game fixes (#21615). Their work this month demonstrated a high-effort commitment to system reliability, with a primary technical focus on testing infrastructure, configuration, and bug fixes."
-    },
-    {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 46.130402834264856,
-      "prScore": 32.630402834264856,
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 59.376000000000005,
+      "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 13.5,
-      "commentScore": 0,
-      "summary": "falcorocks: Maintained a steady presence this month by contributing targeted code updates across the codebase. Their work involved a single commit that modified one file with 9 additions and 2 deletions. This activity was categorized as general project support, reflecting a focus on miscellaneous maintenance tasks."
+      "reviewScore": 58.5,
+      "commentScore": 0.8759999999999999,
+      "summary": null
     },
     {
       "username": "pcw109550",
@@ -1356,6 +2035,26 @@
       "summary": null
     },
     {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 33.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 33.5,
+      "commentScore": 0,
+      "summary": "0xOneTony: Focused on architectural refinements for the Optimism ecosystem, specifically addressing technical debt and structural dependencies. They drove the resolution of two key issues, including breaking a cyclic dependency in the technical specs (#912) and removing permissioned-only guards and dead anchor placeholders in the main repository (#20913). Additionally, they provided technical oversight by completing 4 pull request reviews, including 2 approvals, to support ongoing development. Their primary focus this month was on system specifications and streamlining codebase permissions."
+    },
+    {
+      "username": "its-everdred",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1020682?u=ef69e13586ebc33960d4aa1bf7ef3938bebd59a3&v=4",
+      "totalScore": 28.333665838515966,
+      "prScore": 23.133665838515967,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "danielllek",
       "avatarUrl": "https://avatars.githubusercontent.com/u/4323252?u=762a4b2f35245b3510cd1226621dead500969ee5&v=4",
       "totalScore": 26.830656882088654,
@@ -1376,6 +2075,16 @@
       "summary": "copilot-swe-agent: Focused on enhancing security protocols within the ethereum-optimism/optimism repository by initiating a pull request to reject deposits in the CrossL2Inbox (#21686). This work represents a targeted effort toward refining contract logic and cross-layer communication safety. Their primary focus this month was centered on the contracts-bedrock area."
     },
     {
+      "username": "lucasmt",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36549752?v=4",
+      "totalScore": 25.508641727603273,
+      "prScore": 25.508641727603273,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
       "totalScore": 25.248371757896166,
@@ -1384,26 +2093,6 @@
       "reviewScore": 0,
       "commentScore": 0.43799999999999994,
       "summary": "mintlify: Focused on maintaining operational documentation by updating the release records for op-node v1.19.2 in ethereum-optimism/optimism (#21631). While their code footprint was minimal, they remained active in the development process by providing 10 pull request comments to support ongoing work. Their primary focus this month was on release management and collaborative technical feedback within the Optimism repository."
-    },
-    {
-      "username": "0xOneTony",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 24,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 24,
-      "commentScore": 0,
-      "summary": "0xOneTony: Focused on architectural refinements for the Optimism ecosystem, specifically addressing technical debt and structural dependencies. They drove the resolution of two key issues, including breaking a cyclic dependency in the technical specs (#912) and removing permissioned-only guards and dead anchor placeholders in the main repository (#20913). Additionally, they provided technical oversight by completing 4 pull request reviews, including 2 approvals, to support ongoing development. Their primary focus this month was on system specifications and streamlining codebase permissions."
-    },
-    {
-      "username": "its-everdred",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1020682?u=ef69e13586ebc33960d4aa1bf7ef3938bebd59a3&v=4",
-      "totalScore": 23.333665838515966,
-      "prScore": 23.133665838515967,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
     },
     {
       "username": "teddyknox",
@@ -1456,6 +2145,16 @@
       "summary": "Ethnical: Focused on quality assurance and peer collaboration this month, contributing one pull request approval. This review activity supported the team's development workflow by ensuring code standards were met before integration. Their primary focus for the period was centered on code review and maintainability."
     },
     {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 19.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0,
+      "summary": "donoso-eth: Focused on supporting team velocity through code reviews, providing two approvals and one comment across three pull requests. Their technical contribution included a single commit involving minor feature work that modified two files. Overall, their activity this month centered on feature development and maintaining code quality through peer reviews."
+    },
+    {
       "username": "PrazwalR",
       "avatarUrl": "https://avatars.githubusercontent.com/u/187723253?u=91006b3d493f1c3f41825a47d8ca75059e669be6&v=4",
       "totalScore": 19.067554308427294,
@@ -1476,16 +2175,6 @@
       "summary": null
     },
     {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 18.438,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 18,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
       "username": "milando12",
       "avatarUrl": "https://avatars.githubusercontent.com/u/92939392?u=086600e5fe4b5f7ac1655836823f3f28b25a8a9a&v=4",
       "totalScore": 15.063793079863194,
@@ -1494,6 +2183,16 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "milando12: Focused on identifying and resolving technical discrepancies within the Optimism execution layer, specifically targeting gas estimation and transaction type handling. They identified a bug where `eth_createAccessList` incorrectly reported gas usage (#21682) and subsequently submitted a fix to ensure legacy transaction types are correctly upgraded when setting access lists (#21683). This work, involving 37 lines of code changes, demonstrates a primary focus on bugfix work and the technical accuracy of the alloy-op-evm component."
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
     },
     {
       "username": "ZakAyesh",
@@ -1506,16 +2205,6 @@
       "summary": "ZakAyesh: This month, ZakAyesh focused on supporting the development workflow through peer code reviews. They provided three approvals on pull requests to help move contributions forward. Their primary impact was centered on quality assurance and maintaining momentum within the review cycle."
     },
     {
-      "username": "donoso-eth",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 14.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 14.5,
-      "commentScore": 0,
-      "summary": "donoso-eth: Focused on supporting team velocity through code reviews, providing two approvals and one comment across three pull requests. Their technical contribution included a single commit involving minor feature work that modified two files. Overall, their activity this month centered on feature development and maintaining code quality through peer reviews."
-    },
-    {
       "username": "anakette",
       "avatarUrl": "https://avatars.githubusercontent.com/u/251737?u=b4dd0d32765b1d15199863cc6dc660bec7bc4d56&v=4",
       "totalScore": 14,
@@ -1524,16 +2213,6 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "anakette: Focused on security hardening for the optimism repository by identifying and documenting vulnerabilities discovered during the Lumi Security Audit. They initiated four critical feedback tracks regarding security improvements for core components, including l2_el.go (#21606), lib.rs (#21604), mod.rs (#21613), and solutil.go (#21612). These contributions demonstrate a primary focus on cross-language security analysis and protocol integrity."
-    },
-    {
-      "username": "raffaele-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
-      "totalScore": 10,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
-      "summary": null
     },
     {
       "username": "tuan-phan",
@@ -1570,6 +2249,16 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/36094097?u=9107b303e5c9267df2c7314e44c91ffad0b958e7&v=4",
       "totalScore": 9.641371757896163,
       "prScore": 9.641371757896163,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "krw1-admin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/305330860?v=4",
+      "totalScore": 9.38105020110221,
+      "prScore": 9.38105020110221,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -1706,16 +2395,6 @@
       "summary": "bLd75: Focused on identifying and reporting infrastructure-level inconsistencies within the Ethereum Optimism ecosystem. They documented a specific issue regarding proxyd's handling of out-of-range block requests in ethereum-optimism/infra#666, highlighting a discrepancy where the system returns a null result instead of a standard error. Their primary focus this month was on improving the reliability and error-handling clarity of infrastructure tooling."
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 0.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "TonyBarroca77",
       "avatarUrl": "https://avatars.githubusercontent.com/u/255167759?v=4",
       "totalScore": 0.2,
@@ -1726,9 +2405,9 @@
       "summary": null
     }
   ],
-  "newPRs": 119,
-  "mergedPRs": 66,
-  "newIssues": 49,
-  "closedIssues": 36,
-  "activeContributors": 74
+  "newPRs": 174,
+  "mergedPRs": 107,
+  "newIssues": 55,
+  "closedIssues": 46,
+  "activeContributors": 75
 }

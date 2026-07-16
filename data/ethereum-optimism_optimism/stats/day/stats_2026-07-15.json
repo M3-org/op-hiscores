@@ -5,20 +5,1041 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-15 to 2026-07-16, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-07-15 to 2026-07-16, ethereum-optimism/optimism had 55 new PRs (40 merged), 6 new issues, and 31 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABI6Ln3g",
+      "title": "kona/protocol: brotli decoder (brotli-decompressor) is more lenient than op-node (andybalholm) — accepts malformed channels op-node rejects",
+      "author": "sebastianst",
+      "number": 21793,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nDifferential testing of the two brotli decoders used in OP Stack derivation — `brotli-decompressor` 5.0.1 (kona, [`decompress_brotli`](https://github.com/ethereum-optimism/optimism/blob/44e40ba521c9ec2ad02f3ed7db3e79055afa9877/rust/kona/crates/protocol/protocol/src/brotli.rs#L19-L90)) vs `andybalholm/brotli` v1.1.0 (op-node, [`BatchReader`](https://github.com/ethereum-optimism/optimism/blob/44e40ba521c9ec2ad02f3ed7db3e79055afa9877/op-node/rollup/derive/channel.go#L174-L219)) — shows the two disagree on brotli **validity**. The consensus-relevant direction: **kona's decoder accepts malformed channels that op-node rejects.** kona would then RLP-decode batches op-node discards. If any such batch is valid, kona advances the safe chain where op-node does not → consensus split. This is the mirror image of #20666 (which worried about the opposite direction — that one turns out to be structurally impossible for the current eager decoder).\n\nThis is the *residual* decoder gap behind [protocol-team#84 (strict channel decompression)](https://github.com/ethereum-optimism/protocol-team/issues/84): strict semantics remove the unbounded partial-output surface but leave this validity-boundary disagreement, which needs decoder conformance work.\n\n## Evidence\n\nOver 70,526 adversarial streams (corruptions + truncations + fuzz), classifying each by whether the decoder reaches a *clean* end-of-stream:\n\n| | count |\n|---|---|\n| both decoders accept | 58,695 |\n| …of which **byte-length mismatch** | **0** |\n| both reject | 5,941 |\n| **kona accepts, op-node rejects** (kona too lenient) | **242** |\n| kona rejects, op-node accepts (op-node too lenient) | 5,648 |\n\nKey facts:\n- **Accepted streams never diverge** (0 length mismatches) — valid brotli is deterministic. All divergence is at the accept/reject boundary.\n- The 242 kona-too-lenient cases collapse to two root causes: `BLOCK_LENGTH_1/2` (98) and `excessive input` (144).\n\n## Root cause 1 — `BLOCK_LENGTH` (confirmed, fix in hand)\n\n`brotli-decompressor`'s `BROTLI_STATE_METABLOCK_DONE` handler is **missing the `meta_block_remaining_len < 0` check** that andybalholm ([decode.go#L2464-L2468](https://github.com/andybalholm/brotli/blob/v1.1.0/decode.go#L2464-L2468)) and the C reference enforce. When a metablock's insert-copy commands overshoot the declared MLEN, `meta_block_remaining_len` goes negative; the command loop breaks to `METABLOCK_DONE`, which runs cleanup and proceeds to `SUCCESS` without validating. andybalholm rejects with `BLOCK_LENGTH_2`.\n\nConfirmed by red/green in an isolated copy of the crate: unpatched accepts **98/98** of the malformed streams; with a 5-line check added it accepts **0/98** (matching andybalholm), and all valid streams still decode:\n\n```diff\n         BrotliRunningState::BROTLI_STATE_METABLOCK_DONE => {\n+          if (s.meta_block_remaining_len < 0) {\n+            result = BrotliDecoderErrorCode::BROTLI_DECODER_ERROR_FORMAT_BLOCK_LENGTH_2;\n+            break;\n+          }\n           s.BrotliStateCleanupAfterMetablock();\n```\n\nThis is the **same class** as the PADDING_2 fix ([dropbox/rust-brotli-decompressor#44](https://github.com/dropbox/rust-brotli-decompressor/pull/44)) — a missing end-of-metablock validation in the very same state handler. It needs an **upstream fix in `brotli-decompressor`**, then a version bump here (like #21505 did for PADDING_2).\n\n## Root cause 2 — `excessive input` (trailing bytes)\n\nandybalholm rejects a stream with bytes remaining after the final metablock (`excessive input`); `brotli-decompressor` stops at the ISLAST metablock and returns success, ignoring the trailing bytes. **Fixable at the kona wrapper** by requiring the input reader to be fully consumed — the `decompress_brotli_strict` \"reader fully consumed\" check floated in #20666 (the one sound idea there). Under strict semantics this is the natural rule: a channel with trailing garbage is invalid.\n\n## Reverse direction (for completeness)\n\nThe 5,648 \"op-node accepts, kona rejects\" cases are **89% truncations**: andybalholm treats a truncated stream as clean (returns partial output, nil error), while `brotli-decompressor` correctly rejects it (RFC 7932: a truncated stream is invalid). Here **andybalholm** is the lenient/non-conformant side. This direction also causes divergence (op-node ahead) and needs an op-node-side decision, since op-node is the incumbent.\n\n## Relationship to strict decompression (protocol-team#84)\n\nStrict semantics are the right foundation and should land regardless — they guarantee accepted channels produce identical output and delete the entire best-effort partial-output surface. But strict is **necessary, not sufficient**: it reduces the problem from \"identical partial bytes on every malformed stream\" (implementation-defined, ~impossible) to \"agree on validity\" (a spec-defined boolean) — and the decoders still disagree on that boolean. Closing it is the bounded conformance work below.\n\n## Proposed work\n\n- [ ] Upstream `brotli-decompressor`: add the `BLOCK_LENGTH_2` check to `METABLOCK_DONE` (patch above; sibling to #44) — PR up at dropbox/rust-brotli-decompressor#47; then bump the pin here once it releases.\n- [ ] kona wrapper: require the input reader fully consumed → rejects `excessive input` — **#84-gated; do NOT land standalone.** Under today's best-effort rule op-node already keeps the valid-portion batches from an `excessive input` channel (its \"excessive input\" error routes through the same `NextChannel` + keep-partial path as `io.EOF`), and kona agrees (it ignores the trailing bytes and decodes the same batches). Adding this check now would make kona drop those batches (0 for the whole channel, via `decompress_brotli(...)?`) → a *new* kona-too-strict divergence. It reaches parity only once #84 makes op-node reject the whole channel too. (Same #84-gating applies to every \"make the decoder stricter\" step here, incl. the dropbox#47 `BLOCK_LENGTH` bump: today both clients keep partial batches and agree; tightening one side alone breaks that.)\n- [x] op-node/andybalholm truncation direction — bumped op-node to andybalholm v1.2.2 (#21799, **merged**). The decoder now rejects truncated streams per RFC 7932 §9.3, matching the C reference and kona. The bump is behaviorally inert on its own (verified byte-identical batch output v1.1.0 vs v1.2.2); it provides the `io.ErrUnexpectedEOF` signal that the strict-decompression rule handling (below) acts on.\n- [ ] Land protocol-team#84 (strict decompression) as the foundational rule change — includes the op-node rule handling that acts on the new `ErrUnexpectedEOF` signal to reject truncated channels, plus kona going strict.\n- [ ] Gate a Go↔Rust differential *validity* fuzzer in CI (now feasible — it compares a boolean, not byte sequences).\n\n## Methodology\n\nDifferential harness: kona's `brotli-decompressor` decode status vs `andybalholm/brotli` `io.ReadAll` over a shared corpus (corruptions of valid streams, truncations, random fuzz). Root cause confirmed by red/green against an isolated copy of `brotli-decompressor` 5.0.1. Harnesses and the 98 `BLOCK_LENGTH` reproducers are available on request.\n\n## References\n\n- #20666 — proposed the opposite-direction fix (refuted; the current eager decoder can't lag op-node)\n- #19333 / #20598 / #20004 — original brotli divergence investigation and Bug 1/Bug 2 fixes\n- #21505 — the PADDING_2 bump (brotli-decompressor 5.0.1)\n- [dropbox/rust-brotli-decompressor#44](https://github.com/dropbox/rust-brotli-decompressor/pull/44) — PADDING_2 fix (same bug class)\n- [protocol-team#84](https://github.com/ethereum-optimism/protocol-team/issues/84) — strict channel decompression\n\n🤖 *Generated by Claude Opus 4.8*\n\n",
+      "createdAt": "2026-07-15T13:19:16Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 4
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABB-YK6w",
+      "title": "kona/protocol: switch decompress_brotli to BrotliDecompressCustomIoCustomDict for incremental-flush parity with op-node",
+      "author": "sebastianst",
+      "number": 20666,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Context\n\nFollow-up from #19333 / #20598.\n\n#20598 fixed a wrapper-level bug where `kona::decompress_brotli` under-produced output bytes on the truncation path (`NeedsMoreInput` raised with both `available_in` and `available_out` at 0). With that fix and the brotli crate's PADDING_2 fall-through patched upstream, the OP-Stack differential sweep on a 20-batch fixture (`investigate/brotli-divergence/driver.py` on branch `seb/investigate/kona-brotli-divergence`) converges to **0 BatchReader-level divergences** between kona and op-node.\n\nBut there's a residual **byte-level** divergence on the `ResultFailure with bytes already produced` path that hasn't been observed to affect batch counts in our existing fixtures, but is reachable in principle.\n\n## The remaining divergence\n\nEmpirically (using `investigate/brotli-lib-diff/` on the same branch), on the *patched* Rust `brotli` crate, the high-level `BrotliDecompress` and the equivalent Go libraries differ on mid-stream `ResultFailure`:\n\nTest input: 4 KB ascending-bytes plaintext, 259 B compressed by cbrotli, single-byte XOR at offset 19.\n\n|   | status | partial bytes returned |\n|---|---|---|\n| `brotli::BrotliDecompress` (patched) | err | **0** |\n| `andybalholm/brotli` via `io.ReadAll` | err | **512** |\n| `google/brotli/go/cbrotli` via `io.ReadAll` | err | **512** |\n\nSame difference shows up in our wrapper (`decompress_brotli`) vs op-node's `BatchReader`:\n\n|   | DECOMPRESS_RESULT | bytes | BATCH_COUNT |\n|---|---|---|---|\n| kona (`decompress_brotli`) | err | 0 | 0 |\n| op-node (`BatchReader`) | err | 512 | 0 |\n\nThey agree at the batch level *here* because the 512 partial bytes happen not to RLP-decode into a valid `BatchData`. But there is a class of adversarial inputs — a multi-batch channel where corruption is placed past the first batch boundary — where op-node's incremental flush would decode batch 1 successfully and then fail on batch 2, while kona would emit zero bytes and decode zero batches. That's a real, latent consensus-relevant divergence in op-node's favor.\n\n## Root cause\n\n`brotli::BrotliDecompressStream` only flushes its internal ringbuffer to the caller's output buffer at certain points (most notably `WriteRingBuffer` invocations). When the caller-supplied output buffer is large enough to hold the entire stream, brotli accumulates many decoded bytes in the ringbuffer before flushing. If `ResultFailure` is signaled before that flush happens, the bytes are lost from the caller's perspective even though they are valid decoded output up to the point of corruption.\n\nGo's `brotli.NewReader` and `cbrotli.NewReader` paper over this by repeatedly invoking the C decoder with the small per-call read buffer the user supplies. Each `Read()` triggers a flush from the ringbuffer into the user's buffer, so the partial bytes for earlier metablocks are returned to the caller (via `io.ReadAll`) before a later metablock errors.\n\nkona's hand-rolled wrapper in `rust/kona/crates/protocol/protocol/src/brotli.rs` does not replicate that pattern. It grows a single output buffer and re-enters `BrotliDecompressStream` rather than draining the ringbuffer between calls, so it tracks the underlying decoder's flush granularity rather than imposing its own.\n\n## Proposed fix\n\nReplace the hand-rolled `BrotliDecompressStream` loop in `kona::decompress_brotli` with `brotli::BrotliDecompressCustomIoCustomDict`. The crate exposes this no_std-friendly equivalent of the high-level Reader-based decompression:\n\n- `CustomRead` / `CustomWrite` traits in `brotli::CustomRead` / `brotli::CustomWrite` are *not* `std`-gated (only the high-level `brotli::Decompressor` / `brotli::BrotliDecompress` are).\n- `BrotliDecompressCustomIoCustomDict(reader, writer, in_buf, out_buf, ...)` runs the same incremental-flush loop as `BrotliDecompress` but on `CustomRead`/`CustomWrite`. It calls `BrotliDecompressStream` with a small fixed-size output buffer and writes each batch of produced bytes to the `CustomWrite` before continuing — exactly the pattern Go's reader uses.\n\nConcretely:\n\n1. Implement `CustomRead` for `&[u8]` (a few lines — track a cursor).\n2. Implement `CustomWrite` for `Vec<u8>` with the size cap baked in: appends bytes, returns an error once `MAX_RLP_BYTES_PER_CHANNEL` is reached so the loop terminates per spec.\n3. Replace the body of `decompress_brotli` with one call to `BrotliDecompressCustomIoCustomDict`. The existing `decompress_brotli_strict` variant becomes a thin wrapper that additionally checks the reader has been fully consumed.\n\nThis deletes the buffer-growth dance, the `NeedsMoreInput`-with-full-buffer workaround (#20598), and the implicit \\\"return what we have on `ResultFailure`\\\" behavior — and inherits Go-equivalent flush granularity for free, while preserving no_std compatibility.\n\n## Validation\n\n- Re-run the differential sweep (`investigate/brotli-divergence/driver.py`) at `N_BATCHES=20` and a few additional fixtures (multi-batch, multi-metablock, mid-stream corruption) and confirm 0 divergences at both the byte and batch level.\n- Construct an adversarial multi-batch fixture where corruption is placed past the first batch boundary and confirm kona and op-node now agree on the batch count (op-node currently decodes batch 1; kona currently produces 0 batches).\n- All existing `kona-protocol` tests continue to pass.\n\n## Risks / considerations\n\n- The change is wider than #20598 — it replaces the entire decompression loop rather than fixing a single match arm. Should land independently and get its own focused review.\n- The `MAX_RLP_BYTES_PER_CHANNEL` size-cap-as-truncation semantics need to be preserved precisely (currently: cap exceeded → return truncated output, not an error). The `CustomWrite` impl needs to handle this carefully.\n- Coordination point: the upstream `brotli-decompressor` PADDING_2 fix at the (independent) Rust crate level is necessary for this work to fully eliminate the kona/op-node divergence. Tracking upstream at dropbox/rust-brotli-decompressor#44.\n\n## References\n\n- #19333 — original divergence report (split into Bug 1 and Bug 2; this issue covers the residual byte-level part of Bug 1)\n- #20598 — wrapper-bug fix that eliminates the truncation-side divergence\n- #20004 — Bug 2 fix (Fjord gating via L1 origin)\n- Investigation branch: https://github.com/ethereum-optimism/optimism/tree/seb/investigate/kona-brotli-divergence/investigate\n- Upstream brotli-decompressor PADDING_2 fix: dropbox/rust-brotli-decompressor#44\n\n🤖 *Generated by Claude Code*\n",
+      "createdAt": "2026-05-12T08:24:06Z",
+      "closedAt": "2026-07-15T13:26:04Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM7a74sg",
+      "title": "kona: Review host game input and witness generation for soundness.",
+      "author": "pauldowman",
+      "number": 18430,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2025-11-27T22:15:56Z",
+      "closedAt": "2026-07-15T02:20:28Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7a73bd",
+      "title": "Replace jemalloc allocator with the default to be compatible with kona monorepo",
+      "author": "pauldowman",
+      "number": 18425,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Unless this is absolutely required for some reason. Possibly required for mock-mode CPU proving perf. Run some benchmarks first.",
+      "createdAt": "2025-11-27T22:12:54Z",
+      "closedAt": "2026-07-15T17:12:08Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABATvmLQ",
+      "title": "opgeth-decoupling: swap OptimismConfig/ChainConfig + HardforkConfig interface for BlockAsPayload",
+      "author": "sebastianst",
+      "number": 20270,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of #20263 → #20257. See plan §5 in the op-geth decoupling doc (PR #19767).\n\n## Scope\n\n- `rollup.Config.ChainOpConfig`: change type from `*params.OptimismConfig` to `*opparams.OptimismConfig`. JSON tags must remain identical for wire compatibility.\n- Extend `rollup.Config` with any missing hardfork timestamps that were being read off `params.ChainConfig` (Karst, Interop as needed).\n- `op-service/eth/types.go` `BlockAsPayload` and `BlockAsPayloadEnv`: replace `config *params.ChainConfig` parameter with a local `HardforkConfig` interface (`IsCanyon(uint64) bool`, `IsIsthmus(uint64) bool`). Callers pass `rollup.Config` directly — it already satisfies the interface.\n- Update any other sites that read OP hardfork fields off `*params.ChainConfig` to go through `rollup.Config` instead.\n\nBlocked on: #20260 (`op-core/params`).\n\n🤖 *Generated by Claude Code*",
+      "createdAt": "2026-04-23T11:44:57Z",
+      "closedAt": "2026-07-15T15:55:52Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM7yN8Hz",
+      "title": "Formally-Verified Dafny Model of the Supernode",
+      "author": "lucasmt",
+      "number": 21820,
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\nAn abstract model of the OP Supernode implemented in the Dafny language. Critical properties of the Supernode design have been formally verified in the model using Dafny's formal verification capabilities, including core invariants, cross-validity of `VerifiedDB` entries, and recovery of database consistency after successful pending transition application. Also includes a report produced by an AI-based analysis checking the model specifications over the Go code.\r\n\r\n**Tests**\r\n\r\nNo tests have been added since there were no changes to the Go code, and the Dafny model has been formally verified.\r\n\r\n**Additional context**\r\n\r\n**Metadata**\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-15T21:09:33Z",
+      "mergedAt": null,
+      "additions": 4628,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM7xsqTc",
+      "title": "chore: bump reth to include #26398 fix (validate_block_post_execution_with_hashed_state)",
+      "author": "claude",
+      "number": 21766,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Josh Klopfenstein** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0A3E04GDMX/p1784054235311919?thread_ts=1784054235.311919&cid=C0A3E04GDMX)_\n\nRefs #21524\n\n## Before\n\nThe Rust workspaces pinned `paradigmxyz/reth` to the **`v2.3.0`** release tag. reth `v2.4.0` shipped an incidental change to `validate_block_post_execution_with_hashed_state` that broke the OP Stack, so we could not simply move to the `v2.4.0` tag.\n\n## After\n\nThe reth pin is moved to **`rev = \"f2eecc65482af4085e43eedb27a32024bf177a0d\"`** — the merge commit of paradigmxyz/reth#26398 (Sebastian Stammler's fix), which landed on `main` *after* the `v2.4.0` tag. This restores the `validate_block_post_execution_with_hashed_state` signature the OP Stack needs while picking up the rest of the 2.4.0 line. Because the fix is post-tag, we pin the commit (`rev`) rather than a tag, per `rust/UPDATING-RETH.md`.\n\nNote this is a **two-release catch-up** (`v2.3.0` → post-`v2.4.0`), not a one-commit nudge — see \"Remaining work\" below.\n\n## How\n\n- Bump the reth git ref from `tag = \"v2.3.0\"` to `rev = \"f2eecc65…\"` across all **four** manifests the guide enumerates: `rust/Cargo.toml`, `rust/op-rbuilder/Cargo.toml`, `rust/rollup-boost/crates/rollup-boost/Cargo.toml`, `rust/rollup-boost/crates/flashblocks-rpc/Cargo.toml` (122 pin lines total).\n- Sync the shared crates.io dependency versions to reth's pins at the new rev (read from reth's `Cargo.toml`/`Cargo.lock` at `f2eecc65…`):\n  - `revm` family `40.x` → **`41.0.0`** (upstream unified all `revm-*` subcrates to `41.0.0`), `revm-inspectors` `0.40.1` → `0.41.0`; in `op-rbuilder`, `revm-context`/`revm-context-interface`/`revm-inspector` → `41.0.0`.\n  - published reth-core crates (`reth-codecs`, `reth-codecs-derive`, `reth-primitives-traits`, `reth-rpc-traits`, `reth-zstd-compressors`) `0.4.1` → **`0.5.0`**.\n  - alloy core (`alloy-consensus` … `alloy-transport*`) `2.0.x` → **`2.1.1`**, `alloy-evm` `0.36.0` → `0.37.0`, `alloy-eip7928` `0.4.0` → `0.4.5`, `alloy-rlp` `0.3.13` → `0.3.16`, `alloy-primitives`/`alloy-sol-types` bumped to `1.6.0` where they lagged.\n  - OP-internal path crates (`op-revm`, `op-alloy*`, `alloy-op-evm`, `alloy-op-hardforks`) left untouched, per the guide.\n- Update the replicated `SlotPreimages` MDBX-layout rev reference in `rust/op-reth/crates/cli/src/commands/slot_preimages_seed.rs`. I diffed the upstream `slot_preimages.rs` between `9384bc53…` (v2.3.0) and `f2eecc65…`: the byte-layout and insert/read logic are **identical** — only visibility (`pub`) and docs changed — so the replica stays byte-compatible and only the rev comment moved. (The upstream type becoming `pub` is what unblocks removing the replica in #21523.)\n\n## Verification\n\n⚠️ **Not built/resolved in this environment.** `cargo update` / `cargo check` against the new rev cannot run here: outbound git access to `github.com/paradigmxyz/reth` is blocked by egress policy (HTTP 403 through the agent proxy). Consequently:\n\n- **Lockfiles are NOT regenerated** — the three `Cargo.lock` files still record the `v2.3.0` git source. They must be refreshed in an environment with reth access (`cargo update reth-chainspec` in `.`, `op-rbuilder/`, and `rollup-boost/`).\n- The **compile-and-adapt loop was not run.** A two-release reth jump routinely requires op-side source adaptations (trait-method params, struct destructuring, re-export/rename churn — see `rust/UPDATING-RETH.md`). None of that is in this PR yet.\n\n## Remaining work (before un-drafting)\n\n1. Regenerate all three lockfiles against the new rev.\n2. Run the compile-and-adapt loop to green across all three workspaces (`cargo check --workspace --tests`), then `cargo build -p op-reth`, `just fmt-fix`, `just lint`, `just test`.\n3. Consider folding in #21523 (drop the replicated `SlotPreimages` now that upstream is `pub`).\n4. Run the reth-update AI review (`docs/ai/reth-update-review.md`).\n\nDraft until the above lands and CI is green.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-14T18:49:53Z",
+      "mergedAt": "2026-07-15T19:32:27Z",
+      "additions": 3457,
+      "deletions": 3124
+    },
+    {
+      "id": "PR_kwDODjvEJM7x9Qpe",
+      "title": "op-e2e/actions: run the action tests on the out-of-process op-reth-test-engine",
+      "author": "sebastianst",
+      "number": 21786,
+      "body": "Switches `op-e2e/actions` to run against the out-of-process `op-reth-test-engine` (stacked on #21242), selected by `OP_E2E_ACTIONS_EL=reth-test-engine`. The default stays op-geth, and CI now runs the whole actions suite on **both** ELs.\n\n## Gate: same pass-set on both ELs\n\nFull sweep over all 13 `op-e2e/actions` packages at this head: **identical per-test results on both ELs** (225+ tests) — including the reorg suite (ReorgFlipFlop, DeepReorg, rewind, Holocene invalid-payload replacement), EL-sync (all 5 sync tests via the in-process sync-pump emulation), batcher garbage/blob paths, sequencer drift, altda challenge/expire, supernode rewind, and the engine-API tests. The only intended divergence:\n\n- `RestartOpGeth` (op-geth persistent-DataDir restart-recovery) is geth-gated — impossible against an ephemeral subprocess. Its durable behavior is covered on **both** ELs by the new `RestartEngineFreshState`: restart the engine with all state lost; op-node resets against the wiped engine, re-derives the safe chain from L1 (safety + finality restored), and the sequencer re-builds the identical deposit-only unsafe chain. The geth-only test is deleted in the stacked deletion PR.\n- One rare pre-existing-style flake was investigated and ruled out as a divergence: `FinalizeWhileSyncing` failed once in ~45+ runs, does not touch any of the new wiring (no peering/pump), and did not reproduce in 25 dedicated runs on the pre-wiring base.\n\n## Go-side switch (mechanical rewrites, each enumerable)\n\n- ~100 `engine.L2Chain()` sites → backend-agnostic helpers (`LatestHeader`/`SafeHeader`/`FinalizedHeader`/`BlockByNumber` over the eth RPC).\n- `ActL2IncludeTx` reframed onto the engine's parking buffer (`optest_includeNextTx`); `RemainingBlockGas`/`ForcedEmpty` via `optest_*`; blob-tx rejection asserts each EL's own irreducible message.\n- EL-sync p2p emulation: a package registry maps synthetic enode IDs to reth backends; `AddPeers` starts a per-peer sync pump that backfills `optest_syncTarget`-signalled gaps via `optest_blockPayloadByNumber`→`optest_importBlock`, never moving safe/finalized — reproducing op-geth's post-snap-sync state and log lines.\n\n## Engine additions the switch forced (same crate as #21242)\n\n- **Reorg support**: `new_payload` records every validated block; forkchoice update canonicalizes via `NewCanonicalChain::Reorg` (the engine-tree pattern), so alternate forks, flip-flops, and rewinds work. Invalid payload attributes surface as `-38003` so op-node falls back to deposits-only blocks.\n- **Engine-API-faithful canonicalization**: processed payloads stay non-canonical until FCU (the geth engine test asserts exactly this gap).\n- Richer reads (`eth_call`/`estimateGas`, OP-enriched receipts, historical `eth_getProof`) plus differential tests proving op-node decodes/validates reth receipts-roots and proofs, and that `eth_estimateGas` matches op-geth byte-for-byte on the action-test genesis.\n\n## CI\n\n`go-actions-tests-reth` runs `./op-e2e/actions/...` on the reth engine (binary from `rust-workspace-binaries`, `REQUIRE_RUST_ENGINE=1` + hard binary check so provisioning bugs fail loudly), wired into `ci-gate`. The geth side keeps running in `go-tests-short`/`go-tests-full`, so this PR puts the A/B comparison permanently in CI.\n\nPart of #21196 (Go side) and #20415 (engine design).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-15T09:38:25Z",
+      "mergedAt": null,
+      "additions": 3153,
+      "deletions": 172
+    },
+    {
+      "id": "PR_kwDODjvEJM7vzRoZ",
+      "title": "feat(kona-sp1): execute super-range range proofs",
+      "author": "Inphi",
+      "number": 21671,
+      "body": "## Summary\r\n\r\n`super-range` now proves optimistic per-chain transitions over timestamp spans instead of only committing claimed outputs. The range proof is rectangular over `timestamp x dependency-set chains`, binds the previous super root for every timestamp, and runs witness-backed derivation for every progressing transition.\r\n\r\nRange execution now:\r\n- reads one proof-wide witness blob for the whole range and reuses its preimage/blob data across all `(timestamp, chain)` transitions\r\n- constructs each transition boot from public super-range inputs plus preimage-linked output roots and L2 headers, instead of loading per-transition witness boot inputs\r\n- treats timestamps before the chain’s next L2 block as no-ops\r\n- derives exactly one next block for progressing transitions\r\n- passes the canonical interop dependency set into the derivation pipeline, preserving message-expiry overrides\r\n\r\nAggregation validation now has enough public data to bind range proofs to consolidation outputs: the first range timestamp must use the game starting root, later timestamps must use the previous consolidation result, and optimistic block/output commitments must match consolidation inputs.\r\n\r\nConsolidation remains intentionally shallow in this PR: it sanity-checks that claimed consolidated outputs match the optimistic outputs and carries the claimed super root forward. Full interop message graph consolidation is still follow-up work.\r\n\r\n## Meta\r\n\r\nPart of https://github.com/ethereum-optimism/optimism/issues/21576",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-09T15:41:48Z",
+      "mergedAt": "2026-07-15T00:07:48Z",
+      "additions": 1311,
+      "deletions": 167
+    },
+    {
+      "id": "PR_kwDODjvEJM7xCmoi",
+      "title": "feat: support super-root fault games at initial deployment",
+      "author": "lumoswiz",
+      "number": 21720,
+      "body": "**Description**\r\n\r\nEnforces that initial game types match `SUPER_ROOT_GAMES_MIGRATION`. Disabled mode permits `PERMISSIONED_CANNON` and `CANNON_KONA`. Enabled mode permits `SUPER_PERMISSIONED` and `SUPER_CANNON_KONA`. Adds initial `SUPER_CANNON_KONA` support with a `SUPER_PERMISSIONED` fallback. Carries the full starting anchor proposal through Go and Solidity.\r\n\r\n**Tests**\r\n\r\nCovers both root modes, invalid game types, missing fallbacks, malformed inputs, super-game registration, and anchor propagation.\r\n\r\n**Additional context**\r\n\r\nOPCM preserves and rejects permissionless requests that do not match its root mode. `FullConfig` does not require a fallback. `DeployOPChain` adds one. Upgrade behavior is unchanged.\r\n\r\n**Metadata**\r\n\r\nFixes #21695\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-13T11:31:20Z",
+      "mergedAt": "2026-07-15T16:16:52Z",
+      "additions": 1180,
+      "deletions": 336
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 12475,
+    "deletions": 8446,
+    "files": 263,
+    "commitCount": 218
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "feat(sdm): make the operator opt-in flag consistent across clients",
+      "prNumber": 21551,
+      "type": "feature",
+      "body": "## Overview\n\nCloses #21360. Makes the SDM PostExec **operator opt-in** gate consistent across the OP Stack clients. The gate was previously named inconsistently (`post_exec_opt_in`, `operator_opted_in`, `opt_in`, `sdm_post_exec_opt_in`) and",
+      "files": [
+        "op-acceptance-tests/tests/flashblocks/flashblocks_sdm_test.go",
+        "op-chain-ops/cmd/sdm-devnet/main.go",
+        "op-e2e/actions/helpers/l2_verifier.go",
+        "op-node/config/config.go",
+        "op-node/config/config_persistence.go",
+        "op-node/config/config_persistence_test.go",
+        "op-node/node/api.go",
+        "op-node/node/server_test.go",
+        "op-node/rollup/driver/config.go",
+        "op-node/rollup/driver/driver.go",
+        "op-node/rollup/sequencing/disabled.go",
+        "op-node/rollup/sequencing/iface.go",
+        "op-node/rollup/sequencing/sequencer.go",
+        "op-node/rollup/sequencing/sequencer_test.go",
+        "op-service/apis/rollup.go",
+        "op-service/sources/rollupclient.go",
+        "rust/Cargo.lock",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/context.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/ctx.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/mod.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/standard/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/launcher.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/sdm_admin.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/tests/framework/instance.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/tests/sdm.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/payload/src/config.rs",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/rpc/src/sdm_admin.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/metrics.rs",
+        "rust/op-reth/crates/chainspec/src/lib.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt.rs",
+        "op-acceptance-tests/tests/interop/proofs-singlechain/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests: fix bug that incorrectly sets fork schedule ",
+      "prNumber": 21642,
+      "type": "bugfix",
+      "body": "op-deployer merges user configs with defaults, potentially overwriting\r\nthe user's configs in some cases.\r\n\r\nThe intentbuilder.WithForkAtOffset would incorrectly *delete* a key in\r\nits hardfork mapping when the caller wanted to deactivate a",
+      "files": [
+        "op-chain-ops/genesis/fork_overrides.go",
+        "op-chain-ops/genesis/fork_overrides_test.go",
+        "op-core/forks/forks.go",
+        "op-core/forks/forks_test.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-e2e/config/init.go",
+        "op-e2e/e2eutils/intentbuilder/builder.go",
+        "op-e2e/e2eutils/intentbuilder/builder_test.go",
+        "op-node/rollup/types.go",
+        "op-node/rollup/types_test.go",
+        "op-service/jsonutil/merge.go",
+        "go.mod"
+      ]
+    },
+    {
+      "title": "feat(kona-sp1): execute super-range consolidation proofs",
+      "prNumber": 21677,
+      "type": "feature",
+      "body": "## Summary\r\n\r\nBuilds on https://github.com/ethereum-optimism/optimism/pull/21671 by implementing the `Consolidation` mode in the unified `super-range` SP1 guest.\r\n\r\n## Meta\r\nCloses https://github.com/ethereum-optimism/optimism/issues/21576",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/ethereum/client/Cargo.toml",
+        "rust/kona/sp1/crates/ethereum/client/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_consolidation.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/src/main.rs",
+        "rust/kona/crates/proof/proof-interop/src/consolidation.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/test_utils.rs"
+      ]
+    },
+    {
+      "title": "feat(kona-sp1): execute super-range range proofs",
+      "prNumber": 21671,
+      "type": "feature",
+      "body": "## Summary\r\n\r\n`super-range` now proves optimistic per-chain transitions over timestamp spans instead of only committing claimed outputs. The range proof is rectangular over `timestamp x dependency-set chains`, binds the previous super root ",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/client/src/super_root.rs",
+        "rust/kona/sp1/crates/ethereum/client/Cargo.toml",
+        "rust/kona/sp1/crates/ethereum/client/src/executor.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/src/main.rs",
+        "rust/kona/bin/client/tests/interop_trace_extension.rs",
+        "rust/kona/bin/client/tests/trace_extension.rs",
+        "rust/kona/bin/host/src/interop/local_kv.rs",
+        "rust/kona/bin/host/src/single/local_kv.rs",
+        "rust/kona/crates/proof/preimage/src/lib.rs",
+        "rust/kona/crates/proof/preimage/src/local_keys.rs",
+        "rust/kona/crates/proof/proof-interop/src/boot.rs",
+        "rust/kona/crates/proof/proof/src/boot.rs",
+        "rust/kona/sp1/crates/client/src/range.rs",
+        "rust/kona/sp1/crates/client/src/witness/executor.rs",
+        "rust/kona/sp1/crates/range-executor/src/main.rs"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: add post-fork L2 predeploy verification",
+      "prNumber": 21697,
+      "type": "other",
+      "body": "Closes https://github.com/ethereum-optimism/protocol-team/issues/202\r\n\r\nAdds `just post-fork-ops` for verifying L2 predeploy contracts after a fork activation. Named `post-fork-ops` this way we can add more checks to it in the future, aside",
+      "files": [
+        "packages/contracts-bedrock/justfile",
+        "packages/contracts-bedrock/scripts/post-fork-ops/verify-predeploys.sh"
+      ]
+    },
+    {
+      "title": "dependabot(gomod): bump golang.org/x/mod from 0.37.0 to 0.38.0",
+      "prNumber": 21729,
+      "type": "other",
+      "body": "Bumps [golang.org/x/mod](https://github.com/golang/mod) from 0.37.0 to 0.38.0.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/golang/mod/commit/792ac169a90372d88fb14e712cb793061ba0c104\"><code>792ac16</code></a> go",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "feat: support super-root fault games at initial deployment",
+      "prNumber": 21720,
+      "type": "feature",
+      "body": "**Description**\r\n\r\nEnforces that initial game types match `SUPER_ROOT_GAMES_MIGRATION`. Disabled mode permits `PERMISSIONED_CANNON` and `CANNON_KONA`. Enabled mode permits `SUPER_PERMISSIONED` and `SUPER_CANNON_KONA`. Adds initial `SUPER_CA",
+      "files": [
+        "op-chain-ops/interopgen/deploy.go",
+        "op-chain-ops/interopgen/deploy_anchor_test.go",
+        "op-deployer/pkg/deployer/forge/encoding.go",
+        "op-deployer/pkg/deployer/forge/encoding_test.go",
+        "op-deployer/pkg/deployer/opcm/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "packages/contracts-bedrock/scripts/deploy/ChainAssertions.sol",
+        "packages/contracts-bedrock/scripts/deploy/Deploy.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol",
+        "packages/contracts-bedrock/scripts/libraries/Types.sol",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/opcm/DeployOPChain.t.sol",
+        "op-deployer/pkg/deployer/prepare.go",
+        "op-deployer/pkg/deployer/prepare_test.go"
+      ]
+    },
+    {
+      "title": "docs: move chain-operator network design example from reference to guides",
+      "prNumber": 21770,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784067317292149)_\n\n## What changed\n\nMoves the chain-operator **\"Network Design Example\"** page out of the **R",
+      "files": [
+        "docs/public-docs/chain-operators/guides/management/network-architecture.mdx",
+        "docs/public-docs/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/public/img/chain-operators/network-design-example-op-reth.png",
+        "docs/public-docs/public/img/chain-operators/network-design-example.png"
+      ]
+    },
+    {
+      "title": "chore: bump reth to include #26398 fix (validate_block_post_execution_with_hashed_state)",
+      "prNumber": 21766,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Josh Klopfenstein** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0A3E04GDMX/p1784054235311919?thread_ts=1784054235.311919&cid=C0A3E04GDMX)_\n\nRefs #21524\n\n## Before\n\nThe Rust workspac",
+      "files": [
+        "rust/Cargo.toml",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/op-rbuilder/Cargo.toml",
+        "rust/op-reth/crates/cli/src/commands/slot_preimages_seed.rs",
+        "rust/rollup-boost/Cargo.toml",
+        "rust/rollup-boost/crates/flashblocks-rpc/Cargo.toml",
+        "rust/rollup-boost/crates/rollup-boost/Cargo.toml",
+        "docs/ai/reth-update-review.md",
+        "mise.toml",
+        "ops/docker/op-stack-go/Dockerfile",
+        "rust/Cargo.lock",
+        "rust/UPDATING-RETH.md",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-hardforks/Cargo.toml",
+        "rust/clippy.toml",
+        "rust/kona/crates/node/engine/src/test_utils/attributes.rs",
+        "rust/kona/crates/proof/executor/src/test_utils.rs",
+        "rust/kona/crates/proof/executor/src/util.rs",
+        "rust/kona/crates/proof/proof-interop/src/consolidation.rs",
+        "rust/kona/crates/protocol/derive/src/attributes/stateful.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/core.rs",
+        "rust/kona/crates/protocol/derive/src/stages/attributes_queue.rs",
+        "rust/kona/docker/apps/kona_app_generic.dockerfile",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile",
+        "rust/kona/sp1/crates/host/src/stats.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/op-alloy/crates/rpc-types-engine/src/attributes.rs",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/Dockerfile",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/generator.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/standard/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/flashtestations/args.rs",
+        "rust/op-rbuilder/crates/tdx-quote-provider/Cargo.toml",
+        "rust/op-rbuilder/rust-toolchain.toml",
+        "rust/op-reth/DockerfileOp",
+        "rust/op-reth/crates/cli/Cargo.toml",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/src/worker.rs",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/src/utils.rs",
+        "rust/op-reth/crates/node/tests/e2e-testsuite/testsuite.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/post-exec-replay/src/replay.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/backfill.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/write.rs"
+      ]
+    },
+    {
+      "title": "dependabot(gomod): bump github.com/pion/dtls/v3 from 3.0.6 to 3.0.11",
+      "prNumber": 21765,
+      "type": "other",
+      "body": "Bumps [github.com/pion/dtls/v3](https://github.com/pion/dtls) from 3.0.6 to 3.0.11.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/pion/dtls/releases\">github.com/pion/dtls/v3's releases</a>.</em><",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "docs: surface node system requirements on the node-operator overview",
+      "prNumber": 21761,
+      "type": "docs",
+      "body": "## What and why\n\nA prospective node operator's first practical question is \"what machine do I need?\" The docs answer it — but only inside `node-operators/tutorials/run-node-from-source.mdx`. The **recommended getting-started path** (`tutori",
+      "files": [
+        "docs/public-docs/node-operators/overview.mdx"
+      ]
+    },
+    {
+      "title": "dev: add version-controlled git hooks + install-git-hooks target",
+      "prNumber": 21755,
+      "type": "other",
+      "body": "Adds a committed `.githooks/` directory and an idempotent `just install-git-hooks` target (`git config core.hooksPath .githooks`). Run once per clone; the setting is shared across a clone's worktrees.\n\nInitial hook — **`pre-push`** — blocks",
+      "files": [
+        ".githooks/README.md",
+        ".githooks/pre-push",
+        "docs/ai/dev-workflow.md",
+        "justfile",
+        "rust/justfile"
+      ]
+    },
+    {
+      "title": "fix(kona,security): close three unauthenticated kona attack surfaces",
+      "prNumber": 21753,
+      "type": "bugfix",
+      "body": "Supersedes #21713 — carries @MattHintz's three security commits (authorship preserved) and completes/corrects them in two follow-up commits.\n\nThree unauthenticated attack surfaces in the kona (Rust) consensus client:\n\n- **B1 — truncated spa",
+      "files": [
+        "op-devstack/sysgo/mixed_runtime.go",
+        "rust/kona/bin/node/src/flags/rpc.rs",
+        "rust/kona/crates/node/gossip/src/config.rs",
+        "rust/kona/crates/node/gossip/src/handler.rs",
+        "rust/kona/crates/node/rpc/src/config.rs",
+        "rust/kona/crates/node/service/src/service/node.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/bits.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/errors.rs"
+      ]
+    },
+    {
+      "title": "test(op-e2e): prepare production super-root proposal source",
+      "prNumber": 21742,
+      "type": "tests",
+      "body": "Extracts the pre-activation portions of ethereum-optimism/optimism#21738 onto `develop`.\n\nThe action proposer now accepts a production `ProposalSource`, while the existing test explicitly keeps using `RollupProposalSource` and the legacy re",
+      "files": [
+        "op-e2e/actions/helpers/l2_proposer.go",
+        "op-e2e/actions/helpers/l2_verifier.go",
+        "op-e2e/actions/proposer/l2_proposer_test.go",
+        "op-proposer/proposer/driver.go",
+        "op-proposer/proposer/driver_test.go"
+      ]
+    },
+    {
+      "title": "test(op-e2e): use production super-root proposal source",
+      "prNumber": 21738,
+      "type": "tests",
+      "body": "Stacked on ethereum-optimism/optimism#21689.\n\nUpdates the action proposer test to use op-node's production single-chain `superroot_atTimestamp` API and op-proposer's `SuperNodeProposalSource` instead of constructing super-root proposals in ",
+      "files": [
+        "op-e2e/actions/helpers/l2_proposer.go",
+        "op-e2e/actions/helpers/l2_verifier.go",
+        "op-e2e/actions/proposer/l2_proposer_test.go",
+        "op-e2e/system/proofs/proposer_fp_test.go",
+        "op-proposer/proposer/driver.go"
+      ]
+    },
+    {
+      "title": "docs: add snapshot restore how-to for node operators",
+      "prNumber": 21819,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n> **Scoped down per review:** the op-acceptor and bridged-USDC pages are descoped per revi",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/guides/management/restore-from-snapshot.mdx",
+        "docs/public-docs/op-mainnet/network-information/snapshots.mdx",
+        "docs/public-docs/op-stack/features/bridged-usdc-standard.mdx"
+      ]
+    },
+    {
+      "title": "docs: split app-developer standard-bridge and integrating-wallets pages by mode",
+      "prNumber": 21818,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What\n\n**Before:** two app-developer pages each made readers switch modes mid-page. *Usi",
+      "files": [
+        "docs/public-docs/app-developers/guides/bridging/standard-bridge.mdx",
+        "docs/public-docs/app-developers/guides/bridging/verify-bridged-tokens.mdx",
+        "docs/public-docs/app-developers/guides/configuring-actions.mdx",
+        "docs/public-docs/app-developers/guides/connect-wallet-to-actions.mdx",
+        "docs/public-docs/app-developers/reference/actions/integrating-wallets.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: split governance FAQ into reference pages and add identity explanation",
+      "prNumber": 21817,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What changed\n\n**Before:** the governance FAQ (`governance/gov-faq.mdx`) was a 47 KB acc",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/governance/attestation-schemas.mdx",
+        "docs/public-docs/governance/capital-allocation.mdx",
+        "docs/public-docs/governance/eas-attestations.mdx",
+        "docs/public-docs/governance/evolution-and-experimentation.mdx",
+        "docs/public-docs/governance/gov-faq.mdx",
+        "docs/public-docs/governance/protocol-upgrades.mdx",
+        "docs/public-docs/governance/resources.mdx"
+      ]
+    },
+    {
+      "title": "docs: split mode-mixed rust/kona pages into how-to, reference, and explanation pages",
+      "prNumber": 21816,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## Before / After\n\n**Before:** four kona pages each tried to serve two readers at once. An",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/rust/kona/node/configuration.mdx",
+        "docs/public-docs/rust/kona/node/design/sequencer.mdx",
+        "docs/public-docs/rust/kona/node/install/overview.mdx",
+        "docs/public-docs/rust/kona/node/install/source.mdx",
+        "docs/public-docs/rust/kona/node/monitoring.mdx",
+        "docs/public-docs/rust/kona/node/run/binary.mdx",
+        "docs/public-docs/rust/kona/node/run/docker.mdx",
+        "docs/public-docs/rust/kona/node/run/mechanics.mdx",
+        "docs/public-docs/rust/kona/node/run/overview.mdx",
+        "docs/public-docs/rust/kona/node/run/rpc-trust.mdx",
+        "docs/public-docs/rust/kona/node/run/sequencer.mdx",
+        "docs/public-docs/rust/kona/sdk/examples/frames-to-batch.mdx",
+        "docs/public-docs/rust/kona/sdk/proof/custom-backend.mdx",
+        "docs/public-docs/rust/kona/sdk/proof/fpvm-backend.mdx",
+        "docs/public-docs/rust/kona/sdk/proof/stf.mdx",
+        "docs/public-docs/rust/kona/sdk/protocol/derive/providers.mdx",
+        "docs/public-docs/rust/op-alloy/intro.mdx"
+      ]
+    },
+    {
+      "title": "docs: split node-operator supernode, legacy-geth, and regenesis-history pages by mode",
+      "prNumber": 21815,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What a reader sees\n\n**Before:** three node-operators pages each made readers wade throu",
+      "files": [
+        "docs/public-docs/app-developers/tools/block-explorers.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/guides/configuration/legacy-geth.mdx",
+        "docs/public-docs/node-operators/guides/configuration/supernode.mdx",
+        "docs/public-docs/node-operators/overview.mdx",
+        "docs/public-docs/node-operators/reference/legacy-geth-config.mdx",
+        "docs/public-docs/node-operators/reference/op-supernode-config.mdx",
+        "docs/public-docs/notices/interop-prep.mdx",
+        "docs/public-docs/op-mainnet/pre-bedrock-history/lost-pre-regenesis-data.mdx",
+        "docs/public-docs/op-mainnet/pre-bedrock-history/regenesis-history.mdx",
+        "docs/public-docs/op-stack/interop/supernode.mdx"
+      ]
+    },
+    {
+      "title": "docs: split flashblocks docs into explanation, app how-to, and operator how-to",
+      "prNumber": 21814,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What changed\n\n**Before:** a reader landing on the Flashblocks feature page got one long",
+      "files": [
+        "docs/public-docs/app-developers/guides/transactions/flashblocks-and-gas-usage.mdx",
+        "docs/public-docs/app-developers/guides/transactions/integrating-flashblocks.mdx",
+        "docs/public-docs/chain-operators/guides/features/flashblocks-guide.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/features/flashblocks.mdx",
+        "docs/public-docs/op-stack/transactions/flashblocks.mdx"
+      ]
+    },
+    {
+      "title": "docs: split batcher configuration into a how-to guide and a reference catalogue",
+      "prNumber": 21813,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What changed\n\n**Before:** a chain operator opening \"Batcher configuration\" got one 900-",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/batcher.mdx",
+        "docs/public-docs/chain-operators/reference/batcher-configuration.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-batcher-setup.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: split op-deployer releases page into reference and contributor how-to",
+      "prNumber": 21812,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n## What changed\n\n**Before:** a reader opening the OP Deployer **Releases** reference page ",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/releases.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/release-workflows.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "fix(contracts-bedrock): make batch upgrade test SUPER_ROOT_GAMES_MIGRATION-aware",
+      "prNumber": 21803,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested via [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1784133058651019)_\n\n**Before:** the `SUPER_ROOT_GAMES_MIGRATION` variants of `contracts-bedrock-tests` (and `contracts-bedrock-t",
+      "files": [
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol"
+      ]
+    },
+    {
+      "title": "docs: move op-deployer custom-deployments guide from reference to usage",
+      "prNumber": 21802,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\n## Before / After\n\n**Before:** the OP Deployer **Custom Deployments** page lived in the si",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "deps: bump andybalholm/brotli to v1.2.2",
+      "prNumber": 21799,
+      "type": "other",
+      "body": "## Summary\n\nBumps `github.com/andybalholm/brotli` v1.1.0 → v1.2.2 (the brotli decoder op-node derivation uses in `BatchReader`, `rollup/derive/channel.go:203`).\n\nandybalholm **v1.2.0** fixed its handling of truncated streams: `Reader.Read` ",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "docs: split op-conductor into explanation, setup guide, and reference",
+      "prNumber": 21796,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\n## Before / After\n\n**Before:** the OP Conductor page (`chain-operators/tools/op-conductor.",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-conductor.mdx",
+        "docs/public-docs/chain-operators/tools/op-conductor/reference.mdx",
+        "docs/public-docs/chain-operators/tools/op-conductor/setup.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "test(op-devstack): funder waits for balance >= target, not exact",
+      "prNumber": 21790,
+      "type": "tests",
+      "body": "## Problem\n\n`TestPreNoInbox` (job `memory-all-opn-op-reth`) failed with:\n\n```\nop-acceptance-tests/tests/interop/upgrade/pre_test.go:88\n  → op-devstack/dsl/funder.go (FundAtLeast → WaitForBalance)\n  → op-devstack/dsl/eoa.go\nError: Condition ",
+      "files": [
+        "op-acceptance-tests/tests/base/deposit/deposit_test.go",
+        "op-acceptance-tests/tests/base/faucet_test.go",
+        "op-devstack/dsl/eoa.go",
+        "op-devstack/dsl/funder.go",
+        "op-devstack/dsl/operator_fee.go"
+      ]
+    },
+    {
+      "title": "op-node/op-service: swap ChainOpConfig to op-core/params + HardforkConfig interface for BlockAsPayload",
+      "prNumber": 21789,
+      "type": "other",
+      "body": "§5 of `docs/ai/opgeth-decoupling.md`: remove op-service's direct dependency on op-geth's `params.ChainConfig` for OP-hardfork detection, and move `ChainOpConfig` off op-geth's `params.OptimismConfig`.\n\n- `rollup.Config.ChainOpConfig`: `*par",
+      "files": [
+        "op-chain-ops/genesis/config.go",
+        "op-e2e/e2eutils/setup.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-node/chaincfg/chains_test.go",
+        "op-node/rollup/attributes/engine_consolidate_test.go",
+        "op-node/rollup/types.go",
+        "op-node/rollup/types_test.go",
+        "op-node/superchain/superchain.go",
+        "op-service/eth/types.go"
+      ]
+    },
+    {
+      "title": "ci: pin proven APKO factory workflows",
+      "prNumber": 21788,
+      "type": "other",
+      "body": "## Summary\n\nPin the APKO workflow to the previously validated factory workflow set with Cargo profile selection and isolated APK artifacts.\n\n## Validation\n\n- `mise exec -- actionlint .github/workflows/build-images.apko.yaml`\n",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    },
+    {
+      "title": "rust: address reth bump review findings",
+      "prNumber": 21785,
+      "type": "other",
+      "body": "Companion fix for #21766.\n\n## Summary\n\n- add a regression test proving Isthmus withdrawals-root validation uses the engine-supplied parent-state overlay rather than canonical storage\n- remove unrelated TDX SDK lock drift by pinning the pre-",
+      "files": [
+        "docs/ai/reth-update-review.md",
+        "rust/Cargo.lock",
+        "rust/UPDATING-RETH.md",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/crates/tdx-quote-provider/Cargo.toml",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/engine.rs"
+      ]
+    },
+    {
+      "title": "docs: Diátaxis relabel sweep — declare quadrants on 17 mislabeled pages",
+      "prNumber": 21784,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\nBatch of 17 independently verified Diátaxis mislabel → relabel findings, applied as one sw",
+      "files": [
+        "docs/public-docs/app-developers/tutorials/interoperability/contract-calls.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/event-contests.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/event-reads.mdx",
+        "docs/public-docs/chain-operators/guides/configuration/batcher.mdx",
+        "docs/public-docs/chain-operators/guides/configuration/proposer.mdx",
+        "docs/public-docs/chain-operators/guides/management/key-management.mdx",
+        "docs/public-docs/chain-operators/reference/opcm.mdx",
+        "docs/public-docs/chain-operators/reference/standard-configuration.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/architecture/engine.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/architecture/pipeline.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/upgrade.mdx",
+        "docs/public-docs/chain-operators/tutorials/l1-contract-upgrades/superchain-ops-guide.mdx",
+        "docs/public-docs/chain-operators/tutorials/l1-contract-upgrades/upgrade-op-contracts-1-3-1-8.mdx",
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "docs/public-docs/chain-operators/tutorials/migrating-permissionless.mdx",
+        "docs/public-docs/chain-operators/tutorials/upgrade-chain-to-super-roots.mdx",
+        "docs/public-docs/node-operators/reference/features/snap-sync.mdx"
+      ]
+    },
+    {
+      "title": "docs: relabel three app-developer pages as explanations",
+      "prNumber": 21783,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\nBundles three low-lift Diátaxis relabels in the app-developers section — three pages that ",
+      "files": [
+        "docs/public-docs/app-developers/guides/interoperability/message-passing.mdx",
+        "docs/public-docs/app-developers/guides/interoperability/reading-logs.mdx",
+        "docs/public-docs/app-developers/guides/transactions/flashblocks-and-gas-usage.mdx"
+      ]
+    },
+    {
+      "title": "docs: relabel L1/L2 messaging page as an explanation",
+      "prNumber": 21782,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\n## Before / After\n\n**Before:** the [Sending data between L1 and L2](https://docs.optimism.",
+      "files": [
+        "docs/public-docs/app-developers/guides/bridging/messaging.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: fix dead-end and chained legacy redirects",
+      "prNumber": 21781,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\nTracks ethereum-optimism/solutions#930\n\n## Before / After\n\n**Before:** a reader following ",
+      "files": [
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: retire the \"run an OP Stack node\" link-hub page, fold it into the node-operators overview",
+      "prNumber": 21777,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1784079291457959)_\n\nTracks ethereum-optimism/solutions#929\n\n## Before / After\n\n**Before:** the Node Operators ",
+      "files": [
+        "docs/public-docs/app-developers/reference/rpc-providers.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/overview.mdx",
+        "docs/public-docs/node-operators/reference/architecture/rollup-node.mdx",
+        "docs/public-docs/op-mainnet/network-information/connecting-to-op.mdx"
+      ]
+    },
+    {
+      "title": "Update issue number in TODO",
+      "prNumber": 21776,
+      "type": "other",
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\nUpdate TODO comment to point at correct issue: https://github.com/ethereum-optimism/optimism/issues/21773\r\n",
+      "files": [
+        "rust/kona/sp1/crates/host/src/fetcher.rs"
+      ]
+    },
+    {
+      "title": "test(op-acceptance-tests): remove redundant Cannon-Kona smoke test",
+      "prNumber": 21774,
+      "type": "tests",
+      "body": "Removes the Cannon-Kona smoke test that only checked registered game arguments and implementation presence.\n\nThe surviving acceptance tests create and actively dispute Cannon-Kona games and exercise permissioned/Cannon-Kona withdrawal lifec",
+      "files": [
+        "op-acceptance-tests/tests/proofs/cannon_kona/smoke_test.go"
+      ]
+    },
+    {
+      "title": "test(op-devstack): support explicit super game routing",
+      "prNumber": 21772,
+      "type": "tests",
+      "body": "Prepares the devstack runtime to exercise super dispute games before the default-on cutover in ethereum-optimism/optimism#21689.\n\nExisting explicit configuration now routes game types 5 and 9 through the super proposal source, configures ty",
+      "files": [
+        "op-acceptance-tests/tests/interop/super-at-genesis/super_dispute_game_at_initial_deployment_test.go",
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/proofs/fault_dispute_game.go",
+        "op-devstack/shared/challenger/challenger.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "op-devstack/sysgo/singlechain_runtime.go"
+      ]
+    },
+    {
+      "title": "test(contracts): validate ZK after super root migration",
+      "prNumber": 21771,
+      "type": "tests",
+      "body": "Reworks the ZK StandardValidator fixture to model post-super-root-migration state: legacy games are disabled while super permissioned, super permissionless, and ZK games are enabled. Updates the contracts feature matrix and required-check d",
+      "files": [
+        ".circleci/continue/main.yml",
+        "packages/contracts-bedrock/test/L1/OPContractsManagerStandardValidator.t.sol"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 337.17566570694095,
+      "prScore": 276.93766570694095,
+      "issueScore": 2.3,
+      "reviewScore": 57.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/81847?u=577eaff0520b33aadc0f9fb6d11f5cdb2dd9486e&v=4",
+      "totalScore": 328.99458773999436,
+      "prScore": 310.55658773999437,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 252.2217011187049,
+      "prScore": 224.28370111870493,
+      "issueScore": 0,
+      "reviewScore": 27.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 112.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 112.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 106.24685393748624,
+      "prScore": 96.24685393748624,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 89.88982550328085,
+      "prScore": 23.689825503280836,
+      "issueScore": 2,
+      "reviewScore": 64,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 80.81710085704198,
+      "prScore": 70.61710085704198,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 79,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 77,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 67.85641781431535,
+      "prScore": 24.918417814315347,
+      "issueScore": 0,
+      "reviewScore": 42.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 40.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 40.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 37.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 37.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 35.72040836116135,
+      "prScore": 35.72040836116135,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 31.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 28.828306144334054,
+      "prScore": 22.628306144334054,
+      "issueScore": 6,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 27,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lucasmt",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36549752?v=4",
+      "totalScore": 25.508641727603273,
+      "prScore": 25.508641727603273,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 20.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 12.950720770839919,
+      "prScore": 12.950720770839919,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 9.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "krw1-admin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/305330860?v=4",
+      "totalScore": 9.38105020110221,
+      "prScore": 9.38105020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "its-everdred",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1020682?u=ef69e13586ebc33960d4aa1bf7ef3938bebd59a3&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 55,
+  "mergedPRs": 40,
+  "newIssues": 6,
+  "closedIssues": 10,
+  "activeContributors": 31
 }
