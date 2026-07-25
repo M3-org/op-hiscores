@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-19 to 2026-07-26, ethereum-optimism/optimism had 96 new PRs (82 merged), 15 new issues, and 46 active contributors.",
+  "overview": "From 2026-07-19 to 2026-07-26, ethereum-optimism/optimism had 108 new PRs (98 merged), 23 new issues, and 51 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABATutxw",
@@ -44,6 +44,18 @@
       "commentCount": 1
     },
     {
+      "id": "I_kwDODjvEJM7uKCfn",
+      "title": "op-reth v1.11.0 tls issue",
+      "author": "bhaveshtank",
+      "number": 19322,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Bug Description**\n\nThe `op-reth` binary from the OP Labs Docker image (`us-docker.pkg.dev/oplabs-tools-artifacts/images/op-reth:v1.11.0`) fails to connect to the flashblocks WebSocket endpoint with the error `\"URL error: TLS support not compiled in\"`. \n\n**Steps to Reproduce**\n\n1. Pull the OP Labs op-reth image: `docker pull us-docker.pkg.dev/oplabs-tools-artifacts/images/op-reth:v1.11.0`\n2. Run op-reth with flashblocks enabled using `--flashblocks-url wss://<flashblocks-endpoint>/ws` on Optimism Mainnet\n3. Observe the repeating WARN log every 5 seconds: `Error receiving flashblock err=URL error: TLS support not compiled in`\n\n**Expected behavior**\n\nop-reth should successfully establish a WSS connection to the flashblocks endpoint and receive flashblock data for building pending state.\n\n**Environment Information:**\n\n- Operating System: Linux (Docker)\n- Docker Image: `us-docker.pkg.dev/oplabs-tools-artifacts/images/op-reth:v1.11.0`\n- Package Version: op-reth v1.11.0\n- Chain: Optimism Mainnet\n\n**Configurations:**\n\n```\n--flashblocks-url wss://<flashblocks-endpoint>/ws\n```\n\n**Logs:**\n\n```\n2026-02-26T13:22:43.867284Z  WARN Error receiving flashblock err=URL error: TLS support not compiled in retry_period=5\n2026-02-26T13:22:48.881971Z  WARN Error receiving flashblock err=URL error: TLS support not compiled in retry_period=5\n2026-02-26T13:22:53.890658Z  WARN Error receiving flashblock err=URL error: TLS support not compiled in retry_period=5\n2026-02-26T13:22:59.169761Z  WARN Error receiving flashblock err=URL error: TLS support not compiled in retry_period=5\n2026-02-26T13:23:04.178241Z  WARN Error receiving flashblock err=URL error: TLS support not compiled in retry_period=5\n```\n",
+      "createdAt": "2026-02-26T13:33:50Z",
+      "closedAt": "2026-07-24T03:04:31Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
       "id": "I_kwDODjvEJM8AAAABEbsSHA",
       "title": "kona-node: implement syncmode.offset-el-safe for behavior parity with op-node",
       "author": "geoknee",
@@ -52,18 +64,6 @@
       "body": "Track adding `syncmode.offset-el-safe` to **kona-node** for behavior parity with op-node.\n\n## Background\n\nop-node #21033 (merged 2026-05-27) changed the default of `--syncmode.offset-el-safe` from `0` to `12h` (the OP Mainnet sequencing window). The feature: after **execution-layer (EL) sync** completes, instead of trusting the synced tip as safe/finalized, op-node retracts the safe and finalized heads to `tip - ceil(offset / blockTime)` blocks. This forces derivation to re-derive the most recent ~12h of blocks before they are considered safe. The option is only effective when `--syncmode=execution-layer`.\n\nkona-node currently has **no equivalent**. After EL sync, `L2ForkchoiceState::current()` simply reads the EL's `Safe`/`Finalized` tags (falling back to genesis), with no offset.\n\n## op-node references (behavior to match)\n\n- `OffsetBlockNum` / `DurationToBlocks` — `op-node/rollup/sync/start.go:119` (`n = ceil(offset/blockTime)`, `target = head - n`, clamped to genesis)\n- `headsAfterELSync` — `op-node/rollup/engine/engine_controller.go:874` (unsafe stays at tip; safe & finalized retract to `tip - n`)\n- flag + ineffective-unless-EL-sync warning — `op-node/service.go:350-366`, `op-node/flags/flags.go:134`\n\n## Where it slots into kona\n\n- Apply the offset in the EL-sync-complete reset path: `mark_el_sync_complete_and_notify_derivation_actor` (`rust/kona/crates/node/service/src/actors/engine/actor.rs:159`) → `reset()` → `find_starting_forkchoice`.\n- The tip is resolved in `L2ForkchoiceState::current()` (`rust/kona/crates/node/engine/src/sync/forkchoice.rs:46`); apply the retraction right after.\n- Add the config field + CLI flag in `rust/kona/bin/node/src/flags/`.\n\n## Work items\n\n1. Add `offset_el_safe: Duration` (default `12h`) to the node sync config + a `--syncmode.offset-el-safe` CLI flag, including op-node's \"ineffective unless EL sync → warn and ignore configured value\" handling.\n2. Port `OffsetBlockNum` / `DurationToBlocks` (ceil division, genesis clamp) as a small Rust helper.\n3. In the EL-sync-complete reset path, when `offset > 0`: keep `un_safe = tip`, set `safe = finalized = block(tip.number - n)`.\n\n## Open design decision\n\nop-node layers two robustness behaviors that **cannot be ported faithfully** because kona-node has **no safedb and no persisted safe head**:\n\n- **safedb resume** — N/A in kona; kona would always use the raw offset head (acceptable; safedb is only an optimization).\n- **never-retract** — op-node never moves safe/finalized below the engine's current heads on restart, so the offset window is only re-derived once. Without a persisted safe head, a naive kona port would re-derive the offset window on **every restart after an EL sync**.\n\n  Mitigation: kona already gates the post-EL-sync reset on `finalized_head == default` (genesis), so the offset can be applied **only on the initial post-EL-sync reset** to avoid repeated re-derivation. This should be confirmed during implementation.\n\n## Acceptance\n\n- kona-node retracts safe/finalized by `ceil(offset/blockTime)` blocks (default 12h) after EL sync completes, only when running EL sync.\n- No repeated re-derivation of the offset window on subsequent restarts.\n\n_Filed as parity follow-up to op-node #21033._\n",
       "createdAt": "2026-06-04T21:57:38Z",
       "closedAt": "2026-07-20T11:01:35Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABIZ_r9g",
-      "title": "Fix super-root migration runbooks for simplified SUPER_PERMISSIONED",
-      "author": "pauldowman",
-      "number": 21709,
-      "repository": "ethereum-optimism/optimism",
-      "body": "The single-chain and shared-factory super-root migration runbooks still assume the old fault-game behavior for `SUPER_PERMISSIONED` game type 5. They configure op-challenger with the unsupported `super-permissioned` game type and prescribe a nonzero initialization bond even though the simplified game is bondless and OPCMv2 requires its bond to be zero.\n\nUpdate both runbooks to use a zero type-5 bond, configure op-challenger for type 9 only where it is enabled, and document that type 5 relies on op-dispute-mon, guardian blacklisting, and the separate anchor-advancement workflow.\n",
-      "createdAt": "2026-07-10T22:31:01Z",
-      "closedAt": "2026-07-20T20:31:07Z",
       "state": "CLOSED",
       "commentCount": 1
     }
@@ -78,8 +78,20 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-07-22T21:37:29Z",
       "mergedAt": null,
-      "additions": 5587,
-      "deletions": 531
+      "additions": 4991,
+      "deletions": 310
+    },
+    {
+      "id": "PR_kwDODjvEJM72HlAM",
+      "title": "kona-sp1-proposer: port op-succinct fault-proof proposer (create path)",
+      "author": "digorithm",
+      "number": 22018,
+      "body": "## Summary\n\nPorts succinctlabs/op-succinct's fault-proof proposer (`fault-proof` crate @ [`13716c2c`](https://github.com/succinctlabs/op-succinct/tree/13716c2ca316babb41d92369bd7bb0312611ed5f/fault-proof)) into `rust/kona/sp1/crates/proposer` as `kona-sp1-proposer`: the Rust proposer for the super-root `ZKDisputeGame` (game type 10). PR 1 of two: **create path** (game creation, resolution, two-phase bond claiming). The **defend path** (challenge detection, proof requests, `prove()`) follows under #21463.\n\nPart of #21414 (create path; #21414 stays open until the prove() interaction lands in PR 2, #21463). Supersedes #21995 (the Go op-proposer adaptation): `op-proposer/` is untouched here and gets deprecated after the ZK upgrade, per team decision that one Rust application should own propose+prove. The proposer-agnostic pieces of #21995 (`gameargs.ParseZK`, `ZKGameImpl` parser cutover, `WaitForZKGameCount` DSL) are salvaged into this PR.\n\n### Port fidelity\n\nThe runtime skeleton (pinned-L1 sync discipline, game DAG + canonical head selection, task scheduler, backup, cursor walk) is a **near-verbatim port** - 90-100% line-identical after mechanical renames - so upstream fixes to that machinery can be cross-applied by diff. Adaptation is confined to the contract/data-source seams:\n\n- **Claims from the supernode**: `superroot_atTimestamp` supplies the super-root proof preimage, root claim (`keccak256(proof)`), and safe/finalized timestamp views gating cadence (`PROPOSAL_SAFETY=safe|finalized`). `SuperRootAtTimestampResponse` in `super-range-executor` gains the safe/finalized fields the Go server already serves.\n- **extraData** = `parentIndex (4B BE) || superRootProof`; UUID-collision handling advances the timestamp (fresh proof fetch each step), bounded by the safety limit.\n- **Discovered-game validation** against the canonical super root; a timestamp that is not yet safe locally is *pending* (excluded from parent selection, re-validated each sync, persisted across restarts) rather than terminally dropped - this also structurally prevents the far-future-parent liveness stall flagged in #21995's security review.\n- **Catch-up cadence**: a head lagging by more than one interval proposes at the newest proposable timestamp instead of crawling across the gap (restart after downtime, devstack time warps).\n- **Identity**: op-succinct's aggregationVkey/rangeVkeyCommitment/rollupConfigHash triplet collapses to `absolutePrestate()` (the super-aggregation program vkey, `PROGRAM_VKEY` env) + `verifier()`.\n- **Two-phase DelayedWETH claiming**: unlock once finalized, payout once the withdrawal delay elapses **in L1 time** (chain time, not wall time - they diverge under devstack time travel).\n- **Not ported** (deliberate): `challenger.rs` (op-challenger owns challenge/close, #21983), `prover.rs` + all proving config (PR 2), sp1-cluster + GCP KMS dependencies, alt-DA features, the anvil test harness (devstack supersedes it).\n\n### Devstack / acceptance\n\nThe ZK preset now starts the real proposer (first env-configured sysgo service; `LOG_FORMAT=json` so the readiness matcher can parse the startup line) unless `SkipHonestProposer`. The four pre-existing ZK lifecycle tests keep manual control via `WithoutHonestProposer()`. One CI change: the `RUST_BINARY_PATH_KONA_SP1_PROPOSER` export (the workspace build already produces and persists the binary).\n\n## Test plan\n\n- `cargo test -p kona-sp1-proposer --lib`: 21 tests (canonical-head DAG selection incl. catch-up chains, proposal timing incl. catch-up rule, bounded collision walk, pending-game parent ineligibility, two-phase claim state machine + chain-time maturity, backup schema guard, GameStatus/ProposalStatus enum pins vs Types.sol, 140-byte gameArgs decode with the same vectors as Go's gameargs tests, extraData encoding with #21995's vectors).\n- Acceptance (verified locally, real binary + contracts + supernode, all PASS): `TestProposerCreatesRootZKGame`, `TestProposerChainsSecondZKGameOnFirst`, `TestProposerResolvesOwnUnchallengedGame`, `TestProposerClaimsBondAfterResolution` (full unlock -> delay -> payout cycle).\n- Regression: the four pre-existing ZK lifecycle tests pass; `just lint-go` clean; clippy/fmt clean; `git diff -- op-proposer/` is empty; `op-e2e/system/proofs` (Go proposer) passes.\n- In a long local run the binary chained 51 games (root at parentIndex uint32.max, then 0 -> 1 -> ... -> 50) and self-resolved 49 of them.\n\n## Notes for reviewers\n\n- Textual overlap with #21983 (challenger) in `multichain_proofs.go` and the ZK acceptance setup; whichever lands second rebases. The merged ZK devstack branch should start both the challenger and this proposer.\n- `ZKDisputeGame.sol` was derived from the older op-succinct commit `c13844a9`; this port tracks `13716c2c`.\n- Plan: `.claude/plans/2026-07-24-feat-kona-sp1-proposer-port-plan.md` (local).",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-24T20:47:21Z",
+      "mergedAt": null,
+      "additions": 4149,
+      "deletions": 28
     },
     {
       "id": "PR_kwDODjvEJM7tIZfQ",
@@ -101,7 +113,7 @@
       "body": "**Description**\r\n\r\n`op-deployer` builds continuation deployment inputs from prepared state. Permissionless chains use their committed game type, selected prestate, and complete starting-anchor proposal. Later game type or prestate changes are rejected.\r\n\r\n`CANNON_KONA` uses the fixed permissioned fallback. `SUPER_CANNON_KONA` has no fallback prestate. Permissioned deployments keep existing behavior.\r\n\r\nMissing or incompatible prepared values fail before execution. Re-running `prepare` clears the starting anchor for chains it predicts again. Deployed chains keep their state.\r\n\r\nThe same completed input can be used for preflight and deployment. Deployment is recorded separately, allowing `continue` to record only after broadcast succeeds.\r\n\r\n**Tests**\r\n\r\nCovers game types, prepared-state authority, fallbacks, invalid state, chain binding, anchor transport and resets, permissioned compatibility, execution and recording, and deployed configuration.\r\n\r\n**Additional context**\r\n\r\nReplaces #21610. This PR is stacked on #21611 and must merge `develop` after #21611 merges.\r\n\r\nA preceding stage supplies the starting-anchor proposal. #21669 will add the `continue` command's whole-deployment preflight, broadcast, retry, and verification flow.\r\n\r\n**Metadata**\r\n\r\nCloses #20912\r\n",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-07-20T12:48:03Z",
-      "mergedAt": null,
+      "mergedAt": "2026-07-24T01:51:12Z",
       "additions": 2206,
       "deletions": 175
     },
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 2042,
       "deletions": 216
-    },
-    {
-      "id": "PR_kwDODjvEJM7ynxvy",
-      "title": "feat(kona-sp1): add native super-range acceptance parity",
-      "author": "Inphi",
-      "number": 21857,
-      "body": "## Summary\r\n\r\nRun SP1 super-range acceptance checks natively alongside the existing FPVM scenarios. The native executor collects real witnesses, replays them through the shared range and consolidation cores, and verifies canonical and replacement outcomes across the required interop scenarios.\r\n\r\nCircleCI builds and runs the native executor in both acceptance variants. Full program ELF execution remains limited to one opt-in cross-chain smoke test and is never enabled in CI. This will be done in a later PR.\r\n\r\n## Meta\r\n\r\nPart of https://github.com/ethereum-optimism/optimism/issues/21624",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-16T16:58:43Z",
-      "mergedAt": "2026-07-21T15:26:38Z",
-      "additions": 1981,
-      "deletions": 149
     }
   ],
   "codeChanges": {
-    "additions": 25966,
-    "deletions": 26288,
-    "files": 682,
-    "commitCount": 457
+    "additions": 31298,
+    "deletions": 28108,
+    "files": 742,
+    "commitCount": 504
   },
   "completedItems": [
     {
@@ -144,6 +144,16 @@
       "body": "## Problem\n\nFor a **deposit contract-creation** transaction (`to == null`, `isCreation == true`), `eth_getTransactionReceipt` returns the wrong `contractAddress` whenever the deposit sender's L2 nonce is greater than 0.\n\nThe OP receipt buil",
       "files": [
         "rust/op-reth/crates/rpc/src/eth/receipt.rs"
+      ]
+    },
+    {
+      "title": "fix(op-reth/txpool): reserve L1-info deposit gas in tx-pool gas limit (op-geth parity)",
+      "prNumber": 21548,
+      "type": "bugfix",
+      "body": "Closes #21546.\n\n## What\n\nOn OP-stack chains, every block contains a system-injected **L1-info deposit** as its first transaction, which always consumes some gas. op-geth accounts for this in tx-pool admission (`core/txpool/validation.go`): ",
+      "files": [
+        "rust/op-reth/crates/txpool/src/transaction.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs"
       ]
     },
     {
@@ -199,6 +209,15 @@
         "op-deployer/pkg/deployer/opcm/opchain.go",
         "op-deployer/pkg/deployer/opcm/opchain_test.go",
         "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol"
+      ]
+    },
+    {
+      "title": "feat(op-reth/txpool): reserve the Isthmus operator fee in pool balance check",
+      "prNumber": 21609,
+      "type": "feature",
+      "body": "## Problem\n\nCloses #21608.\n\n`OpTransactionValidator::apply_op_checks` (`rust/op-reth/crates/txpool/src/validator.rs`) reserves only the **L1 data fee** (`l1_tx_data_fee`) when checking that a sender can afford a transaction, not the **Isthm",
+      "files": [
+        "rust/op-reth/crates/txpool/src/validator.rs"
       ]
     },
     {
@@ -814,6 +833,38 @@
       ]
     },
     {
+      "title": "op-deployer: build continuation deploy input from prepared state",
+      "prNumber": 21897,
+      "type": "other",
+      "body": "**Description**\r\n\r\n`op-deployer` builds continuation deployment inputs from prepared state. Permissionless chains use their committed game type, selected prestate, and complete starting-anchor proposal. Later game type or prestate changes a",
+      "files": [
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "op-deployer/pkg/deployer/prepare.go",
+        "op-deployer/pkg/deployer/prepare_test.go",
+        "op-deployer/pkg/deployer/prestate.go",
+        "op-deployer/pkg/deployer/prestate_test.go",
+        "op-deployer/pkg/deployer/state/chain_intent.go",
+        "op-deployer/pkg/deployer/state/chain_intent_test.go",
+        "op-deployer/pkg/deployer/state/state.go",
+        "op-deployer/pkg/deployer/state/state_test.go",
+        "op-deployer/pkg/deployer/apply.go",
+        "op-deployer/pkg/deployer/artifacts/download.go",
+        "op-deployer/pkg/deployer/artifacts/download_test.go",
+        "op-deployer/pkg/deployer/artifacts/integrity.go",
+        "op-deployer/pkg/deployer/artifacts/integrity_test.go",
+        "op-deployer/pkg/deployer/opcm/opchain.go",
+        "op-deployer/pkg/deployer/opcm/opchain_test.go",
+        "op-deployer/pkg/deployer/pipeline/env.go",
+        "op-deployer/pkg/deployer/pipeline/l2genesis.go",
+        "op-deployer/pkg/deployer/pipeline/prepared.go",
+        "op-deployer/pkg/deployer/pipeline/prepared_test.go",
+        "op-deployer/pkg/deployer/state/intent.go",
+        "op-deployer/pkg/deployer/state/intent_test.go"
+      ]
+    },
+    {
       "title": "deps: bump flagged dependencies to patched versions",
       "prNumber": 21896,
       "type": "other",
@@ -1336,6 +1387,17 @@
       ]
     },
     {
+      "title": "op-acceptance-tests: take safe-head DB baseline at L1-origin granularity",
+      "prNumber": 21975,
+      "type": "tests",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested via [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1784757290091229)_\n\n## Before\n\n`TestNotTruncateDatabaseOnRestartWithExistingDatabase` intermittently fails its **pre-restart** s",
+      "files": [
+        "op-acceptance-tests/tests/safeheaddb_elsync/safeheaddb_test.go",
+        "op-devstack/dsl/l2_cl.go",
+        "op-devstack/dsl/safedb.go"
+      ]
+    },
+    {
       "title": "docs: add op-conductor, op-contracts, proxyd component hubs (A4 batch 3)",
       "prNumber": 21973,
       "type": "docs",
@@ -1533,6 +1595,75 @@
       ]
     },
     {
+      "title": "docs: cut duplicated bridging mechanics to canonical flow explainers",
+      "prNumber": 22002,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nIteration-2 deduplication slice D4 (census clu",
+      "files": [
+        "docs/public-docs/app-developers/guides/bridging/messaging.mdx",
+        "docs/public-docs/op-stack/bridging/cross-domain.mdx",
+        "docs/public-docs/op-stack/bridging/deposit-flow.mdx",
+        "docs/public-docs/op-stack/bridging/withdrawal-flow.mdx",
+        "docs/public-docs/op-stack/protocol/overview.mdx",
+        "docs/public-docs/op-stack/transactions/forced-transaction.mdx",
+        "docs/public-docs/op-stack/transactions/transaction-flow.mdx",
+        "docs/public-docs/public/img/op-stack/protocol/op-cross-chain-txn.jpeg"
+      ]
+    },
+    {
+      "title": "docs: extract shared setup snippets across app developer tutorials",
+      "prNumber": 22001,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nSlice D2 of the docs-improver iteration 2 dedu",
+      "files": [
+        "docs/public-docs/app-developers/tutorials/bridging/cross-dom-bridge-erc20.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/cross-dom-bridge-eth.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/cross-dom-solidity.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/standard-bridge-custom-token.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/standard-bridge-standard-token.mdx",
+        "docs/public-docs/app-developers/tutorials/transactions/sdk-estimate-costs.mdx",
+        "docs/public-docs/app-developers/tutorials/transactions/sdk-trace-txns.mdx",
+        "docs/public-docs/app-developers/tutorials/transactions/send-tx-from-eth.mdx",
+        "docs/public-docs/snippets/tutorial-setup-node-project.mdx",
+        "docs/public-docs/snippets/tutorial-setup-repl.mdx",
+        "docs/public-docs/snippets/tutorial-setup-wallet-and-funds.mdx"
+      ]
+    },
+    {
+      "title": "docs: single-source the op-geth EOL warning via shared snippet",
+      "prNumber": 22000,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nSlice D1 of the docs-improver iteration 2 dedu",
+      "files": [
+        "docs/public-docs/DOCS_CONTRIBUTING.md",
+        "docs/public-docs/chain-operators/guides/configuration/op-challenger-config-guide.mdx",
+        "docs/public-docs/chain-operators/guides/features/alt-da-mode-guide.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-reth-setup.mdx",
+        "docs/public-docs/node-operators/guides/configuration/execution-clients.mdx",
+        "docs/public-docs/node-operators/guides/configuration/legacy-geth.mdx",
+        "docs/public-docs/node-operators/guides/management/archive-node.mdx",
+        "docs/public-docs/node-operators/guides/management/restore-from-snapshot.mdx",
+        "docs/public-docs/node-operators/reference/architecture/architecture.mdx",
+        "docs/public-docs/node-operators/tutorials/node-from-docker.mdx",
+        "docs/public-docs/node-operators/tutorials/run-node-from-source.mdx",
+        "docs/public-docs/op-stack/transactions/transaction-flow.mdx",
+        "docs/public-docs/snippets/op-geth-eol.mdx",
+        "docs/public-docs/use-cases/choose-your-node-stack.mdx"
+      ]
+    },
+    {
+      "title": "docs: add shared OP Enterprise callout to chain operator surfaces",
+      "prNumber": 21999,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nTracks ethereum-optimism/solutions#1026 (close",
+      "files": [
+        "docs/public-docs/chain-operators/guides/management/best-practices.mdx",
+        "docs/public-docs/chain-operators/quickstart.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-challenger-setup.mdx",
+        "docs/public-docs/snippets/op-enterprise-callout.mdx"
+      ]
+    },
+    {
       "title": "docs: reconcile contradictory transaction finality timings",
       "prNumber": 21998,
       "type": "docs",
@@ -1555,6 +1686,21 @@
       ]
     },
     {
+      "title": "op-supernode: gate unsafe ingestion during invalidation recovery",
+      "prNumber": 21991,
+      "type": "other",
+      "body": "## Description\n\nFixes the supernode rewind race / livelock observed on `interop-reorg-2` (2026-07-21, ~21:14–21:56 UTC), where the same invalid Chain B block `515624` was invalidated repeatedly, each cycle freezing and resetting the VNs of ",
+      "files": [
+        "op-node/rollup/engine/engine_controller.go",
+        "op-node/rollup/engine/super_authority_mock_test.go",
+        "op-node/rollup/engine/unsafe_ingestion_deny_test.go",
+        "op-node/rollup/iface.go",
+        "op-supernode/supernode/chain_container/invalidation.go",
+        "op-supernode/supernode/chain_container/invalidation_test.go",
+        "op-supernode/supernode/chain_container/super_authority.go"
+      ]
+    },
+    {
       "title": "docs: dissolve the Rust tab (A5, final batch)",
       "prNumber": 21989,
       "type": "docs",
@@ -1570,6 +1716,45 @@
         "docs/public-docs/app-developers/tools-sdks/support-matrix.mdx",
         "docs/public-docs/docs.json",
         "docs/public-docs/rust/index.mdx"
+      ]
+    },
+    {
+      "title": "op-devstack,op-acceptance-tests: extract reusable SDM acceptance harness for external suites",
+      "prNumber": 21987,
+      "type": "tests",
+      "body": "Stacked on #21958 — review/merge that first.\n\nMakes the SDM acceptance tests drivable from outside this repo, so\noptimism-premium can boot its own sequencer binary against the same\nfixtures instead of forking them.\n\n- **New importable `sdmt",
+      "files": [
+        "op-acceptance-tests/tests/sdm/block_test.go",
+        "op-acceptance-tests/tests/sdm/boundary_test.go",
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-acceptance-tests/tests/sdm/premium_baseline_test.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/system.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/workload.go",
+        "op-devstack/sysgo/contracts.go",
+        "op-devstack/sysgo/l2_el_opreth.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-evm/src/post_exec/inspector.rs",
+        "rust/alloy-op-evm/src/post_exec/mod.rs",
+        "rust/alloy-op-evm/src/post_exec/refund.rs",
+        "rust/kona/bin/client/src/fpvm_evm/factory.rs",
+        "rust/kona/sp1/crates/client/src/precompiles/factory.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/context.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/post_exec_ext.rs",
+        "rust/op-reth/crates/node/tests/it/builder.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/examples/custom-node/src/evm/alloy.rs",
+        "rust/op-reth/examples/custom-node/src/evm/config.rs",
+        "rust/op-reth/examples/custom-node/src/evm/executor.rs",
+        "op-devstack/README.md",
+        "op-devstack/sysgo/contracts_test.go"
       ]
     },
     {
@@ -1663,17 +1848,102 @@
         "docs/public-docs/chain-operators/tutorials/integrating-da-layer.mdx",
         "docs/public-docs/op-stack/contribute/content-guide.mdx"
       ]
+    },
+    {
+      "title": "op-challenger: migrate ZK dispute game actor to super roots",
+      "prNumber": 21983,
+      "type": "other",
+      "body": "## Summary\r\n\r\n`ZKDisputeGame` became a super-root game, but op-challenger's ZK actor still\r\nvalidated single-chain output roots and compared them against what is now a\r\nsuper-root hash — so it judged every valid proposal invalid and could n",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/challenger_op_node_test.go",
+        "op-acceptance-tests/tests/proofs/zk/challenger_supernode_test.go",
+        "op-acceptance-tests/tests/proofs/zk/setup_test.go",
+        "op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go",
+        "op-challenger/cmd/main_test.go",
+        "op-challenger/config/config.go",
+        "op-challenger/config/config_test.go",
+        "op-challenger/flags/flags.go",
+        "op-challenger/game/fault/contracts/zkdisputegame.go",
+        "op-challenger/game/zk/actor.go",
+        "op-challenger/game/zk/actor_test.go",
+        "op-challenger/game/zk/register.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-devstack/dsl/proofs/zk_dispute_game.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/proof.go",
+        "op-devstack/shared/challenger/challenger.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-acceptance-tests/tests/proofs/zk/honest_challenger_test.go"
+      ]
+    },
+    {
+      "title": "op-chain-ops: expand invalid message smoke test",
+      "prNumber": 22017,
+      "type": "tests",
+      "body": "## Summary\n\n- support multiple invalid executing messages across multiple Chain B blocks\n- identify Chain B transaction and block for each inclusion\n- make per-transaction reorg timeout configurable, defaulting to 10 minutes\n\n## Validation\n",
+      "files": [
+        "op-chain-ops/interopsmoke/smoke.go",
+        "op-chain-ops/interopsmoke/smoke_test.go"
+      ]
+    },
+    {
+      "title": "ci: bump apko factory pin to include BASH_REMATCH fix",
+      "prNumber": 22012,
+      "type": "bugfix",
+      "body": "## Problem\n\nThe op-node `v1.19.4-rc.3` release CI failed in the `build-images.apko`\nworkflow's `plan` job:\n\n```\nrelease tag regex '^([^/]+)/(v.+)$' did not provide capture indexes service=1 version=2 for 'op-node/v1.19.4-rc.3'\n```\n\nThe rege",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    },
+    {
+      "title": "docs: single-source op-challenger setup and fix broken build-from-source path",
+      "prNumber": 22007,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nDeduplication slice D3 of docs-improver iterat",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/op-challenger-config-guide.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-challenger-setup.mdx",
+        "docs/public-docs/snippets/op-challenger-about.mdx",
+        "docs/public-docs/snippets/op-challenger-dispute-mon.mdx",
+        "docs/public-docs/snippets/op-challenger-docker-intro.mdx"
+      ]
+    },
+    {
+      "title": "docs: add OP Enterprise decision-point sentences to solution guides",
+      "prNumber": 22006,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nSlice 3 (Pattern D) of the iteration-2 OPE ste",
+      "files": [
+        "docs/public-docs/use-cases/launch-a-chain-with-fault-proofs-and-ha-sequencing.mdx",
+        "docs/public-docs/use-cases/run-a-fault-proof-challenger.mdx"
+      ]
+    },
+    {
+      "title": "docs: single-source supernode topology and legacy geth guidance",
+      "prNumber": 22005,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nIteration-2 deduplication slice D5 (census clu",
+      "files": [
+        "docs/public-docs/node-operators/guides/configuration/legacy-geth.mdx",
+        "docs/public-docs/node-operators/guides/configuration/supernode.mdx",
+        "docs/public-docs/node-operators/reference/architecture/architecture.mdx",
+        "docs/public-docs/node-operators/reference/legacy-geth-config.mdx",
+        "docs/public-docs/notices/interop-prep.mdx"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "claude",
       "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
-      "totalScore": 1039.3949294621914,
-      "prScore": 916.5409294621915,
-      "issueScore": 4,
-      "reviewScore": 117,
-      "commentScore": 1.8539999999999999,
+      "totalScore": 1312.8654961196812,
+      "prScore": 1149.8114961196811,
+      "issueScore": 8,
+      "reviewScore": 153,
+      "commentScore": 2.054,
       "summary": null
     },
     {
@@ -1687,13 +1957,23 @@
       "summary": null
     },
     {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 334.9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 334.5,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 319.31397132259275,
+      "totalScore": 319.6539713225928,
       "prScore": 234.69797132259276,
       "issueScore": 4.2,
       "reviewScore": 79,
-      "commentScore": 1.416,
+      "commentScore": 1.7559999999999998,
       "summary": null
     },
     {
@@ -1707,63 +1987,53 @@
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 305.4,
-      "prScore": 0,
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 282.4218736828016,
+      "prScore": 200.22187368280163,
       "issueScore": 0,
-      "reviewScore": 305,
-      "commentScore": 0.4,
+      "reviewScore": 82,
+      "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 241.42187368280162,
-      "prScore": 200.22187368280163,
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 240.93310297272038,
+      "prScore": 198.53310297272037,
       "issueScore": 0,
-      "reviewScore": 41,
-      "commentScore": 0.2,
+      "reviewScore": 42,
+      "commentScore": 0.4,
       "summary": null
     },
     {
       "username": "falcorocks",
       "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 204.73147276858097,
-      "prScore": 194.73147276858097,
+      "totalScore": 228.98608505724908,
+      "prScore": 218.98608505724908,
       "issueScore": 0,
       "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 199.80632907614427,
-      "prScore": 157.60632907614428,
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 179.55084795964552,
+      "prScore": 146.21084795964555,
       "issueScore": 0,
-      "reviewScore": 42,
-      "commentScore": 0.2,
+      "reviewScore": 33,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 156.90891701442948,
+      "totalScore": 166.60891701442947,
       "prScore": 99.00891701442947,
       "issueScore": 0,
-      "reviewScore": 57.5,
-      "commentScore": 0.4,
-      "summary": null
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 156.55084795964552,
-      "prScore": 146.21084795964555,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 67,
+      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
@@ -1779,11 +2049,21 @@
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 107.94755939933738,
+      "totalScore": 128.28755939933737,
       "prScore": 69.44755939933736,
-      "issueScore": 0,
-      "reviewScore": 38.5,
-      "commentScore": 0,
+      "issueScore": 2,
+      "reviewScore": 56.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 115.66126373541437,
+      "prScore": 89.22326373541438,
+      "issueScore": 6,
+      "reviewScore": 20,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -1807,6 +2087,16 @@
       "summary": null
     },
     {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 89.12122392535841,
+      "prScore": 84.9212239253584,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
       "totalScore": 88.29842275920369,
@@ -1827,33 +2117,23 @@
       "summary": null
     },
     {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 65.67948983883826,
-      "prScore": 45.67948983883827,
+      "username": "lukasrosario",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36800180?u=68c7227a899428a4a0d92506cfef6dcf8c373334&v=4",
+      "totalScore": 78.05122598118001,
+      "prScore": 78.05122598118001,
       "issueScore": 0,
-      "reviewScore": 20,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 53.153999999999996,
+      "totalScore": 63.494,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 51.5,
-      "commentScore": 1.654,
-      "summary": null
-    },
-    {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 48.282784067560705,
-      "prScore": 46.08278406756071,
-      "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 0.2,
+      "reviewScore": 61.5,
+      "commentScore": 1.9939999999999998,
       "summary": null
     },
     {
@@ -1887,23 +2167,23 @@
       "summary": null
     },
     {
-      "username": "asdv23",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
-      "totalScore": 32.338,
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 35,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 31.5,
-      "commentScore": 0.838,
+      "reviewScore": 35,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "raffaele-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
-      "totalScore": 30,
+      "username": "asdv23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
+      "totalScore": 32.678,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 30,
-      "commentScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 1.178,
       "summary": null
     },
     {
@@ -1923,6 +2203,16 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tremarkley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15234569?u=b2a30602eb3a6a6fbd8e7b2ee2eef68888738704&v=4",
+      "totalScore": 20.245379569644605,
+      "prScore": 20.245379569644605,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1964,6 +2254,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.4,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -2037,18 +2337,18 @@
       "summary": null
     },
     {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 4.7,
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2,
       "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0.2,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "pauldowman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "username": "Famma1675",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/178044800?v=4",
       "totalScore": 2,
       "prScore": 0,
       "issueScore": 2,
@@ -2097,9 +2397,9 @@
       "summary": null
     }
   ],
-  "newPRs": 96,
-  "mergedPRs": 82,
-  "newIssues": 15,
-  "closedIssues": 23,
-  "activeContributors": 46
+  "newPRs": 108,
+  "mergedPRs": 98,
+  "newIssues": 23,
+  "closedIssues": 29,
+  "activeContributors": 51
 }
