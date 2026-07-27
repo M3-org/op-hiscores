@@ -5,20 +5,112 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-26 to 2026-08-02, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-07-26 to 2026-08-02, ethereum-optimism/optimism had 9 new PRs (0 merged), 0 new issues, and 5 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM72o6Aq",
+      "title": "contracts-bedrock: Skip shared-contract upgrades for non-owning chains post-interop-migration",
+      "author": "ajsutton",
+      "number": 22033,
+      "body": "## Summary\n\nFixes ethereum-optimism/optimism#21731. After an interop migration, `OPContractsManagerV2.upgrade()` could only upgrade the first chain in an interop set — every other member chain reverted.\n\nThe shared contracts (ETHLockbox, DisputeGameFactory, DelayedWETH, AnchorStateRegistry) are administered by a single ProxyAdmin — the one belonging to the first chain in the set — while each member chain keeps its own distinct ProxyAdmin. `_apply` routed every proxy upgrade through the calling chain's ProxyAdmin, so `ProxyAdmin.upgrade` reverted on the EIP-1967 admin check for any chain that didn't own the shared proxies.\n\n## Approach: skip on ProxyAdmin mismatch\n\nEach shared-contract upgrade — and the DisputeGameFactory config mutations (`setImplementation`/`setInitBond`, including the SUPER_CANNON clear) — is now gated on the target self-reporting the calling chain's ProxyAdmin as its admin, via the `proxyAdmin()` getter every target inherits from `ProxyAdminOwnedBase` (a plain self-read). Per-chain contracts always match and always upgrade; shared contracts match only for the first chain, so they are upgraded exactly **once**, during the first chain's `upgrade()` call. Non-owning chains simply skip them (no version-equality guard).\n\nInitial deployments short-circuit the check, since a freshly-deployed proxy has no implementation to self-report its admin yet and is always administered by this ProxyAdmin.\n\n### Tradeoff\n\nBecause shared contracts are upgraded only during the first chain's call, an interop **set should be upgraded together** (all member chains, first chain included) for cross-chain version consistency. This function does not enforce set-wide consistency; that is a property of upgrading the whole set together.\n\n## Testing\n\n- New regression test `test_upgrade_afterMigrationNonFirstChain_succeeds` migrates the 2-chain interop fixture, then runs `upgrade()` for both member chains (including the non-first chain) and asserts neither reverts, that the shared DGF/ASR/ETHLockbox/DelayedWETH end at the target implementations, and that the non-first chain's own per-chain contracts upgrade while the shared contracts are left untouched. On `develop` this reverts for chain 2.\n- `OPContractsManagerV2.t.sol` (default + `DEV_FEATURE__OPTIMISM_PORTAL_INTEROP`), `OPContractsManagerUtils.t.sol`, and `OPContractsManagerStandardValidator.t.sol` all pass.\n- Snapshots + semver-lock regenerated; OPCM `@custom:semver` bumped 7.2.2 → 7.2.3.\n\nRef: ethereum-optimism/optimism#21731",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-26T21:50:23Z",
+      "mergedAt": null,
+      "additions": 232,
+      "deletions": 57
+    },
+    {
+      "id": "PR_kwDODjvEJM7zW3yl",
+      "title": "op-service: preserve trusted RPC hashes for block info",
+      "author": "homilclaw",
+      "number": 21890,
+      "body": "## Summary\n- add a shared block-info fetch path that preserves the RPC-provided block hash when trustRPC is enabled\n- use it for InfoByNumber and InfoByLabel instead of recomputing the geth header hash locally\n- add a regression test where the trusted RPC hash differs from the locally computed header hash\n\n## Context\nThis is needed for CC3/Substrate-backed Ethereum RPC compatibility, where the JSON-RPC block hash is intentionally the Ethereum-compatible hash while the locally recomputed geth header hash can differ.\n\n## Verification\n- PATH=/home/chainmailclaw/.openclaw/workspace/tooling/go1.24/bin:/home/chainmailclaw/.cargo/bin:/home/chainmailclaw/.openclaw/npm/projects/openclaw-codex-8902d781d4/node_modules/@openclaw/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path:/home/chainmailclaw/.openclaw/agents/main/agent/codex-home/tmp/arg0/codex-arg0tRTULt:/usr/bin:/bin:/home/chainmailclaw/.local/bin:/home/chainmailclaw/.npm-global/bin:/home/chainmailclaw/bin:/home/chainmailclaw/.nix-profile/bin:/usr/local/bin:/snap/bin go test ./op-service/sources",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-18T15:53:43Z",
+      "mergedAt": null,
+      "additions": 193,
+      "deletions": 19
+    },
+    {
+      "id": "PR_kwDODjvEJM72lF2U",
+      "title": "op-service, txmgr, op-deployer: make L1 RPC handling more tolerant",
+      "author": "homilclaw",
+      "number": 22028,
+      "body": "## Summary\n- Preserve the block hash returned by a trusted L1 RPC when loading L1 block info instead of recomputing a local header hash from the response fields.\n- Allow calldata fee estimation to continue when an L1 RPC endpoint does not implement `eth_blobBaseFee`.\n- Skip blob-base-fee metrics when blob base fee data is unavailable on calldata-only endpoints.\n- Make live op-deployer execution more tolerant of RPC/fork and gas-estimation differences by:\n  - preserving the requested fork block reference for forked state reads,\n  - allowing the live fork script host to load unoptimized deployment artifacts consistently with genesis execution,\n  - increasing keyed broadcaster gas padding, and\n  - applying a ProxyAdmin call gas floor for `upgradeAndCall` and `transferOwnership` calls.\n\n## Motivation\nSome deployment and derivation environments use L1 RPC endpoints whose behavior differs from a local geth-style assumption in small but important ways:\n\n- The RPC endpoint may already be the trusted source of the canonical block hash for a block info response.\n- A calldata-only environment may not expose blob-fee RPC methods even though the transaction path does not need blob data.\n- Live deployment transactions can fail when simulated gas usage is too tight for specific ProxyAdmin calls.\n\nThese changes keep the existing strict paths intact while making the affected code paths tolerate those RPC and gas-estimation differences more directly.\n\n## Verification\n```bash\nGOTOOLCHAIN=local go test ./op-service/sources ./op-service/txmgr ./op-chain-ops/script/forking ./op-deployer/pkg/deployer ./op-deployer/pkg/deployer/broadcaster\n```",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-26T16:16:50Z",
+      "mergedAt": null,
+      "additions": 193,
+      "deletions": 19
+    },
+    {
+      "id": "PR_kwDODjvEJM72pGwP",
+      "title": "contracts-bedrock: Resolve each proxy's own ProxyAdmin during upgrade",
+      "author": "ajsutton",
+      "number": 22034,
+      "body": "## Summary\n\nFixes ethereum-optimism/optimism#21731. After an interop migration, a chain set shares `ETHLockbox`, `DisputeGameFactory`, `AnchorStateRegistry`, and `DelayedWETH`, all administered by the **first** chain's `ProxyAdmin`. `OPContractsManagerV2._apply` routed every proxy upgrade through the *calling* chain's `_cts.proxyAdmin`, so `upgrade()` reverted on the shared contracts' proxy admin-slot check for any member chain other than the first.\n\n## Approach: per-target ProxyAdmin resolution\n\n`_apply` now resolves each proxy's administering `ProxyAdmin` per target via a new `_adminFor(defaultAdmin, target)` helper:\n\n- It reads the target proxy's self-reported admin through `ProxyAdminOwnedBase.proxyAdmin()`. Per-chain contracts resolve to the chain's own `ProxyAdmin` (unchanged behavior); the shared interop contracts resolve to the first chain's `ProxyAdmin`, so the admin-slot check passes.\n- It falls back to the passed-in `_cts.proxyAdmin` when the target proxy has no implementation set yet (a freshly deployed proxy during an initial deployment or a permitted proxy deployment) — such a proxy can't report its admin and is always administered by the `ProxyAdmin` that just deployed it.\n- The common L1 `ProxyAdmin` owner owns every `ProxyAdmin`, so `onlyOwner` passes regardless of which one is selected.\n\n## Tradeoff\n\nThis upgrades **all** contracts (per-chain + shared) on every member chain's `upgrade()` call, so the shared contracts get re-upgraded idempotently on each member's upgrade. This relies on the initializers being idempotent — re-running the same release does not reset anchors, games, withdrawals, balances, or authorizations. The dispute-game config loop (`setImplementation` / `setInitBond`) is `onlyOwner` on the DGF and already worked; it likewise re-applies idempotently.\n\n## Testing\n\nAdds `test_upgrade_interopMemberChains_succeeds` (2-chain migrate fixture): migrates the interop set, then upgrades **both** members — including the non-first chain — asserting neither reverts and the shared DGF / ASR / ETHLockbox / DelayedWETH end at the target implementations. This test reverts on `develop` for chain 2 (verified) and passes with this change.\n\nBumps OPCM `@custom:semver` to 7.2.3 (bytecode change).",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-26T22:08:09Z",
+      "mergedAt": null,
+      "additions": 161,
+      "deletions": 14
+    },
+    {
+      "id": "PR_kwDODjvEJM72l2HL",
+      "title": "op-deployer: harden live deployment RPC and gas handling",
+      "author": "homilclaw",
+      "number": 22032,
+      "body": "## Summary\n- Preserve the requested fork block reference for forked state reads.\n- Allow the live fork script host to load unoptimized deployment artifacts consistently with genesis execution.\n- Increase keyed broadcaster gas padding.\n- Apply a ProxyAdmin call gas floor for `upgradeAndCall` and `transferOwnership` calls.\n- Add broadcaster coverage for the gas padding behavior.\n\n## Motivation\nLive deployment transactions can fail when forked reads or simulated gas usage are too brittle for specific RPC/provider behavior. These changes make the live deployment path more tolerant while keeping the scope limited to fork reads, artifact loading, and deployment transaction gas handling.\n\n## Verification\n```bash\nGOTOOLCHAIN=local go test ./op-chain-ops/script/forking ./op-deployer/pkg/deployer ./op-deployer/pkg/deployer/broadcaster\n```\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-26T17:15:44Z",
+      "mergedAt": null,
+      "additions": 62,
+      "deletions": 6
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 16
   },
   "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
+  "topContributors": [
+    {
+      "username": "homilclaw",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/260096485?u=ebeb98b5e73f7a254ff27111a5d1b04d1378880b&v=4",
+      "totalScore": 87.10225970294381,
+      "prScore": 86.66425970294381,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 56.711454026816014,
+      "prScore": 56.27345402681601,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "cristianizzo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5518760?u=002af29150bcb79ca344042a00a85a33939bff05&v=4",
+      "totalScore": 11.271955074527657,
+      "prScore": 6.571955074527657,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 9,
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 5
 }
