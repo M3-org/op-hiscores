@@ -5,8 +5,32 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-26 to 2026-08-02, ethereum-optimism/optimism had 29 new PRs (13 merged), 1 new issues, and 32 active contributors.",
+  "overview": "From 2026-07-26 to 2026-08-02, ethereum-optimism/optimism had 62 new PRs (30 merged), 5 new issues, and 44 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABKF_Emg",
+      "title": "kona-sp1-proposer: detect a second instance running with the same key",
+      "author": "digorithm",
+      "number": 22020,
+      "repository": "ethereum-optimism/optimism",
+      "body": "The proposer assumes it is the only instance running with its key. If two run at once (most commonly a Kubernetes rolling update overlapping old and new pods, a local debug run against a live network, or two deployments sharing a remote signer key), nothing unsafe happens: the factory's UUID dedup rejects duplicate games. But the two instances race nonces, spam reverted transactions, and can create redundant sibling games that each cost a bond. It is a silent gas leak that looks like flaky infrastructure.\n\nThe proposer can detect this itself. If it discovers an on-chain game created by its own address that it did not create in this process (created after startup, not tracked by the creation guard), the only explanation is another instance with the same key. On detection: log an error, bump a dedicated metric, and optionally pause creation. Small change, fits naturally into the sync loop's game classification.\n\nPrevention on the ops side, independent of this change: use `strategy: Recreate` (or a single-replica StatefulSet) so deploys never overlap two pods, keep the proposer key in exactly one workload's secret, and alert on sustained game-creation or nonce errors.\n\nRelated: #22019 (sync_games decomposition) touches the same code; these could land together.",
+      "createdAt": "2026-07-24T21:49:10Z",
+      "closedAt": "2026-07-28T19:29:11Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM7vl_iY",
+      "title": "contracts: increase PreimageOracle.PRECOMPILE_CALL_RESERVED_GAS before Glamsterdam (EIP-8037)",
+      "author": "ajsutton",
+      "number": 19380,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`PreimageOracle.PRECOMPILE_CALL_RESERVED_GAS` is currently set to `100_000`. EIP-8037 (part of Glamsterdam / EIP-8007, targeting H1 2026) proposes to roughly double cold SSTORE costs from ~20,000 to ~40,000 gas. This would cause `loadPrecompilePreimagePart` to run out of gas after its internal `staticcall` when writing the three storage slots that record the preimage result, if the caller provides the minimum gas implied by the constant.\n\nThe constant must be increased to at least **200,000** before Glamsterdam activates on L1.\n\n---\n\n## How the gas budget works\n\n`loadPrecompilePreimagePart` enforces:\n\n```solidity\n// require(gas() >= (requiredGas * 64 / 63) + PRECOMPILE_CALL_RESERVED_GAS)\nif lt(mul(gas(), 63), add(mul(_requiredGas, 64), mul(PRECOMPILE_CALL_RESERVED_GAS, 63))) {\n    revert(0x1c, 4) // NotEnoughGas()\n}\n```\n\nThen calls the precompile forwarding **all** remaining gas, and afterwards writes three storage slots:\n\n```solidity\npreimagePartOk[key][_partOffset] = true;   // SSTORE 1\npreimageParts[key][_partOffset]  = part;   // SSTORE 2\npreimageLengths[key]             = size;   // SSTORE 3\n```\n\n**Post-staticcall gas budget.** By EIP-150, the staticcall retains `floor(gas/64)` in the calling context and forwards the rest. The precompile uses `requiredGas` and returns the remainder. In the minimum-gas case (caller provides exactly `requiredGas × 64/63 + PRECOMPILE_CALL_RESERVED_GAS`):\n\n```\npost_budget ≈ requiredGas/63 + PRECOMPILE_CALL_RESERVED_GAS\n```\n\nThe constant therefore serves double duty:\n1. Covering the small pre-staticcall overhead (key hash, gas check arithmetic, memory setup) — measured at ~13,000 gas today.\n2. Providing the bulk of the post-staticcall gas budget for the three SSTOREs.\n\n---\n\n## Measured values\n\nUsing a zero-cost EOA as the precompile target with `requiredGas = 0`, every gas unit consumed is pure oracle overhead (new test `PreimageOracle_LoadPrecompilePreimagePartOverhead_Test` in `packages/contracts-bedrock/test/cannon/PreimageOracle.t.sol`):\n\n| Scenario | Measured gas | PRECOMPILE_CALL_RESERVED_GAS |\n|---|---|---|\n| First call, 3 cold SSTOREs | **73,254** | 100,000 |\n| Subsequent call, same key (2 cold + 1 warm SSTORE, `preimageLengths` unchanged) | **46,742** | 100,000 |\n\nBreakdown of the 73,254 gas:\n- 3 × cold SSTORE (20,000 each): **60,000 gas**\n- Pre-staticcall and other overhead: **~13,254 gas**\n\n---\n\n## EIP-8037 impact\n\nEIP-8037 proposes cold SSTORE ≈ 40,000 gas (exact numbers pending stateful benchmarks). This adds 3 × 20,000 = **60,000 gas** to the cold-call overhead:\n\n| Scenario | Today | EIP-8037 projected | Budget (ecrecover, requiredGas=3,000) |\n|---|---|---|---|\n| First call (cold) | 73,254 | **133,254** | 100,048 — **insufficient** |\n| Subsequent call (warm preimageLengths) | 46,742 | **86,742** | 100,048 — OK |\n\nFor ecrecover (`requiredGas = 3,000`): `post_budget = 3000/63 + 100,000 = 100,048 < 133,254` → **OOG after the staticcall**.\n\nThe smallest `requiredGas` among accelerated precompiles post-Glamsterdam is BLS G1Add at 643 gas, giving `post_budget ≈ 10 + PRECOMPILE_CALL_RESERVED_GAS`. The constant must therefore be ≥ the maximum post-staticcall overhead on its own.\n\n---\n\n## Recommended new value: 200,000\n\n| Projected overhead component | Gas |\n|---|---|\n| EIP-8037 cold SSTOREs (3 × ~40,000) | ~120,000 |\n| Non-SSTORE overhead (unchanged) | ~13,254 |\n| EIP-8038 buffer (state access costs TBD) | ~20,000 |\n| **Conservative ceiling** | **~153,254** |\n| **Recommended PRECOMPILE_CALL_RESERVED_GAS** | **200,000** |\n\n**Impact on Problem 2 headroom (16M gas limit).** Increasing from 100,000 to 200,000 reduces bn256Pairing headroom from ~607K to ~507K — still well within the EIP-7825 cap of 16,777,216.\n\n---\n\n## Required change\n\nIn `packages/contracts-bedrock/src/cannon/PreimageOracle.sol`:\n\n```diff\n- uint256 public constant PRECOMPILE_CALL_RESERVED_GAS = 100_000;\n+ uint256 public constant PRECOMPILE_CALL_RESERVED_GAS = 200_000;\n```\n\nThis requires deploying a new `PreimageOracle` and updating all contracts that reference it. It should ship together with the Problem 1 EIP-7904 `requiredGas` updates.\n\n**Deadline:** must be live before L1 activates Glamsterdam (EIP-8007, targeting H1 2026). Re-evaluate the 200,000 value once EIP-8038 final numbers are published.\n\n---\n\n## Tests\n\nThree tests in `PreimageOracle_LoadPrecompilePreimagePartOverhead_Test` (to be added to `packages/contracts-bedrock/test/cannon/PreimageOracle.t.sol`):\n\n```solidity\ncontract PreimageOracle_LoadPrecompilePreimagePartOverhead_Test is PreimageOracle_TestInit {\n    /// @notice Acts as a canary for EIP-8037: asserts measured overhead < PRECOMPILE_CALL_RESERVED_GAS.\n    ///         Passes today (73,254 < 100,000). Would fail under EIP-8037 (133,254 > 100,000).\n    function test_overhead_coldSSTOREs() public {\n        address freeTarget = makeAddr(\"freeTarget\");\n        bytes memory input = hex\"deadbeef\";\n\n        uint256 gasBefore = gasleft();\n        oracle.loadPrecompilePreimagePart(0, freeTarget, 0, input);\n        uint256 overhead = gasBefore - gasleft();\n\n        console.log(\"Overhead - cold (3 cold SSTOREs, requiredGas=0):\", overhead);\n        console.log(\"  EIP-8037 projected overhead (+60,000):\", overhead + 60_000);\n        assertLt(overhead, oracle.PRECOMPILE_CALL_RESERVED_GAS(), \"overhead exceeds PRECOMPILE_CALL_RESERVED_GAS\");\n    }\n\n    /// @notice Second call for same key: preimageLengths warm (100 gas vs 20,000 cold).\n    function test_overhead_warmPreimageLengths() public {\n        address freeTarget = makeAddr(\"freeTarget\");\n        bytes memory input = hex\"deadbeef\";\n        oracle.loadPrecompilePreimagePart(0, freeTarget, 0, input);\n\n        uint256 gasBefore = gasleft();\n        oracle.loadPrecompilePreimagePart(1, freeTarget, 0, input);\n        uint256 overhead = gasBefore - gasleft();\n\n        console.log(\"Overhead - warm preimageLengths (2 cold + 1 warm SSTORE):\", overhead);\n        assertLt(overhead, oracle.PRECOMPILE_CALL_RESERVED_GAS(), \"warm overhead exceeds PRECOMPILE_CALL_RESERVED_GAS\");\n    }\n\n    /// @notice Verifies success at documented minimum gas. Under EIP-8037 this would OOG\n    ///         unless PRECOMPILE_CALL_RESERVED_GAS is raised to >= 150,000.\n    function test_minGasSucceeds() public {\n        address sha256Precompile = address(0x02);\n        uint64 sha256Gas = 72; // 60 + 12 * ceil(4/64)\n        bytes memory input = hex\"deadbeef\";\n\n        uint256 tightGas = uint256(sha256Gas) * 64 / 63 + oracle.PRECOMPILE_CALL_RESERVED_GAS() + 2_000;\n        oracle.loadPrecompilePreimagePart{ gas: tightGas }(0, sha256Precompile, sha256Gas, input);\n    }\n}\n```\n\nCurrent test output (all pass):\n```\n[PASS] test_overhead_coldSSTOREs()\n  Overhead - cold (3 cold SSTOREs, requiredGas=0): 73254\n  EIP-8037 projected (+60,000): 133254\n\n[PASS] test_overhead_warmPreimageLengths()\n  Overhead - warm preimageLengths (2 cold + 1 warm SSTORE): 46742\n\n[PASS] test_minGasSucceeds()\n```",
+      "createdAt": "2026-03-04T02:43:05Z",
+      "closedAt": "2026-07-28T15:23:20Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
     {
       "id": "I_kwDODjvEJM8AAAABC3cEoQ",
       "title": "[PCD] Add starting anchor root and prestate hashes to the deploy input",
@@ -42,21 +66,33 @@
       "closedAt": "2026-07-27T21:38:17Z",
       "state": "CLOSED",
       "commentCount": 0
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABKXQR0w",
-      "title": "proposer: Read DGF from superchain registry (kona-genesis crate)",
-      "author": "Inphi",
-      "number": 22051,
-      "repository": "ethereum-optimism/optimism",
-      "body": "For standard networks, the DGF proxy address should be read from the superchain-registry rather than be required as an input.\n\nSimilar to the op-proposer, a `--network` flag should be accepted to auto configure the proposer to use the appropriate DGF proxy.",
-      "createdAt": "2026-07-27T17:09:13Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 0
     }
   ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM72HlAM",
+      "title": "kona-sp1-proposer: port op-succinct fault-proof proposer (create path)",
+      "author": "digorithm",
+      "number": 22018,
+      "body": "## Summary\n\nPorts succinctlabs/op-succinct's fault-proof proposer (`fault-proof` crate @ [`13716c2c`](https://github.com/succinctlabs/op-succinct/tree/13716c2ca316babb41d92369bd7bb0312611ed5f/fault-proof)) into `rust/kona/sp1/crates/proposer` as `kona-sp1-proposer`: the Rust proposer for the super-root `ZKDisputeGame` (game type 10). PR 1 of two: **create path** (game creation, resolution, two-phase bond claiming). The **defend path** (challenge detection, proof requests, `prove()`) follows under #21463.\n\nPart of #21414 (create path; #21414 stays open until the prove() interaction lands in PR 2, #21463). Supersedes #21995 (the Go op-proposer adaptation): `op-proposer/` is untouched here and gets deprecated after the ZK upgrade, per team decision that one Rust application should own propose+prove. The proposer-agnostic pieces of #21995 (`gameargs.ParseZK`, `ZKGameImpl` parser cutover, `WaitForZKGameCount` DSL) are salvaged into this PR.\n\n### Port fidelity\n\nThe runtime skeleton (pinned-L1 sync discipline, game DAG + canonical head selection, task scheduler, backup, cursor walk) is a **near-verbatim port** - 90-100% line-identical after mechanical renames - so upstream fixes to that machinery can be cross-applied by diff. Adaptation is confined to the contract/data-source seams:\n\n- **Claims from the supernode**: `superroot_atTimestamp` supplies the super-root proof preimage, root claim (`keccak256(proof)`), and safe/finalized timestamp views gating cadence (`PROPOSAL_SAFETY=safe|finalized`). `SuperRootAtTimestampResponse` in `super-range-executor` gains the safe/finalized fields the Go server already serves.\n- **extraData** = `parentIndex (4B BE) || superRootProof`; UUID-collision handling advances the timestamp (fresh proof fetch each step), bounded by the safety limit.\n- **Discovered-game validation** against the canonical super root; a timestamp that is not yet safe locally is *pending* (excluded from parent selection, re-validated each sync, persisted across restarts) rather than terminally dropped - this also structurally prevents the far-future-parent liveness stall flagged in #21995's security review.\n- **Catch-up cadence**: a head lagging by more than one interval proposes at the newest proposable timestamp instead of crawling across the gap (restart after downtime, devstack time warps).\n- **Identity**: op-succinct's aggregationVkey/rangeVkeyCommitment/rollupConfigHash triplet collapses to `absolutePrestate()` (the super-aggregation program vkey, `PROGRAM_VKEY` env) + `verifier()`.\n- **Two-phase DelayedWETH claiming**: unlock once finalized, payout once the withdrawal delay elapses **in L1 time** (chain time, not wall time - they diverge under devstack time travel).\n- **Not ported** (deliberate): `challenger.rs` (op-challenger owns challenge/close, #21983), `prover.rs` + all proving config (PR 2), sp1-cluster + GCP KMS dependencies, alt-DA features, the anvil test harness (devstack supersedes it).\n\n### Devstack / acceptance\n\nThe ZK preset now starts the real proposer (first env-configured sysgo service; `LOG_FORMAT=json` so the readiness matcher can parse the startup line) unless `SkipHonestProposer`. The four pre-existing ZK lifecycle tests keep manual control via `WithoutHonestProposer()`. One CI change: the `RUST_BINARY_PATH_KONA_SP1_PROPOSER` export (the workspace build already produces and persists the binary).\n\n## Test plan\n\n- `cargo test -p kona-sp1-proposer --lib`: 21 tests (canonical-head DAG selection incl. catch-up chains, proposal timing incl. catch-up rule, bounded collision walk, pending-game parent ineligibility, two-phase claim state machine + chain-time maturity, backup schema guard, GameStatus/ProposalStatus enum pins vs Types.sol, 140-byte gameArgs decode with the same vectors as Go's gameargs tests, extraData encoding with #21995's vectors).\n- Acceptance (verified locally, real binary + contracts + supernode, all PASS): `TestProposerCreatesRootZKGame`, `TestProposerChainsSecondZKGameOnFirst`, `TestProposerResolvesOwnUnchallengedGame`, `TestProposerClaimsBondAfterResolution` (full unlock -> delay -> payout cycle).\n- Regression: the four pre-existing ZK lifecycle tests pass; `just lint-go` clean; clippy/fmt clean; `git diff -- op-proposer/` is empty; `op-e2e/system/proofs` (Go proposer) passes.\n- In a long local run the binary chained 51 games (root at parentIndex uint32.max, then 0 -> 1 -> ... -> 50) and self-resolved 49 of them.\n\n## Notes for reviewers\n\n- Textual overlap with #21983 (challenger) in `multichain_proofs.go` and the ZK acceptance setup; whichever lands second rebases. The merged ZK devstack branch should start both the challenger and this proposer.\n- `ZKDisputeGame.sol` was derived from the older op-succinct commit `c13844a9`; this port tracks `13716c2c`.\n- Plan: `.claude/plans/2026-07-24-feat-kona-sp1-proposer-port-plan.md` (local).",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-24T20:47:21Z",
+      "mergedAt": "2026-07-28T21:58:10Z",
+      "additions": 4187,
+      "deletions": 88
+    },
+    {
+      "id": "PR_kwDODjvEJM73q2nQ",
+      "title": "contracts: revive SuperchainTokenBridge + add SuperchainERC20Factory (wrap/unwrap)",
+      "author": "opsuperchain",
+      "number": 22087,
+      "body": "# Description\n\nThis PR revives the `SuperchainTokenBridge` and adds a new `SuperchainERC20Factory` that lets any existing ERC20 be wrapped into a `SuperchainERC20` and moved across the Superchain.\n\n## Commit 1: revive the SuperchainTokenBridge\n\n`SuperchainTokenBridge`, `SuperchainERC20`, and `IERC7802` were removed in #19999 (and #20141) as unused interop contracts. This commit restores them from history at their original semvers and predeploy slot (`0x4200...0028`), adapted to the predeploy machinery that has landed since (`Predeploys.getAllRecords()` registry, `L2ContractsManager` deploy/upgrade flow, gate assertions in `L2Genesis`). The bridge is gated behind interop exactly like `SuperchainETHBridge`/`ETHLiquidity`. The legacy `OptimismSuperchainERC20` lane (beacon, factory, `L2StandardBridgeInterop`) is intentionally not revived; the new factory below replaces it.\n\n## Commit 2: SuperchainERC20Factory\n\nA minimal wrap/unwrap factory, added as an interop-gated predeploy at `0x4200...0026` (the slot freed by the old `OptimismSuperchainERC20Factory`):\n\n- `deploy(chainId, token, name, symbol, decimals)` deploys a `SuperchainWrappedERC20` via CREATE2 with `salt = keccak256(chainId, token)`. The wrapped token's constructor takes no arguments (metadata is read back from the factory during construction), so its initcode is constant and **the wrapped token address is identical on every chain**, derived purely from the `[chain_id, address]` identity of the original token.\n- On the original token's chain, metadata is read from the token itself (falling back to caller-supplied values for tokens without the metadata extension). On remote chains the deployer supplies it — or, better, uses propagation:\n- `propagate(token, toChainId)` sends the canonical wrapped metadata from the token's home chain to the factory on another chain via the `L2ToL2CrossDomainMessenger` (the factory is the same predeploy address everywhere, mirroring `SuperchainTokenBridge.sendERC20`/`relayERC20`). `relayDeploy` on the destination requires the messenger, the factory itself as cross-domain sender, and **message source chain == the token's claimed home chain**, so remote chains get authentic metadata without trusting any caller.\n- `wrap(token, amount)` escrows original tokens in the factory and mints the wrapped token 1:1 (mints the actually-received amount, so fee-on-transfer tokens can't inflate supply beyond backing). Only possible on the token's home chain.\n- `unwrap(token, amount)` burns wrapped tokens and releases escrow.\n- The wrapped token is a standard `SuperchainERC20`: `crosschainMint`/`crosschainBurn` are gated to the `SuperchainTokenBridge`, so once deployed on two chains, `sendERC20`/`relayERC20` move it between them. Escrow on the home chain always equals global wrapped supply.\n\n## Notes for reviewers\n\n- The revive commit restores the bridge byte-for-byte where possible; the only source adaptations are the solady import path (the versioned `@solady-v0.0.245` remapping no longer exists; the vendored solady is v0.0.158) and registration in the new predeploy registry.\n- `L2ContractsManager` semver bumped 1.13.0 → 1.14.0.\n- Rebasing tokens are not supported by the wrap/unwrap escrow (negative rebases can strand late unwrappers), same caveat as any escrow wrapper.\n\n## Tests\n\n- Restored `SuperchainTokenBridge` and `SuperchainERC20` unit tests.\n- New suites for the factory (deterministic addresses, home/remote metadata, propagate/relayDeploy auth + source-chain checks, wrap/unwrap, fee-on-transfer, escrow accounting) and the wrapped token (factory/bridge mint-burn gating, ERC7802 interface).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-28T21:16:59Z",
+      "mergedAt": null,
+      "additions": 3004,
+      "deletions": 22
+    },
     {
       "id": "PR_kwDODjvEJM70xuPq",
       "title": "op-reth: forward eth_getBlockReceipts to historical endpoint",
@@ -70,59 +106,35 @@
       "deletions": 33
     },
     {
-      "id": "PR_kwDODjvEJM7v_wv5",
-      "title": "feat(devfeatures): enable super root games migration by default",
-      "author": "ajsutton",
-      "number": 21689,
-      "body": "Stacked on ethereum-optimism/optimism#21663.\n\nEnables `SUPER_ROOT_GAMES_MIGRATION` by default in Foundry test config while keeping the Go/Solidity bitmap predicates unchanged. The contracts feature matrix now runs the explicit opt-out row as `NO_SUPER_ROOT_GAMES_MIGRATION`, preserving coverage for the old path.\n\nLocal checks:\n- `mise exec -- go test ./op-core/devfeatures`\n- `mise exec -- forge fmt --check scripts/libraries/Config.sol src/libraries/DevFeatures.sol test/L1/opcm/OPContractsManagerContainer.t.sol test/L2/L2DevFeatureFlags.t.sol test/libraries/DevFeatures.t.sol test/setup/ForkL1Live.s.sol test/setup/DisputeGames.sol test/L1/opcm/OPContractsManagerV2.t.sol test/L1/opcm/OPContractsManagerMigrationValidator.t.sol`\n- `mise exec -- just nut-bundle-check-no-build`\n- `mise exec -- forge test --match-path test/libraries/DevFeatures.t.sol --match-contract DevFeatures_isDevFeatureEnabled_Test -vv`\n- `mise exec -- forge test --match-path test/L1/opcm/OPContractsManagerContainer.t.sol --match-contract OPContractsManagerContainer_IsDevFeatureEnabled_Test -vv`\n- `mise exec -- forge test --match-path test/L2/L2DevFeatureFlags.t.sol --match-contract L2DevFeatureFlags_IsDevFeatureEnabled_Test -vv`\n- `mise exec -- forge test --match-path test/L1/OPContractsManagerStandardValidator.t.sol --match-contract OPContractsManagerStandardValidator_SuperModeCoreValidation_Test -vv`\n\nNot run locally: fork-live upgrade jobs require CI RPC credentials.",
+      "id": "PR_kwDODjvEJM73pei6",
+      "title": "interopsmoke: add chained-invalid-message smoke test",
+      "author": "jelias2",
+      "number": 22085,
+      "body": "> Stacked on #22074 — review/merge that first; this PR targets its branch.\n\n## Description\n\nAdds a smoke test verifying that interop invalidation is **transitive**.\n\nChain A sends a cross-domain message targeting an `EventLogger` on chain B. Chain B relays it with a corrupted identifier, so the relay is invalid. The relay still executes and calls `emitLog`, emitting a new initiating message that exists *only because the invalid relay ran*. Chain A then executes that message. When chain B's block is replaced, chain A's executing message must be reorged out too.\n\nTwo independent dependent arms are asserted:\n1. A message depending on the invalid block itself.\n2. A plain log emitted on a *later* chain B block, executed on chain A — that block is valid in itself and is replaced only because its ancestor is. This covers invalidation through the block lineage, which a node could otherwise miss while still correctly invalidating direct dependencies.\n\nA control message that does not depend on the invalid block is asserted to survive, so a node that discards a swathe of recent chain A blocks does not pass.\n\n\n## Tests\n\nNew smoke test in `op-chain-ops/interopsmoke`. `go build ./...` passes.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-10T03:02:17Z",
-      "mergedAt": "2026-07-27T20:04:34Z",
-      "additions": 324,
-      "deletions": 216
+      "createdAt": "2026-07-28T20:17:13Z",
+      "mergedAt": null,
+      "additions": 425,
+      "deletions": 1
     },
     {
-      "id": "PR_kwDODjvEJM72o6Aq",
-      "title": "contracts-bedrock: Skip shared-contract upgrades for non-owning chains post-interop-migration",
-      "author": "ajsutton",
-      "number": 22033,
-      "body": "## Summary\n\nFixes ethereum-optimism/optimism#21731. After an interop migration, `OPContractsManagerV2.upgrade()` could only upgrade the first chain in an interop set — every other member chain reverted.\n\nThe shared contracts (ETHLockbox, DisputeGameFactory, DelayedWETH, AnchorStateRegistry) are administered by a single ProxyAdmin — the one belonging to the first chain in the set — while each member chain keeps its own distinct ProxyAdmin. `_apply` routed every proxy upgrade through the calling chain's ProxyAdmin, so `ProxyAdmin.upgrade` reverted on the EIP-1967 admin check for any chain that didn't own the shared proxies.\n\n## Approach: skip on ProxyAdmin mismatch\n\nEach shared-contract upgrade — and the DisputeGameFactory config mutations (`setImplementation`/`setInitBond`, including the SUPER_CANNON clear) — is now gated on the target self-reporting the calling chain's ProxyAdmin as its admin, via the `proxyAdmin()` getter every target inherits from `ProxyAdminOwnedBase` (a plain self-read). Per-chain contracts always match and always upgrade; shared contracts match only for the first chain, so they are upgraded exactly **once**, during the first chain's `upgrade()` call. Non-owning chains simply skip them (no version-equality guard).\n\nInitial deployments short-circuit the check, since a freshly-deployed proxy has no implementation to self-report its admin yet and is always administered by this ProxyAdmin.\n\n### Tradeoff\n\nBecause shared contracts are upgraded only during the first chain's call, an interop **set should be upgraded together** (all member chains, first chain included) for cross-chain version consistency. This function does not enforce set-wide consistency; that is a property of upgrading the whole set together.\n\n## Testing\n\n- New regression test `test_upgrade_afterMigrationNonFirstChain_succeeds` migrates the 2-chain interop fixture, then runs `upgrade()` for both member chains (including the non-first chain) and asserts neither reverts, that the shared DGF/ASR/ETHLockbox/DelayedWETH end at the target implementations, and that the non-first chain's own per-chain contracts upgrade while the shared contracts are left untouched. On `develop` this reverts for chain 2.\n- `OPContractsManagerV2.t.sol` (default + `DEV_FEATURE__OPTIMISM_PORTAL_INTEROP`), `OPContractsManagerUtils.t.sol`, and `OPContractsManagerStandardValidator.t.sol` all pass.\n- Snapshots + semver-lock regenerated; OPCM `@custom:semver` bumped 7.2.2 → 7.2.3.\n\nRef: ethereum-optimism/optimism#21731",
+      "id": "PR_kwDODjvEJM7ySN7-",
+      "title": "ci: cache final rust-workspace-binaries outputs",
+      "author": "claude",
+      "number": 21833,
+      "body": "\n_Requested by **Adrian Sutton** · [Slack thread](https://oplabs-pbc.slack.com/archives/C09E7EJGN5P/p1784158570945069)_\n\nFollow-up to #21832 (now merged), split out per review.\n\n**Before:** `rust-workspace-binaries` rebuilds the full release workspace (~13.5 min) on every pipeline, gating `go-tests-short`/`go-tests-full` and the sysgo acceptance jobs — so Go-only PRs wait ~14 min for unchanged binaries, while `rust-build-op-rbuilder` skips its build in 33s via its final-binary cache.\n\n**After:** when the `rust/` tree, the mise toolchain pins, and the superchain-registry submodule pin are unchanged, the three workspace binaries (`kona-host`, `kona-node`, `op-reth`) are restored from cache in ~30s and the cargo build is skipped entirely.\n\n**How:** a new reusable `rust-binary-cached-build` command in `main.yml`, wired into both `rust-workspace-binaries` invocations via `rust-build-binary`'s new `binary_cache_binaries` parameter, and into `rust-workspace-release` in rust-e2e.yml (same build parameters and consumers, so it shares the same cache key). The shell logic lives in `.circleci/scripts/rust-binary-cache.sh` with three subcommands — `compute-key` (writes the checksum inputs: sha256 of `git ls-tree -r HEAD` + the profile/features/package/binary parameters, plus the sorted binary list), `build` (hit-check, else cargo build + collect the named binaries), and `stage` (lay the binaries out for `persist_to_workspace`). Only `restore_cache`/`save_cache` remain YAML steps, as CircleCI requires. Both the hit and build paths persist exactly the named binaries at `rust/target/release/`, so downstream jobs see an identical workspace layout either way.\n\n**Deletes the old `rust-build-vendored` job** (second commit): the job reimplemented this exact pattern inline — 134 lines, ~65 of them inline shell for the tree-hash key, hit-check, build-skip, and binary collection. `rust-build-op-rbuilder` / `rust-build-rollup-boost` now route through the same command via `rust-build-binary` (a new `extra_hash_paths` parameter covers their sibling `path`-dep closure). Net effect on this PR vs develop: **403 insertions / 178 deletions** (179 of the insertions are the script; the migration commit alone is +44/−158). Behavior deltas for the vendored builds, all intentional:\n\n- They now restore the shared dep/toolchain caches (keyed on their own `Cargo.lock`s, which `op-rbuilder-checks`/`rollup-boost-checks` already populate), so a binary-cache miss no longer re-downloads every crate. They are restore-only (`save_cache: false`) — a single-package build must not save a partial registry under the shared key.\n- Their cache key now includes the mise toolchain pins and the superchain-registry submodule pin (previously a toolchain bump did **not** invalidate the vendored binaries — a latent staleness bug), and moves from the `rust-<dir>-v9-…` namespace to `rust-workspace-bins-v1-…`, so each job rebuilds once on first run and caches thereafter.\n- Binaries persist at `rust/<dir>/target/release/<bin>` — the same layout as the workspace binaries — so the `.circleci-cache/rust-binaries` special case in the sysgo consumers (`main.yml` acceptance jobs + `helpers.yml` `rust-setup-env`) is deleted too.\n\nJob/check names are unchanged, and the workspace builds' cache key is byte-identical before and after (verified by running `compute-key` locally with the workspace parameters).\n\nDep-cache interplay: the command keeps the same shared dep/toolchain cache restore+save as the normal build path, so on a binary-cache miss from a rust-only change the exact-key dep cache usually hits and prepopulates the crate downloads (sccache covers recompilation, not downloads); a `Cargo.lock` change fully refreshes the dep cache per its existing no-fallback design (and also changes the binary key, landing on the build path). If the dep key was evicted while the binary key is still live, the hit path re-seeds the registry with `cargo fetch` rather than tripping #21832's empty-save guard.\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01VwuA7LGUGaRFVJ7JKPMNah)_",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-26T21:50:23Z",
+      "createdAt": "2026-07-16T01:02:24Z",
       "mergedAt": null,
-      "additions": 232,
-      "deletions": 57
-    },
-    {
-      "id": "PR_kwDODjvEJM7zW3yl",
-      "title": "op-service: preserve trusted RPC hashes for block info",
-      "author": "homilclaw",
-      "number": 21890,
-      "body": "## Summary\n- add a shared block-info fetch path that preserves the RPC-provided block hash when trustRPC is enabled\n- use it for InfoByNumber and InfoByLabel instead of recomputing the geth header hash locally\n- add a regression test where the trusted RPC hash differs from the locally computed header hash\n\n## Context\nThis is needed for CC3/Substrate-backed Ethereum RPC compatibility, where the JSON-RPC block hash is intentionally the Ethereum-compatible hash while the locally recomputed geth header hash can differ.\n\n## Verification\n- PATH=/home/chainmailclaw/.openclaw/workspace/tooling/go1.24/bin:/home/chainmailclaw/.cargo/bin:/home/chainmailclaw/.openclaw/npm/projects/openclaw-codex-8902d781d4/node_modules/@openclaw/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-path:/home/chainmailclaw/.openclaw/agents/main/agent/codex-home/tmp/arg0/codex-arg0tRTULt:/usr/bin:/bin:/home/chainmailclaw/.local/bin:/home/chainmailclaw/.npm-global/bin:/home/chainmailclaw/bin:/home/chainmailclaw/.nix-profile/bin:/usr/local/bin:/snap/bin go test ./op-service/sources",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-18T15:53:43Z",
-      "mergedAt": null,
-      "additions": 193,
-      "deletions": 19
-    },
-    {
-      "id": "PR_kwDODjvEJM72lF2U",
-      "title": "op-service, txmgr, op-deployer: make L1 RPC handling more tolerant",
-      "author": "homilclaw",
-      "number": 22028,
-      "body": "## Summary\n- Preserve the block hash returned by a trusted L1 RPC when loading L1 block info instead of recomputing a local header hash from the response fields.\n- Allow calldata fee estimation to continue when an L1 RPC endpoint does not implement `eth_blobBaseFee`.\n- Skip blob-base-fee metrics when blob base fee data is unavailable on calldata-only endpoints.\n- Make live op-deployer execution more tolerant of RPC/fork and gas-estimation differences by:\n  - preserving the requested fork block reference for forked state reads,\n  - allowing the live fork script host to load unoptimized deployment artifacts consistently with genesis execution,\n  - increasing keyed broadcaster gas padding, and\n  - applying a ProxyAdmin call gas floor for `upgradeAndCall` and `transferOwnership` calls.\n\n## Motivation\nSome deployment and derivation environments use L1 RPC endpoints whose behavior differs from a local geth-style assumption in small but important ways:\n\n- The RPC endpoint may already be the trusted source of the canonical block hash for a block info response.\n- A calldata-only environment may not expose blob-fee RPC methods even though the transaction path does not need blob data.\n- Live deployment transactions can fail when simulated gas usage is too tight for specific ProxyAdmin calls.\n\nThese changes keep the existing strict paths intact while making the affected code paths tolerate those RPC and gas-estimation differences more directly.\n\n## Verification\n```bash\nGOTOOLCHAIN=local go test ./op-service/sources ./op-service/txmgr ./op-chain-ops/script/forking ./op-deployer/pkg/deployer ./op-deployer/pkg/deployer/broadcaster\n```",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-26T16:16:50Z",
-      "mergedAt": null,
-      "additions": 193,
-      "deletions": 19
+      "additions": 403,
+      "deletions": 177
     }
   ],
   "codeChanges": {
-    "additions": 1769,
-    "deletions": 529,
-    "files": 105,
-    "commitCount": 72
+    "additions": 6902,
+    "deletions": 934,
+    "files": 176,
+    "commitCount": 200
   },
   "completedItems": [
     {
@@ -215,6 +227,60 @@
       ]
     },
     {
+      "title": "kona-sp1-proposer: port op-succinct fault-proof proposer (create path)",
+      "prNumber": 22018,
+      "type": "other",
+      "body": "## Summary\n\nPorts succinctlabs/op-succinct's fault-proof proposer (`fault-proof` crate @ [`13716c2c`](https://github.com/succinctlabs/op-succinct/tree/13716c2ca316babb41d92369bd7bb0312611ed5f/fault-proof)) into `rust/kona/sp1/crates/propose",
+      "files": [
+        ".circleci/continue/main.yml",
+        "op-acceptance-tests/tests/proofs/zk/setup_test.go",
+        "op-acceptance-tests/tests/proofs/zk/zk_proposer_test.go",
+        "op-challenger/game/fault/contracts/gameargs/gameargs.go",
+        "op-challenger/game/fault/contracts/gameargs/gameargs_test.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-devstack/dsl/proofs/zk_dispute_game.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/zk_proposer.go",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/backup.rs",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/config.rs",
+        "rust/kona/sp1/crates/proposer/src/contract.rs",
+        "rust/kona/sp1/crates/proposer/src/lib.rs",
+        "rust/kona/sp1/crates/proposer/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/signer.rs",
+        "rust/kona/sp1/crates/proposer/src/supernode.rs",
+        "rust/kona/sp1/crates/super-range-executor/src/lib.rs",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/sysgo/preset_config.go",
+        "rust/kona/sp1/crates/host/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/superroot.rs",
+        ".circleci/continue/rust-e2e.yml",
+        "op-acceptance-tests/tests/proofs/zk/honest_challenger_test.go",
+        "op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go"
+      ]
+    },
+    {
+      "title": "op-deployer: bound forge subprocess waits, slow test broadcasts",
+      "prNumber": 22011,
+      "type": "tests",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested via [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1784858382581989)_\n\n**Description**\n\n**Before:** an op-deployer test that spawns `forge script` against a local anvil devnet can",
+      "files": [
+        "op-deployer/pkg/deployer/forge/client.go",
+        "op-deployer/pkg/deployer/forge/client_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/deploy_scripts_forge_test.go",
+        "op-deployer/pkg/deployer/opcm/superchain_test.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "op-deployer/pkg/deployer/pipeline/superchain_test.go",
+        "op-deployer/pkg/deployer/prepare_test.go",
+        "op-deployer/pkg/deployer/testutil/forge.go"
+      ]
+    },
+    {
       "title": "docs: single-source governance treasury addresses",
       "prNumber": 22008,
       "type": "docs",
@@ -244,6 +310,16 @@
       ]
     },
     {
+      "title": "op-reth: Bound the validator resync and reorg waits in proofs e2e tests",
+      "prNumber": 22056,
+      "type": "tests",
+      "body": "`TestResyncing` polls for the validator to catch up with `wait.For(t.Ctx(), ...)` — a 2s poll interval but no deadline of its own, so it inherits the suite context. When the validator EL dies on restart the poll never succeeds and the test ",
+      "files": [
+        "rust/op-reth/tests/proofs/core/resyncing_test.go",
+        "rust/op-reth/tests/proofs/reorg/reorg_test.go"
+      ]
+    },
+    {
       "title": "op-e2e: Skip permissioned game test when the game type is unregistered",
       "prNumber": 22054,
       "type": "tests",
@@ -251,6 +327,21 @@
       "files": [
         "op-e2e/e2eutils/disputegame/helper.go",
         "op-e2e/faultproofs/permissioned_test.go"
+      ]
+    },
+    {
+      "title": "op-reth: make forwarded txpool admission opt-in (breaking)",
+      "prNumber": 22053,
+      "type": "other",
+      "body": "## Summary\r\n\r\nMakes local transaction-pool admission opt-in for RPC-submitted transactions that are forwarded to a configured sequencer.\r\n\r\n- Adds `--rollup.txpool.enable-admission`, disabled by default and without aliases.\r\n- When forwardi",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/tests/it/rpc.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs"
       ]
     },
     {
@@ -329,6 +420,16 @@
       ]
     },
     {
+      "title": "ci: Fast linker plus split op-reth/kona builds",
+      "prNumber": 22042,
+      "type": "other",
+      "body": "Combines PR1 (mold linker, #22039) and PR2 (split op-reth/kona compilation, #22040) to measure their joint effect on the PR critical path (`rust-workspace-binaries` → `memory-all-*-op-reth`).\n\n- **mold** (`mold -run`, preinstalled in ci-bas",
+      "files": [
+        ".circleci/continue/main.yml",
+        "mise.toml"
+      ]
+    },
+    {
       "title": "docs: rename OP Stack tab to Protocol and re-home Contribute under Get Started",
       "prNumber": 22038,
       "type": "docs",
@@ -338,17 +439,165 @@
         "docs/public-docs/op-stack/contribute/component-hub-template.mdx",
         "docs/public-docs/op-stack/contribute/index.mdx"
       ]
+    },
+    {
+      "title": "docs: add application-facing OP Enterprise callout to app developer surfaces",
+      "prNumber": 22037,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nSlice 6 (Pattern E, the plan amendment from Ma",
+      "files": [
+        "docs/public-docs/app-developers/guides/building-apps.mdx",
+        "docs/public-docs/app-developers/quickstarts/get-started.mdx",
+        "docs/public-docs/app-developers/tutorials/deploy-a-contract.mdx",
+        "docs/public-docs/snippets/op-enterprise-apps-callout.mdx"
+      ]
+    },
+    {
+      "title": "ops: retry external kona clone in prestate reproducibility build",
+      "prNumber": 22084,
+      "type": "other",
+      "body": "_Requested via [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1785217215971259?thread_ts=1785217215.971259&cid=C03N11M0BBN)_\n\n**Before:** `build-prestates.sh` does a fresh full `git clone` of the external op-rs/kona repo ",
+      "files": [
+        ".circleci/continue/main.yml",
+        "ops/prestate-reproducibility/build-prestates.sh",
+        "ops/prestate-reproducibility/prestates/fetcher.go"
+      ]
+    },
+    {
+      "title": "Update release docs: add proxyd v4.30.0",
+      "prNumber": 22081,
+      "type": "other",
+      "body": "## Summary\nAdds the proxyd v4.30.0 release (published 2026-07-27) to the release history.\n\n## Changes\n- `releases/proxyd.mdx`: prepend v4.30.0 entry; demote v4.29.1 from `Latest, Stable` to `Stable`.\n- `releases/index.mdx`: bump the proxyd ",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/proxyd.mdx"
+      ]
+    },
+    {
+      "title": "ci: group version-locked deps in Renovate",
+      "prNumber": 22077,
+      "type": "other",
+      "body": "Follow-up to the Renovate rollout. Adds `packageRules` that group the **OpenTelemetry**, **Alloy**, and **libp2p** dependency families so their version-locked members bump together in a single PR.\n\nMotivation: bumping one member of these ec",
+      "files": [
+        "renovate.json"
+      ]
+    },
+    {
+      "title": "rust: consolidate nextest config to workspace root + store test results in CI",
+      "prNumber": 22076,
+      "type": "tests",
+      "body": "Consolidates the Rust test-tooling config into the workspace root and surfaces individual Rust test results in the CircleCI UI.\n\nThe per-component `<crate>/.config/nextest.toml` and `zepter.yaml` files predated the workspace unification and",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        "rust/.config/nextest.toml",
+        "rust/alloy-op-evm/.config/nextest.toml",
+        "rust/alloy-op-evm/.config/zepter.yaml",
+        "rust/alloy-op-hardforks/.config/zepter.yaml",
+        "rust/kona/.config/nextest.toml",
+        "rust/kona/.config/zepter.yaml",
+        "rust/op-alloy/.config/nextest.toml",
+        "rust/op-alloy/.config/zepter.yaml",
+        "rust/op-reth/.config/nextest.toml",
+        "rust/op-reth/.config/zepter.yaml"
+      ]
+    },
+    {
+      "title": "CODEOWNERS: set team consensus as derivation code owners",
+      "prNumber": 22073,
+      "type": "other",
+      "body": "Follow up to https://github.com/ethereum-optimism/optimism/pull/21967 to set consensus directory code owners back to team [consensus](https://github.com/orgs/ethereum-optimism/teams/consensus).",
+      "files": [
+        ".github/CODEOWNERS"
+      ]
+    },
+    {
+      "title": "deps: update quinn-proto to v0.11.16",
+      "prNumber": 22072,
+      "type": "other",
+      "body": "Resolves the quinn-proto advisory (`GHSA-4w2j-m93h-cj5j`, affecting `< 0.11.15`) by bumping the locked version in the `rust/` and `rollup-boost/` workspaces. `op-rbuilder` already resolves quinn-proto 0.11.16.\n\nLockfile-only change. The tar",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/rollup-boost/Cargo.lock"
+      ]
+    },
+    {
+      "title": "ci: emit scoped-commit titles from Renovate",
+      "prNumber": 22071,
+      "type": "other",
+      "body": "Follow-up to the Renovate rollout. Renovate's default Conventional Commits titles (`chore(deps):`, `fix(deps):`) fail the repository's Scoped Commits subject check, which rejects conventional type prefixes.\n\nThis disables Renovate's semanti",
+      "files": [
+        "renovate.json"
+      ]
+    },
+    {
+      "title": "deps: Update module golang.org/x/text to v0.39.0 [SECURITY]",
+      "prNumber": 22067,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [golang.org/x/text](https://pkg.go.dev/",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "deps: Update module github.com/quic-go/webtransport-go to v0.11.1 [SECURITY]",
+      "prNumber": 22066,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [github.com/quic-go/webtransport-go](ht",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "deps: Update go toolchain directive to v1.25.12 [SECURITY]",
+      "prNumber": 22065,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [go](https://go.dev/) ([source](https://redirect.github.com/golang/go)) | toolchain | minor | `1.24.10` → `1.25.12` |\n\n---\n\n### Excessive reso",
+      "files": [
+        "cannon/testdata/common/go.mod"
+      ]
+    },
+    {
+      "title": "ci: add Renovate CVE-autobump workflow and config",
+      "prNumber": 22061,
+      "type": "other",
+      "body": "Adds Renovate in CVE-only mode: a self-hosted GitHub Actions workflow authenticating as an org-owned GitHub App, opening PRs **only** for vulnerability advisories (GitHub + OSV feeds). All generic version updates are disabled, so Renovate r",
+      "files": [
+        ".github/workflows/renovate.yaml",
+        "renovate.json"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 204.1591492069274,
-      "prScore": 194.0211492069274,
+      "totalScore": 292.15286078639645,
+      "prScore": 250.81486078639645,
+      "issueScore": 2,
+      "reviewScore": 38.5,
+      "commentScore": 0.838,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 265.9611027793761,
+      "prScore": 215.9611027793761,
       "issueScore": 0,
-      "reviewScore": 9.5,
-      "commentScore": 0.6379999999999999,
+      "reviewScore": 50,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 205.5596554784684,
+      "prScore": 120.2196554784684,
+      "issueScore": 0,
+      "reviewScore": 85,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -362,6 +611,26 @@
       "summary": null
     },
     {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 163.6036529917857,
+      "prScore": 161.40365299178572,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 144.77800000000002,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 144,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
       "username": "zhwrd",
       "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
       "totalScore": 137.0437738965761,
@@ -372,13 +641,23 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 103.64095073064814,
-      "prScore": 103.64095073064814,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 122.71422854564739,
+      "prScore": 113.51422854564737,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 107.81480448250906,
+      "prScore": 85.11480448250907,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -392,103 +671,153 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 51.20117647048128,
-      "prScore": 51.001176470481276,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 45.34,
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 83.278,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 45,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 82.5,
+      "commentScore": 0.7779999999999999,
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 40.484389791664405,
-      "prScore": 40.484389791664405,
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 74.75572599255723,
+      "prScore": 26.755725992557227,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 48,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 36.975956205909675,
+      "totalScore": 73.17595620590967,
       "prScore": 31.775956205909672,
       "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
-      "totalScore": 29.286424036192304,
-      "prScore": 24.786424036192304,
-      "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 28.938,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 28.5,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 24.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 24.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 19,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 19,
-      "commentScore": 0,
+      "reviewScore": 41,
+      "commentScore": 0.4,
       "summary": null
     },
     {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 18.5,
+      "totalScore": 59.36372599255723,
+      "prScore": 18.363725992557228,
+      "issueScore": 0,
+      "reviewScore": 41,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 51.7864240361923,
+      "prScore": 24.786424036192304,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 46.438,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 18.5,
+      "reviewScore": 46,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 43.138000000000005,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 40.5,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 27,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 25,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 24.885371757896163,
+      "prScore": 24.447371757896164,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 20.846306144334054,
+      "prScore": 20.846306144334054,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 15,
+      "totalScore": 20.2,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 15,
+      "reviewScore": 20,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "HDauven",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9271195?u=a60100f5c68c7338f1cdea961f3bb84326826896&v=4",
+      "totalScore": 11.709348061489413,
+      "prScore": 9.709348061489413,
+      "issueScore": 2,
+      "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 11.437999999999999,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 9,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -512,8 +841,8 @@
       "summary": null
     },
     {
-      "username": "raffaele-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
       "totalScore": 10,
       "prScore": 0,
       "issueScore": 0,
@@ -522,23 +851,23 @@
       "summary": null
     },
     {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 9.2,
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 10,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.2,
+      "reviewScore": 10,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 6.5,
-      "prScore": 0,
-      "issueScore": 2,
-      "reviewScore": 4.5,
-      "commentScore": 0,
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.27671895621705,
+      "prScore": 6.8387189562170505,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -552,8 +881,8 @@
       "summary": null
     },
     {
-      "username": "hdcesario-op",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "username": "op-owner-falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/218228085?v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -572,28 +901,8 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "OptimismBot",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "Ethnical",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -612,6 +921,16 @@
       "summary": null
     },
     {
+      "username": "sigma",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16090?u=c8e066119aa13b6e36642ade56ee5936ff2276db&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "akegaviar",
       "avatarUrl": "https://avatars.githubusercontent.com/u/10195782?u=2a7ec831853138ffcc609e375fec9939d5893dad&v=4",
       "totalScore": 0.2,
@@ -622,9 +941,9 @@
       "summary": null
     }
   ],
-  "newPRs": 29,
-  "mergedPRs": 13,
-  "newIssues": 1,
-  "closedIssues": 3,
-  "activeContributors": 32
+  "newPRs": 62,
+  "mergedPRs": 30,
+  "newIssues": 5,
+  "closedIssues": 8,
+  "activeContributors": 44
 }
