@@ -5,8 +5,32 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-07-26 to 2026-08-02, ethereum-optimism/optimism had 81 new PRs (43 merged), 13 new issues, and 51 active contributors.",
+  "overview": "From 2026-07-26 to 2026-08-02, ethereum-optimism/optimism had 97 new PRs (60 merged), 21 new issues, and 54 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABIsHWsg",
+      "title": "Make post-migration OPCM upgrades work for every chain in an interop set",
+      "author": "Inphi",
+      "number": 21731,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Problem\n\nThe interop migration allows member chains to have different `ProxyAdmin` contracts as long as those contracts have the same L1 ProxyAdmin owner.\n\nDuring `OPContractsManagerMigrator.migrate`, the shared `ETHLockbox`, `DisputeGameFactory`, and `AnchorStateRegistry` proxies are deployed using the first chain’s `ProxyAdmin`. The first chain’s `DelayedWETH` is also reused by the set. All portals are then pointed at this shared infrastructure.\n\nAfter migration, `OPContractsManagerV2.upgrade` still assumes that every contract discovered from a chain’s `SystemConfig` is administered by that chain’s `ProxyAdmin`. This is no longer true for chains after the first one.\n\nFor example, given two chains with distinct ProxyAdmins owned by the same L1PAO:\n\n```\nPortal A admin:       ProxyAdmin A\nPortal B admin:       ProxyAdmin B\nShared contract admin: ProxyAdmin A\n```\n\nCalling `upgrade()` with Chain B’s `SystemConfig` loads Chain B’s ProxyAdmin along with the shared lockbox, DGF, DelayedWETH, and ASR. `_apply` then attempts to upgrade the shared contracts through ProxyAdmin B.\n\nThe common L1PAO passes ProxyAdmin B’s `onlyOwner` check, but the shared proxy only recognizes ProxyAdmin A as its EIP-1967 admin. The shared-contract upgrade therefore reverts, rolling back the entire transaction, including the earlier upgrades to Chain B’s SystemConfig and portal.\n\nAs a result, the current `upgrade()` path cannot upgrade the per-chain contracts of every member after an interop migration.\n\n## Desired behavior\n\nPost-migration upgrades should preserve OPCM’s declarative behavior while recognizing that the deployment now contains two resource scopes:\n\n- Per-chain contracts, administered by each chain’s `ProxyAdmin`.\n- Shared contracts, administered by the shared infrastructure’s `ProxyAdmin`.\n\nApplying the same desired release repeatedly should be safe and should converge the interop set to the same final state. Existing games, advanced anchors, withdrawal state, balances, and lockbox authorizations must not be reset.\n\nOne possible design is to split the existing apply logic into two operations:\n\n- A per-chain apply that upgrades `SystemConfig`, `OptimismPortal`, etc, while preserving and validating the shared contract references.\n- A shared apply that upgrades the `ETHLockbox`, DGF, `DelayedWETH`, ASR, and dispute-game configuration exactly once using their actual `ProxyAdmin`.",
+      "createdAt": "2026-07-13T22:19:37Z",
+      "closedAt": "2026-07-30T20:52:13Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABK3OJzA",
+      "title": "op-supernode: derivation silently forks after invalidation replacement and logsDB cannot recover",
+      "author": "jelias2",
+      "number": 22138,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe supernode bookkept a chain that doesn't exist, then got permanently stuck on it.\n\nAn invalid cross-chain message got invalidated — normal, that's what this devnet tests. Recovery worked: bad block 259685 was replaced, and everyone agreed on the replacement.\n\nThen two blocks later, at 259687, the supernode's derivation quietly produced a different block than the rest of the network. Not an error — just different. It kept going that way for ~1390 blocks over ~24 minutes, sealing every one into its logsDB and marking them cross-safe at ~300 timestamps per 5 minutes. Nothing checked whether the blocks it was verifying existed on its own execution engine. They didn't.\n\nWhen the next invalid message arrived, the supernode made an invalidation decision against blocks from that private chain — denylisting hashes no node has ever seen. That forced a direct comparison, and the two chains finally collided: logsDB's newest block was on the fork, and the real next block's parent wasn't it. `block parent hash does not match logsDB`.\n\nIt cannot get out. Its rewind only walks back to blocks logsDB already holds — all of which are on the fork. The true common ancestor is ~1390 blocks below that, unreachable. So it retries the same doomed operation every 2 seconds; still doing so 4h40m later, as of writing.\n\nBeyond one node: other CLs get their cross-safe head from the supernode. It can't advance, so none of theirs do. Both chains kept producing blocks at full rate throughout — ~15,600 of them — none of which can ever become cross-safe. Every dashboard reads green: unsafe head fine, local-safe fine, L1 fine, pods healthy. The only signals that move are ones nothing alerts on.\n\n**Two defects, not one:**\n\n1. **Derivation forked and nothing noticed.** Blocks 259684–259686 matched the network; 259687 onward did not. A derived block that doesn't match the node's own engine should be a loud failure, not the foundation of its safety database.\n2. **Once wedged, no way out** — even though the node logs `super authority safe head non-canonical (reorg signal)`, meaning it detected exactly this condition and cannot act on it.\n\nThe sharp part: **the fix for #2 already exists in this codebase.** `reconcileLogsDBTail` (`op-supernode/supernode/activity/interop/log_backfill.go:209`) does precisely the needed rewind-to-common-ancestor, and its doc comment describes this failure verbatim:\n\n```go\n// reconcileLogsDBTail trims tail blocks whose hash no longer matches canonical,\n// so backfill resumes from a block that is still in force. Without this, an L2\n// reorg that occurs while supernode is offline leaves the tail diverged and the\n// first seal on resume loops forever on ErrParentHashMismatch.\n```\n\nIt has exactly one call site — `log_backfill.go:177`, the cold-start/backfill path. The live frontier path never calls it; `interop.go:889` just wraps the error and returns, so the next round fails identically:\n\n```go\nif err := i.persistFrontierLogs(pending.Result.Timestamp, pending.Result.L2Heads); err != nil {\n    return false, fmt.Errorf(\"persist frontier logs: %w\", err)\n}\n```\n\nSo defect 2 is not a missing capability — it is an existing, tested remedy that is not wired into the live path.\n\n> **Revision note.** Earlier versions of this issue identified the fork point as block 261076 and framed the cause as an off-by-one in the invalidation rewind target, and described the impact as confined to one node. Both were wrong; the corrections and the evidence trail are in the comments. Two findings unrelated to the supernode (invalidation-round serialization vs. the smoke test's 20-minute deadline, and an EL outage on `ops-reth-a-sn-1`) are also recorded in the comments rather than here, to keep this issue on the supernode defect.\n\n## Environment\n\n- Devnet: `interop-reorg-4` (dev-ent, `oplabs-dev-ent-networks-us-ue1-0`)\n- Chains: `420120186` (`interop-reorg-4-0`), `420120187` (`interop-reorg-4-1`)\n- Component: `op-supernode`, image `op-supernode:v1.0.0-rc.7` (`sha256:f2d228cc31af98633b0d91776667d2798aac0e8c0247584f99a0a0852b01c4d5`)\n- Specimen: `an-interop-reorg-4-supernode-2`, pod `op-supernode-0` — up since 2026-07-29 16:17:32, **zero container restarts**, so it observed the entire event with one continuous logsDB. All supernode logs below are from it.\n- Date: 2026-07-30, all times UTC\n\n## Defect 1 — derivation silently forked at 259687\n\n`supernode-2` logs every derived block as `Record local safe head … l2=<hash>:<number>`. Comparing those hashes against `opn-reth-a-rpc-0` on chain 420120186:\n\n| height | supernode-2 derived | canonical (all ELs) | |\n|---|---|---|---|\n| 259547 | `0x5c3e3538cc5f6e11` | same | match |\n| 259684 | `0x5ef2ede6b821201b` | same | match — `lastValidParentBlock` of the 16:39 invalidation |\n| 259685 | `0x53f8d09893162824` | same | match — **the replacement block itself** |\n| 259686 | `0xfea5576f7584b141` | same | match |\n| **259687** | `0x724cc9354a4012b9` | `0x3686d4bfb9c01076` | **DIVERGED** |\n| 259688 | `0x570005061f8a3163` | `0xfcb7150a8535493e` | diverged |\n| 259691 | `0x5dba543162d95c67` | `0x44cdfaedf64919a9` | diverged |\n| 259692 | `0x65544ddb908fecd9` | `0x2623f286d3cbbefc` | diverged |\n| 260047 | `0xf6c9281280dd` | `0x64f215c3ed00` | diverged |\n| 260445 | `0x6fa21e6c519b` | `0x994dc79a1a61` | diverged |\n| 260737 | `0x23133e785628` | `0x5aab00e259a4` | diverged |\n| 260862 | `0xc95da95b702d` | `0xf51ab543f7df` | diverged |\n| 260912 | `0x7ec3a7bc933c` | `0x68ff95f9a1f1` | diverged |\n| 261076 | `0xb540da3392b1` | `0x5274e13066ef` | diverged |\n\nThe replacement at 259685 landed correctly and matched the network. 259686 matched. **From 259687 the derived chain went onto its own branch and never rejoined** — ~1390 blocks, ~24 minutes.\n\n`0x5dba543162d95c67:259691` and `0xb540da33…:261076` are not found on any EL in the devnet: `opn-reth-a-rpc-0`, `opn-reth-f-seq-0/1/2`, `ops-reth-a-sn-0/1/2`.\n\nEvery node in the devnet agrees on the canonical value at 261076, including the supernode's own paired EL:\n\n```\nopn-reth-a-rpc-0    0x5274e13066ef6c0a4ef8825abe851e82c76524b16ff7722ddc52627b4399845a\nopn-reth-f-seq-0    0x5274e13066ef6c0a4ef8825abe851e82c76524b16ff7722ddc52627b4399845a\nopn-reth-f-seq-1    0x5274e13066ef6c0a4ef8825abe851e82c76524b16ff7722ddc52627b4399845a\nopn-reth-f-seq-2    0x5274e13066ef6c0a4ef8825abe851e82c76524b16ff7722ddc52627b4399845a\nops-reth-a-sn-2     0x5274e13066ef6c0a4ef8825abe851e82c76524b16ff7722ddc52627b4399845a\n```\n\nFive other CL nodes derived independently over the same L1 data and all agree with the ELs. Only `supernode-2` disagrees.\n\n### It verified against the fork the entire time\n\n`increase(supernode_interop_timestamps_verified_total{namespace=\"an-interop-reorg-4-supernode-2\"}[5m])`, spanning the period on the private fork:\n\n```\n16:40=298  16:45=301  16:50=300  16:55=244  17:00=300  17:05=188\n```\n\n~300 timestamps verified per 5 minutes against a chain that does not exist. `l2_local_safe` and `l2_safe` advanced normally throughout. Nothing in the interop path noticed.\n\nCorroboration from the sequencer side: at 17:04 the chain-0 op-node reported `externalSafe=0x44cdfaedf64919a9…:259691` — the canonical hash — while the supernode held `0x5dba5431…` at that same height. They had already disagreed for 25 minutes.\n\n### What the invalidation at 17:03 was actually computed against\n\nBecause the node was on the fork, the 17:03:04 invalidation decision named blocks that only ever existed in its own view:\n\n```\nlvl=info msg=\"added block to deny list\" chainID=420120186 invalidatedBlock=0x8ddee908869d5a00ae594317950fc6598b5e1b64465225c52100302375b3856b:261077 lastValidParentBlock=0xb540da3392b1110066983116c6516dd9aae82c2350ccafaf98a3d48c38b11f52:261076 decisionTimestamp=1785430769\nlvl=warn msg=\"initiating rewind after block invalidation\" chainID=420120186 invalidatedBlock=0x8ddee908...:261077 lastValidParentBlock=0xb540da33...:261076\nlvl=info msg=\"chain rewind completed\" chainID=420120186 invalidatedBlock=0x8ddee908...:261077 lastValidParentBlock=0xb540da33...:261076 rewindTargetBlock=0xb540da3392b1110066983116c6516dd9aae82c2350ccafaf9...\nlvl=info msg=\"added block to deny list\" chainID=420120187 invalidatedBlock=0xc44cd9919faded8d74c045b577160c461295faf5b2817869bdd1641334fbdfe1:261077 lastValidParentBlock=0xa7c3f936c75efb0965bc3eb9e165a5e121b4241b54542db614ab8a443bfff89a:261076 decisionTimestamp=1785430769\nlvl=info msg=\"chain rewind completed\" chainID=420120187 invalidatedBlock=0xc44cd991...:261077 lastValidParentBlock=0xa7c3f936...:261076 rewindTargetBlock=0xa7c3f936c75efb0965bc3eb9e165a5e121b4241b54542db61...\n```\n\n`0xb540da33…:261076` was never canonical. logsDB was already on the fork by this point; the invalidation simply set its rewind target to another fork block, sealing in the dead end.\n\n## Defect 2 — logsDB cannot recover from a non-canonical frontier\n\nlogsDB enforces a contiguity rule: to seal block N+1, its parent hash must equal the last block sealed. That rule is correct — it is what keeps the log chain unbroken.\n\nHere the last sealed block is on the private fork, and the real next block's parent is a block logsDB never sealed. So the check fails, and it fails identically on every retry.\n\nThe escape would be to rewind logsDB to the last block that still matches the real chain and re-seal forward. It cannot: its rewind only targets blocks logsDB already holds, and every one of those is on the fork. The last in-force block is 259686, ~1390 blocks below the frontier, out of reach.\n\nAnd it knows. Every cycle it logs `super authority safe head non-canonical (reorg signal)` with both hashes side by side — its own and the real one. It has diagnosed itself correctly and has no lever to pull.\n\nThere is a revealing asymmetry: **restarting the pod with logsDB intact would heal it**, because the cold-start path calls `reconcileLogsDBTail` and would trim the diverged tail. Staying up never heals, because the live path does not. Same database, same divergence, opposite outcome depending on whether the process restarts.\n\nFrom 17:06:40 onward, every ~2 seconds, on both chains, still going 4h40m later:\n\n```\nlvl=warn  msg=\"super authority safe head non-canonical (reorg signal)\" chain_id=420120186 vn_id=d6c6 super_authority_safe=0xb540da3392b1110066983116c6516dd9aae82c2350ccafaf98a3d48c38b11f52:261076 canonical=0x5274e13066ef6c0a4ef8825abe851e82c76524b16ff7722ddc52627b4399845a:261076\nlvl=warn  msg=\"super authority safe head non-canonical (reorg signal)\" chain_id=420120187 vn_id=bf35 super_authority_safe=0xa7c3f936c75efb0965bc3eb9e165a5e121b4241b54542db614ab8a443bfff89a:261076 canonical=0x58df1ebb1cb9a3802b3401680e811de09552c737e6125d789670c4958d27a274:261076\n\nlvl=error msg=\"failed to progress and record interop\" activity=interop err=\"persist frontier logs: chain 420120186: block 261077 parent hash 0x5274e13066ef6c0a4ef8825abe851e82c76524b16ff7722ddc52627b4399845a does not match logsDB last sealed block hash 0xb540da3392b1110066983116c6516dd9aae82c2350ccafaf98a3d48c38b11f52: block parent hash does not match logsDB\"\nlvl=error msg=\"failed to progress and record interop\" activity=interop err=\"persist frontier logs: chain 420120187: block 261077 parent hash 0x58df1ebb1cb9a3802b3401680e811de09552c737e6125d789670c4958d27a274 does not match logsDB last sealed block hash 0xa7c3f936c75efb0965bc3eb9e165a5e121b4241b54542db614ab8a443bfff89a: block parent hash does not match logsDB\"\n```\n\n`supernode_interop_verified_timestamp` frozen at `1785430768` since ~17:03. Lag grows 1:1 with wall clock (17193s / 4.78h at the last check):\n\n```\n17:00=182  17:15=932  17:30=1832  17:45=2732  18:00=3632  18:15=4532  18:30=5432\n18:45=6332 19:00=7232 19:15=8132  19:30=9032  19:45=9932  20:00=10832 20:15=11732 20:30=12632\n```\n\n`increase(supernode_interop_round_decisions_total[15m])` — `wait` goes to zero and `advance` flat-lines at exactly the 2s retry cadence (450 per 15m = 0.5/s), i.e. the round loop spinning on the same failing frontier:\n\n```\nadvance:    16:45=916  17:00=1071  17:15=410  17:30=450  17:45=449  ... 20:30=450\nwait:       16:45=871  17:00=854   17:15=390  17:30=0    17:45=0    ... 20:30=0\n```\n\n`increase(supernode_interop_timestamps_verified_total[15m])` — zero from 17:30 on:\n\n```\n16:45=916  17:00=1071  17:15=161  17:30=0  17:45=0  18:00=0  ... 20:30=0\n```\n\n## Impact\n\nCross-safe stopped advancing devnet-wide. `optimism_syncStatus` via `proxyd-cl`, 4h44m after the event:\n\n| field | chain 420120186 | chain 420120187 |\n|---|---|---|\n| `unsafe_l2` | 276581 | 276571 |\n| `local_safe_l2` | 276581 | 276571 |\n| **`safe_l2`** | **259685** `0x53f8d098…` | **259685** `0xb604566e…` |\n| **`finalized_l2`** | **259685** `0x53f8d098…` | **259685** `0xb604566e…` |\n\nThose two hashes at 259685 are the replacement blocks from the 16:39 invalidation — cross-safe is pinned to the last block before the fork at 259687.\n\nPer-node `op_node_default_refs_number{layer=\"l2\",type=\"l2_safe\"}`, chain 420120186 — every CL froze between 17:00 and 17:30:\n\n| node | cross-safe frozen at |\n|---|---|\n| `opn-reth-a-rpc-0` | 261041 |\n| `opn-reth-f-seq-1` | 261041 |\n| `opn-reth-f-snapsync-0` | 261030 |\n| `opn-reth-f-seq-0` | 260992 |\n| `opn-reth-f-seq-2` | 260992 |\n| supernode-backed view (`proxyd-cl`) | 259685 |\n\nEvery frozen height sits below 261076 and clusters in 259685–261041, which is independent confirmation of a fork at 259687 rather than at 261076. Meanwhile `local_safe_l2` on `opn-reth-a-rpc-0` went 260936 (17:00) → 276580 (21:20): ~15600 blocks of local-safe progress with zero cross-safe progress.\n\n**Nothing alerts on this.** `unsafe_l2`, `local_safe_l2`, `cross_unsafe_l2`, `l1_head`, block production and pod health all look normal. The only signals that move are `supernode_interop_verified_timestamp` (frozen), `op_node_default_refs_number{type=\"l2_safe\"}` (frozen everywhere), and the `super authority safe head non-canonical` log — none of them alerted.\n\n## How it started\n\nThe trigger was two back-to-back invalid-exec-message rounds from `op-chain-ops/cmd/interop-smoke`.\n\n**16:39:02 — first round, block 259685, both chains.** This one recovered correctly:\n\n```\nlvl=info msg=\"added block to deny list\" chainID=420120186 invalidatedBlock=0x0b8b07674e5bbb74ddcba99cb35db5c4793c77a81ef682763f06d4df3f2b49ac:259685 lastValidParentBlock=0x5ef2ede6b821201bc10c6e25479e1dfba6ea573fef5f4510f4205658d57d6f47:259684 decisionTimestamp=1785429377\nlvl=warn msg=\"initiating rewind after block invalidation\" chainID=420120186 invalidatedBlock=0x0b8b0767...:259685 lastValidParentBlock=0x5ef2ede6...:259684\nlvl=info msg=\"chain rewind completed\" chainID=420120186 invalidatedBlock=0x0b8b0767...:259685 lastValidParentBlock=0x5ef2ede6...:259684 rewindTargetBlock=0x5ef2ede6b821201bc10c6e25479e1dfba6ea573fef5f4510f...\nlvl=warn msg=\"Gating unsafe ingestion during invalidation recovery\" chain_id=420120186 vn_id=438a maxDeniedHeight=259685 finalized=0x022906f9f37efad1a5f15fb810b85b6837fca06d3a903cddc085fa8b284f6fab:12107\nlvl=warn msg=\"Requesting deposits-only replacement for derived payload\" chain_id=420120186 vn_id=438a blockNumber=0x3f665 blockHash=0x0b8b07674e5bbb74ddcba99cb35db5c4793c77a81ef682763f06d4df3f2b49ac derivedFrom=0x39f2225b8113243d642ca5b7b16372646ef0bdceba5affc2bea1e43f6ceb11f2:11383671\n```\n\n**16:58:16 — gating lifted:**\n\n```\nlvl=warn msg=\"Resuming unsafe ingestion, finality passed the invalidation\" chain_id=420120186 vn_id=438a maxDeniedHeight=259685 finalized=0x53f8d09893162824c455733115c8f1081666554c730587cc779b9875f1f8934a:259685\nlvl=warn msg=\"Resuming unsafe ingestion, finality passed the invalidation\" chain_id=420120187 vn_id=325d maxDeniedHeight=259685 finalized=0xb604566e0fd6babf73c6b261153b355dcd556373c28ca50fda760aae33b74e34:259685\n```\n\nThe replacement at 259685 is correct and matches the network. **Divergence begins at 259687, i.e. two blocks after the replaced block**, and goes undetected from there.\n\n**16:59:29–16:59:42 —** the second smoke round's 12 invalid blocks land on the real chain (261077, 261080, 261082, 261085, 261087, 261090, both chains). **17:03:04 —** the supernode invalidates \"261077\" against its fork, as shown above. **17:06:40 —** the permanent error loop begins.\n\nNote the 17:03 round logged no `Requesting deposits-only replacement for derived payload`, unlike the 16:39 round — worth checking whether the recovery path aborted early, and whether that is cause or consequence.\n\nAlso note `finalized` falls back to the interop-activation anchor (`:12107`) on invalidation and the virtual node IDs rotate (`438a`→`d6c6`, `325d`→`bf35`), which wipes monotonic caches. PR #22129 (\"op-supernode: hold finalized instead of publishing activation anchor on zero FinalizedL1\") looks related.\n\n## Reproduction\n\n```\ngo run ./cmd/interop-smoke invalid-message \\\n  --l2a-rpc https://interop-reorg-4-0.optimism.io \\\n  --l2b-rpc https://interop-reorg-4-1.optimism.io \\\n  --private-key <foundry dev key> \\\n  --tx-per-block 6 --direction both\n```\n\nRun it, let the invalidation round complete, then run it again. The first round recovered; the second wedged the node. The 12 invalid blocks were all correctly replaced on the real chain, so the reorg machinery itself works — the failure is in what the supernode derived afterwards.\n\n### Unit-test reproduction for defect 2\n\nDefect 2 is reproducible without a devnet, in `op-supernode/supernode/activity/interop/`. The harness already exists — `newInteropTestHarness(t)`, `WithChain(id, func(m *mockChainContainer))`, `WithActivation`, and direct `db.SealBlock(...)` access — and there is a close precedent in `TestColdStartBackfill_RecoversFromOfflineReorg` (`startup_test.go:370`), which is the offline-reorg twin of this bug and seeds a deliberately diverged tail.\n\nA live-path version:\n\n1. Build the harness with one chain, verification already initialized (so it takes the live path, not cold start).\n2. `SealBlock` a tail where blocks ≤ N match `mockChainContainer`'s canonical output and blocks > N do not — the 259686/259687 boundary.\n3. Drive the `DecisionAdvance` branch so it calls `persistFrontierLogs` for the next timestamp.\n4. Assert it does **not** keep returning `ErrParentHashMismatch` across repeated rounds — i.e. that it reconciles and makes progress.\n\nThat test fails on current `develop` and passes once `reconcileLogsDBTail` runs on the live path.\n\nDefect 1 is not reproducible this way — the silent fork is in derivation after an invalidation replacement, so it needs the real pipeline (op-e2e / acceptance-tests). The tractable form there is an invariant rather than a bug repro: after invalidation recovery, assert each derived block hash matches what the engine returns at that height, and fail on the first mismatch. That is also the production fix for defect 1, and would have caught this in seconds instead of 24 minutes.\n\n## Expected behaviour\n\n1. **A derived block whose hash does not match what the engine holds must fail loudly and immediately** — not be sealed into logsDB, not become the basis of interop verification, and never become the basis of an invalidation decision. ~1390 blocks and ~24 minutes of verifying a nonexistent chain is the core defect.\n2. **Wire `reconcileLogsDBTail` into the live frontier path.** It already does the right thing on the backfill path; on `ErrParentHashMismatch` (or on `super authority safe head non-canonical`) the live path should reconcile back to the last in-force block — 259686 here — and re-seal forward, instead of failing `persist frontier logs` forever.\n3. **Fail visibly.** A node that has detected its frontier is non-canonical should escalate rather than spin silently while every head metric reads green.\n\n## Open question\n\nWhat does the derivation pipeline resume from after `chain rewind completed` and the deposits-only replacement, such that 259685 and 259686 come out correct but 259687 does not? Stale batch-queue state, a wrong L1 origin, or a wrong sequence number would all fit the observed boundary. Determining whether the fork blocks differ from canonical in their L1 origin / sequence number / attributes, versus being the same attributes on a different parent, would separate a bad resume point from a bad engine interaction. The payloads are no longer on the ELs, so this likely needs a repro.\n\n## Notes\n\nDiagnosis was read-only: Grafana Cloud metrics/logs plus `cast` and `optimism_syncStatus` against the devnet. No state was modified.\n\n**Live specimen.** As of 21:46 UTC, `an-interop-reorg-4-supernode-2` is still wedged — `supernode_interop_verified_timestamp` 17193s (4.78h) behind, `persist frontier logs` errors still firing within the last 5 minutes. It is the best specimen for inspecting the diverged logsDB before it is recycled. `supernode-0` and `supernode-1` were redeployed onto a `22129-merge` build at 20:44:54 and 20:23:33 and are not valid specimens. Note that restarting `supernode-2` will likely *destroy* the evidence by triggering the cold-start reconcile.\n",
+      "createdAt": "2026-07-30T21:02:31Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
     {
       "id": "I_kwDODjvEJM8AAAABKF_Emg",
       "title": "kona-sp1-proposer: detect a second instance running with the same key",
@@ -20,6 +44,18 @@
       "commentCount": 2
     },
     {
+      "id": "I_kwDODjvEJM8AAAABKkZNDw",
+      "title": "flaky test: `TestSequencerFailover_ConductorRPC` — hangs until 20m package timeout, panics op-e2e/system/conductor",
+      "author": "ajsutton",
+      "number": 22094,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** `TestSequencerFailover_ConductorRPC` hung until the 20-minute package timeout, taking down the whole `op-e2e/system/conductor` package (`TestMain` panics, remaining tests in the binary never run, and gotestsum aborts the rerun with `rerun aborted because previous run had a suspected panic`).\n\n**CI run:** https://circleci.com/gh/ethereum-optimism/optimism/5388221 (job `go-tests-short`)\n**Date:** 2026-07-29\n**Encountered on:** ethereum-optimism/optimism#22034, a Solidity-only branch (4 files, all under `packages/contracts-bedrock`). `go-tests-short` passed on the immediately preceding push of the same branch, and is green on `develop`.\n\n```\npanic: test timed out after 20m0s\n\trunning tests:\n\t\tTestSequencerFailover_ConductorRPC (20m0s)\n\ngoroutine 14 [sync.WaitGroup.Wait, 19 minutes]:\nsync.(*WaitGroup).Wait(0x6de78667648)\ngithub.com/hashicorp/raft.(*raftState).waitShutdown(...)\n\traft@v1.7.3/state.go:154\ngithub.com/hashicorp/raft.(*shutdownFuture).Error(0x6de77c000d0)\n\traft@v1.7.3/future.go:175 +0x29\ngithub.com/ethereum-optimism/optimism/op-conductor/consensus.(*RaftConsensus).Shutdown(0x6de6969dae0)\n\top-conductor/consensus/raft.go:297 +0x2e\ngithub.com/ethereum-optimism/optimism/op-conductor/conductor.(*OpConductor).Stop(...)\n```\n\nThe cluster never re-forms a quorum. `sequencer1` is gone (`dial tcp 127.0.0.1:36493: connect: connection refused`) and `sequencer2` never answers (`msgpack decode error [pos 0]: ... i/o timeout`), so `sequencer3` spins in pre-vote at a fixed `term=411` for the remaining ~6 minutes of log:\n\n```\n[WARN]  raft: Election timeout reached, restarting election\n[INFO]  raft: entering candidate state: node=\"Node at 127.0.0.1:43037 [Candidate]\" term=411\n[DEBUG] raft: calculated votes needed: needed=2 term=411\n[DEBUG] raft: pre-vote granted: from=sequencer3 term=411 tally=1\n[ERROR] raft: failed to make requestVote RPC: target=\"{Voter sequencer1 ...}\" error=\"dial tcp ...: connection refused\" term=411\n[DEBUG] raft: pre-vote denied: from=sequencer1 term=411 tally=1\n```\n\nTwo things worth separating in an investigation:\n\n1. Why the test wedges — a 2-of-3 quorum loss with one peer refusing connections and one timing out mid-msgpack.\n2. `RaftConsensus.Shutdown` blocking forever on `waitShutdown`. Even once the test gives up, teardown can't complete, which is what converts a single stuck test into a whole-package panic and a lost rerun. A bounded shutdown would at least contain the blast radius.\n",
+      "createdAt": "2026-07-29T00:41:04Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
       "id": "I_kwDODjvEJM7vl_iY",
       "title": "contracts: increase PreimageOracle.PRECOMPILE_CALL_RESERVED_GAS before Glamsterdam (EIP-8037)",
       "author": "ajsutton",
@@ -30,42 +66,6 @@
       "closedAt": "2026-07-28T15:23:20Z",
       "state": "CLOSED",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABKs1iNg",
-      "title": "op-reth: update reth dependency to 2.4.2 / 2.5.0",
-      "author": "sebastianst",
-      "number": 22115,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Placeholder issue to bump the reth dependency to its next release.",
-      "createdAt": "2026-07-29T19:41:56Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABKr8q-g",
-      "title": "kona-sp1-proposer: which games should the proposer defend when challenged",
-      "author": "digorithm",
-      "number": 22111,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Design decision for the defend path (#21463): when the kona-sp1-proposer sees a challenged game, which games is it willing to prove? The prove, resolve, and claim sets must be the same set: a game we would prove is a game we must later resolve and claim. Upstream op-succinct uses option A (it defends any game whose identity matches its own program).\n\n**Which games should our proposer defend (prove) when challenged?**\n\nOption A: every game that runs our program, no matter who created it.\nOption B: our own games, plus the games ours are built on.\n\nThe case for B:\n\n- Users only depend on our chain of games. A withdrawal goes through when the game covering it resolves in our favor, and those games are the ones we create. If one of ours is challenged, we must prove it. If a game ours are built on is challenged and dies, everything we built on top dies with it. So we defend our games and everything they stand on. That is B.\n- A stranger's game outside our chain affects nobody but the stranger. If it dies, our games still cover the same state and users still withdraw. Proving it costs us money and unblocks no user.\n- A invites abuse: anyone can create a game with our program and challenge it themselves, and we pay for a proof. We win the challenger bond each round, but the bond is fixed by governance at upgrade time (and by other chains' governance elsewhere), while proving costs move with market prices. Whenever a proof costs more than the bond, we lose money on every round, and we cannot retune the bond quickly.\n- B is not a one-way door. If we later want to defend every game of our program, it is a small filter change.\n",
-      "createdAt": "2026-07-29T17:46:32Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM76BN3s",
-      "title": "flaky test: `TestExecutePayloadSuccess`",
-      "author": "sebastianst",
-      "number": 19898,
-      "repository": "ethereum-optimism/optimism",
-      "body": "## Flaky Test\n\n**Test:** `TestExecutePayloadSuccess`\n**Package:** `rust/op-reth/tests/proofs/core`\n**CI Job:** `op-reth-e2e-sysgo-tests`\n\n## CI Runs\n\n- https://app.circleci.com/pipelines/gh/ethereum-optimism/optimism/121652/workflows/c7a2af02-affc-4d0d-bd43-461f58d6a244/jobs/4731572\n- Failed 2 times in a row with the same error\n\n## Error\n\n```\nexecute_payload_test.go:61: no state found for block number 1\n```\n\n## Context\n\nThe test sets up a system, funds an account (tx confirmed at block 1), then immediately queries op-reth for the state of block 1. op-reth doesn't have the state ready yet — likely a race condition between block production and state availability in the execution client.\n\nTwo other proof tests in the same package pass consistently (`TestL2MultipleTransactionsInDifferentBlocks`, `TestL2MultipleTransactionsInSingleBlock`).\n\nEncountered while working on ethereum-optimism/optimism#19881.\n\n🤖 *Generated by Claude Code*",
-      "createdAt": "2026-04-02T13:30:14Z",
-      "closedAt": "2026-07-29T13:16:57Z",
-      "state": "CLOSED",
-      "commentCount": 0
     }
   ],
   "topPRs": [
@@ -82,6 +82,18 @@
       "deletions": 0
     },
     {
+      "id": "PR_kwDODjvEJM7klOEo",
+      "title": "op-up: add devnet preset runner and control CLI",
+      "author": "Inphi",
+      "number": 21315,
+      "body": "## Summary\r\n\r\nAdds a friendlier `op-up` UX for launching local op-devstack devnet presets.\r\n\r\nThis lets users run preset devnets from `op-up`, get randomized local RPC ports automatically, and see the information needed to interact with the network after startup.\r\n\r\n## Features\r\n\r\n- Start realistic OP Stack devnets with one command.\r\n- Pick from useful presets like minimal, interop, two-L2, multinode, conductors, and flashblocks.\r\n- No manual port management: op-up finds ports and prints every endpoint.\r\n- Get the funded test account, deployed contracts, L1 beacon RPC, L2 RPCs, and supernode RPC in one place.\r\n- Export configs automatically for external tools like challenger/proposer runners.\r\n- Control running services with start, stop, restart, and status.\r\n- Simulate failures without editing presets or writing custom test code.\r\n- Keep RPC endpoints stable across service restarts.\r\n- Find service logs easily under ~/.op-up/logs.\r\n\r\n## Changes\r\n\r\n- Add `op-up up <preset>` / preset selection UX backed by op-devstack presets.\r\n- Print service endpoints for L1/L2 EL, L2 CL, L1 beacon, and interop supernode RPC when available.\r\n- Print deployed L1 contract addresses for each L2, including portal, system config, bridge, DGF, proxy admin, and delayed WETH.\r\n- Use random local ports by default so users do not need to manually pick ports.\r\n- Export devnet config files under `~/.op-up/configs/`, including endpoints, contracts, rollup configs, dependency set config, and generated JSON configs when available.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-09T22:09:39Z",
+      "mergedAt": null,
+      "additions": 4676,
+      "deletions": 36
+    },
+    {
       "id": "PR_kwDODjvEJM72HlAM",
       "title": "kona-sp1-proposer: port op-succinct fault-proof proposer (create path)",
       "author": "digorithm",
@@ -94,6 +106,18 @@
       "deletions": 88
     },
     {
+      "id": "PR_kwDODjvEJM74Ub6u",
+      "title": "kona-sp1-proposer: defend challenged games with SP1 super-aggregation proofs",
+      "author": "digorithm",
+      "number": 22121,
+      "body": "## Summary\n\nPorts the defend path from op-succinct's `fault-proof` proposer (@ `13716c2c`): when a game the proposer can prove gets challenged, it fetches the span's super roots, collects witnesses, obtains an SP1 super-aggregation proof bound to its signer, and submits `prove()`. The existing resolution and claim tasks then finish the game (including the challenger-bond prover credit).\n\nPart of #21463. Fast finality (prove at creation) is deliberately not ported; tracked in #22112. Stacked on #22097.\n\n## What is upstream and what is ours\n\n- Ported near-verbatim (diff against upstream side by side): `prover.rs` (SPN request/poll state machine; cluster arm and two request knobs dropped), the defense scheduling in `proposer.rs` (`spawn_game_defense_tasks`, `should_skip_proving`, `spawn_game_proving_task`, deadline tiers), `RangeSplitCount`.\n- Ours by necessity (no upstream analog): `proving.rs` replaces upstream's single-chain witness/stdin machinery with the super-root stack (`super-range-executor` witness collection, `SuperAggregationInputs`); `synthesize_execution` generalized to timestamp spans (host-side only, no vkey change); the multi-prestate `PrestateCache` gains per-prestate proving keys and the deferred vkey verification (agg vk must hash to the on-chain prestate).\n- Ownership is now prestate-based (option A, #22111): the proposer proves, resolves, and claims every game whose prestate artifacts it can load, regardless of creator. Prove set = resolve set = claim set.\n\n## No real proofs in this PR\n\nThere are no SPN calls and no SNARK cryptography in any test. All coverage runs the mock provider: submitted proof bytes are a placeholder constant and devstack's `ZKMockVerifier` accepts any bytes. What the tests exercise for real is every computation around the proof: span fetching, witness collection from live nodes, native re-derivation of the state transition (the same code the guest programs compile from), consolidation checks, aggregation-input validation, and the exact public-values tuple `prove()` reconstructs on-chain. The one unexercised seam, `generate_*_proof()` returning verifier-accepted bytes, is upstream's code nearly verbatim and gets a manual SPN smoke once credentials are provisioned.\n\n## Hardening beyond upstream\n\nTwo serious issues caught in pre-merge review, fixed with pinning unit tests. Neither exists upstream; both are invariants upstream gets structurally for free that our architectural departures initially violated:\n\n1. Permanent verdicts are trust-gated: the `undefendable` skip set (added to bound retry spend; upstream retries forever) only condemns a game on a supernode answer with `current_l1 >= verified_required_l1`. Without the gate, a mid-rewind stale answer could permanently mark an honest game undefendable and burn its bond.\n2. Poisoned prestates close the creation gate: upstream verifies embedded ELF vkeys before creating; our runtime-fetched artifacts verify at first key setup, which initially left the existence-only gate open, letting the proposer keep bonding games it had proven it cannot defend. `ensure_loaded` now returns false for poisoned entries and heals only when the published artifacts actually change.\n\nSmaller deliberate divergences, flagged inline: pre-submit re-check before the prove tx (upstream submits blind), sync loads every cached game's prestate so post-rotation games stay owned (upstream is single-identity), mock provider is native-core rather than emulator-based (stub artifacts are not ELFs).\n\n## Test plan\n\n- Rust: 84 unit tests (proposer + super-range-executor) incl. ported upstream tables, six migrated span tests, and the two hardening pins; clippy `--all-features --all-targets --locked` and `just lint-docs` clean.\n- Go: gofmt/vet/op-golangci-lint clean.\n- Acceptance (sysgo, stub mode, PR CI lane): full ZK suite 10/10, incl. `TestChallengedValidProposalAnchors` now proposer-driven (the `TODO(#21463)` flip) and new `TestProposerDefendsForeignValidGame` pinning option A end to end (foreign game proven, resolved, challenger bond claimed).\n- Real-ELF lane: `TestChallengedValidProposalAnchors` + `TestProposerClaimsBondAfterResolution` pass with real artifacts.\n- `TestZKDisputeGameWithdrawal` stays skipped: its single-chain preset fails bring-up installing the ZK game type (pre-existing, unrelated to the proposer; issue to follow).\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-30T03:50:43Z",
+      "mergedAt": null,
+      "additions": 3529,
+      "deletions": 272
+    },
+    {
       "id": "PR_kwDODjvEJM73q2nQ",
       "title": "contracts: revive SuperchainTokenBridge + add SuperchainERC20Factory (wrap/unwrap)",
       "author": "opsuperchain",
@@ -104,37 +128,13 @@
       "mergedAt": null,
       "additions": 3004,
       "deletions": 22
-    },
-    {
-      "id": "PR_kwDODjvEJM74G6yw",
-      "title": "op-reth: add CLI surface snapshot test",
-      "author": "claude",
-      "number": 22108,
-      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Josh Klopfenstein** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0A3E04GDMX/p1785194297744039?thread_ts=1785194297.744039&cid=C0A3E04GDMX)_\n\nReplaces #22107, which GitHub auto-closed after a transient bad force-push to the branch (the branch is now clean; the diff below is the intended 3-file change).\n\n## Before\n\nop-reth inherits its entire CLI surface from the pinned upstream reth crates. A reth pin bump can add, remove, rename, or re-default operator-facing flags without producing any diff in this repository, so those changes ship silently and never get reviewed.\n\n## After\n\nA snapshot test renders the full op-reth command tree — every subcommand and every argument, including hidden ones, with aliases, value names, env vars, defaults, possible values, and help text — into a deterministic text file checked in at rust/op-reth/crates/cli/tests/snapshots/cli.snap. Any CLI surface change now fails the test and must be acknowledged by regenerating the snapshot, which makes the change visible in review:\n\n    UPDATE_SNAPSHOT=1 cargo nextest run -p reth-optimism-cli --all-features cli_surface_snapshot\n\nOn mismatch the test prints the first differing line, prints the complete generated snapshot between BEGIN/END markers so it can be recovered verbatim from CI logs, and also writes it to the cargo target tmpdir.\n\n## How\n\nThe renderer in rust/op-reth/crates/cli/tests/cli_snapshot.rs walks the clap command tree built by CommandFactory (the same tree the binary parses) and emits one line per argument in clap definition order. It is deliberately hand-rolled and std-only:\n\n- It does not snapshot help output, which wraps at terminal width and varies by environment.\n- It renders only the short help, never the long help — long help embeds registry-derived content such as the built-in superchain chain list on the chain flag, which would churn on registry updates unrelated to the CLI surface.\n- Machine- and build-specific defaults are normalized to stable placeholders: defaults containing platform base directories (HOME, XDG dirs) and a small list of known build- or CPU-count-derived defaults (identity, builder.extradata, rpc.max-tracing-requests).\n- No new dependency is added; the comparison and update logic (UPDATE_SNAPSHOT=1) is plain std. The workspace has insta available, but using it here would require touching the lockfile and would not print the full snapshot on failure, which the CI recovery loop below relies on.\n\nA short section was added to rust/UPDATING-RETH.md telling reth bumpers the snapshot will surface upstream CLI changes and how to regenerate it.\n\n## CI\n\nThe new test runs in the **rust-tests** CircleCI job (just test → cargo nextest run --workspace --all-features), which is part of the required-rust-ci gate. The test is gated on the crate dev feature because the dev-only test-vectors subcommand is part of the rendered surface; the --all-features run in CI enables it. Runs without that feature skip the test silently.\n\n## Caveats\n\nThe committed snapshot is a best-effort construction generated offline from the pinned reth sources — this environment cannot compile the Rust workspace (the reth git dependency is not fetchable here), so the snapshot could not be produced by running the test. **The first CI run is expected to fail the new test**; the authoritative snapshot will be printed between the BEGIN/END markers in the rust-tests output, and a follow-up commit pastes it into rust/op-reth/crates/cli/tests/snapshots/cli.snap (or a local checkout runs the UPDATE_SNAPSHOT command above), after which the job goes green.\n\nRefs #21687\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_017oDUppqTaWNyAbxV99uMMY)_",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-29T16:58:24Z",
-      "mergedAt": null,
-      "additions": 1544,
-      "deletions": 0
-    },
-    {
-      "id": "PR_kwDODjvEJM74JUyp",
-      "title": "rust: bump reth to 92cf59e2",
-      "author": "bitwiseguy",
-      "number": 22113,
-      "body": "## Summary\r\n\r\nUpdates the public monorepo's reth dependency from `f2eecc65482af4085e43eedb27a32024bf177a0d` to `92cf59e2bee8329dbe654088255a889f46469bf4`.\r\n\r\nThis also:\r\n\r\n- Synchronizes Alloy core dependencies to 1.6.1.\r\n- Refreshes the root, op-rbuilder, rollup-boost, and SP1 guest lockfiles.\r\n- Adapts OP payload builders to the removal of changed-path tracking.\r\n- Updates `OpEngineValidator` for reth's new parent-header argument.\r\n- Updates op-rbuilder test fixtures for `PayloadBuilderResources`.\r\n\r\nRevm remains at 41.0.0. The slot-preimage API and database layout are unchanged across this reth range.\r\n\r\n## Breaking API changes\r\n\r\nThe upstream range contains several API changes relevant to downstream consumers:\r\n\r\n- `BuiltPayloadExecutedBlock.changed_paths` was removed.\r\n- `StateRootComputeOutcome.changed_paths` was removed.\r\n- `BuildNewPayload::{cache, state_root_handle}` was replaced by `BuildNewPayload::resources`.\r\n- `PayloadValidator::validate_block_post_execution_with_hashed_state` now receives the parent header.\r\n- `PayloadStateRootHandle::take_state_root_rx()` was added for callers that need custom timeout handling.\r\n\r\nThe OP builders previously supplied `changed_paths: None`, so removing those fields does not discard information or change their effective behavior.\r\n\r\n## Behavior and operational implications\r\n\r\nThe reth range includes several inherited behavior changes:\r\n\r\n- Sparse-trie preservation and proof generation were reworked, including exact-prefix proof grouping and a fix preventing preserved trie anchors from moving backwards. These should preserve state-root results but may change state-root latency, memory use, cache reuse, and fallback frequency.\r\n- snap/2 account, storage, and bytecode requests are now served instead of rejected as unsupported, adding peer-visible functionality and associated database/proof-generation work.\r\n- `--testing.skip-invalid-transactions` now defaults to `false`, so `testing_buildBlockV1` fails on invalid transactions instead of skipping them. Production Engine API behavior is unaffected.\r\n- BAL RPC behavior was aligned with the specification and `debug_getRawBlockAccessList` was added.\r\n- Payload jobs now retain resource leases and pause JIT compilation while active. Current OP builds do not enable reth's JIT backend, so this is currently inert.\r\n- Alloy 1.6.1 makes some ABI/event decoding stricter and changes the hasher used by fixed-byte maps. Consensus code must continue to avoid depending on hash-map iteration order.\r\n- Updating Alloy in the SP1 guest workspace changes the guest dependency graph. Rebuilt guest ELFs should be treated as verification-key-changing artifacts.\r\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-29T18:27:55Z",
-      "mergedAt": null,
-      "additions": 1124,
-      "deletions": 1067
     }
   ],
   "codeChanges": {
-    "additions": 8922,
-    "deletions": 2071,
-    "files": 275,
-    "commitCount": 298
+    "additions": 13744,
+    "deletions": 2915,
+    "files": 347,
+    "commitCount": 402
   },
   "completedItems": [
     {
@@ -312,6 +312,17 @@
       ]
     },
     {
+      "title": "docs: add op-supernode how-to page",
+      "prNumber": 21837,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n**Before:** a node operator searching the docs for how to actually stand up op-supernode f",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/guides/configuration/supernode-setup.mdx",
+        "docs/public-docs/node-operators/guides/configuration/supernode.mdx"
+      ]
+    },
+    {
       "title": "op-node: Reject stale sequencer build starts",
       "prNumber": 21913,
       "type": "other",
@@ -319,6 +330,54 @@
       "files": [
         "op-node/rollup/engine/build_start.go",
         "op-node/rollup/engine/engine_controller_test.go"
+      ]
+    },
+    {
+      "title": "op-reth: print a backtrace when an integration test dies on a signal",
+      "prNumber": 21910,
+      "type": "tests",
+      "body": "Stacked on #21909 — review that first; this PR's diff is the second commit only.\n\nMakes the next recurrence of #20973 yield a faulting stack. Instrumentation only: no behavior change to any test, no effect unless a fatal signal fires.\n\n`p2p",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/tests/it/crash_backtrace.rs",
+        "rust/op-reth/crates/node/tests/it/main.rs",
+        "rust/op-reth/crates/node/tests/it/p2p_version.rs"
+      ]
+    },
+    {
+      "title": "rust: retry the eth69 teardown SIGSEGV flake",
+      "prNumber": 21909,
+      "type": "other",
+      "body": "Stops `p2p_version::peers_negotiate_eth_69` from ejecting unrelated PRs from the merge queue. Mitigation only — the crash is unresolved, see #20973.\n\nThe test dies with SIGSEGV *after* its body has passed: assertions succeed, nextest prints",
+      "files": [
+        "rust/.config/nextest.toml",
+        ".circleci/continue/rust-ci.yml"
+      ]
+    },
+    {
+      "title": "op-deployer: add computation of output root to prepare stage",
+      "prNumber": 21963,
+      "type": "other",
+      "body": "## Context\r\nTBD\r\n\r\nCloses #20909 \r\nCloses #20910 ",
+      "files": [
+        "op-deployer/pkg/deployer/inspect/fixture_test.go",
+        "op-deployer/pkg/deployer/inspect/genesis.go",
+        "op-deployer/pkg/deployer/inspect/genesis_test.go",
+        "op-deployer/pkg/deployer/inspect/rollup.go",
+        "op-deployer/pkg/deployer/inspect/rollup_test.go",
+        "op-deployer/pkg/deployer/pipeline/env.go",
+        "op-deployer/pkg/deployer/pipeline/env_test.go",
+        "op-deployer/pkg/deployer/pipeline/output_root.go",
+        "op-deployer/pkg/deployer/pipeline/output_root_test.go",
+        "op-deployer/pkg/deployer/prepare.go",
+        "op-deployer/pkg/deployer/prepare_test.go",
+        "op-deployer/pkg/deployer/state/state.go",
+        "op-deployer/pkg/deployer/pipeline/interop_depset.go",
+        "op-deployer/pkg/deployer/pipeline/interop_depset_test.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "op-deployer/pkg/deployer/state/state_test.go"
       ]
     },
     {
@@ -423,6 +482,19 @@
       ]
     },
     {
+      "title": "docs: upgrade generic contact cards to named OP Enterprise CTAs",
+      "prNumber": 22004,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nSlice 2 of the iteration-2 OPE steering plan (",
+      "files": [
+        "docs/public-docs/index.mdx",
+        "docs/public-docs/op-stack/introduction/op-stack.mdx",
+        "docs/public-docs/use-cases/index.mdx",
+        "docs/public-docs/snippets/op-enterprise-callout.mdx",
+        "docs/public-docs/snippets/op-enterprise-soft-card.mdx"
+      ]
+    },
+    {
       "title": "docs: add Get Started home tab as the docs landing experience",
       "prNumber": 22024,
       "type": "docs",
@@ -439,6 +511,20 @@
       "files": [
         ".github/scripts/check-pr-title-test.sh",
         ".github/scripts/check-pr-title.sh"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: Resolve each proxy's own ProxyAdmin during upgrade",
+      "prNumber": 22034,
+      "type": "other",
+      "body": "## Summary\n\nFixes ethereum-optimism/optimism#21731. After an interop migration, a chain set shares `ETHLockbox`, `DisputeGameFactory`, `AnchorStateRegistry`, and `DelayedWETH`, all administered by the **first** chain's `ProxyAdmin`. `OPCont",
+      "files": [
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerUtils.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerUtils.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerUtilsCaller.sol"
       ]
     },
     {
@@ -541,6 +627,16 @@
       ]
     },
     {
+      "title": "ci: bump factory pins to latest main",
+      "prNumber": 22047,
+      "type": "tests",
+      "body": "## Summary\n\nBumps all `ethereum-optimism/factory` action and reusable-workflow pins in `build-images.yaml` and `build-images.apko.yaml` to the latest `main` commit `80fb1914d8f68ea4ac277beff4541cc4a669569f`.\n\nThe motivating change is https:",
+      "files": [
+        ".github/workflows/build-images.apko.yaml",
+        ".github/workflows/build-images.yaml"
+      ]
+    },
+    {
       "title": "ci: fix apko factory pin to include cargo-profile input",
       "prNumber": 22046,
       "type": "bugfix",
@@ -600,6 +696,20 @@
         "docs/public-docs/app-developers/quickstarts/get-started.mdx",
         "docs/public-docs/app-developers/tutorials/deploy-a-contract.mdx",
         "docs/public-docs/snippets/op-enterprise-apps-callout.mdx"
+      ]
+    },
+    {
+      "title": "docs: add Upgrade 20 operator notice",
+      "prNumber": 22092,
+      "type": "docs",
+      "body": "## What changed\n\n- Added the Upgrade 20 notice and explained why Super Root Dispute Games are a prerequisite to Interop without activating Interop or migrating chains to shared dispute infrastructure.\n- Added the required `op-proposer`, `op",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/notices/index.mdx",
+        "docs/public-docs/notices/upgrade-20.mdx",
+        "docs/public-docs/app-developers/tools-sdks/support-matrix.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/cross-dom-bridge-eth.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/cross-dom-solidity.mdx"
       ]
     },
     {
@@ -770,6 +880,18 @@
       ]
     },
     {
+      "title": "op-acceptance-tests: fix SafeHeadProgression flake with progress-aware head waits",
+      "prNumber": 22062,
+      "type": "bugfix",
+      "body": "Fixes the current manifestation of the `TestSupernodeInterop_SafeHeadProgression` flake: the post-resume cross-safe wait added in #20852 (15 attempts × 2s) exhausts its budget when the devnet transiently stalls under CI load, e.g. `operatio",
+      "files": [
+        "op-acceptance-tests/tests/supernode/interop/head_progression_test.go",
+        "op-devstack/dsl/check.go",
+        "op-devstack/dsl/l2_cl.go",
+        "op-devstack/dsl/l2_el.go"
+      ]
+    },
+    {
       "title": "ci: add Renovate CVE-autobump workflow and config",
       "prNumber": 22061,
       "type": "other",
@@ -777,6 +899,58 @@
       "files": [
         ".github/workflows/renovate.yaml",
         "renovate.json"
+      ]
+    },
+    {
+      "title": "docs: consolidate kona-node install pages and single-source the ports table",
+      "prNumber": 22060,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nDedup slice D9 of docs-improver iteration 2 (c",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/faq/ports.mdx",
+        "docs/public-docs/node-operators/kona-node/install/binaries.mdx",
+        "docs/public-docs/node-operators/kona-node/install/docker.mdx",
+        "docs/public-docs/node-operators/kona-node/install/overview.mdx",
+        "docs/public-docs/node-operators/kona-node/install/source.mdx",
+        "docs/public-docs/node-operators/kona-node/run/binary.mdx",
+        "docs/public-docs/node-operators/kona-node/run/docker.mdx",
+        "docs/public-docs/snippets/kona-node-ports.mdx"
+      ]
+    },
+    {
+      "title": "docs: add reusable notice content type",
+      "prNumber": 22120,
+      "type": "docs",
+      "body": "## What changed\n\n- Added a reusable notice content-type contract and copy-paste template for time-bound upgrade, deprecation, and operational notices.\n- Classified notices as Diátaxis reference pages, with `content_type: notice` reserved fo",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/notices/archive/fusaka-notice.mdx",
+        "docs/public-docs/notices/archive/op-deployer-upgrade-deprecation.mdx",
+        "docs/public-docs/notices/archive/op-geth-deprecation.mdx",
+        "docs/public-docs/notices/archive/req-resp-cl-sync-deprecation.mdx",
+        "docs/public-docs/notices/archive/stake-based-priority-ordering.mdx",
+        "docs/public-docs/notices/interop-prep.mdx",
+        "docs/public-docs/notices/specialized-node-topology.mdx",
+        "docs/public-docs/op-stack/contribute/choose-a-content-type.mdx",
+        "docs/public-docs/op-stack/contribute/index.mdx",
+        "docs/public-docs/op-stack/contribute/notice.mdx"
+      ]
+    },
+    {
+      "title": "op-supernode: pass version to virtual node metrics",
+      "prNumber": 22104,
+      "type": "other",
+      "body": "## Summary\n\n- pass the supernode build version into each virtual op-node\n- remove the hardcoded virtual node version\n\n## Why\n\n`op_node_supernode_info` was reporting hardcoded `0.1.0` instead of the version injected into the supernode binary",
+      "files": [
+        "op-devstack/sysgo/l2_cl_supernode.go",
+        "op-e2e/interop/supersystem.go",
+        "op-supernode/cmd/main.go",
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/chain_container_test.go",
+        "op-supernode/supernode/resources/supernode_metrics.go",
+        "op-supernode/supernode/supernode.go"
       ]
     },
     {
@@ -788,77 +962,186 @@
         ".github/workflows/renovate.yaml",
         "renovate.json"
       ]
+    },
+    {
+      "title": "alloy-op-evm: don't rebate inner CREATE warming",
+      "prNumber": 22098,
+      "type": "other",
+      "body": "## Summary\n\nInner `CREATE`/`CREATE2` operations could claim a 2,500-gas SDM warm-account rebate for the created address. These opcodes warm that address but do not pay EIP-2929's cold-account surcharge, so there is no cold-to-warm delta to ",
+      "files": [
+        "rust/alloy-op-evm/src/block/tests.rs",
+        "rust/alloy-op-evm/src/post_exec/inspector.rs"
+      ]
+    },
+    {
+      "title": "kona-sp1-proposer: review follow-ups from the #22018 nits list",
+      "prNumber": 22097,
+      "type": "other",
+      "body": "## Summary\n\nWorks through all 40 nit-level items from #22086 (wwared's #22018 review). Every item has an explicit verdict below: 37 fixed here, 2 deferred to their owning issues, 1 declined with reason. Four commits, grouped by risk (verdic",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/zk_proposer_test.go",
+        "op-devstack/dsl/anchor_state_registry.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-devstack/dsl/proofs/zk_dispute_game.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-devstack/sysgo/zk_proposer.go",
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/config.rs",
+        "rust/kona/sp1/crates/proposer/src/contract.rs",
+        "rust/kona/sp1/crates/proposer/src/lib.rs",
+        "rust/kona/sp1/crates/proposer/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/signer.rs",
+        "rust/kona/sp1/crates/proposer/src/superroot.rs",
+        "rust/kona/sp1/crates/super-range-executor/src/lib.rs"
+      ]
+    },
+    {
+      "title": "bgpo: inspect exactly maxBlocks when suggesting blob tips",
+      "prNumber": 22133,
+      "type": "other",
+      "body": "<!--\r\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\r\n-->\r\n\r\n**Description**\r\n\r\n<!--\r\nA clear and concise description of the features you're adding in this pull request.\r\n-->\r\n\r\nCloses ht",
+      "files": [
+        "op-service/bgpo/oracle.go",
+        "op-service/bgpo/oracle_test.go"
+      ]
+    },
+    {
+      "title": "kona: reuse shared OP EVM env builder",
+      "prNumber": 22130,
+      "type": "other",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1785430681249789)_\n\n## Summary\n\nContinues #21481 by @cliff0412 — the original commits (b70efc2, d3051b4)",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/kona/crates/proof/executor/Cargo.toml",
+        "rust/kona/crates/proof/executor/src/builder/core.rs",
+        "rust/kona/crates/proof/executor/src/builder/env.rs",
+        "rust/kona/crates/protocol/genesis/Cargo.toml",
+        "rust/kona/crates/protocol/genesis/src/rollup.rs",
+        "rust/kona/sp1/programs/Cargo.lock"
+      ]
+    },
+    {
+      "title": "kona: match op-node span-batch uvarint decoding",
+      "prNumber": 22126,
+      "type": "other",
+      "body": "Aligns kona's span-batch `uvarint` decoding with op-node. A byzantine batcher could otherwise publish a span batch that one client decodes and the other rejects, splitting derivation on identical L1 data.\r\n\r\nkona decoded all six span-batch ",
+      "files": [
+        "docs/ai/derivation.md",
+        "op-node/rollup/derive/span_batch_test.go",
+        "rust/kona/crates/protocol/protocol/src/batch/mod.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/payload.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/prefix.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/raw.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/transactions.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/varint.rs"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 409.99255789576847,
-      "prScore": 324.21655789576846,
-      "issueScore": 4,
-      "reviewScore": 80.5,
-      "commentScore": 1.2759999999999998,
-      "summary": null
-    },
-    {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 369.1142671636531,
-      "prScore": 319.1142671636531,
-      "issueScore": 0,
-      "reviewScore": 50,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "claude",
       "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
-      "totalScore": 338.0590297786573,
-      "prScore": 314.95902977865734,
+      "totalScore": 638.9217086024734,
+      "prScore": 601.9817086024733,
       "issueScore": 0,
-      "reviewScore": 22.5,
-      "commentScore": 0.6000000000000001,
+      "reviewScore": 36,
+      "commentScore": 0.94,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 468.97433179234457,
+      "prScore": 367.7603317923446,
+      "issueScore": 4,
+      "reviewScore": 95.5,
+      "commentScore": 1.714,
       "summary": null
     },
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 240.5596554784684,
-      "prScore": 120.2196554784684,
-      "issueScore": 2,
-      "reviewScore": 118,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 218.53862014769183,
-      "prScore": 186.4986201476918,
-      "issueScore": 0,
-      "reviewScore": 31.5,
+      "totalScore": 401.0834822153465,
+      "prScore": 186.54348221534656,
+      "issueScore": 4,
+      "reviewScore": 210,
       "commentScore": 0.54,
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 167.31480448250906,
-      "prScore": 85.11480448250907,
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 384.1142671636531,
+      "prScore": 319.1142671636531,
       "issueScore": 0,
-      "reviewScore": 82,
-      "commentScore": 0.2,
+      "reviewScore": 65,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "oplabs-renovate",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 163.6036529917857,
-      "prScore": 161.40365299178572,
+      "totalScore": 261.10749373848466,
+      "prScore": 258.9074937384847,
       "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 227.77662014769183,
+      "prScore": 186.4986201476918,
+      "issueScore": 4.3,
+      "reviewScore": 36,
+      "commentScore": 0.978,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 182.4255477931522,
+      "prScore": 87.0875477931522,
+      "issueScore": 4,
+      "reviewScore": 90.5,
+      "commentScore": 0.838,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 181.81480448250906,
+      "prScore": 85.11480448250907,
+      "issueScore": 0,
+      "reviewScore": 96.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 172.9973973276499,
+      "prScore": 68.4973973276499,
+      "issueScore": 0,
+      "reviewScore": 104.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 152.617787984161,
+      "prScore": 43.817787984161,
+      "issueScore": 2,
+      "reviewScore": 106,
+      "commentScore": 0.8,
       "summary": null
     },
     {
@@ -882,51 +1165,31 @@
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 134.9973973276499,
-      "prScore": 68.4973973276499,
-      "issueScore": 0,
-      "reviewScore": 66.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 120.1817738965761,
-      "prScore": 43.5437738965761,
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 124.2989039702289,
+      "prScore": 56.79890397022891,
       "issueScore": 4,
-      "reviewScore": 72,
-      "commentScore": 0.6379999999999999,
+      "reviewScore": 63.5,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 103.95735312325499,
+      "totalScore": 112.95735312325499,
       "prScore": 90.25735312325499,
       "issueScore": 0,
-      "reviewScore": 13.5,
+      "reviewScore": 22.5,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 101.37595620590967,
-      "prScore": 31.775956205909672,
-      "issueScore": 0,
-      "reviewScore": 69,
-      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
       "username": "mds1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 88.278,
+      "totalScore": 90.278,
       "prScore": 0,
-      "issueScore": 0,
+      "issueScore": 2,
       "reviewScore": 87.5,
       "commentScore": 0.7779999999999999,
       "summary": null
@@ -942,33 +1205,43 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 65.86372599255722,
-      "prScore": 18.363725992557228,
-      "issueScore": 2,
-      "reviewScore": 45.5,
-      "commentScore": 0,
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 85.80064395529749,
+      "prScore": 38.86264395529749,
+      "issueScore": 6,
+      "reviewScore": 40.5,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
       "username": "einar-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 62.778000000000006,
+      "totalScore": 72.97800000000001,
       "prScore": 0,
       "issueScore": 2,
-      "reviewScore": 60,
-      "commentScore": 0.7779999999999999,
+      "reviewScore": 70,
+      "commentScore": 0.978,
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 61.300643955297495,
-      "prScore": 38.86264395529749,
-      "issueScore": 4,
-      "reviewScore": 18,
-      "commentScore": 0.43799999999999994,
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 59.095773896576105,
+      "prScore": 38.8957738965761,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 52.39664601251114,
+      "prScore": 52.39664601251114,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1022,6 +1295,16 @@
       "summary": null
     },
     {
+      "username": "grandpig",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/229586679?u=0950039d702d16e946056feb12f56fd82e7ca34f&v=4",
+      "totalScore": 31.56950756146648,
+      "prScore": 27.36950756146648,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
       "totalScore": 30.5534379124341,
@@ -1029,6 +1312,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 27.966657668923812,
+      "prScore": 27.966657668923812,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1054,21 +1347,21 @@
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 24.885371757896163,
+      "totalScore": 25.32337175789616,
       "prScore": 24.447371757896164,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.8759999999999999,
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 20.2,
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 24.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0.2,
+      "reviewScore": 24.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1102,6 +1395,16 @@
       "summary": null
     },
     {
+      "username": "ajit2903",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97722590?v=4",
+      "totalScore": 11.14971895621705,
+      "prScore": 6.64971895621705,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "hdcesario-op",
       "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
       "totalScore": 10,
@@ -1112,8 +1415,8 @@
       "summary": null
     },
     {
-      "username": "OptimismBot",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
       "totalScore": 10,
       "prScore": 0,
       "issueScore": 0,
@@ -1202,9 +1505,9 @@
       "summary": null
     }
   ],
-  "newPRs": 81,
-  "mergedPRs": 43,
-  "newIssues": 13,
-  "closedIssues": 9,
-  "activeContributors": 51
+  "newPRs": 97,
+  "mergedPRs": 60,
+  "newIssues": 21,
+  "closedIssues": 15,
+  "activeContributors": 54
 }
