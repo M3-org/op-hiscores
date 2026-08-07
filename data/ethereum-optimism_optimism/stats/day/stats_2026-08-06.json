@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-06 to 2026-08-07, ethereum-optimism/optimism had 30 new PRs (17 merged), 2 new issues, and 22 active contributors.",
+  "overview": "From 2026-08-06 to 2026-08-07, ethereum-optimism/optimism had 30 new PRs (17 merged), 2 new issues, and 21 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABLwVZgg",
@@ -15,8 +15,8 @@
       "repository": "ethereum-optimism/optimism",
       "body": "`TestProposerDefendsMultipleChallengedGamesConcurrently` flakes with the proposer dying on boot:\n\n```\nkona-sp1-proposer | Error: failed to start metrics server:\n  failed to create HTTP listener: Address already in use (os error 98)\n\nError Trace:  op-devstack/sysgo/zk_proposer.go:249\n              op-devstack/sysgo/multichain_proofs.go:115\n              op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go:218\nError:        kona-sp1-proposer exited before its startup line was emitted\nTest:         TestProposerDefendsMultipleChallengedGamesConcurrently\n```\n\nSeen in `memory-all-opn-op-reth-prague` ([build 5436840](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/jobs/5436840)). It took down `ci-gate`, which lists that job as `terminal`, so it blocks merge on an unrelated PR (#22290).\n\n## Cause\n\n`op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go:252` is the F15 anti-pattern from [docs/ai/flake-prevention.md](https://github.com/ethereum-optimism/optimism/blob/develop/docs/ai/flake-prevention.md#f15--selecting-a-free-port-before-starting-the-service):\n\n```go\nfunc freeTCPPort(t devtest.T) uint16 {\n\tlistener, err := net.Listen(\"tcp\", \"127.0.0.1:0\")\n\tt.Require().NoError(err, \"reserve an ephemeral port\")\n\tdefer listener.Close()   // port released here\n\treturn uint16(listener.Addr().(*net.TCPAddr).Port)\n}\n```\n\nThe port is released as soon as it's read, then passed to `kona-sp1-proposer` via `METRICS_PORT`. The proposer doesn't bind it until after `NewSimpleInterop` has stood up L1, the supernode, batchers, proposers and challengers — a multi-second window in which the kernel can hand that same number to any other socket. The number is drawn from the ephemeral range that every other socket in the process also draws from, and `#22208` (`op-acceptance-tests: run ZK dispute game tests in parallel`) put many more sockets in flight concurrently, which is what turned a latent race into an observed flake.\n\n## Fixing it\n\nPer F15, the owner of the socket should bind port 0 and report its address, rather than having the test preselect one. Two constraints make this more than a one-liner:\n\n- `METRICS_PORT=0` currently means *metrics disabled*, and `zk_proposer.go:205-212` deliberately pins it so an inherited `METRICS_PORT` (op-succinct deployments export that exact name) can't leak into devstack proposers. So \"0 = ephemeral\" isn't available; the mode needs a distinct signal, e.g. `MetricsListen { Disabled, Ephemeral, Fixed(u16) }`.\n- `metrics_exporter_prometheus` 0.18 binds inside `new_http_listener` and never surfaces the bound `SocketAddr`, and `with_http_listener` takes a `SocketAddr` rather than a listener — so the exporter can't report an ephemeral port, and can't adopt a listener we opened. Resolving the port inside the proposer therefore still needs a probe-then-bind, but the window collapses from seconds across processes to microseconds within one, and can be wrapped in a retry loop.\n\nSketch:\n\n- `rust/kona/sp1/crates/proposer/src/config.rs` — parse `METRICS_PORT` into a three-state mode.\n- `rust/kona/sp1/crates/host/src/metrics.rs` — `init_metrics` returns the resolved `SocketAddr`, retrying on `AddrInUse` in ephemeral mode.\n- `rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs` — log the resolved address in the existing `metrics_addr` field of the `kona-sp1-proposer started` line.\n- `op-devstack/sysgo/zk_proposer.go` — the startup-line callback already parses that log entry; capture `metrics_addr` and expose it.\n- `op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go` — drop `freeTCPPort`, scrape the reported address.\n\nA cheaper interim mitigation, if the cross-language change isn't wanted yet: keep the preselection but make it recoverable — on `Address already in use`, pick a fresh port and restart the proposer. That leaves the race in place but makes residual failure negligible.\n\n`freeTCPPort` has one caller today, so the blast radius either way is small.\n",
       "createdAt": "2026-08-06T18:22:19Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-08-07T18:06:04Z",
+      "state": "CLOSED",
       "commentCount": 1
     },
     {
@@ -70,6 +70,18 @@
       "deletions": 1438
     },
     {
+      "id": "PR_kwDODjvEJM77qMDH",
+      "title": "sdm: isolate refund production behind a test-only fixture",
+      "author": "nonsense",
+      "number": 22289,
+      "body": "## Summary\n\n- remove the concrete SDM refund policy from public production binaries while retaining generic post-exec policy hooks and verifier support\n- add an unpublished, test-only `op-reth-sdm-fixture` producer and retarget SDM acceptance coverage to it\n- simplify replay to structural verification and document the public/private policy ownership boundary\n\n## Testing\n\n- targeted Rust package tests and formatting\n- SDM fixture acceptance and derivation tests\n- relevant Go tests and compilation\n- op-rbuilder and rollup-boost lint/test suites\n- Premium exact-pin compatibility gate\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-06T15:14:07Z",
+      "mergedAt": "2026-08-07T15:07:35Z",
+      "additions": 2843,
+      "deletions": 4330
+    },
+    {
       "id": "PR_kwDODjvEJM77qKfW",
       "title": "sdm: isolate refund production behind a test-only fixture",
       "author": "nonsense",
@@ -79,18 +91,6 @@
       "createdAt": "2026-08-06T15:13:17Z",
       "mergedAt": null,
       "additions": 2550,
-      "deletions": 4339
-    },
-    {
-      "id": "PR_kwDODjvEJM77qMDH",
-      "title": "sdm: isolate refund production behind a test-only fixture",
-      "author": "nonsense",
-      "number": 22289,
-      "body": "## Summary\n\n- remove the concrete SDM refund policy from public production binaries while retaining generic post-exec policy hooks and verifier support\n- add an unpublished, test-only `op-reth-sdm-fixture` producer and retarget SDM acceptance coverage to it\n- simplify replay to structural verification and document the public/private policy ownership boundary\n\n## Testing\n\n- targeted Rust package tests and formatting\n- SDM fixture acceptance and derivation tests\n- relevant Go tests and compilation\n- op-rbuilder and rollup-boost lint/test suites\n- Premium exact-pin compatibility gate\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-06T15:14:07Z",
-      "mergedAt": null,
-      "additions": 2270,
       "deletions": 4339
     },
     {
@@ -618,5 +618,5 @@
   "mergedPRs": 17,
   "newIssues": 2,
   "closedIssues": 2,
-  "activeContributors": 22
+  "activeContributors": 21
 }

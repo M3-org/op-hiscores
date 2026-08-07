@@ -5,8 +5,20 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-02 to 2026-08-09, ethereum-optimism/optimism had 100 new PRs (63 merged), 30 new issues, and 46 active contributors.",
+  "overview": "From 2026-08-02 to 2026-08-09, ethereum-optimism/optimism had 114 new PRs (70 merged), 33 new issues, and 49 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABLazGNw",
+      "title": "flake: TestSupernodeLightSequencerInteropInvalidMessageReplacement",
+      "author": "einar-oplabs",
+      "number": 22234,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Description\n\n`TestSupernodeLightSequencerInteropInvalidMessageReplacement` (`op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go`) failed once during memory-all acceptance measurement runs on 2026-08-04 and passed in the seven sibling runs executed the same day across two concurrency shapes — it looks like an ordinary flake rather than load-induced.\n\n## Occurrence\n\n- Job: `memory-all-opn-op-reth-prague` (4 nodes × `ACCEPTANCE_TEST_JOBS=8`), CircleCI job 5423722 on `einar/ci-timing-splits` (#22202 measurement rerun)\n- Test runtime: 71s, result `failure`; the run completed 85 tests with this single failure\n- Same test green in: 3× other 4×8 runs and 4× 4×16 runs that day\n- No existing `MarkFlaky` marker and no prior issue found for this test name\n\n## Next steps\n\n- Mark the test flaky referencing this issue (draft PR open) so it stops failing acceptance jobs while the root cause is investigated\n- The test is the light-sequencer analogue of `TestSupernodeInteropInvalidMessageReplacement` (see #21119 for the op-geth-specific skip context); investigation should start with the replacement-adoption race on the light ELSync path\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "createdAt": "2026-08-04T13:53:04Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
     {
       "id": "I_kwDODjvEJM8AAAABERT9Pw",
       "title": "chore(ci): lower makespan of ci",
@@ -32,6 +44,18 @@
       "commentCount": 1
     },
     {
+      "id": "I_kwDODjvEJM8AAAABJxUlSA",
+      "title": "op-node/op-geth: post-exec (0x7D) tx payload not validated on decode (latent Go↔Rust divergence)",
+      "author": "sebastianst",
+      "number": 21961,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Found during independent review of #21907. Inherited op-geth design, not introduced there — another instance of the known Go-lenient/Rust-strict wire-divergence class (cf. brotli strictness), reachable only via a misbehaving sequencer/batcher.\n\n## Divergence\n\nThe post-exec (`0x7D`, `PostExecTx`) transaction's `Data` payload is treated as **opaque bytes on the Go side** and **parsed + validated on the Rust side**:\n\n- **Go** — op-geth `core/types/post_exec_tx.go` `decode()` is `CopyBytes` (no parse); `op-core/types.PostExecTx` validates only the type byte + non-empty payload; op-node derivation frames it opaquely (singular batch: type byte + SDM gate only; span batch: `rlp.Stream.Raw()`). Nothing in the Go consensus path reads the payload's contents.\n- **Rust** — op-alloy `TxPostExec` / `PostExecPayload::from_rlp_bytes` requires `version == POST_EXEC_PAYLOAD_VERSION`, canonical RLP, and no trailing bytes; a malformed payload is rejected at decode.\n\nSo a block / span-batch carrying a post-exec tx with a malformed payload (wrong version / non-canonical inner RLP / trailing bytes) is accepted by the Go stack but rejected by op-alloy/kona at decode — a potential op-node↔kona derivation divergence.\n\n## Confirmed Go-side impact\n\nInvestigated whether a malformed payload later triggers a Go-side execution error (which would close the gap). Findings against the current op-geth pin (`v1.101702.3-rc.5`):\n\n1. **The Go consensus/derivation path never validates payload content — anywhere.** This is the durable finding: `PostExecTxType` appears only in op-geth `core/types/*`, and nothing between op-node derivation and the engine reads the payload bytes.\n2. **The \"Go accepts a block kona rejects\" divergence is NOT reachable _today_ — but only accidentally.** In op-geth rc.5, post-exec execution is not wired: a `0x7D` tx becomes a message with `to=nil`, `gasFeeCap=0`, `gasLimit=0` and fails EL `preCheck` (`ErrFeeCapTooLow`; `ErrIntrinsicGas` on a zero-basefee chain) **independent of payload content** (`core/state_transition.go:410-413,539-545`; signer returns the zero address for `0x7D`, `core/types/transaction_signing.go:274-276`). Every block containing a post-exec tx is therefore rejected by the Go EL, valid or malformed. Go rejects at the _execution_ stage for an unrelated reason, not because it validates the payload.\n3. **The divergence becomes real the moment Go EL SDM execution is wired**, unless payload validation is added on the Go side. It is a latent, pre-SDM-execution issue, not exploitable against the current stack.\n\nPer-category detail (relevant once Go execution accepts these blocks):\n\n| Malformation | Go derivation | Notes |\n|---|---|---|\n| Wrong version byte | accepted | never checked |\n| Non-canonical inner RLP | accepted | the outer list header _is_ caught on the span-batch path by geth's `rlp.Stream` (`ErrCanonSize` + list-kind requirement); inner-item non-minimality is not; the singular-batch path is fully opaque |\n| Trailing bytes | accepted (singular batch) | not representable in a span batch — the payload's outer RLP header self-frames the tx, so appended bytes are consumed as the next tx |\n\n## Related open question\n\nop-revm's `catch_error` currently lumps `PostExec` into the collapsed non-deposit \"discard-and-continue\" arm (raised by @geoknee in review of #21723). Whether a tx-validity error is even legitimately reachable for a `0x7D` tx is a separate open decision that interacts with this one: if these txs are producer-generated and a validity error implies a consensus bug, both stacks should agree on halting vs. continuing.\n\n## Possible resolutions\n\n- Align op-geth / op-core to validate the payload on decode (strict), matching op-alloy — preferred if the payload format is fixed; or\n- Explicitly spec the opaque treatment and relax the Rust side.\n\nThe op-core golden vectors in #21931 pin only the hash/encoding of _valid_ payloads, not the acceptance boundary — whichever way this is resolved should add acceptance-boundary vectors shared across the Go and Rust suites.\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-07-22T15:45:33Z",
+      "closedAt": "2026-08-07T13:46:36Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
       "id": "I_kwDODjvEJM8AAAABKjW8iQ",
       "title": "op-reth proofs history can lag permanently after clean shutdown",
       "author": "HDauven",
@@ -41,30 +65,6 @@
       "createdAt": "2026-07-28T21:28:21Z",
       "closedAt": "2026-08-03T21:28:52Z",
       "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABLR96Hw",
-      "title": "acceptance-tests: Add high-level DSL for metrics usage in tests",
-      "author": "wwared",
-      "number": 22207,
-      "repository": "ethereum-optimism/optimism",
-      "body": "A follow-up from https://github.com/ethereum-optimism/optimism/pull/22121#discussion_r3704129527\r\n\r\nThe kona-sp1-proposer ZK tests have some hacky low level code for metrics handling that should be factored into higher level DSL constructs",
-      "createdAt": "2026-08-03T16:29:02Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABLwVZgg",
-      "title": "op-acceptance-tests: TestProposerDefendsMultipleChallengedGamesConcurrently flakes on kona-sp1-proposer metrics port collision",
-      "author": "maurelian",
-      "number": 22299,
-      "repository": "ethereum-optimism/optimism",
-      "body": "`TestProposerDefendsMultipleChallengedGamesConcurrently` flakes with the proposer dying on boot:\n\n```\nkona-sp1-proposer | Error: failed to start metrics server:\n  failed to create HTTP listener: Address already in use (os error 98)\n\nError Trace:  op-devstack/sysgo/zk_proposer.go:249\n              op-devstack/sysgo/multichain_proofs.go:115\n              op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go:218\nError:        kona-sp1-proposer exited before its startup line was emitted\nTest:         TestProposerDefendsMultipleChallengedGamesConcurrently\n```\n\nSeen in `memory-all-opn-op-reth-prague` ([build 5436840](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/jobs/5436840)). It took down `ci-gate`, which lists that job as `terminal`, so it blocks merge on an unrelated PR (#22290).\n\n## Cause\n\n`op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go:252` is the F15 anti-pattern from [docs/ai/flake-prevention.md](https://github.com/ethereum-optimism/optimism/blob/develop/docs/ai/flake-prevention.md#f15--selecting-a-free-port-before-starting-the-service):\n\n```go\nfunc freeTCPPort(t devtest.T) uint16 {\n\tlistener, err := net.Listen(\"tcp\", \"127.0.0.1:0\")\n\tt.Require().NoError(err, \"reserve an ephemeral port\")\n\tdefer listener.Close()   // port released here\n\treturn uint16(listener.Addr().(*net.TCPAddr).Port)\n}\n```\n\nThe port is released as soon as it's read, then passed to `kona-sp1-proposer` via `METRICS_PORT`. The proposer doesn't bind it until after `NewSimpleInterop` has stood up L1, the supernode, batchers, proposers and challengers — a multi-second window in which the kernel can hand that same number to any other socket. The number is drawn from the ephemeral range that every other socket in the process also draws from, and `#22208` (`op-acceptance-tests: run ZK dispute game tests in parallel`) put many more sockets in flight concurrently, which is what turned a latent race into an observed flake.\n\n## Fixing it\n\nPer F15, the owner of the socket should bind port 0 and report its address, rather than having the test preselect one. Two constraints make this more than a one-liner:\n\n- `METRICS_PORT=0` currently means *metrics disabled*, and `zk_proposer.go:205-212` deliberately pins it so an inherited `METRICS_PORT` (op-succinct deployments export that exact name) can't leak into devstack proposers. So \"0 = ephemeral\" isn't available; the mode needs a distinct signal, e.g. `MetricsListen { Disabled, Ephemeral, Fixed(u16) }`.\n- `metrics_exporter_prometheus` 0.18 binds inside `new_http_listener` and never surfaces the bound `SocketAddr`, and `with_http_listener` takes a `SocketAddr` rather than a listener — so the exporter can't report an ephemeral port, and can't adopt a listener we opened. Resolving the port inside the proposer therefore still needs a probe-then-bind, but the window collapses from seconds across processes to microseconds within one, and can be wrapped in a retry loop.\n\nSketch:\n\n- `rust/kona/sp1/crates/proposer/src/config.rs` — parse `METRICS_PORT` into a three-state mode.\n- `rust/kona/sp1/crates/host/src/metrics.rs` — `init_metrics` returns the resolved `SocketAddr`, retrying on `AddrInUse` in ephemeral mode.\n- `rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs` — log the resolved address in the existing `metrics_addr` field of the `kona-sp1-proposer started` line.\n- `op-devstack/sysgo/zk_proposer.go` — the startup-line callback already parses that log entry; capture `metrics_addr` and expose it.\n- `op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go` — drop `freeTCPPort`, scrape the reported address.\n\nA cheaper interim mitigation, if the cross-language change isn't wanted yet: keep the preselection but make it recoverable — on `Address already in use`, pick a fresh port and restart the proposer. That leaves the race in place but makes residual failure negligible.\n\n`freeTCPPort` has one caller today, so the blast radius either way is small.\n",
-      "createdAt": "2026-08-06T18:22:19Z",
-      "closedAt": null,
-      "state": "OPEN",
       "commentCount": 1
     }
   ],
@@ -118,23 +118,23 @@
       "deletions": 340
     },
     {
-      "id": "PR_kwDODjvEJM77qKfW",
+      "id": "PR_kwDODjvEJM77qMDH",
       "title": "sdm: isolate refund production behind a test-only fixture",
       "author": "nonsense",
-      "number": 22288,
-      "body": "## Summary\n\n- remove the concrete SDM refund policy from public production binaries while retaining generic post-exec policy hooks and verifier support\n- add an unpublished, test-only `op-reth-sdm-fixture` producer and retarget SDM acceptance coverage to it\n- simplify replay to structural verification and add CI guards against fixture release or test-ownership regressions\n\n## Testing\n\n- targeted Rust package tests and formatting\n- SDM fixture acceptance and derivation tests\n- relevant Go tests and compilation\n- op-rbuilder and rollup-boost lint/test suites\n- Premium exact-pin compatibility gate\n",
+      "number": 22289,
+      "body": "## Summary\n\n- remove the concrete SDM refund policy from public production binaries while retaining generic post-exec policy hooks and verifier support\n- add an unpublished, test-only `op-reth-sdm-fixture` producer and retarget SDM acceptance coverage to it\n- simplify replay to structural verification and document the public/private policy ownership boundary\n\n## Testing\n\n- targeted Rust package tests and formatting\n- SDM fixture acceptance and derivation tests\n- relevant Go tests and compilation\n- op-rbuilder and rollup-boost lint/test suites\n- Premium exact-pin compatibility gate\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-06T15:13:17Z",
-      "mergedAt": null,
-      "additions": 2550,
-      "deletions": 4339
+      "createdAt": "2026-08-06T15:14:07Z",
+      "mergedAt": "2026-08-07T15:07:35Z",
+      "additions": 2843,
+      "deletions": 4330
     }
   ],
   "codeChanges": {
-    "additions": 21398,
-    "deletions": 44903,
-    "files": 547,
-    "commitCount": 410
+    "additions": 26861,
+    "deletions": 50233,
+    "files": 614,
+    "commitCount": 472
   },
   "completedItems": [
     {
@@ -800,6 +800,24 @@
       ]
     },
     {
+      "title": "ci: shard test jobs by historical timing and widen parallelism",
+      "prNumber": 22202,
+      "type": "tests",
+      "body": "## Description\n\nRevives the test-splitting/parallelism experiments from #20930, rebased onto the restructured CI. All splits use `circleci tests split --split-by=timings`, fed by the JUnit files each job already uploads via `store_test_resu",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "justfile",
+        "rust/kona/tests/justfile",
+        "op-acceptance-tests/justfile",
+        "op-devstack/README.md",
+        "ops/scripts/shard-tests.sh",
+        "rust/Cargo.toml",
+        "rust/kona/tests/node/restart/setup_test.go"
+      ]
+    },
+    {
       "title": "kona-proof: sample field elements in test_roots_of_unity",
       "prNumber": 22201,
       "type": "tests",
@@ -866,6 +884,24 @@
         "go.sum",
         "op-deployer/pkg/deployer/standard/standard.go",
         "op-deployer/pkg/deployer/pipeline/init_test.go"
+      ]
+    },
+    {
+      "title": "op-node: run sequencer on its own goroutine",
+      "prNumber": 22241,
+      "type": "other",
+      "body": "Eliminates sequencer starvation by the shared event loop: block production no longer competes with derivation for the driver thread. Stacked on #22238.\r\n\r\nThe sequencer emits no events on the block-production path. It calls the engine contr",
+      "files": [
+        "op-e2e/actions/helpers/l2_sequencer.go",
+        "op-node/rollup/attributes/attributes.go",
+        "op-node/rollup/driver/driver.go",
+        "op-node/rollup/sequencing/disabled.go",
+        "op-node/rollup/sequencing/iface.go",
+        "op-node/rollup/sequencing/sequencer.go",
+        "op-node/rollup/sequencing/sequencer_chaos_test.go",
+        "op-node/rollup/sequencing/sequencer_inbox_test.go",
+        "op-node/rollup/sequencing/sequencer_test.go",
+        "packages/contracts-bedrock/foundry.lock"
       ]
     },
     {
@@ -1195,6 +1231,38 @@
       ]
     },
     {
+      "title": "kona-sp1-proposer,op-devstack: resolve the metrics port in the proposer",
+      "prNumber": 22300,
+      "type": "other",
+      "body": "Human here: Fixes a flake documented in #22299.\r\n\r\n## Summary\r\n\r\n`TestProposerDefendsMultipleChallengedGamesConcurrently` picked a free port with `freeTCPPort` and released it immediately, then passed the number to `kona-sp1-proposer` via `",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/superproofs_from_runtime.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/zk_proposer.go",
+        "op-devstack/sysgo/zk_proposer_test.go",
+        "rust/Cargo.lock",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/host/Cargo.toml",
+        "rust/kona/sp1/crates/host/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/config.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "op-devstack/presets/interop_test.go"
+      ]
+    },
+    {
+      "title": "op-node: register l2.follow.source.rpc-timeout flag",
+      "prNumber": 22297,
+      "type": "other",
+      "body": "L2FollowSourceRpcTimeout (--l2.follow.source.rpc-timeout / OP_NODE_L2_FOLLOW_SOURCE_RPC_TIMEOUT) was declared in op-node/flags/flags.go but never added to optionalFlags, so urfave/cli never registered it: it was absent from op-node --help, ",
+      "files": [
+        "op-node/flags/flags.go"
+      ]
+    },
+    {
       "title": "op-core,op-service,op-chain-ops: receipt wrapping constructor and codec cleanups",
       "prNumber": 22295,
       "type": "refactor",
@@ -1227,6 +1295,62 @@
       "body": "Human here: the op-deployer go-release job is failing because of a missing go-embed. You can see the failure occurring on a test release branch [here](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/132056/details?workf",
       "files": [
         ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "sdm: isolate refund production behind a test-only fixture",
+      "prNumber": 22289,
+      "type": "bugfix",
+      "body": "## Summary\n\n- remove the concrete SDM refund policy from public production binaries while retaining generic post-exec policy hooks and verifier support\n- add an unpublished, test-only `op-reth-sdm-fixture` producer and retarget SDM acceptan",
+      "files": [
+        ".circleci/continue/main.yml",
+        "docs/ai/acceptance-tests.md",
+        "docs/public-docs/chain-operators/guides/features/sequencer-defined-metering.mdx",
+        "justfile",
+        "op-acceptance-tests/justfile",
+        "op-acceptance-tests/tests/flashblocks/flashblocks_sdm_phantom_test.go",
+        "op-acceptance-tests/tests/flashblocks/flashblocks_sdm_test.go",
+        "op-acceptance-tests/tests/interop/proofs-singlechain/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/karst/upgrade_gas_test.go",
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-acceptance-tests/tests/sdm/block_test.go",
+        "op-acceptance-tests/tests/sdm/boundary_test.go",
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/system.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/workload.go",
+        "op-chain-ops/cmd/sdm-devnet/main.go",
+        "op-chain-ops/pkg/sdm/workload.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options_test.go",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-evm/src/post_exec/inspector.rs",
+        "rust/alloy-op-evm/src/post_exec/inspector/tests.rs",
+        "rust/alloy-op-evm/src/post_exec/mod.rs",
+        "rust/alloy-op-evm/src/post_exec/null.rs",
+        "rust/alloy-op-evm/src/post_exec/refund.rs",
+        "rust/kona/bin/client/src/fpvm_evm/factory.rs",
+        "rust/kona/sp1/crates/client/src/precompiles/factory.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/context.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/tests/sdm.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/post_exec_ext.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/src/proof_history.rs",
+        "rust/op-reth/crates/node/tests/it/builder.rs",
+        "rust/op-reth/crates/post-exec-replay/src/lib.rs",
+        "rust/op-reth/crates/post-exec-replay/src/replay.rs",
+        "rust/op-reth/crates/post-exec-replay/src/types.rs",
+        "rust/op-reth/crates/sdm-fixture-node/Cargo.toml",
+        "rust/op-reth/crates/sdm-fixture-node/src/lib.rs",
+        "rust/op-reth/crates/sdm-fixture-node/src/main.rs"
       ]
     },
     {
@@ -1273,47 +1397,114 @@
         "rust/rollup-boost/crates/flashblocks-rpc/Cargo.toml",
         "rust/rollup-boost/crates/rollup-boost/Cargo.toml"
       ]
+    },
+    {
+      "title": "docs: fix unreachable /op-stack root, dead in-tree links, and mis-archived snap-sync guide",
+      "prNumber": 22317,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## What this fixes\n\nThree information-architec",
+      "files": [
+        "docs/public-docs/app-developers/guides/configuring-actions.mdx",
+        "docs/public-docs/app-developers/guides/interoperability/get-started.mdx",
+        "docs/public-docs/app-developers/guides/interoperability/reading-logs.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/deposit-transactions.mdx",
+        "docs/public-docs/app-developers/tutorials/development/supersim/installation.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/manual-relay.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/message-passing.mdx",
+        "docs/public-docs/chain-operators/guides/features/snap-sync.mdx",
+        "docs/public-docs/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/introduction/op-stack.mdx",
+        "docs/public-docs/op-stack/security/interop-security.mdx",
+        "docs/public-docs/scripts/lint/redirect-lint-baseline.json"
+      ]
+    },
+    {
+      "title": "docs: retire the stale imported op-reth OP Stack run page",
+      "prNumber": 22316,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## Before / After\n\n**Before.** The most plausi",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-reth-setup.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/guides/configuration/execution-clients.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/overview.mdx",
+        "docs/public-docs/node-operators/op-reth/index.mdx",
+        "docs/public-docs/node-operators/op-reth/run/faq/sync-op-mainnet.mdx",
+        "docs/public-docs/node-operators/op-reth/run/opstack.mdx",
+        "docs/public-docs/op-stack/components/op-reth.mdx"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 640.9625742854357,
-      "prScore": 502.6445742854357,
-      "issueScore": 42,
-      "reviewScore": 95,
-      "commentScore": 1.3179999999999998,
-      "summary": null
-    },
-    {
       "username": "claude",
       "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
-      "totalScore": 630.2008163594724,
-      "prScore": 567.0008163594723,
+      "totalScore": 783.7335865180696,
+      "prScore": 720.5335865180697,
       "issueScore": 0,
       "reviewScore": 63,
       "commentScore": 0.2,
       "summary": null
     },
     {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 650.3025742854356,
+      "prScore": 502.6445742854357,
+      "issueScore": 42,
+      "reviewScore": 104,
+      "commentScore": 1.658,
+      "summary": null
+    },
+    {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 489.2981570943991,
-      "prScore": 239.12015709439908,
+      "totalScore": 556.5052314842048,
+      "prScore": 288.1272314842048,
+      "issueScore": 10,
+      "reviewScore": 257,
+      "commentScore": 1.378,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 356.0682491280443,
+      "prScore": 266.55424912804426,
       "issueScore": 6,
-      "reviewScore": 243,
-      "commentScore": 1.178,
+      "reviewScore": 82,
+      "commentScore": 1.5139999999999998,
       "summary": null
     },
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 295.32383749409337,
+      "totalScore": 304.82383749409337,
       "prScore": 222.22383749409335,
       "issueScore": 2,
-      "reviewScore": 70.5,
+      "reviewScore": 80,
       "commentScore": 0.6000000000000001,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 288.20697451048846,
+      "prScore": 168.70697451048846,
+      "issueScore": 2,
+      "reviewScore": 117.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 272.27681082812774,
+      "prScore": 162.0368108281277,
+      "issueScore": 0,
+      "reviewScore": 109.5,
+      "commentScore": 0.74,
       "summary": null
     },
     {
@@ -1327,43 +1518,13 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 248.6255282409399,
-      "prScore": 166.5495282409399,
-      "issueScore": 4,
-      "reviewScore": 77,
-      "commentScore": 1.0759999999999998,
-      "summary": null
-    },
-    {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 231.5768108281277,
-      "prScore": 162.0368108281277,
-      "issueScore": 0,
-      "reviewScore": 69,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 195.50534841660513,
-      "prScore": 76.00534841660513,
-      "issueScore": 2,
-      "reviewScore": 117.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "karlfloersch",
       "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 175.27001511330008,
+      "totalScore": 188.9700151133001,
       "prScore": 170.5700151133001,
       "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0.2,
+      "reviewScore": 18,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -1377,6 +1538,16 @@
       "summary": null
     },
     {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 116.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 116.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
       "totalScore": 110.76249285279316,
@@ -1384,16 +1555,6 @@
       "issueScore": 6,
       "reviewScore": 42.5,
       "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 101.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 101.5,
-      "commentScore": 0,
       "summary": null
     },
     {
@@ -1439,10 +1600,10 @@
     {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 66.5,
+      "totalScore": 71,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 66.5,
+      "reviewScore": 71,
       "commentScore": 0,
       "summary": null
     },
@@ -1484,6 +1645,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 45.82452402830473,
+      "prScore": 45.82452402830473,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1597,6 +1768,26 @@
       "summary": null
     },
     {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "justintx19-bit",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/228147891?v=4",
+      "totalScore": 9.256588722239782,
+      "prScore": 9.256588722239782,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "futurealisha",
       "avatarUrl": "https://avatars.githubusercontent.com/u/82848594?u=7fe2bd4b134a43a37d9bf3a47a5f7de0dce38073&v=4",
       "totalScore": 6.523895272798371,
@@ -1617,8 +1808,8 @@
       "summary": null
     },
     {
-      "username": "pcw109550",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -1627,8 +1818,8 @@
       "summary": null
     },
     {
-      "username": "hdcesario-op",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -1687,9 +1878,9 @@
       "summary": null
     }
   ],
-  "newPRs": 100,
-  "mergedPRs": 63,
-  "newIssues": 30,
-  "closedIssues": 16,
-  "activeContributors": 46
+  "newPRs": 114,
+  "mergedPRs": 70,
+  "newIssues": 33,
+  "closedIssues": 21,
+  "activeContributors": 49
 }

@@ -5,53 +5,174 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-07 to 2026-08-08, ethereum-optimism/optimism had 0 new PRs (3 merged), 0 new issues, and 3 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-08-07 to 2026-08-08, ethereum-optimism/optimism had 14 new PRs (10 merged), 3 new issues, and 18 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABJxUlSA",
+      "title": "op-node/op-geth: post-exec (0x7D) tx payload not validated on decode (latent Go↔Rust divergence)",
+      "author": "sebastianst",
+      "number": 21961,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Found during independent review of #21907. Inherited op-geth design, not introduced there — another instance of the known Go-lenient/Rust-strict wire-divergence class (cf. brotli strictness), reachable only via a misbehaving sequencer/batcher.\n\n## Divergence\n\nThe post-exec (`0x7D`, `PostExecTx`) transaction's `Data` payload is treated as **opaque bytes on the Go side** and **parsed + validated on the Rust side**:\n\n- **Go** — op-geth `core/types/post_exec_tx.go` `decode()` is `CopyBytes` (no parse); `op-core/types.PostExecTx` validates only the type byte + non-empty payload; op-node derivation frames it opaquely (singular batch: type byte + SDM gate only; span batch: `rlp.Stream.Raw()`). Nothing in the Go consensus path reads the payload's contents.\n- **Rust** — op-alloy `TxPostExec` / `PostExecPayload::from_rlp_bytes` requires `version == POST_EXEC_PAYLOAD_VERSION`, canonical RLP, and no trailing bytes; a malformed payload is rejected at decode.\n\nSo a block / span-batch carrying a post-exec tx with a malformed payload (wrong version / non-canonical inner RLP / trailing bytes) is accepted by the Go stack but rejected by op-alloy/kona at decode — a potential op-node↔kona derivation divergence.\n\n## Confirmed Go-side impact\n\nInvestigated whether a malformed payload later triggers a Go-side execution error (which would close the gap). Findings against the current op-geth pin (`v1.101702.3-rc.5`):\n\n1. **The Go consensus/derivation path never validates payload content — anywhere.** This is the durable finding: `PostExecTxType` appears only in op-geth `core/types/*`, and nothing between op-node derivation and the engine reads the payload bytes.\n2. **The \"Go accepts a block kona rejects\" divergence is NOT reachable _today_ — but only accidentally.** In op-geth rc.5, post-exec execution is not wired: a `0x7D` tx becomes a message with `to=nil`, `gasFeeCap=0`, `gasLimit=0` and fails EL `preCheck` (`ErrFeeCapTooLow`; `ErrIntrinsicGas` on a zero-basefee chain) **independent of payload content** (`core/state_transition.go:410-413,539-545`; signer returns the zero address for `0x7D`, `core/types/transaction_signing.go:274-276`). Every block containing a post-exec tx is therefore rejected by the Go EL, valid or malformed. Go rejects at the _execution_ stage for an unrelated reason, not because it validates the payload.\n3. **The divergence becomes real the moment Go EL SDM execution is wired**, unless payload validation is added on the Go side. It is a latent, pre-SDM-execution issue, not exploitable against the current stack.\n\nPer-category detail (relevant once Go execution accepts these blocks):\n\n| Malformation | Go derivation | Notes |\n|---|---|---|\n| Wrong version byte | accepted | never checked |\n| Non-canonical inner RLP | accepted | the outer list header _is_ caught on the span-batch path by geth's `rlp.Stream` (`ErrCanonSize` + list-kind requirement); inner-item non-minimality is not; the singular-batch path is fully opaque |\n| Trailing bytes | accepted (singular batch) | not representable in a span batch — the payload's outer RLP header self-frames the tx, so appended bytes are consumed as the next tx |\n\n## Related open question\n\nop-revm's `catch_error` currently lumps `PostExec` into the collapsed non-deposit \"discard-and-continue\" arm (raised by @geoknee in review of #21723). Whether a tx-validity error is even legitimately reachable for a `0x7D` tx is a separate open decision that interacts with this one: if these txs are producer-generated and a validity error implies a consensus bug, both stacks should agree on halting vs. continuing.\n\n## Possible resolutions\n\n- Align op-geth / op-core to validate the payload on decode (strict), matching op-alloy — preferred if the payload format is fixed; or\n- Explicitly spec the opaque treatment and relax the Rust side.\n\nThe op-core golden vectors in #21931 pin only the hash/encoding of _valid_ payloads, not the acceptance boundary — whichever way this is resolved should add acceptance-boundary vectors shared across the Go and Rust suites.\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-07-22T15:45:33Z",
+      "closedAt": "2026-08-07T13:46:36Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7ssgEC",
+      "title": "op-node: block building delayed up to 2 seconds during L1 batch derivation",
+      "author": "akundaz",
+      "number": 19263,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Bug Description**\nWhen L1 batches arrive for derivation, the sequencer's FCU w/attr call can be delayed by nearly 2 seconds, causing blocks to be produced late.\n\nThis can delay the subsequent block too and this makes producing the expected number of flashblocks unfeasible. \n\n**Steps to Reproduce**\n1. Clone the [builder-playground repo](https://github.com/flashbots/builder-playground)\n    ```\n    git clone git@github.com:flashbots/builder-playground.git\n    ```\n2. Start the opstack recipe in builder-playground with the \n    ```\n    go run . cook opstack \\\n        --flashblocks \\\n        --external-builder http://host.docker.internal:4444 \\\n        --block-time 1 \\\n        --batcher-max-channel-duration 50\n    ```\n   This will run the default op-node version in builder-playground, which is `v1.16.3`. \n3. Wait 10 minutes (50 L1 blocks) for the derivation pipeline to run\n4. Filter rollup-boost logs for lines that contain \"Sending fork_choice_updated_v3 to builder\" and \"timestamp=Some(1771637243)\". Note how the timestamp (of when the log is printed) is very close to the second boundary nearly all the time, but when the L1 batch derivation pipeline runs, the timestamp is delayed, usually in the hundreds of milliseconds.\n\nOptional: I also tested this out against HEAD. To do this compile op-node locally, then point builder-playground to the new binary\n```\n# In optimism repo\ncd op-node\njust op-node\n\n# In builder-playground repo\ngo run . cook opstack \\\n    .... same flags as before \\\n    --override op-node=/path/to/op-node/binary/like/optimism/op-node/bin/op-node\n```\nThis has the advantage of being able to test potential op-node fixes easily or add new debug logs. For example, I modified `onBuildStart` in `op-node/rollup/engine/build_start.go` to print the delays in op-node to easier inspect delays:\n```\nfunc (e *EngineController) onBuildStart(ctx context.Context, ev BuildStartEvent) {\n\teventReceivedTime := time.Now()\n\trpcCtx, cancel := context.WithTimeout(e.ctx, buildStartTimeout)\n\tdefer cancel()\n\n\t// Calculate slot delay: how late are we compared to when we should start building?\n\t// We should start building at (block_timestamp - block_time)\n\t// slot_delay_ms = actual_start - expected_start\n\t// Positive = late, Negative = early, ~0 = on time\n\tblockTimestamp := time.Unix(int64(ev.Attributes.Attributes.Timestamp), 0)\n\texpectedStart := blockTimestamp.Add(-time.Duration(e.rollupCfg.BlockTime) * time.Second)\n\tslotDelayMs := eventReceivedTime.Sub(expectedStart).Milliseconds()\n\n\te.log.Info(\"BuildStartEvent received\",\n\t\t\"block_number\", ev.Attributes.Parent.Number+1,\n\t\t\"slot_delay_ms\", slotDelayMs)\n\n    ...rest of function unchanged\n```\n\n**Expected behavior**\nDesired behavior is for FCU w/attr to come reliably at the same time each second.\n\n**Environment Information:**\nLocal testing on mac. We see this in all our environments running linux.\nTested op-node versions `v1.16.3` and `a439b465` (my current head commit).\n\n**Configurations:**\n`--batcher-max-channel-duration 50`. This doesn't show up reliably if I set this value low, which makes sense because derivation is much quicker then.\n\n**Logs:**\n<!--\nLogs and/or error messages that help illustrate the issue.\n-->\nLog sample from running op-node with the additional print statement from above (filtered and truncated):\n```\nt=2026-02-20T21:17:41-0500 lvl=info msg=\"BuildStartEvent received\" block_number=612 slot_delay_ms=11\n..\nt=2026-02-20T21:17:42-0500 lvl=info msg=\"BuildStartEvent received\" block_number=613 slot_delay_ms=5\n..\nrepeated 600 times:\nlvl=info msg=\"decoded singular batch from channel\"\nlvl=info msg=\"generated attributes in payload queue\"\n..\nt=2026-02-20T21:17:43-0500 lvl=info msg=\"BuildStartEvent received\" block_number=614 slot_delay_ms=217\n..\nt=2026-02-20T21:17:44-0500 lvl=info msg=\"BuildStartEvent received\" block_number=615 slot_delay_ms=4\n\n```\n\n**Additional context**\nI initially thought https://github.com/ethereum-optimism/optimism/issues/15393 would be a contributing factor, but adding debouncing (via https://github.com/ethereum-optimism/optimism/pull/18385) did not get rid of the delay. \n\nI suspect the root cause is that the `EngineController` holds a lock while making blocking RPC calls:\n```\nfunc (e *EngineController) OnEvent(ctx context.Context, ev event.Event) bool {\n\te.mu.Lock()\n\tdefer e.mu.Unlock()\n\t// ... blocking RPC calls while holding lock\n}\n```\nDuring batch derivation hundreds of events are emitted and the FCU w/attr call would need to wait for all of them, which could cause such a delay.",
+      "createdAt": "2026-02-21T02:27:11Z",
+      "closedAt": "2026-08-07T15:29:47Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABKsUE2w",
+      "title": "[PCD Milestone 3] op-deployer & Tooling Runbook",
+      "author": "0xiamflux",
+      "number": 22114,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Context\nThe PCD introduces changes to `op-deployer`, including a new pipeline and additional requirements for `intent.json`. As a result, consumers of the pipeline need to understand the step-by-step process and the actionable items needed to recover from the different input validation failures.\n\n## Definition of Done\n\nThe deliverable for this issue is a document that can be used as a runbook to take a permissionless deployment live on-chain, either using `op-deployer` directly for simpler setups or the companion tooling to coordinate multi-chain setups.",
+      "createdAt": "2026-07-29T18:34:27Z",
+      "closedAt": "2026-08-07T18:27:04Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABLap9Zw",
+      "title": "op-node: sequencer and derivation thread contention/starvation",
+      "author": "sebastianst",
+      "number": 22232,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Tracking issue for the long-standing issue of having op-node's sequencer be starved by derivation in the single-threaded event loop.\n\nRelated:\n- https://github.com/ethereum-optimism/optimism/issues/21953 but it's a general issue, not only in tests.\n- https://github.com/ethereum-optimism/optimism/issues/19263 describes the symptom, but it can be much longer than 2s\n- Previous stale attempt: https://github.com/ethereum-optimism/optimism/pull/19881\n- New attempt at: https://github.com/ethereum-optimism/optimism/pull/22238 and {TODO}",
+      "createdAt": "2026-08-04T13:37:38Z",
+      "closedAt": "2026-08-07T15:29:48Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABLwVZgg",
+      "title": "op-acceptance-tests: TestProposerDefendsMultipleChallengedGamesConcurrently flakes on kona-sp1-proposer metrics port collision",
+      "author": "maurelian",
+      "number": 22299,
+      "repository": "ethereum-optimism/optimism",
+      "body": "`TestProposerDefendsMultipleChallengedGamesConcurrently` flakes with the proposer dying on boot:\n\n```\nkona-sp1-proposer | Error: failed to start metrics server:\n  failed to create HTTP listener: Address already in use (os error 98)\n\nError Trace:  op-devstack/sysgo/zk_proposer.go:249\n              op-devstack/sysgo/multichain_proofs.go:115\n              op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go:218\nError:        kona-sp1-proposer exited before its startup line was emitted\nTest:         TestProposerDefendsMultipleChallengedGamesConcurrently\n```\n\nSeen in `memory-all-opn-op-reth-prague` ([build 5436840](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/jobs/5436840)). It took down `ci-gate`, which lists that job as `terminal`, so it blocks merge on an unrelated PR (#22290).\n\n## Cause\n\n`op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go:252` is the F15 anti-pattern from [docs/ai/flake-prevention.md](https://github.com/ethereum-optimism/optimism/blob/develop/docs/ai/flake-prevention.md#f15--selecting-a-free-port-before-starting-the-service):\n\n```go\nfunc freeTCPPort(t devtest.T) uint16 {\n\tlistener, err := net.Listen(\"tcp\", \"127.0.0.1:0\")\n\tt.Require().NoError(err, \"reserve an ephemeral port\")\n\tdefer listener.Close()   // port released here\n\treturn uint16(listener.Addr().(*net.TCPAddr).Port)\n}\n```\n\nThe port is released as soon as it's read, then passed to `kona-sp1-proposer` via `METRICS_PORT`. The proposer doesn't bind it until after `NewSimpleInterop` has stood up L1, the supernode, batchers, proposers and challengers — a multi-second window in which the kernel can hand that same number to any other socket. The number is drawn from the ephemeral range that every other socket in the process also draws from, and `#22208` (`op-acceptance-tests: run ZK dispute game tests in parallel`) put many more sockets in flight concurrently, which is what turned a latent race into an observed flake.\n\n## Fixing it\n\nPer F15, the owner of the socket should bind port 0 and report its address, rather than having the test preselect one. Two constraints make this more than a one-liner:\n\n- `METRICS_PORT=0` currently means *metrics disabled*, and `zk_proposer.go:205-212` deliberately pins it so an inherited `METRICS_PORT` (op-succinct deployments export that exact name) can't leak into devstack proposers. So \"0 = ephemeral\" isn't available; the mode needs a distinct signal, e.g. `MetricsListen { Disabled, Ephemeral, Fixed(u16) }`.\n- `metrics_exporter_prometheus` 0.18 binds inside `new_http_listener` and never surfaces the bound `SocketAddr`, and `with_http_listener` takes a `SocketAddr` rather than a listener — so the exporter can't report an ephemeral port, and can't adopt a listener we opened. Resolving the port inside the proposer therefore still needs a probe-then-bind, but the window collapses from seconds across processes to microseconds within one, and can be wrapped in a retry loop.\n\nSketch:\n\n- `rust/kona/sp1/crates/proposer/src/config.rs` — parse `METRICS_PORT` into a three-state mode.\n- `rust/kona/sp1/crates/host/src/metrics.rs` — `init_metrics` returns the resolved `SocketAddr`, retrying on `AddrInUse` in ephemeral mode.\n- `rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs` — log the resolved address in the existing `metrics_addr` field of the `kona-sp1-proposer started` line.\n- `op-devstack/sysgo/zk_proposer.go` — the startup-line callback already parses that log entry; capture `metrics_addr` and expose it.\n- `op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go` — drop `freeTCPPort`, scrape the reported address.\n\nA cheaper interim mitigation, if the cross-language change isn't wanted yet: keep the preselection but make it recoverable — on `Address already in use`, pick a fresh port and restart the proposer. That leaves the race in place but makes residual failure negligible.\n\n`freeTCPPort` has one caller today, so the blast radius either way is small.\n",
+      "createdAt": "2026-08-06T18:22:19Z",
+      "closedAt": "2026-08-07T18:06:04Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM77yPht",
-      "title": "docs: add the \"Choose how to run your chain\" fork page",
-      "author": "claude",
-      "number": 22312,
-      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n> [!IMPORTANT]\n> **The blocking number-and-tier-name check has NOT been performed.** `https://optimism.io` returns HTTP 403 to every session in this program, so no agent can read the live OP Enterprise page. This PR therefore ships the plan's documented **non-numeric fallback path**, and **Matthew Cruz is a required reviewer** for the tier copy. The checklist he needs to work through is in \"What Matthew must verify\" below.\n\n## Before / After\n\n**Before.** A team arriving at the chain operator quickstart has no page anywhere in the docs that describes what running an OP Stack chain themselves actually entails versus having it run for them. The build-vs-buy fork that every prospective chain operator faces is simply absent from the information architecture: the quickstart hands the reader straight to the deployment tutorial, and the reader discovers what a standing 24/7 operation costs them only by living it.\n\n**After.** A new page, \"Choose how to run your chain\" (`chain-operators/launch-paths`), sits directly after the quickstart in the Get Started nav. It lays out one spectrum with three points on it (run it yourself, run it with engineering support, have it operated for you), states what the reader's team owns at each point, and does not pick a point for them. The self-hosted path is listed first, described in the docs' own factual register, and every self-hosted destination is one click away. Two lines on the quickstart point at it.\n\n**How.** Every ownership claim in the self-hosted section is a summary of a page already published in this repo, with the in-site citation carried on the page itself: the launch guide's sequencer topology and consistent-L1-view sections, the challenger guide's bond budgeting, `key-management.mdx`, `notices/index.mdx`, and `best-practices.mdx`. Nothing about the managed paths is asserted beyond what the already-shipped `snippets/op-enterprise-callout.mdx` and `snippets/op-enterprise-apps-callout.mdx` say, plus the plan's four non-numeric fallback phrases. The page carries no digit, no percentage, no tier name, and no comparative adjective in rendered prose.\n\nThis is slice 4 of the iteration-2 OP Enterprise steering plan ([`projects/docs-improver/plans/iteration-2/ope-steering.md`](https://github.com/ethereum-optimism/solutions/blob/main/projects/docs-improver/plans/iteration-2/ope-steering.md), Pattern C).\n\nTracks ethereum-optimism/solutions#1199. Digits follow-up: ethereum-optimism/solutions#1200.\n\n## What changed\n\n| File | Change |\n| --- | --- |\n| `docs/public-docs/chain-operators/launch-paths.mdx` | New page, \"Choose how to run your chain\" (130 lines) |\n| `docs/public-docs/docs.json` | One nav entry, after `chain-operators/quickstart` |\n| `docs/public-docs/chain-operators/quickstart.mdx` | Two-line preamble linking the fork page |\n\n`+134 / -0`. Zero self-hosted content removed, buried, gated, or de-emphasized. **Redirect budget: 0** (pure addition; no page moved or deleted).\n\n**Artifact class** (per the [curation review policy](https://docs.optimism.io/op-stack/contribute/curation-policy), \"Adding a new curated page\", step 2): **selection and comparison page**, 90-day sweep interval. It carries `last-reviewed: 2026-08-06` and enters the rotation on merge.\n\n## What Matthew must verify\n\nThe plan's number policy (items 2 through 5) makes this blocking, and it is unresolved. Every phrase below is a **placeholder** standing in for something only a human with a browser can read off the live page. Please open `https://optimism.io/op-enterprise` and record the date plus what the page states for each:\n\n- [ ] **Uptime SLA figure.** The page says `backed by an uptime SLA` with no percentage. What is the actual figure, and does an SLA attach to every option or only some?\n- [ ] **Incident response time.** The page says `priority incident response` with no time. What is the actual P1 response time?\n- [ ] **Engineering support hours.** The page says `direct engineering support` with no hours. What is the actual figure, and which option does it attach to?\n- [ ] **Public RPC volume.** The page says `managed public RPC` with no request volume. What is the actual allowance?\n- [ ] **Certification claims.** None appears on the page in any form. Does the live page make a bridge stage certification claim (or similar), and should the docs carry it?\n- [ ] **Time-to-production comparison.** None appears on the page in any form. See the ruling below on why it was omitted rather than fallback-phrased. If a claim should ship, the sentence needs drafting from scratch.\n- [ ] **The exact tier names and their count.** The page asserts none. Its three headings (\"Run it yourself\", \"Run it with engineering support\", \"Have it operated for you\") and the spectrum table's column headers are deliberately descriptive of ownership, not product names. If the live page's tier names belong in the docs, those headings are where they go.\n- [ ] **The phrase `fully managed and supported self-managed options`** (lowercase, descriptive). It is copied verbatim from the already-shipped `snippets/op-enterprise-callout.mdx`, so it is not new exposure, but it is the closest thing on the page to a tier-name assertion. Confirm it as permanent wording or replace it.\n- [ ] **The spectrum table's middle column.** It reads \"Your team, with OP Labs engineering behind it\" and does **not** name OP Enterprise, while the right column does. That is internally consistent with the table's \"who runs it\" semantics, but a reader could infer OP Enterprise does not cover the supported self-managed path, which the page's own copy says it does. Naming OP Enterprise there would assert the tier structure, which is exactly what this check gates, so it is left for your call.\n- [ ] **Backup sequencer on the engineering-support path.** The \"Run it with engineering support\" section states that OP Labs can optionally run a backup sequencer for the operator, alongside the sequencer cluster their team operates. This claim is **not** sourced from `optimism.io` (403 to every session in this program). Its source is your own review comment, https://github.com/ethereum-optimism/optimism/pull/22312#discussion_r3732317775, recorded here so the provenance stays visible to whoever reads this PR later. It carries no count of sequencers, no uptime or response-time figure, and no product tier name, so it does not depend on the rest of this checklist. Confirm the wording says what you meant.\n- [ ] **Component rendering.** Mintlify `*.mintlify.site` PR previews are proxy-blocked from program sessions, so the spectrum table (its first header cell is intentionally empty) and the `<CardGroup cols={2}>` have not been render-checked in a browser.\n\nAnything the live page does not support should be removed from the page rather than hedged. ethereum-optimism/solutions#1200 tracks the follow-up change and carries the same table.\n\n### Two rulings the verifier made, for the record\n\n**Time to production was omitted, not fallback-phrased.** The plan's number-policy item 3 offers `faster time to production` as the fallback for a weeks/months comparison, but slice 4's acceptance criteria bar comparative adjectives \"anywhere on the page\", and \"faster\" is one. Reading the bar as absolute, the fallback phrase cannot ship. Reading it narrowly as scoped to path-vs-path comparisons does not help either, because a time-to-production claim *is* a managed-versus-self-hosted comparison, which is precisely what the bar exists to prevent. Both readings converge, so omission is the right resolution; the applied reading is the absolute one. Item 3's phrases are permissions to state a claim without a digit, not obligations to state every claim class.\n\n**Certification claims were omitted.** Number-policy item 4 lists a bridge stage certification among the unverified inventory, and item 2 blocks asserting it. There is no honest numberless form of a certification claim, so nothing ships.\n\n## Notes for the reviewer\n\n**`docs.json` serialization.** `docs.json` is this program's universal collision file. ethereum-optimism/optimism#21838 (`docs: add fault proofs reference page`) merged at 2026-08-06T22:27:10Z with a live nav change while this branch was in verification. The branch was rebased onto `develop` at `20b5123` after that merge and the nav array was re-verified: `navigation.tabs[0].groups[0].pages` is now `[\"index\", \"ai-docs\", \"chain-operators/quickstart\", \"chain-operators/launch-paths\", \"op-stack/reference/glossary\"]`, and that PR's `op-stack/fault-proofs/reference` entry is intact.\n\n**Insertion point.** The plan's stated insertion point is stale: it predates the IA lane's landed \"Get Started tab\" move. **The insertion followed that landed IA move**, which is the plan's own documented contingency (\"if the IA lane's Get Started tab move has landed first, the insertion point follows that new group and the PR notes it\"). The entry sits at index 3 of the `\"Get started\"` group in the `\"Get Started\"` tab. Note that `tabs[1]` (Chain Operators) has its own separate `\"Get started\"` group; it was not touched and still contains only `chain-operators/index`.\n\n**No repository PR template exists** (`.github/` carries no `PULL_REQUEST_TEMPLATE`), so there are no template headings to mirror.\n\n## Reviewer checklist\n\n- [ ] The self-hosted path reads as genuinely useful routing, not as a setup for the managed pitch.\n- [ ] A self-hoster who has already built all of this finds nothing to object to.\n- [ ] Every ownership claim is a fair summary of the page it cites.\n- [ ] The two-line quickstart preamble does not disrupt the quickstart's own flow.\n- [ ] The blocking number-and-tier-name checklist above.\n\nBackground on this program: [`projects/docs-improver/README.md`](https://github.com/ethereum-optimism/solutions/blob/main/projects/docs-improver/README.md).\n\n---\n\n## Verification report (docs-verifier)\n\n- Branch: `docs-improver/i2-ope4` at `6b0b1e891348a4363404066c32ff29a86c078942`, base `develop` at `20b51232dda25d71159020be054c9820e7750004`\n- Claims checked: **22 inventoried + 8 swept from the diff (uninventoried)**. All 22 inventoried claims were re-derived from the cited files at the base tip, reading each cited range rather than trusting the citation. The 8 swept claims are the four `<CardGroup>` card descriptions, the \"sequencer cluster managed by `op-conductor`\" attribution, the hardfork-registry location claim, the quickstart preamble's claim about what the quickstart and tutorial cover, and the utm parameter string.\n- Claims corrected (fixed forward): **none.** No claim on the page failed re-derivation. One branch-level correction was made: `6b0b1e8` amends the commit message to drop a `Co-authored-by: Matthew Cruz <85043086+sbvegan@users.noreply.github.com>` trailer that attributed authorship of an agent-written commit to a human who did not write it. Before: two `Co-authored-by:` trailers. After: `Co-Authored-By: Claude <noreply@anthropic.com>` alone. No repository precedent supports the removed trailer. Diff content is byte-identical.\n- Review law: **PASS 20, N/A 12, FAIL 0** (32 rules). Non-PASS rules, one line each:\n  - M3 (blobs vs calldata) N/A: no data-availability sentence added; zero `calldata` hits.\n  - M4 (timestamps not block estimates) N/A: no activation or timing claim added; zero hits.\n  - M5 (kona-first framing) N/A: zero `op-geth` and zero `op.program` hits.\n  - M7 (no hub for retired components) N/A: the added page routes over live components (`op-conductor`, `op-challenger`, `op-deployer`); it is not a component hub.\n  - M9 (stale README or runbook links) N/A: zero hits.\n  - M10 (third-party brief mention) N/A: no third-party software referenced.\n  - M13 (support links to monorepo issues) N/A: the three `support` hits are prose about engineering support; no support-intent link was added.\n  - M17 (deletions map to an accepted plan) N/A: zero deletions (`+134 / -0`).\n  - E1 (`NormativeSpec` explainer-only) N/A: component not used.\n  - E4 (delete or move requires a redirect) N/A: pure addition, nothing moved or deleted.\n  - E7 (generated references not hand-edited) N/A: no hunks under `snippets/generated/**`.\n  - E8 (\"Next steps\", never \"Curated exits\") N/A: the page's closing heading is \"Where to go from here\"; zero hits.\n  - E10 (caps) PASS **by operator sanction, not by count**: 3 docs-improver PRs are open, equal to `max_open_review_prs`. The per-PR check is stood down by the operator-sanctioned batch (operator sbvegan, agreed size 4, batch label `i2-tail`), whose batch-start check ran once, per the agent spec's Batch mode section.\n- Linters (run independently from `docs/public-docs/`, output verbatim):\n  - `pnpm lint:nav` gives `nav validator: OK — 426 pages on disk, 425 distinct nav entries, 1 allowlisted orphan(s)`\n  - `pnpm lint:redirects` gives `redirect lint: OK — 652 redirects, 469 files scanned, 11 grandfathered violation(s) remaining`\n  - `node scripts/lint-link-policy.mjs --baseline scripts/lint-link-policy.baseline.json --specs-src <specs checkout>` gives `scanned .../docs/public-docs: 0 finding(s) {}` then `clean: no violations`. The `note: specs path/anchor resolution SKIPPED` line is **absent**, confirming the specs resolver actually ran. The builder's run omitted `--specs-src` and printed that note; review-law E3 requires the full run, so it was re-run here. **The specs checkout used is synthetic**: 62 markdown files fetched from `raw.githubusercontent.com` pinned to `main`, covering only the paths the docs cite, because cloning `ethereum-optimism/specs` is blocked from this session. The diff adds zero `specs.optimism.io` links, so the resolver had nothing in this diff to resolve either way.\n- Link resolution: all 14 in-site link instances (9 distinct destinations) resolve to a file on disk **and** a `docs.json` nav entry. Two resolve through the Mintlify index convention (`/chain-operators/tutorials/create-l2-rollup` to `.../create-l2-rollup/index`, and `/notices` to `notices/index`); both forms have shipped in-tree precedent (9 files and 2 files respectively). All 3 heading anchors resolve against the launch guide's actual headings. Exactly one external link, with the utm parameters exactly as the plan specifies.\n- Blocking-gate greps, re-run independently over the whole new page and the added lines of the other two files, against **rendered prose** (frontmatter, link hrefs, and JSX attributes stripped): zero `%`; **zero digits**; zero `tier` or `tiers`; zero comparative adjectives. In the raw lines, digits occur only in the `last-reviewed` frontmatter date, three URL anchor slugs, `cols={2}`, and one URL path, none of which render. The four fallback phrases appear exactly as the plan's number-policy item 3 specifies: `backed by an uptime SLA`, `priority incident response`, `direct engineering support`, `managed public RPC`. The challenger guide's source states a 7-day bond delay; the page correctly says only \"after a delay\", with no digit.\n- Frontmatter ruling: `diataxis: explanation` plus `last-reviewed:` with no `content-type:` is correct. `choose-a-content-type` defines exactly four `content-type:` values (`solution-guide`, `learning-unit`, `curriculum-hub`, `router-landing`) and states that pages of the four base Diataxis types carry none. This page is not pure navigation, so it is not a router-landing; it explains a spectrum rather than instructing, so `explanation` is right and `how-to` is not. The curation policy lists \"selection and comparison pages\" as a curated class with no token, which is why it carries `last-reviewed:` without `content-type:`. In-tree precedent for that exact shape: `ai-docs.mdx` and `op-stack/contribute/curation-policy.mdx`.\n- Scoped out / for the reviewer:\n  1. The blocking number-and-tier-name check itself, and the browser render check. See the checklist above.\n  2. The [Solutions board](https://github.com/orgs/ethereum-optimism/projects/140) Status field is not writable from this session. Paste-block line: `ethereum-optimism/solutions#1199 -> Status: In review`.\n  3. Paraphrase checked and accepted, flagged so the reviewer can rule otherwise: `key-management.mdx` says the batcher and proposer keys must be online \"for a component of the system to work\"; the page says \"for the system to work\". Faithful tightening, not a factual change.\n  4. \"The challenger is a role your team staffs, not a service you switch on\" is the page's own framing rather than a sentence in the challenger guide. It is supported by the shape of that guide (staffing, bond budgeting, prestate pinning, four endpoints, monitoring, verification) but is editorial rather than quoted.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_",
+      "id": "PR_kwDODjvEJM77qMDH",
+      "title": "sdm: isolate refund production behind a test-only fixture",
+      "author": "nonsense",
+      "number": 22289,
+      "body": "## Summary\n\n- remove the concrete SDM refund policy from public production binaries while retaining generic post-exec policy hooks and verifier support\n- add an unpublished, test-only `op-reth-sdm-fixture` producer and retarget SDM acceptance coverage to it\n- simplify replay to structural verification and document the public/private policy ownership boundary\n\n## Testing\n\n- targeted Rust package tests and formatting\n- SDM fixture acceptance and derivation tests\n- relevant Go tests and compilation\n- op-rbuilder and rollup-boost lint/test suites\n- Premium exact-pin compatibility gate\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-06T22:35:08Z",
-      "mergedAt": "2026-08-07T01:02:12Z",
-      "additions": 186,
-      "deletions": 0
+      "createdAt": "2026-08-06T15:14:07Z",
+      "mergedAt": "2026-08-07T15:07:35Z",
+      "additions": 2843,
+      "deletions": 4330
     },
     {
-      "id": "PR_kwDODjvEJM77yyuk",
-      "title": "docs: correct kona-node actor list and extension mechanism on mechanics page",
-      "author": "claude",
-      "number": 22313,
-      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## Before / After\n\n**Before.** The \"Extensibility\" section of the kona-node \"How it Works\" page taught two code examples against APIs that do not exist. It described a `NodeActor` trait with five associated types and `build`/`start` methods, and a `RollupNodeService` trait you were supposed to implement to swap actors into the node. Neither shape exists in `rust/`. Anyone who followed either example wrote code that would not compile. The page also listed a `SupervisorActor` among the node's built-in actors, which the binary has not run since the supervisor crates were removed upstream.\n\n**After.** Both examples match the source. The `NodeActor` example is the real trait: one associated type, one `step` method. The `RollupNodeService` section is replaced by an accurate statement of the current situation, including the honest news that there is no trait-based extension point today. The `SupervisorActor` entry is gone, which also resolves the contradiction with #22310.\n\n**How.** Every identifier and behavioral claim on the page was re-derived from `rust/kona/crates/node/`, independently of the writing pass. The actor set was read off the literal `spawn_and_wait!` list in `RollupNode::start`, the trait off `actors/traits.rs`, and the extension-point negative off an enumeration of every `pub trait` in the `kona-node-service` crate plus the builder's public surface. Three further claims failed re-derivation during verification and were fixed forward on the branch.\n\n## Read this first: the page now documents a capability downgrade\n\nThe page used to promise a supported extension trait. It now says none exists. Publishing \"you cannot do this\" is worse than publishing nothing if the capability is real and simply hidden, so this was verified independently rather than accepted from the authoring pass.\n\n**Independent verdict: no extension point exists.** Evidence:\n\n* `RollupNode` (`rust/kona/crates/node/service/src/service/node.rs:58`) is a concrete, non-generic struct. Every field is a concrete config type; there is no trait-object or generic actor slot.\n* Its actor set is a literal list in `RollupNode::start` (`node.rs:533-543`), passed to `spawn_and_wait!`.\n* `spawn_and_wait!` is `pub(crate) use spawn_and_wait;` (`service/util.rs:79`) and `pub(crate) use util::{shutdown_signal, spawn_and_wait};` (`service/mod.rs:15-16`). `grep -rn macro_export` over the whole crate returns nothing, so the macro is genuinely unreachable from outside.\n* All thirteen `pub trait`s in `kona-node-service` were enumerated. Twelve are per-actor client/provider traits (`DerivationEngineClient`, `OriginSelector`, `Conductor`, `RpcServerLauncher`, and similar) that a given actor is generic over; none is a hook the standard `RollupNode` consults. The thirteenth is `NodeActor` itself, which is what your actor implements, not how it gets spawned.\n* `RollupNodeBuilder` (`service/builder.rs`) exposes only config setters (`with_dependency_set`, `with_engine_config`, `with_rpc_config`, `with_sequencer_config`, `with_derivation_delegate_config`) and `build() -> RollupNode`. No actor injection.\n\nThe downgrade is accurate. If a maintainer knows of an extension path outside `kona-node-service`, that is the one thing worth pushing back on here.\n\n## What changed\n\nOne file, `docs/public-docs/node-operators/kona-node/run/mechanics.mdx`.\n\n* Removed the `SupervisorActor` built-in-actor entry and the `SupervisorExt` / `SupervisorActor` associated types.\n* Replaced the `NodeActor` example with the real trait shape.\n* Replaced the `RollupNodeService` section with \"Running Custom Actors\", stating that no trait-based extension point exists and that a custom actor means composing the node in your own binary.\n* `OpPayloadAttributesWithParent` corrected to `OpAttributesWithParent`.\n* `InsertUnsafe` corrected to `InsertTask` (verifier fix-forward).\n* Corrected the crate-ownership claim for the channel types (verifier fix-forward).\n* Collapsed the duplicated actor enumeration to a pointer at its canonical home (verifier fix-forward, E5).\n\n## Source citations\n\n| Claim | Source |\n| --- | --- |\n| `NodeActor` = `type Error: std::fmt::Debug` + `async fn step(&mut self)` | `rust/kona/crates/node/service/src/actors/traits.rs:9-20` |\n| Actor set spawned by the node | `rust/kona/crates/node/service/src/service/node.rs:533-543` |\n| `RollupNode` is a concrete struct | `rust/kona/crates/node/service/src/service/node.rs:58` |\n| Spawn helper is crate-internal | `service/util.rs:79`, `service/mod.rs:15-16` |\n| Cancellation owned by the loop driver | `service/util.rs:29-37`; token created `node.rs:452` |\n| Sequencer actor only in sequencer mode | `node.rs:337-340` (`build_sequencer -> Option`, `None` when `!is_sequencer`); skipped at `util.rs:18` |\n| Engine RPC actor is read-only | `actors/engine/rpc_actor.rs:8` (\"reading engine state and queue length via watches\") |\n| L1 watcher watches head and finalized | `actors/l1_watcher/actor.rs:46-47` (`head_stream`, `finalized_stream`) |\n| `OpAttributesWithParent` | `kona_protocol`, used at `rust/kona/crates/node/engine/src/attributes.rs:8` |\n| `InsertTask` and its FCU | `engine/src/task_queue/tasks/insert/task.rs:22` and `:128` (`SynchronizeTask`); variant `EngineTask::Insert` at `tasks/task.rs:96` |\n| Channel type ownership | `L1WatcherQueries` `node/rpc/src/l1_watcher.rs:38`; `NetworkAdminQuery` `node/rpc/src/admin.rs:15`; `P2pRpcRequest` `node/gossip/src/rpc/request.rs:25`; `OpExecutionPayloadEnvelope` `op_alloy_rpc_types_engine` |\n\n## Reviewer notes\n\n**1. Dual-sourcing (E5): ruled, and fixed forward.** `design/intro.mdx` and `mechanics.mdx` both enumerated the actor set, and that duplication is exactly what let one copy rot while the other stayed correct. The authoring pass kept a corrected list plus a pointer; the verifier ruled that a corrected fork is still a fork under the content guide's \"link, don't restate\" ban, and collapsed the list to a prose summary of the roles plus a pointer naming `design/intro.mdx` as canonical. The identifier table now lives in exactly one place. Ask for the bullets back if you would rather the overview page carry them.\n\n**2. Derivation-actor naming.** `RollupNode` selects between `DerivationActor` and `DelegateDerivationActor` through a private `ConfiguredDerivationActor` enum (`node.rs:92-103`), so naming only `DerivationActor` in a list would have been a partial truth. The E5 collapse makes this moot: the page now says \"derivation\" as a role and defers the type names to the design page.\n\n**3. Out-of-scope identifier fixes.** `OpPayloadAttributesWithParent` (line 71) and `InsertUnsafe` (line 56) sit outside the filed finding's two-line fix shape. Both are kept, because the tracking issue's acceptance criterion is page-wide: \"No identifier on `mechanics.mdx` fails a case-insensitive grep against `rust/`.\" Say the word if you would rather the diff stayed confined to the supervisor lines.\n\n**4. `blob/develop` link targets.** The two added reference links point at `blob/develop/.../service/{node,builder}.rs`. These are byte-identical to the `[node]` and `[builder]` definitions already live at `design/intro.mdx:70-71`, so this follows the section's established convention. A pinned SHA would be more durable but would diverge from the sibling page; consistency was chosen. Neither link carries a line anchor, so branch drift degrades gracefully.\n\n## Reviewer checklist\n\n- [ ] The capability downgrade is correct: no supported way to swap an actor into the standard `RollupNode` exists today.\n- [ ] Collapsing the actor list to a pointer (E5) is the right call for an overview page.\n- [ ] The `NodeActor` example is the shape you would want a third party to copy.\n- [ ] The two out-of-scope identifier corrections belong in this PR.\n\nTracks ethereum-optimism/solutions#1201\nResolves the contradiction with #22310, now merged.\nWhat this program is: [`projects/docs-improver/README.md`](https://github.com/ethereum-optimism/solutions/blob/main/projects/docs-improver/README.md)\n\n## Verification report (docs-verifier)\n\n- Branch: `docs-improver/i2-acc-1201` at `0116b5c6435070a9ffffc57d84591ce744decaf2`, base `develop` at `a896f434ddae9e75795598a699fa815c1898c178`. The branch was rebased during verification: `develop` moved twice mid-run and #22310 landed, so the base now contains the supervisor statements this page had to agree with.\n- Claims checked: 8 inventoried + 6 swept from the diff and page (uninventoried), plus a page-wide sweep of 36 backticked and bolded identifiers. Every identifier was checked against its **definition site**, not a whole-tree grep. Prose, comments and log strings do not count as existence. Only two came back zero-hit, both expected: `MyCustomActor` (the example's own placeholder, defined in the snippet) and `kona_node_service::NodeActor` (a path, whose halves both resolve: crate `kona-node-service`, re-export at `lib.rs:31`).\n- Claims corrected (fixed forward), all in `0116b5c6`:\n  1. `\"an \\`InsertUnsafe\\` task is executed. The \\`InsertUnsafe\\` task executes a forkchoice update\"` -> `\"an \\`InsertTask\\` is executed. That task inserts the payload and sends a forkchoice update\"`, per `rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs:22` and `:128`. This one is the interesting catch: `InsertUnsafe` was on the incoming branch's \"passing\" list because a whole-tree grep returns hits, but every hit is a stale code **comment** in `tasks/task.rs:159-186`. It matches no definition. The real type is `InsertTask`; the real enum variant is `EngineTask::Insert`. Same error class as the op-batcher phantom-flag regression fixtures.\n  2. `\"The built-in actors and the channel types they communicate over are public API of the \\`kona-node-service\\` crate\"` -> a statement that the actors are `kona-node-service` API while the request and payload types are spread across `kona-node-service`, sibling kona crates such as `kona-rpc` and `kona-gossip`, and the shared alloy engine types. Per `node/rpc/src/l1_watcher.rs:38`, `node/rpc/src/admin.rs:15`, `node/gossip/src/rpc/request.rs:25`, and `op_alloy_rpc_types_engine`. Three of the channel types are not `kona-node-service` API at all.\n  3. The seven-bullet actor enumeration -> a prose role summary plus a pointer to `design/intro.mdx`, per the content guide's dual-sourcing ban (E5). See reviewer note 1.\n- Review law: 32 rules, of which 19 PASS, 11 N/A, 1 FAIL fixed forward, 1 waived.\n  - **E5 FAIL on the incoming branch, fixed forward in `0116b5c6`.** The corrected actor list still duplicated `design/intro.mdx`; collapsed to a pointer. Now PASS.\n  - **E10 waived** by the operator-sanctioned batch (sbvegan, batch `i2-tail`), which stands in for the per-PR cap check.\n  - N/A: M3 (no DA text), M5 (no `op-geth`/`op-program` on added lines; the pre-existing `op-geth` mention was deliberately left outside the added set), M6, M7, M8 (`docs.json` untouched), M10, M13, M17 (no page deleted or moved), E1, E2, E4 (no redirect owed).\n  - M18 verified on both commit messages and this body: no model IDs, no session trailers.\n- Linters, run from `docs/public-docs/`: `lint:nav` OK (425 pages, 424 nav entries, 1 allowlisted orphan); `lint:redirects` OK (652 redirects, 468 files, 11 grandfathered); `lint-link-policy.mjs --baseline scripts/lint-link-policy.baseline.json --specs-src <specs checkout>` clean, 0 findings, and the output carried **no** \"specs path/anchor resolution SKIPPED\" note, so specs resolution was active. Caveat for the reader: the specs checkout used was a synthetic partial mirror assembled from `raw.githubusercontent.com`, not a full clone, so specs-anchor coverage is best-effort.\n- Negative space confirmed: `SupervisorActor`, `SupervisorExt`, `RollupNodeService`, `CancellableContext` and `OpPayloadAttributesWithParent` now return zero hits across the whole of `docs/`. `mechanics.mdx` was the only page carrying them. `design/intro.mdx` was read in full and is independently accurate: its actor descriptions match the spawned set, and it names roles rather than forking type names.\n- Example compiles by inspection: the snippet's signature is byte-identical to the real in-tree impls (compare `actors/engine/rpc_actor.rs:66-73`). `#[async_trait]` is required and present, and `std::io::Error` satisfies the trait's `type Error: std::fmt::Debug` bound. Not compiled against the crate; a full `cargo check` of `kona-node-service` was out of reach in this environment.\n- Scoped out / for the reviewer: the backticked `` `synced` `` on line 64 is pre-existing prose emphasis, not an identifier. The underlying state is `el_sync_finished` (`node/engine/src/state/core.rs:153`). It was left alone rather than expanding the diff into an unrelated sentence; flagging it so the choice is visible.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_",
+      "id": "PR_kwDODjvEJM76plL3",
+      "title": "op-node: run sequencer on its own goroutine",
+      "author": "sebastianst",
+      "number": 22241,
+      "body": "Eliminates sequencer starvation by the shared event loop: block production no longer competes with derivation for the driver thread. Stacked on #22238.\r\n\r\nThe sequencer emits no events on the block-production path. It calls the engine controller directly (`StartBuild`/`SealBuild`/`ProcessPayload` from #22238) and paces itself with its own timer in `RunLoop`, on a dedicated goroutine started by the driver. Sequencer latency under derivation load drops from \"full event-queue drain\" (seconds during span-batch consolidation, #19263) to at most one in-flight `e.mu` critical section.\r\n\r\n**Ingestion — ordered mailbox.** External signals (forkchoice updates, resets, temp errors, derivation build activity, derivation-processed payloads) arrive via the retained ingest-only Deriver registration: `OnEvent` appends to an ordered log under a micro-mutex and fires a cap-1 wake channel — it never blocks the event loop and never mutates sequencer state. The goroutine replays entries in arrival order through the existing handlers; adjacent non-rewinding forkchoice updates coalesce to the latest. Replay-then-decide: an action fire first drains the inbox and honors a schedule parked by the replay.\r\n\r\n**Error discipline — park-and-echo.** Every error path that defers recovery to an event echoing back through the mailbox parks the schedule first (`nextActionOK=false`); paths with no echo (`ErrBuildInvalid`, seal errors, undecodable gossip payload) back off locally. `RunLoop` never re-arms an already-fired deadline, so no-op actions cannot spin.\r\n\r\n**Driver.** `planSequencerAction`, `sequencerTimer`, `sequencerCh`, `SequencerActionEvent`, and `SequencerIface.NextAction` are deleted; `Driver.Start` launches `RunLoop`. Lock order is strictly `d.l → e.mu`; the event thread holds neither when calling the other side. Also deletes the `attributes.go` sequencer-origin gates on seal errors, which are now only emitted for derived builds.\r\n\r\n**Fan-out unchanged**: error events (reset/temporary/critical) are still emitted (enqueue is thread-safe); the derivation-origin build event chain, conductor, and async gossip are untouched.\r\n\r\nTests: unit + chaos rework to direct calls; new inbox tests (arrival-order replay, rewind-safe coalescing, wake coalescing, RunLoop liveness incl. the start/stop wake contracts of #22145, which this supersedes); action-test helpers call `RunAction` synchronously. Design reviewed adversarially by two independent passes; every finding is fixed with a pinning regression test.\r\n\r\nSupersedes #22145. Closes #19263, #22232\r\n\r\n🤖 *Co-created with Claude (Fable 5)*",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-06T23:16:21Z",
-      "mergedAt": "2026-08-07T00:26:49Z",
-      "additions": 52,
-      "deletions": 76
+      "createdAt": "2026-08-04T16:19:38Z",
+      "mergedAt": "2026-08-07T15:29:46Z",
+      "additions": 2031,
+      "deletions": 665
     },
     {
-      "id": "PR_kwDODjvEJM77y3tq",
-      "title": "docs: disambiguate colliding frontmatter page titles",
-      "author": "claude",
-      "number": 22314,
-      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## Before / After\n\n**Before.** Thirteen pages shared five titles between them. Four different pages were all called \"Installation\", three were all called \"op-reth\", and there were two \"proxyd\", two \"Releases\", and two \"Transaction finality\". A reader searching the docs got back a list that gave them no way to tell the pages apart, and the nav and cross-links repeated the same bare word no matter where it led.\n\n**After.** Each of those pages says what it is: \"Install op-deployer\", \"Install Supersim\", \"Install kona-node\", \"Add op-alloy to your project\", \"Run proxyd\", \"op-reth for node operators\", \"op-deployer versioning and releases\", \"Transaction finality on OP Mainnet\". Descriptions that were equally ambiguous were rewritten to match, and seven inbound links that quoted an old title now quote the new one.\n\nNothing moved. Every URL is unchanged, no page is created or deleted, no redirect is added (the count stays at 652), and `docs.json` is untouched: none of these pages carried a nav label override, so nav labels follow the frontmatter and update on their own.\n\n## The retitles\n\n| Page | Before | After |\n| --- | --- | --- |\n| `chain-operators/tools/proxyd.mdx` | proxyd | Run proxyd |\n| `node-operators/op-reth/index.mdx` | op-reth | op-reth for node operators |\n| `chain-operators/tools/op-deployer/reference/releases.mdx` | Releases | op-deployer versioning and releases |\n| `op-mainnet/network-information/transaction-finality.mdx` | Transaction finality | Transaction finality on OP Mainnet |\n| `chain-operators/tools/op-deployer/installation.mdx` | Installation | Install op-deployer |\n| `app-developers/tools-sdks/op-alloy/starting.mdx` | Installation | Add op-alloy to your project |\n| `app-developers/tutorials/development/supersim/installation.mdx` | Installation | Install Supersim |\n| `node-operators/kona-node/install/overview.mdx` | Installation | Install kona-node |\n\nOne page needed a second edit. `node-operators/op-reth/index.mdx` carried a stray `---` fence pair in its body, immediately below the real frontmatter, holding the page's `description`. Markdown does not read that as frontmatter: the first `---` renders as a horizontal rule and the second turns the `description:` line into a setext heading, so the page displayed a rule followed by a heading reading \"description: op-reth is the OP Stack execution client built on reth\", and the page had no `description` at all. That block is now folded into the real frontmatter.\n\n## Deliberately unchanged\n\n**The component hubs.** `op-stack/components/proxyd.mdx` and `op-stack/components/op-reth.mdx` keep the bare component name. All twelve other component hubs in that directory use the bare component name (the thirteenth file there, `index.mdx`, is the section landing page, titled \"Stack Components\"), so breaking the convention for one hub would trade a title collision for a naming inconsistency across a set that reads as a component index. Each hub's `description` already begins \"Canonical hub for ...\", which disambiguates it in search.\n\n**The general finality explainer.** `op-stack/transactions/transaction-finality.mdx` keeps its title. It is the canonical general explanation, and the OP Mainnet page is the one that needed qualifying.\n\n**Two generator-produced pages.**\n\n* `releases/index.mdx` carries a \"DO NOT EDIT THIS FILE DIRECTLY\" banner. Its title is emitted at `docs/public-docs/scripts/generate-releases.ts:458`, and the script refetches live GitHub release data on every run, so the title cannot be changed by hand. Its `sidebarTitle: \"Overview\"` already disambiguates it in nav; only search sees \"Releases\".\n* `node-operators/op-reth/cli/op-reth.mdx` is emitted at `docs/public-docs/scripts/gen-op-reth-cli/main.mjs:164`, which writes the command name as the title by construction. `scripts/gen-op-reth-cli/manifest.json` records a SHA-256 over the generated tree, gated by the script's `--check` mode; the committed 72-page tree hashes to exactly the recorded `e979848d...`, so any hand edit breaks that gate. Retitling it needs a generator change plus regeneration against an `op-reth/v2.4.1` binary.\n\nThose two pages are why this change is partial. See Tracking below.\n\n## Sources\n\n* Collision inventory: re-derived by parsing the `title:` frontmatter of all 425 pages under `docs/public-docs/` and grouping case-insensitively, at base `a896f434` and again at branch head.\n* Generator ownership: the output root of every generator under `docs/public-docs/scripts/` (`generate-releases.ts` to `releases/`, `generate-actions-components.ts` to `snippets/actions/`, `generate-hardforks.ts` to `snippets/generated/hardforks/`, `gen-flags` and `gen-deploy-config` to `snippets/generated/`, `gen-op-reth-cli` to `node-operators/op-reth/cli/`), plus a banner and history check on each of the thirteen pages.\n* Every new title and description was checked against the body of the page it names.\n* op-reth as the OP Stack execution client built on reth: `rust/op-reth/bin/Cargo.toml`.\n\n## Reviewer checklist\n\n* [ ] The new titles read well as sidebar labels as well as in search results (no page carries a `sidebarTitle`, so the frontmatter title is both).\n* [ ] \"op-deployer versioning and releases\" is the right call over \"op-deployer Releases\", which would have collided case-insensitively with the generated `releases/op-deployer.mdx` (\"op-deployer Releases\").\n* [ ] Leaving the two component hubs on the bare component name is the right trade.\n* [ ] The frontmatter fold on `node-operators/op-reth/index.mdx` renders as intended.\n\n## Tracking\n\nTracking `ethereum-optimism/solutions#1172` (finding 5, `Finding-ID: 1f60a97821f3860e`).\n\n**That issue stays open.** This PR is a partial fix: four of the five collision groups are fully handled, and the op-reth group drops from three pages to two. The remaining pair, `op-stack/components/op-reth.mdx` against the generated `node-operators/op-reth/cli/op-reth.mdx`, needs the generator work described above and stays as that issue's open scope. Finding 5 is the issue's only remaining scope, so merging this must not auto-close it.\n\nKnown follow-up owned elsewhere: `node-operators/kona-node/run/binary.mdx:10` still uses `[Installation]` as its link text into the retitled kona-node install page. That file belongs to another in-flight branch and was deliberately left alone here; confirmed still present at develop `a896f434`.\n\nWhat this program is: [`projects/docs-improver/README.md`](https://github.com/ethereum-optimism/solutions/blob/main/projects/docs-improver/README.md).\n\n## Verification report (docs-verifier)\n\n- Branch: `docs-improver/i2-titles-f5` at `017a93b91ce45114c8891448057d5f500fe03f1f`, base `develop` at `a896f434ddae9e75795598a699fa815c1898c178`\n- Claims checked: 30 inventoried + 10 swept from the diff (uninventoried). Everything was re-derived from source rather than from the builder's citations: generator output roots read out of each script, the op-reth CLI tree SHA-256 recomputed independently (72 pages, matching `manifest.json`), the title inventory re-run at both base and head, and every new title and description read against its page body.\n- Claims corrected (fixed forward):\n  - `bc26ad4c`: commit message read \"matching the other thirteen hubs under op-stack/components\" -> \"matching the other twelve component hubs under op-stack/components\", per `docs/public-docs/op-stack/components/`, which holds 13 component hubs plus `index.mdx` (\"Stack Components\"); op-reth is one of the 13, so 12 others. The hand-off's \"all 14 hubs use the bare component name\" is wrong for the same reason. The ruling that followed from the count (leave the hub alone) is unaffected.\n  - `017a93b9`: `app-developers/tutorials/interoperability/message-passing.mdx:64` read `Follow [Install Supersim](...) to install:` -> `... to set up:`. Substituting a verb-phrase title into a sentence that already ended \"to install\" was a regression the retitle introduced; the identical doubling had already been resolved on `bridge-crosschain-eth.mdx:71` by switching the sentence verb, so this applies the same fix.\n- Review law: 21 PASS / 0 FAIL / 11 N/A across all 32 rules. Non-PASS rules, all N/A with justification: M3 (no `calldata` on added lines); M5 (no op-geth or op-program hits on added lines, and the added op-reth framing is consistent with kona-first); M7 (no hub or landing page added); M8 (`docs.json` untouched); M10 (no third-party content added; \"built on reth\" is upstream-base attribution matching the existing component hub); M13 (no support-intent links added); M17 (no deletions); M19 (meta-rule, no new checks added); E1 (no `NormativeSpec` added); E2 (no touched page carries `last-reviewed`); E4 (no delete or move, so no redirect owed). M6 is a PASS by decision procedure: six op-deployer hits on added lines, all install or versioning link text and titles, none making a claim about contract upgrade paths.\n- Linters: `lint:nav` OK (425 pages on disk, 424 nav entries, 1 allowlisted orphan); `lint:redirects` OK (652 redirects, 468 files scanned, 11 grandfathered violations, unchanged from base); `lint-link-policy` run with `--baseline scripts/lint-link-policy.baseline.json --specs-src <checkout root>` clean, 0 findings, with specs path and anchor resolution active rather than skipped (verified against a control run without the flag, which reports it skipped). The specs source was a synthetic partial mirror assembled from `raw.githubusercontent.com`, not a full checkout, so specs-side resolution is only as complete as that mirror.\n- Post-fix collision inventory: one group remains, `op-reth` (2 pages), between `op-stack/components/op-reth.mdx` and the generated `node-operators/op-reth/cli/op-reth.mdx`. Down from five groups over thirteen pages at base.\n- Scoped out / for the reviewer:\n  - Closing the last group needs a change at `scripts/gen-op-reth-cli/main.mjs:164` to emit a distinct title for the CLI root page, then regeneration against an `op-reth/v2.4.1` binary and a refreshed manifest SHA-256. Not possible in this environment.\n  - `releases/index.mdx` is generator-owned and refetches live release data on regeneration; left alone.\n  - `node-operators/kona-node/run/binary.mdx:10` `[Installation]` link text, owned by another in-flight branch.\n  - Pre-existing, found while sweeping, outside this slice's scope: `message-passing.mdx:86` has a malformed link target, `(/> app-developers/tools/development/supersim)`, with a stray `/>` and a space (the path itself has a redirect, so only the syntax is broken); and `node-operators/guides/configuration/execution-clients.mdx:21` links the text \"op-reth\" to upstream `paradigmxyz/reth` rather than the monorepo's `rust/op-reth`.\n  - Two inbound `[proxyd](./proxyd)` links on `chain-operators/tools/op-txproxy.mdx:10,51` were left as-is. They use a relative target that a URL sweep misses, but they are component-name mentions in running prose (\"proxyd as an ingress router supports ...\"), not title quotations, and the new title cannot be substituted into those sentences.\n  - No retitled page carries a `sidebarTitle`, so the longer new titles are also the sidebar labels. Adding `sidebarTitle` would shorten nav without touching search, but that was outside this slice.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_",
+      "id": "PR_kwDODjvEJM78MHpO",
+      "title": "Lagoon hardfork rename (cherry-pick of #21105)",
+      "author": "maurelian",
+      "number": 22330,
+      "body": "Cherry-picks #21105 (`b5c39b2`) onto `proposal/op-contracts/v7.0.0`.\n\nThe branch diverged from `develop` around 2026-05-01, so 36 of the 101 files\nconflicted. Resolution rule throughout: keep the v7.0.0 side of each conflict,\nthen re-apply the rename to whatever v7.0.0 actually has. Nine files in the\nupstream diff were added to `develop` after the divergence and don't exist here\n(`op-node/rollup/derive/interop_activation_transactions.go`, the `sdm` acceptance\ntests, `rust/op-rbuilder/*`, …); those were dropped rather than reintroduced.\n\nThe Rust conflicts were redone from the v7.0.0 files rather than merged, because\nthe keep-ours pass left `pub struct Lagoon` next to `impl Interop`. The\nconsensus-critical `UpgradeDepositSource` intent strings (`\"Interop: …\"`) are\ndeliberately untouched — only type paths were renamed.\n\nThe second commit fixes call sites that only exist on v7.0.0, so the upstream PR\nhad no equivalent of them to rename. Note `IsInterop`/`IsInteropActivationBlock`\non the op-supervisor depset config types keep their names: those are the\nconcept-level interop interface, not the fork.\n\nVerified: `go build ./...`, `go vet ./...`, gofmt clean; `cargo check --workspace\n--all-targets` and `cargo +nightly fmt --check` clean; kona crates touched by the\nrename pass with `--all-features`. Go test failures under `op-deployer`/`op-node/p2p`\nare identical to those on the unmodified base branch (they need built contract\nartifacts).\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-06T23:22:33Z",
-      "mergedAt": "2026-08-07T00:26:49Z",
-      "additions": 21,
-      "deletions": 24
+      "createdAt": "2026-08-07T19:15:16Z",
+      "mergedAt": null,
+      "additions": 449,
+      "deletions": 353
+    },
+    {
+      "id": "PR_kwDODjvEJM78B9Dy",
+      "title": "contracts-bedrock: Super ZK Dispute Game Internal Review Remediations",
+      "author": "0xarktos",
+      "number": 22328,
+      "body": "## Summary\r\n\r\nRemediates internal review findings on the Super ZK dispute game. Adds a solvency invariant and a migration boundary test for `ZKDisputeGame`, and bounds the ZK durations in `OPContractsManagerStandardValidator` and `op-deployer`. No core contract changes are introduced.\r\n\r\n## Review Issues Remediated\r\n\r\n| Issue | Description | Remediation |\r\n|---|---|---|\r\n| `M-03` | `ZKDisputeGame` had no fuzz or invariant coverage. Bond conservation across `resolve()` was checked only by hand written examples. | Added `ZKDisputeGame_Solvency_Invariant` with a `RandomZKActor` harness. |\r\n| `M-04` | The SFDG to ZKDG migration was only tested against a clean pre state. No game, anchor or blacklist entry ever crossed the flip. | Added `test_flip_inFlightStateCrossesBoundary_succeeds`. |\r\n| `F-05` | ZK durations had no upper bound. A value near `uint64` max truncates the deadline cast, so the game is over the instant it is created and resolves `DEFENDER_WINS` unproven. | Bounded both durations at `type(uint32).max` in `_assertValidZKGameArgs` and both `op-deployer` encoders. |\r\n\r\n## Detailed Changes\r\n\r\n### `[M-03]` No fuzz or invariant coverage\r\n\r\nAdded `test/invariants/ZKDisputeGame.t.sol`, modelled on the `SuperFaultDisputeGame` solvency invariant.\r\n\r\n`RandomZKActor` exposes `challenge`, `prove`, `proveAsProposer` and `warpForward`, all guarded so the actor never reverts. The invariant drives the resulting state through `resolve`, the finality airgap, `closeGame` and the two phase `DelayedWETH` claim, then asserts the game holds no ETH and that the sum returned to participants equals `totalBonds`.\r\n\r\nConservation of the total is asserted rather than per actor balances, so the check stays branch agnostic.\r\n\r\nThe `address(0)` burn branch and REFUND mode are out of scope for this harness. Both need state the actor cannot reach.\r\n\r\n---\r\n\r\n### `[M-04]` Upgrade transition never exercised with in flight state\r\n\r\nAdded `test_flip_inFlightStateCrossesBoundary_succeeds` to `ZKDisputeGameSuperMigration.t.sol`.\r\n\r\nThree pieces of pre boundary state cross the real `OPCMv2.upgrade()` flip. A game that already advanced the anchor, a blacklisted game, and a game left `IN_PROGRESS`.\r\n\r\nThe test pins the value level result of the in place ASR re initialization. `anchorGame` is cleared, `retirementTimestamp` and the blacklist survive, and the unresolved game still resolves, closes in NORMAL mode and re advances the anchor. That last assertion records existing behavior, since the respected type is snapshotted at creation.\r\n\r\nSFDG only. `SuperPermissionedDisputeGame` resolves at initialization and cannot be left in flight.\r\n\r\n---\r\n\r\n### `[F-05]` ZK durations have no upper bound\r\n\r\n`_assertValidZKGameArgs` bounds both durations on the existing error codes.\r\n\r\n```solidity\r\nargs.maxChallengeDuration > 0 && args.maxChallengeDuration <= type(uint32).max\r\n```\r\n\r\n`type(uint32).max` is roughly 136 years, low enough that `block.timestamp + duration` cannot approach `uint64`, so the truncation is unreachable. Validator bumped to `3.1.0` and `semver-lock.json` regenerated.\r\n\r\nThe same bound was added to `encodeZKGameArgs` and `EncodedUpgradeInputV2` in `op-deployer`, so a bad duration fails when the bundle is built. Tests pin the bound as inclusive.\r\n\r\n`ZKDisputeGame` itself is unchanged, so a config installed outside these paths still reaches the chain.\r\n\r\n## Summary\r\n\r\nRemediates internal review findings on ZK dispute game test coverage and duration validation. Adds a solvency invariant and a migration boundary test for `ZKDisputeGame`, and bounds the ZK durations in `OPContractsManagerStandardValidator` and `op-deployer`.\r\n\r\n## Audit Issues Remediated\r\n\r\n| Issue | Description | Remediation |\r\n|---|---|---|\r\n| `M-03` | `ZKDisputeGame` had no fuzz or invariant coverage. Bond conservation across `resolve()` was checked only by hand written examples. | Added `ZKDisputeGame_Solvency_Invariant` with a `RandomZKActor` harness. |\r\n| `M-04` | The SFDG to ZKDG migration was only tested against a clean pre state. No game, anchor or blacklist entry ever crossed the flip. | Added `test_flip_inFlightStateCrossesBoundary_succeeds`. |\r\n| `F-05` | ZK durations had no upper bound. A value near `uint64` max truncates the deadline cast, so the game is over the instant it is created and resolves `DEFENDER_WINS` unproven. | Bounded both durations at `type(uint32).max` in `_assertValidZKGameArgs` and both `op-deployer` encoders. |\r\n\r\n## Detailed Changes\r\n\r\n### `[M-03]` No fuzz or invariant coverage\r\n\r\nAdded `test/invariants/ZKDisputeGame.t.sol`, modelled on the `SuperFaultDisputeGame` solvency invariant.\r\n\r\n`RandomZKActor` exposes `challenge`, `prove`, `proveAsProposer` and `warpForward`, all guarded so the actor never reverts. The invariant drives the resulting state through `resolve`, the finality airgap, `closeGame` and the two phase `DelayedWETH` claim, then asserts the game holds no ETH and that the sum returned to participants equals `totalBonds`.\r\n\r\nConservation of the total is asserted rather than per actor balances, so the check stays branch agnostic.\r\n\r\nThe `address(0)` burn branch and REFUND mode are out of scope for this harness. Both need state the actor cannot reach.\r\n\r\n---\r\n\r\n### `[M-04]` Upgrade transition never exercised with in flight state\r\n\r\nAdded `test_flip_inFlightStateCrossesBoundary_succeeds` to `ZKDisputeGameSuperMigration.t.sol`.\r\n\r\nThree pieces of pre boundary state cross the real `OPCMv2.upgrade()` flip. A game that already advanced the anchor, a blacklisted game, and a game left `IN_PROGRESS`.\r\n\r\nThe test pins the value level result of the in place ASR re initialization. `anchorGame` is cleared, `retirementTimestamp` and the blacklist survive, and the unresolved game still resolves, closes in NORMAL mode and re advances the anchor. That last assertion records existing behavior, since the respected type is snapshotted at creation.\r\n\r\nSFDG only. `SuperPermissionedDisputeGame` resolves at initialization and cannot be left in flight.\r\n\r\n---\r\n\r\n### `[F-05]` ZK durations have no upper bound\r\n\r\n`_assertValidZKGameArgs` bounds both durations on the existing error codes.\r\n\r\n```solidity\r\nargs.maxChallengeDuration > 0 && args.maxChallengeDuration <= type(uint32).max\r\n```\r\n\r\n`type(uint32).max` is roughly 136 years, low enough that `block.timestamp + duration` cannot approach `uint64`, so the truncation is unreachable. Validator bumped to `3.1.0` and `semver-lock.json` regenerated.\r\n\r\nThe same bound was added to `encodeZKGameArgs` and `EncodedUpgradeInputV2` in `op-deployer`, so a bad duration fails when the bundle is built. Tests pin the bound as inclusive.\r\n\r\n`ZKDisputeGame` itself is unchanged, so a config installed outside these paths still reaches the chain.\r\n\r\n## Notes\r\n\r\nOther findings assessed during this review and not remediated here.\r\n\r\n## Summary\r\n\r\nRemediates internal review findings on ZK dispute game test coverage and duration validation. Adds a solvency invariant and a migration boundary test for `ZKDisputeGame`, and bounds the ZK durations in `OPContractsManagerStandardValidator` and `op-deployer`.\r\n\r\n## Audit Issues Remediated\r\n\r\n| Issue | Description | Remediation |\r\n|---|---|---|\r\n| `M-03` | `ZKDisputeGame` had no fuzz or invariant coverage. Bond conservation across `resolve()` was checked only by hand written examples. | Added `ZKDisputeGame_Solvency_Invariant` with a `RandomZKActor` harness. |\r\n| `M-04` | The SFDG to ZKDG migration was only tested against a clean pre state. No game, anchor or blacklist entry ever crossed the flip. | Added `test_flip_inFlightStateCrossesBoundary_succeeds`. |\r\n| `F-05` | ZK durations had no upper bound. A value near `uint64` max truncates the deadline cast, so the game is over the instant it is created and resolves `DEFENDER_WINS` unproven. | Bounded both durations at `type(uint32).max` in `_assertValidZKGameArgs` and both `op-deployer` encoders. |\r\n\r\n## Detailed Changes\r\n\r\n### `[M-03]` No fuzz or invariant coverage\r\n\r\nAdded `test/invariants/ZKDisputeGame.t.sol`, modelled on the `SuperFaultDisputeGame` solvency invariant.\r\n\r\n`RandomZKActor` exposes `challenge`, `prove`, `proveAsProposer` and `warpForward`, all guarded so the actor never reverts. The invariant drives the resulting state through `resolve`, the finality airgap, `closeGame` and the two phase `DelayedWETH` claim, then asserts the game holds no ETH and that the sum returned to participants equals `totalBonds`.\r\n\r\nConservation of the total is asserted rather than per actor balances, so the check stays branch agnostic.\r\n\r\nThe `address(0)` burn branch and REFUND mode are out of scope for this harness. Both need state the actor cannot reach.\r\n\r\n---\r\n\r\n### `[M-04]` Upgrade transition never exercised with in flight state\r\n\r\nAdded `test_flip_inFlightStateCrossesBoundary_succeeds` to `ZKDisputeGameSuperMigration.t.sol`.\r\n\r\nThree pieces of pre boundary state cross the real `OPCMv2.upgrade()` flip. A game that already advanced the anchor, a blacklisted game, and a game left `IN_PROGRESS`.\r\n\r\nThe test pins the value level result of the in place ASR re initialization. `anchorGame` is cleared, `retirementTimestamp` and the blacklist survive, and the unresolved game still resolves, closes in NORMAL mode and re advances the anchor. That last assertion records existing behavior, since the respected type is snapshotted at creation.\r\n\r\nSFDG only. `SuperPermissionedDisputeGame` resolves at initialization and cannot be left in flight.\r\n\r\n---\r\n\r\n### `[F-05]` ZK durations have no upper bound\r\n\r\n`_assertValidZKGameArgs` bounds both durations on the existing error codes.\r\n\r\n```solidity\r\nargs.maxChallengeDuration > 0 && args.maxChallengeDuration <= type(uint32).max\r\n```\r\n\r\n`type(uint32).max` is roughly 136 years, low enough that `block.timestamp + duration` cannot approach `uint64`, so the truncation is unreachable. Validator bumped to `3.1.0` and `semver-lock.json` regenerated.\r\n\r\nThe same bound was added to `encodeZKGameArgs` and `EncodedUpgradeInputV2` in `op-deployer`, so a bad duration fails when the bundle is built. Tests pin the bound as inclusive.\r\n\r\n`ZKDisputeGame` itself is unchanged, so a config installed outside these paths still reaches the chain.\r\n\r\n## Notes\r\n\r\nFindings assessed and deliberately not remediated.\r\n\r\n- **`l2SequenceNumber` has no upper bound.** A game at `uint64` max that finalized as `DEFENDER_WINS` would pin the anchor there and block all future game creation for every chain in the set. `l2SequenceNumber` is committed to the verifier through `publicValues`, so no valid proof can exist for such a game unless the timestamp being proven is exactly that value, which is not practically reachable. An unchallenged game still resolves `DEFENDER_WINS` without a proof, so this rests on a challenger acting within `maxChallengeDuration`, the same assumption every other invalid proposal relies on.\r\n- **Game args reach the chain unvalidated on the migration paths.** `setInteropDisputeGames()` and `migrate()` never call `_assertValidFullConfig`. All parameters are validated in the `op-deployer` CLI that produces the Safe transaction calldata, and signers are expected to verify them, so tooling plus signer review is deemed sufficient.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-07T12:21:53Z",
+      "mergedAt": null,
+      "additions": 377,
+      "deletions": 10
+    },
+    {
+      "id": "PR_kwDODjvEJM78Hh2U",
+      "title": "nuts: declare activation-block extra gas in the bundle schema",
+      "author": "sebastianst",
+      "number": 22329,
+      "body": "Bundles now declare the gas their activation block reserves for upgrade deposits the consensus layer emits *outside* the bundle, as `metadata.extraGas`. Both readers fold it into the bundle's total gas.\n\nFor Lagoon that is the `setFeature(INTEROP)` and `ETHLiquidity` funding wrappers (150,000). Neither is expressible as a bundle transaction: the funding deposit carries a non-zero mint, and both are emitted only by a multi-chain dependency set. So the amount was hardcoded separately in op-node and kona — `UpgradeTransactions` and `UpgradeGas` return different numbers for the same fork ([footgun](https://github.com/ethereum-optimism/optimism/pull/22216#discussion_r3723616297)), and the two clients can drift. #22216 fixed the drift; this removes the place it can come from.\n\n**This PR changes no gas.** No bundle declares `extraGas` yet — see the follow-up below.\n\n## Where the value lives\n\nA constant beside `UPGRADE_NAME` in `GenerateNUTBundle.s.sol`, not a `just` argument. The generator already models which upgrade it builds (it branches on `\"karst\"` for the transaction count), and `nut-bundle-check` invokes `--sig 'run()'` and diffs the snapshot — an argument would have to be repeated in the justfile twice, reintroducing the duplication this removes. With a constant, `run()` stays zero-arg and `nut-bundle-check` and `nut-provenance-verify` work untouched, each locked commit regenerating with its own generator.\n\n`fork_lock.toml` mirrors the value so it is visible without opening 350 KB of JSON; `check-nut-locks` enforces that mirror and bundle agree.\n\n## Schema version\n\nBundles carrying the field declare `1.1.0`. All three readers (op-node, kona's build script, `NetworkUpgradeTxns.sol`) accept `{1.0.0, 1.1.0}` and reject a `1.0.0` bundle that declares `extraGas` — a reader predating the field would silently under-reserve the activation block's gas limit.\n\n`1.0.0` stays accepted permanently: no generator can emit it any more, but every already-locked bundle uses it, and provenance verification regenerates each bundle with the generator of *its own* locked commit.\n\nThe generator's duplicate `BUNDLE_VERSION` is gone; `NetworkUpgradeTxns` owns it, since it both writes and validates the field.\n\n## Follow-up: re-lock Lagoon\n\nLanding `extraGas` in Lagoon's bundle **cannot** happen in this PR. `check-nut-locks` requires the lock's `commit` to be an ancestor of `develop`, and `nut-provenance-verify-changed.sh` regenerates any bundle whose hash changed, at that commit. A bundle carrying `extraGas` requires a generator that emits it, which is only on this branch — so the recorded commit would have to be both an ancestor of `develop` and contain a change that is not on `develop`.\n\nOnce this merges, a follow-up regenerates Lagoon on `develop` and drops the code-side wrapper-gas constants from both clients. That re-lock also picks up contract drift accumulated since `fa9974a2`: 10 of 28 transactions, +2,747,222 gas — almost entirely re-profiled `deployGasLimit` constants in `Predeploys.sol` rather than bytecode growth, dominated by `L1FeeVault` being corrected from a stale 260,550 to the 1,800,000 its three identical siblings use (#20982).\n\n## Verification\n\n`nut-bundle-check` (regeneration deterministic); `check-nut-locks`; Go `op-node/rollup/derive`, `op-core/nuts`, `ops/scripts/*`; Rust `kona-hardforks` + `op-alloy-consensus` (clippy and `fmt-check` clean); Solidity `NetworkUpgradeTxns`, `GenerateNUTBundle`, `PastNUTBundles`. `L2ForkUpgrade` / `L2GenesisForkUpgrade` are fork tests and skipped locally.\n\nStacked on #22216.\n\n🤖 *Co-created with Claude Opus 5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-07T15:57:00Z",
+      "mergedAt": null,
+      "additions": 353,
+      "deletions": 50
     }
   ],
   "codeChanges": {
-    "additions": 259,
-    "deletions": 100,
-    "files": 19,
-    "commitCount": 2
+    "additions": 5722,
+    "deletions": 5430,
+    "files": 111,
+    "commitCount": 64
   },
   "completedItems": [
+    {
+      "title": "ci: shard test jobs by historical timing and widen parallelism",
+      "prNumber": 22202,
+      "type": "tests",
+      "body": "## Description\n\nRevives the test-splitting/parallelism experiments from #20930, rebased onto the restructured CI. All splits use `circleci tests split --split-by=timings`, fed by the JUnit files each job already uploads via `store_test_resu",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "justfile",
+        "rust/kona/tests/justfile",
+        "op-acceptance-tests/justfile",
+        "op-devstack/README.md",
+        "ops/scripts/shard-tests.sh",
+        "rust/Cargo.toml",
+        "rust/kona/tests/node/restart/setup_test.go"
+      ]
+    },
+    {
+      "title": "op-node: run sequencer on its own goroutine",
+      "prNumber": 22241,
+      "type": "other",
+      "body": "Eliminates sequencer starvation by the shared event loop: block production no longer competes with derivation for the driver thread. Stacked on #22238.\r\n\r\nThe sequencer emits no events on the block-production path. It calls the engine contr",
+      "files": [
+        "op-e2e/actions/helpers/l2_sequencer.go",
+        "op-node/rollup/attributes/attributes.go",
+        "op-node/rollup/driver/driver.go",
+        "op-node/rollup/sequencing/disabled.go",
+        "op-node/rollup/sequencing/iface.go",
+        "op-node/rollup/sequencing/sequencer.go",
+        "op-node/rollup/sequencing/sequencer_chaos_test.go",
+        "op-node/rollup/sequencing/sequencer_inbox_test.go",
+        "op-node/rollup/sequencing/sequencer_test.go",
+        "packages/contracts-bedrock/foundry.lock"
+      ]
+    },
     {
       "title": "docs: disambiguate colliding frontmatter page titles",
       "prNumber": 22314,
@@ -94,12 +215,278 @@
         "docs/public-docs/chain-operators/quickstart.mdx",
         "docs/public-docs/docs.json"
       ]
+    },
+    {
+      "title": "kona-sp1-proposer,op-devstack: resolve the metrics port in the proposer",
+      "prNumber": 22300,
+      "type": "other",
+      "body": "Human here: Fixes a flake documented in #22299.\r\n\r\n## Summary\r\n\r\n`TestProposerDefendsMultipleChallengedGamesConcurrently` picked a free port with `freeTCPPort` and released it immediately, then passed the number to `kona-sp1-proposer` via `",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/superproofs_from_runtime.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/zk_proposer.go",
+        "op-devstack/sysgo/zk_proposer_test.go",
+        "rust/Cargo.lock",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/host/Cargo.toml",
+        "rust/kona/sp1/crates/host/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/config.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "op-devstack/presets/interop_test.go"
+      ]
+    },
+    {
+      "title": "op-node: register l2.follow.source.rpc-timeout flag",
+      "prNumber": 22297,
+      "type": "other",
+      "body": "L2FollowSourceRpcTimeout (--l2.follow.source.rpc-timeout / OP_NODE_L2_FOLLOW_SOURCE_RPC_TIMEOUT) was declared in op-node/flags/flags.go but never added to optionalFlags, so urfave/cli never registered it: it was absent from op-node --help, ",
+      "files": [
+        "op-node/flags/flags.go"
+      ]
+    },
+    {
+      "title": "sdm: isolate refund production behind a test-only fixture",
+      "prNumber": 22289,
+      "type": "bugfix",
+      "body": "## Summary\n\n- remove the concrete SDM refund policy from public production binaries while retaining generic post-exec policy hooks and verifier support\n- add an unpublished, test-only `op-reth-sdm-fixture` producer and retarget SDM acceptan",
+      "files": [
+        ".circleci/continue/main.yml",
+        "docs/ai/acceptance-tests.md",
+        "docs/public-docs/chain-operators/guides/features/sequencer-defined-metering.mdx",
+        "justfile",
+        "op-acceptance-tests/justfile",
+        "op-acceptance-tests/tests/flashblocks/flashblocks_sdm_phantom_test.go",
+        "op-acceptance-tests/tests/flashblocks/flashblocks_sdm_test.go",
+        "op-acceptance-tests/tests/interop/proofs-singlechain/interop_fault_proofs_test.go",
+        "op-acceptance-tests/tests/karst/upgrade_gas_test.go",
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-acceptance-tests/tests/sdm/block_test.go",
+        "op-acceptance-tests/tests/sdm/boundary_test.go",
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/system.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/workload.go",
+        "op-chain-ops/cmd/sdm-devnet/main.go",
+        "op-chain-ops/pkg/sdm/workload.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options_test.go",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-evm/src/post_exec/inspector.rs",
+        "rust/alloy-op-evm/src/post_exec/inspector/tests.rs",
+        "rust/alloy-op-evm/src/post_exec/mod.rs",
+        "rust/alloy-op-evm/src/post_exec/null.rs",
+        "rust/alloy-op-evm/src/post_exec/refund.rs",
+        "rust/kona/bin/client/src/fpvm_evm/factory.rs",
+        "rust/kona/sp1/crates/client/src/precompiles/factory.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/context.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/tests/sdm.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/post_exec_ext.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/src/proof_history.rs",
+        "rust/op-reth/crates/node/tests/it/builder.rs",
+        "rust/op-reth/crates/post-exec-replay/src/lib.rs",
+        "rust/op-reth/crates/post-exec-replay/src/replay.rs",
+        "rust/op-reth/crates/post-exec-replay/src/types.rs",
+        "rust/op-reth/crates/sdm-fixture-node/Cargo.toml",
+        "rust/op-reth/crates/sdm-fixture-node/src/lib.rs",
+        "rust/op-reth/crates/sdm-fixture-node/src/main.rs"
+      ]
+    },
+    {
+      "title": "docs: fix unreachable /op-stack root, dead in-tree links, and mis-archived snap-sync guide",
+      "prNumber": 22317,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## What this fixes\n\nThree information-architec",
+      "files": [
+        "docs/public-docs/app-developers/guides/configuring-actions.mdx",
+        "docs/public-docs/app-developers/guides/interoperability/get-started.mdx",
+        "docs/public-docs/app-developers/guides/interoperability/reading-logs.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/deposit-transactions.mdx",
+        "docs/public-docs/app-developers/tutorials/development/supersim/installation.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/manual-relay.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/message-passing.mdx",
+        "docs/public-docs/chain-operators/guides/features/snap-sync.mdx",
+        "docs/public-docs/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/introduction/op-stack.mdx",
+        "docs/public-docs/op-stack/security/interop-security.mdx",
+        "docs/public-docs/scripts/lint/redirect-lint-baseline.json"
+      ]
+    },
+    {
+      "title": "docs: retire the stale imported op-reth OP Stack run page",
+      "prNumber": 22316,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## Before / After\n\n**Before.** The most plausi",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-reth-setup.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/guides/configuration/execution-clients.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/overview.mdx",
+        "docs/public-docs/node-operators/op-reth/index.mdx",
+        "docs/public-docs/node-operators/op-reth/run/faq/sync-op-mainnet.mdx",
+        "docs/public-docs/node-operators/op-reth/run/opstack.mdx",
+        "docs/public-docs/op-stack/components/op-reth.mdx"
+      ]
     }
   ],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 3,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 3
+  "topContributors": [
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
+      "totalScore": 153.53277015859732,
+      "prScore": 153.53277015859732,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 107.44272088710437,
+      "prScore": 100.00472088710437,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 92.70162609388333,
+      "prScore": 92.70162609388333,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 67.20707438980575,
+      "prScore": 49.00707438980575,
+      "issueScore": 4,
+      "reviewScore": 14,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 45.82452402830473,
+      "prScore": 45.82452402830473,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 40.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 13.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 9.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "justintx19-bit",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/228147891?v=4",
+      "totalScore": 9.256588722239782,
+      "prScore": 9.256588722239782,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 14,
+  "mergedPRs": 10,
+  "newIssues": 3,
+  "closedIssues": 5,
+  "activeContributors": 18
 }
