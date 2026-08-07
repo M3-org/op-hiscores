@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-02 to 2026-08-09, ethereum-optimism/optimism had 70 new PRs (43 merged), 28 new issues, and 44 active contributors.",
+  "overview": "From 2026-08-02 to 2026-08-09, ethereum-optimism/optimism had 100 new PRs (63 merged), 30 new issues, and 46 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABERT9Pw",
@@ -56,16 +56,16 @@
       "commentCount": 1
     },
     {
-      "id": "I_kwDODjvEJM7Oo7Hm",
-      "title": "sequencer does not progress blocks",
-      "author": "bingcicle",
-      "number": 17654,
+      "id": "I_kwDODjvEJM8AAAABLwVZgg",
+      "title": "op-acceptance-tests: TestProposerDefendsMultipleChallengedGamesConcurrently flakes on kona-sp1-proposer metrics port collision",
+      "author": "maurelian",
+      "number": 22299,
       "repository": "ethereum-optimism/optimism",
-      "body": "Problem: Sequencer does not advance blocks when the node is in ELSync.\n\nAction: Diagnose the failure mode and use the outcome to consolidate sync.CLSync and sync.ELSync into a consistent path.\n\nStatus: Deprioritized; work is focused on the verifier pipeline.\n\nContext: Removal of ReqRes sync.",
-      "createdAt": "2025-09-29T22:20:54Z",
-      "closedAt": "2026-08-04T13:33:43Z",
-      "state": "CLOSED",
-      "commentCount": 0
+      "body": "`TestProposerDefendsMultipleChallengedGamesConcurrently` flakes with the proposer dying on boot:\n\n```\nkona-sp1-proposer | Error: failed to start metrics server:\n  failed to create HTTP listener: Address already in use (os error 98)\n\nError Trace:  op-devstack/sysgo/zk_proposer.go:249\n              op-devstack/sysgo/multichain_proofs.go:115\n              op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go:218\nError:        kona-sp1-proposer exited before its startup line was emitted\nTest:         TestProposerDefendsMultipleChallengedGamesConcurrently\n```\n\nSeen in `memory-all-opn-op-reth-prague` ([build 5436840](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/jobs/5436840)). It took down `ci-gate`, which lists that job as `terminal`, so it blocks merge on an unrelated PR (#22290).\n\n## Cause\n\n`op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go:252` is the F15 anti-pattern from [docs/ai/flake-prevention.md](https://github.com/ethereum-optimism/optimism/blob/develop/docs/ai/flake-prevention.md#f15--selecting-a-free-port-before-starting-the-service):\n\n```go\nfunc freeTCPPort(t devtest.T) uint16 {\n\tlistener, err := net.Listen(\"tcp\", \"127.0.0.1:0\")\n\tt.Require().NoError(err, \"reserve an ephemeral port\")\n\tdefer listener.Close()   // port released here\n\treturn uint16(listener.Addr().(*net.TCPAddr).Port)\n}\n```\n\nThe port is released as soon as it's read, then passed to `kona-sp1-proposer` via `METRICS_PORT`. The proposer doesn't bind it until after `NewSimpleInterop` has stood up L1, the supernode, batchers, proposers and challengers — a multi-second window in which the kernel can hand that same number to any other socket. The number is drawn from the ephemeral range that every other socket in the process also draws from, and `#22208` (`op-acceptance-tests: run ZK dispute game tests in parallel`) put many more sockets in flight concurrently, which is what turned a latent race into an observed flake.\n\n## Fixing it\n\nPer F15, the owner of the socket should bind port 0 and report its address, rather than having the test preselect one. Two constraints make this more than a one-liner:\n\n- `METRICS_PORT=0` currently means *metrics disabled*, and `zk_proposer.go:205-212` deliberately pins it so an inherited `METRICS_PORT` (op-succinct deployments export that exact name) can't leak into devstack proposers. So \"0 = ephemeral\" isn't available; the mode needs a distinct signal, e.g. `MetricsListen { Disabled, Ephemeral, Fixed(u16) }`.\n- `metrics_exporter_prometheus` 0.18 binds inside `new_http_listener` and never surfaces the bound `SocketAddr`, and `with_http_listener` takes a `SocketAddr` rather than a listener — so the exporter can't report an ephemeral port, and can't adopt a listener we opened. Resolving the port inside the proposer therefore still needs a probe-then-bind, but the window collapses from seconds across processes to microseconds within one, and can be wrapped in a retry loop.\n\nSketch:\n\n- `rust/kona/sp1/crates/proposer/src/config.rs` — parse `METRICS_PORT` into a three-state mode.\n- `rust/kona/sp1/crates/host/src/metrics.rs` — `init_metrics` returns the resolved `SocketAddr`, retrying on `AddrInUse` in ephemeral mode.\n- `rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs` — log the resolved address in the existing `metrics_addr` field of the `kona-sp1-proposer started` line.\n- `op-devstack/sysgo/zk_proposer.go` — the startup-line callback already parses that log entry; capture `metrics_addr` and expose it.\n- `op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go` — drop `freeTCPPort`, scrape the reported address.\n\nA cheaper interim mitigation, if the cross-language change isn't wanted yet: keep the preselection but make it recoverable — on `Address already in use`, pick a fresh port and restart the proposer. That leaves the race in place but makes residual failure negligible.\n\n`freeTCPPort` has one caller today, so the blast radius either way is small.\n",
+      "createdAt": "2026-08-06T18:22:19Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
     }
   ],
   "topPRs": [
@@ -77,7 +77,7 @@
       "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nIA-modernization slice 9 (final slice of the lane) per [`projects/docs-improver/plans/iteration-2/ia-modernization.md`](https://github.com/ethereum-optimism/solutions/blob/main/projects/docs-improver/plans/iteration-2/ia-modernization.md): the op-reth CLI regeneration pipeline, plus its first regeneration at `op-reth/v2.4.1`.\n\n## Before / After\n\n**Before:** the 59-page op-reth CLI reference was a one-time snapshot of the retired Vocs site with no regeneration pipeline. It silently drifted from every op-reth release — missing whole command families (`proofs`, `db migrate-v2`, `p2p enode`), documenting seven `db settings set` subcommands the binary no longer has, and carrying stale flags and help text on 51 pages.\n\n**After:** the reference is regenerated from the current finalized release (`op-reth/v2.4.1`) and gains a documented, review-gated regeneration pipeline for future releases. Readers get 21 new command pages (including the whole `proofs` family), 51 corrected pages, and the 7 retired pages redirect to the surviving `db settings set` page that documents the replacement `v2` flow. The hand-written CLI overview gains one table row (`proofs`).\n\n## How\n\n- **Pipeline** — new `docs/public-docs/scripts/gen-op-reth-cli/` (`main.mjs` + `README.md` + `manifest.json`): a zero-dependency Node port of upstream reth's `docs/cli/update.sh` + `docs/cli/help.rs` (the exact tooling whose output format the original snapshot matches). It walks a pinned release binary's `--help` tree and emits the MDX pages (`diataxis: reference` frontmatter), the docs.json nav fragment for the collapsed \"op-reth CLI reference\" group (hand-written `cli/overview` guarded as the group's first entry, never touched), and provenance in `manifest.json`. Environment-dependent help output (home paths, version/target triples, CPU-count defaults) is scrubbed with upstream's replacement set.\n- **Provenance chain** — binary built from source at tag `op-reth/v2.4.1` (tag commit `a9a8dad3f15`, the latest finalized non-rc release), which pins upstream reth at rev `f2eecc65482a`. `manifest.json` records `{tag, binaryVersion, sha256-over-generated-tree}`.\n- **Idempotency** — running the generator twice against the same binary is a byte-for-byte no-op (verified live: second run reports `0 new, 0 changed, removed 0`, `git status` clean). `--check` mode recomputes the whole tree in memory and fails on any divergence, so hand edits to generated pages cannot survive review.\n\n## No CI wiring (per Matthew's ruling)\n\nNothing in this diff touches `.circleci/`, `.github/`, or any package script; nothing runs unattended. Regeneration is registered as a **review-gated Mintlify docs automation** (see the README's \"Automation registration\" section, mirroring the gen-flags precedent in `DOCS_CONTRIBUTING.md`): when a newer finalized `op-reth/v*` tag exists than the manifest's, a regeneration is *proposed for human review* — never merged by CI. All 79 changed files live under `docs/public-docs/`.\n\n## Regeneration drift (first run at v2.4.1)\n\n| Kind | Count | What |\n| --- | --- | --- |\n| New pages | 21 | `proofs` family (7 pages), `db copy`, `db migrate-v2`, `db state`, `db prune-checkpoints` (3), `db stage-checkpoints` (3), `db checksum rocksdb`, `db get rocksdb`, `db settings set v2`, `p2p enode` |\n| Updated pages | 51 | Genuine drift: new flags (e.g. `--tx-channel-memory-limit`, `--rpc.disable-metrics`, `--rpc-cache.max-bals`), renames (`--enable-discv5-discovery` → `--disable-discv5-discovery`), help-text and `--chain` list changes |\n| Deleted pages | 7 | The per-table `db settings set <table>` leaves, superseded upstream by `db settings set v2` |\n| Nav entries | 409 → 423 | +21 / −7; all other tabs and groups byte-identical, tab count 8 → 8 |\n\n## Redirects (645 → 652)\n\n| Change | Count | Detail |\n| --- | --- | --- |\n| New (R5, one per deleted page) | 7 | `/node-operators/op-reth/cli/op-reth/db/settings/set/<table>` → `.../db/settings/set` (the surviving parent documenting the `v2` flow) |\n| Retargeted in place | 9 | The legacy `/rust/op-reth/cli/.../db/settings/set/<table>` entries (7 + 2 `*_in_static_files`) each pointed at a now-deleted URL; retargeted to `.../db/settings/set` so no chains or stale destinations exist |\n\nFull 652-entry trace: 0 duplicate sources, 0 chains, 0 sources shadowing live pages, 0 destinations pointing at deleted URLs; no prose page links to any deleted URL.\n\n## Deviations from the plan (stated plainly)\n\n1. **7 redirects vs the plan's ~0–5 budget** — the estimate predates further months of upstream drift; every removal is the single superseded `db settings set` per-table family, all covered same-PR per R5 (plus the 9 in-place retargets the no-chain rule requires).\n2. **Binary built from source (dev profile) instead of the release Docker image** — the release ships no binary assets and the image registry is egress-blocked in the build environment. Feature set matches the official image build (default features = DockerfileOp set); clap `--help` output is feature-dependent, not profile-dependent. Release metadata was injected exactly as the official image build does.\n3. **One fork-specific scrub beyond upstream `help.rs`** — `default: op-reth/<VERSION>-<SHA>/<ARCH>`: the fork identifies as `op-reth/...` where upstream's scrub patterns only cover the `reth/...` spelling; without it the build-host arch would leak into a page. Recorded in `main.mjs` comments and the README.\n4. **`manifest.json` carries `binaryVersion`** in addition to the gen-flags-precedent `{tag, sha256}` — extra provenance for a binary-derived generator.\n\n## Verification (re-derived independently by the verifier)\n\n- `--check` against the tag binary: exit 0 — 72 pages, nav fragment, and manifest all match the `--help` tree; manifest sha256 `e979848d9b4a…9017f6ad` re-derived independently and matches.\n- `op-reth/v2.4.1` confirmed as the latest finalized (non-rc, non-draft) op-reth release via the GitHub API; `rust/Cargo.toml` at the tag pins reth rev `f2eecc65482a`.\n- Sample pages (`proofs`, `db migrate-v2`, `p2p enode`, `node`, `db list`, `config`): flag sets match the binary's `--help` exactly; the 7 deleted commands are absent from the binary (`db settings set` now has only `v2`).\n- Leakage sweep over all 72 pages: zero hits for the version string, commit SHAs, build timestamps, target triples, or build-host paths.\n- Lints: `validate-nav.ts` OK (424 pages on disk / 423 nav entries / 1 allowlisted orphan — counts reconcile exactly), `validate-redirects.ts` OK (652 redirects, 11 grandfathered — baseline byte-identical to how IA-8 left it), `lint-link-policy.mjs` 0 findings. All 73 touched MDX files compile clean under @mdx-js/mdx.\n\n## Wiz SAST findings (8 LOW) — addressed\n\nWiz flagged 8 LOW SAST findings on the PR head. The only SAST-scannable code in this diff is `scripts/gen-op-reth-cli/main.mjs` (everything else is MDX/JSON/Markdown), and its sinks account for exactly the two pattern classes Wiz LOW-flags in JavaScript: two `child_process` executions (`execFileSync` for `--help`/`--version`) and six dynamic-path `fs` operations (page write/mkdir/delete, docs.json write, manifest read/write, existing-page reads).\n\nContext: this is a repo-local, review-gated generator that only shells out to a binary the operator explicitly passes via `--bin` (built locally from a release tag); it already used `execFileSync` with argument arrays (no shell), and every dynamic path is rooted at script-relative constants. The one genuine untrusted-input flow — subcommand names parsed from the binary's `--help` output feed both process arguments and file paths — is now hardened in `06bcbc29c9`: names are validated against the shape clap actually produces (`/^[a-z0-9][a-z0-9._-]*$/`, run aborts on anything else), and every page write/delete asserts containment inside the generated tree. No behavior change: `--check` still passes byte-identically at v2.4.1. The remaining dynamic-path reads/writes against script-relative constants (docs.json, manifest.json) are inherent to any generator and not reachable from untrusted input.\n\n## Reviewer checklist\n\n- [ ] Preview: the collapsed \"op-reth CLI reference\" group under Node Operators → Reference renders with `overview` first and nested subgroups in `--help` order (eyeball `db settings set` → `set`, `v2`)\n- [ ] Spot-check a new page (e.g. `/node-operators/op-reth/cli/op-reth/proofs`) against `op-reth proofs --help` at v2.4.1\n- [ ] Hit a deleted URL (e.g. `.../db/settings/set/receipts`) and confirm the redirect lands on `.../db/settings/set`\n- [ ] Confirm the README's automation-registration section matches the intended Mintlify registry entry (review-gated, never CI)\n- [ ] Agree the 4 deviations above are acceptable\n\n## Program status\n\nThis closes the IA-modernization lane: slices 1–9 have all shipped. D12 is the program's last remaining content slice.\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-08-02T20:43:25Z",
-      "mergedAt": null,
+      "mergedAt": "2026-08-06T19:29:59Z",
       "additions": 5046,
       "deletions": 1438
     },
@@ -118,23 +118,23 @@
       "deletions": 340
     },
     {
-      "id": "PR_kwDODjvEJM76gDJ-",
-      "title": "sdm: replace public warming production with a test fixture",
+      "id": "PR_kwDODjvEJM77qKfW",
+      "title": "sdm: isolate refund production behind a test-only fixture",
       "author": "nonsense",
-      "number": 22222,
-      "body": "## Summary\n\n- Replace stock SDM refund production with a null policy while retaining mechanism coverage through an unpublished fixed-refund fixture node.\n- Keep derivation, stock-verifier, replay/accounting, and fault-proof coverage; make public replay structural-only.\n- Remove the public warming policy, op-rbuilder, vendored rollup-boost, and their build/release surfaces.\n\n## Validation\n\n- Fixture release-exclusion and required-test-name guards\n- Rebased commit-series range-diff\n",
+      "number": 22288,
+      "body": "## Summary\n\n- remove the concrete SDM refund policy from public production binaries while retaining generic post-exec policy hooks and verifier support\n- add an unpublished, test-only `op-reth-sdm-fixture` producer and retarget SDM acceptance coverage to it\n- simplify replay to structural verification and add CI guards against fixture release or test-ownership regressions\n\n## Testing\n\n- targeted Rust package tests and formatting\n- SDM fixture acceptance and derivation tests\n- relevant Go tests and compilation\n- op-rbuilder and rollup-boost lint/test suites\n- Premium exact-pin compatibility gate\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-04T11:06:49Z",
+      "createdAt": "2026-08-06T15:13:17Z",
       "mergedAt": null,
-      "additions": 1877,
-      "deletions": 92243
+      "additions": 2550,
+      "deletions": 4339
     }
   ],
   "codeChanges": {
-    "additions": 16438,
-    "deletions": 42039,
-    "files": 408,
-    "commitCount": 301
+    "additions": 21398,
+    "deletions": 44903,
+    "files": 547,
+    "commitCount": 410
   },
   "completedItems": [
     {
@@ -154,6 +154,16 @@
         ".circleci/scripts/test-decision-tree.sh",
         ".circleci/routing.yml",
         "docs/ai/ci-config-review.md"
+      ]
+    },
+    {
+      "title": "docs: add fault proofs reference page",
+      "prNumber": 21838,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784143660400919)_\n\n**Before:** all six pages in `op-stack/fault-proofs/` are explanation-mode — a reader look",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/fault-proofs/reference.mdx"
       ]
     },
     {
@@ -340,6 +350,25 @@
       ]
     },
     {
+      "title": "op-reth: remove unsupported --minimal option (breaking change)",
+      "prNumber": 22109,
+      "type": "other",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Josh Klopfenstein** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0A3E04GDMX/p1785194297744039?thread_ts=1785194297.744039&cid=C0A3E04GDMX)_\n\n**Stacked on #22108** (base = claude/op-r",
+      "files": [
+        "docs/public-docs/chain-operators/guides/management/network-architecture.mdx",
+        "docs/public-docs/node-operators/guides/configuration/execution-clients.mdx",
+        "docs/public-docs/node-operators/guides/management/archive-node.mdx",
+        "rust/Cargo.lock",
+        "rust/UPDATING-RETH.md",
+        "rust/op-reth/bin/Cargo.toml",
+        "rust/op-reth/bin/src/main.rs",
+        "rust/op-reth/crates/cli/src/app.rs",
+        "rust/op-reth/crates/cli/src/lib.rs",
+        "rust/op-reth/crates/cli/tests/cli_snapshot.rs",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap"
+      ]
+    },
+    {
       "title": "feat: enhanced lightnode reorg observability",
       "prNumber": 22106,
       "type": "feature",
@@ -449,6 +478,22 @@
       ]
     },
     {
+      "title": "kona-sp1-proposer: fast finality mode (prove without waiting for a challenge)",
+      "prNumber": 22173,
+      "type": "other",
+      "body": "## Summary\n\nPorts fast finality mode from op-succinct's fault-proof proposer (@ 13716c2c): with FAST_FINALITY_MODE=true the proposer proves every game it owns while the game is still unchallenged. A proven game is over immediately, so it re",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/zk_proposer_test.go",
+        "op-devstack/sysgo/zk_proposer.go",
+        "op-devstack/sysgo/zk_proposer_test.go",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/config.rs",
+        "rust/kona/sp1/crates/proposer/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs"
+      ]
+    },
+    {
       "title": "op-e2e: remove unused generated bindings",
       "prNumber": 22165,
       "type": "other",
@@ -513,6 +558,64 @@
         "op-conductor/consensus/raft.go",
         "op-conductor/consensus/raft_logger.go",
         "op-conductor/consensus/raft_logger_test.go"
+      ]
+    },
+    {
+      "title": "docs: regenerate op-reth CLI reference at v2.4.1 via new gen-op-reth-cli pipeline (IA slice 9)",
+      "prNumber": 22193,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nIA-modernization slice 9 (final slice of the l",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/config.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/account-storage.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/checksum.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/checksum/mdbx.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/checksum/rocksdb.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/checksum/static-file.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/clear.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/clear/mdbx.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/clear/static-file.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/copy.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/diff.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/drop.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/get.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/get/mdbx.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/get/rocksdb.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/get/static-file.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/list.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/migrate-v2.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/path.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/prune-checkpoints.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/prune-checkpoints/get.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/prune-checkpoints/set.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/repair-trie.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/settings.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/settings/get.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/settings/set.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/settings/set/transaction_hash_numbers.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/settings/set/transaction_senders.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/settings/set/v2.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/stage-checkpoints.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/stage-checkpoints/get.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/stage-checkpoints/set.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/state.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/static-file-header.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/static-file-header/block.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/static-file-header/path.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/stats.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/db/version.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/dump-genesis.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/import-op.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/import-receipts-op.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/init-state.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/init.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/node.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/p2p.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/p2p/body.mdx",
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/p2p/bootnode.mdx"
       ]
     },
     {
@@ -634,6 +737,15 @@
       "files": [
         "op-service/txmgr/txmgr.go",
         "op-service/txplan/txplan.go"
+      ]
+    },
+    {
+      "title": "ci: page protocol-oncall on go-tests-full develop failures",
+      "prNumber": 22212,
+      "type": "tests",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested via [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1785782736939909)_\n\n## Description\n\n**Before:** when `go-tests-full` fails on `develop`, the failure notification posts to #noti",
+      "files": [
+        ".circleci/continue/main.yml"
       ]
     },
     {
@@ -772,6 +884,17 @@
       ]
     },
     {
+      "title": "op-reth: use RUST_BINARY_PATH_OP_RETH for e2e test binaries",
+      "prNumber": 22233,
+      "type": "tests",
+      "body": "## Description\n\n`OP_RETH_EXEC_PATH` is read by nothing in this repo — the devstack harness reads `RUST_BINARY_PATH_<BINARY>` (`op-devstack/shared/rustbin/rust_binary.go`) and otherwise falls back to the **newest of `target/{debug,release}` ",
+      "files": [
+        ".circleci/continue/rust-e2e.yml",
+        "rust/op-reth/tests/README.md",
+        "rust/op-reth/tests/justfile"
+      ]
+    },
+    {
       "title": "op-acceptance-tests: use NewMinimalNoFaultProofs in interop smoke tests",
       "prNumber": 22230,
       "type": "tests",
@@ -779,6 +902,43 @@
       "files": [
         "op-acceptance-tests/tests/interop/smoke/interop_smoke_test.go",
         "op-acceptance-tests/tests/interop/smoke/smoke_test.go"
+      ]
+    },
+    {
+      "title": "op-dispute-mon: normalize fault bond snapshots",
+      "prNumber": 22226,
+      "type": "other",
+      "body": "## Claim\n\nReplace four sequential Fault bond enrichers with one normalized bond snapshot and a sealed bond lane without changing existing Fault RPC order, metrics, logs, or boundary behavior.\n\n## Base and dependency\n\nPR 2 of 5. Base: `feat/",
+      "files": [
+        "op-dispute-mon/metrics/metrics.go",
+        "op-dispute-mon/metrics/noop.go",
+        "op-dispute-mon/mon/bonds/collateral.go",
+        "op-dispute-mon/mon/bonds/collateral_test.go",
+        "op-dispute-mon/mon/bonds/monitor.go",
+        "op-dispute-mon/mon/bonds/monitor_test.go",
+        "op-dispute-mon/mon/claims.go",
+        "op-dispute-mon/mon/claims_test.go",
+        "op-dispute-mon/mon/extract/balance_enricher.go",
+        "op-dispute-mon/mon/extract/balance_enricher_test.go",
+        "op-dispute-mon/mon/extract/bond_data_enricher.go",
+        "op-dispute-mon/mon/extract/bond_data_enricher_test.go",
+        "op-dispute-mon/mon/extract/bond_enricher.go",
+        "op-dispute-mon/mon/extract/bond_enricher_test.go",
+        "op-dispute-mon/mon/extract/caller.go",
+        "op-dispute-mon/mon/extract/extractor_test.go",
+        "op-dispute-mon/mon/extract/recipient_enricher.go",
+        "op-dispute-mon/mon/extract/recipient_enricher_test.go",
+        "op-dispute-mon/mon/extract/withdrawals_enricher.go",
+        "op-dispute-mon/mon/extract/withdrawals_enricher_test.go",
+        "op-dispute-mon/mon/monitor.go",
+        "op-dispute-mon/mon/monitor_test.go",
+        "op-dispute-mon/mon/service.go",
+        "op-dispute-mon/mon/service_test.go",
+        "op-dispute-mon/mon/types/types.go",
+        "op-dispute-mon/mon/types/types_test.go",
+        "op-dispute-mon/mon/withdrawals.go",
+        "op-dispute-mon/mon/withdrawals_test.go",
+        "op-dispute-mon/metrics/forecast_registry_test.go"
       ]
     },
     {
@@ -924,27 +1084,236 @@
         "op-deployer/pkg/deployer/pipeline/init.go",
         "op-deployer/pkg/deployer/standard/standard.go"
       ]
+    },
+    {
+      "title": "docs: disambiguate colliding frontmatter page titles",
+      "prNumber": 22314,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## Before / After\n\n**Before.** Thirteen pages ",
+      "files": [
+        "docs/public-docs/app-developers/tools-sdks/op-alloy/starting.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/bridge-crosschain-eth.mdx",
+        "docs/public-docs/app-developers/tutorials/development/supersim/installation.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/manual-relay.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/message-passing.mdx",
+        "docs/public-docs/chain-operators/guides/features/custom-gas-token-guide.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/installation.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/overview.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/releases.mdx",
+        "docs/public-docs/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/node-operators/kona-node/install/overview.mdx",
+        "docs/public-docs/node-operators/op-reth/index.mdx",
+        "docs/public-docs/op-mainnet/network-information/transaction-finality.mdx",
+        "docs/public-docs/op-stack/components/op-deployer.mdx",
+        "docs/public-docs/op-stack/components/proxyd.mdx"
+      ]
+    },
+    {
+      "title": "docs: correct kona-node actor list and extension mechanism on mechanics page",
+      "prNumber": 22313,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## Before / After\n\n**Before.** The \"Extensibil",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/run/mechanics.mdx"
+      ]
+    },
+    {
+      "title": "docs: add the \"Choose how to run your chain\" fork page",
+      "prNumber": 22312,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n> [!IMPORTANT]\n> **The blocking number-and-tie",
+      "files": [
+        "docs/public-docs/chain-operators/launch-paths.mdx",
+        "docs/public-docs/chain-operators/quickstart.mdx",
+        "docs/public-docs/docs.json"
+      ]
+    },
+    {
+      "title": "docs: use \"Optimism\", name op-reth in the EL example, and fix the Solidity version contradiction",
+      "prNumber": 22311,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## Before and after\n\n**Before.** Three pages n",
+      "files": [
+        "docs/public-docs/app-developers/guides/transactions/flashblocks-and-gas-usage.mdx",
+        "docs/public-docs/app-developers/tools-sdks/faucets.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/standard-bridge-standard-token.mdx",
+        "docs/public-docs/op-stack/security/faq-sec-model.mdx"
+      ]
+    },
+    {
+      "title": "docs: correct kona-node supervisor and conductor flag facts",
+      "prNumber": 22310,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## Before / After\n\n**Before.** An operator rea",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/run/binary.mdx",
+        "docs/public-docs/snippets/kona-node-ports.mdx"
+      ]
+    },
+    {
+      "title": "docs: correct op-batcher throttling disable flag in batcher guide",
+      "prNumber": 22309,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786053341098809?thread_ts=1786053341.098809&cid=C0BHEH8TG91)_\n\n## What changed\n\nOne sentence on the \"Batcher ",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/batcher.mdx"
+      ]
+    },
+    {
+      "title": "kona-sp1-proposer: rename super root RPC configuration",
+      "prNumber": 22308,
+      "type": "other",
+      "body": "## Summary\r\n\r\n- rename the kona-sp1-proposer environment variable from SUPERNODE_RPC to SUPERROOT_RPC\r\n- rename the corresponding Rust config and startup-log fields\r\n- update the devstack wiring and proposer documentation\r\n\r\nThis is intenti",
+      "files": [
+        "op-devstack/sysgo/zk_proposer.go",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/config.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs"
+      ]
+    },
+    {
+      "title": "docs: resolve blobs title collision, add prestate cross-link, share supersim deposit pointer (dedup slice D12)",
+      "prNumber": 22302,
+      "type": "docs",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1784834359611159?thread_ts=1784834359.611159&cid=C0BHEH8TG91)_\n\nIteration-2 deduplication slice D12 (`projects",
+      "files": [
+        "docs/public-docs/app-developers/reference/tools/supersim/chain-a.mdx",
+        "docs/public-docs/app-developers/reference/tools/supersim/chain-b.mdx",
+        "docs/public-docs/app-developers/reference/tools/supersim/fork.mdx",
+        "docs/public-docs/app-developers/reference/tools/supersim/included-contracts.mdx",
+        "docs/public-docs/app-developers/reference/tools/supersim/vanilla.mdx",
+        "docs/public-docs/chain-operators/guides/configuration/batcher.mdx",
+        "docs/public-docs/chain-operators/guides/features/blobs.mdx",
+        "docs/public-docs/chain-operators/tutorials/kona-custom-prestate.mdx",
+        "docs/public-docs/node-operators/guides/management/blobs.mdx",
+        "docs/public-docs/op-stack/components/op-batcher.mdx",
+        "docs/public-docs/op-stack/components/op-node.mdx",
+        "docs/public-docs/snippets/supersim-deposit-pointer.mdx",
+        "docs/public-docs/use-cases/tune-batcher-costs.mdx"
+      ]
+    },
+    {
+      "title": "op-core,op-service,op-chain-ops: receipt wrapping constructor and codec cleanups",
+      "prNumber": 22295,
+      "type": "refactor",
+      "body": "Follow-ups from the review of the op-geth decoupling stack (#20264 — #21907, #21908, #21911). None of them blocked those PRs.\n\n- **`optypes.FromGethReceipt`** wraps a single go-ethereum receipt, mirroring the deposit fields to the authorita",
+      "files": [
+        "op-chain-ops/cmd/check-karst/main.go",
+        "op-chain-ops/cmd/receipt-reference-builder/pull.go",
+        "op-core/types/receipt_consensus.go",
+        "op-core/types/receipt_consensus_test.go",
+        "op-service/eth/receipts.go",
+        "op-service/eth/transactions.go",
+        "op-service/sources/raw_transaction_test.go",
+        "op-service/txplan/txplan.go"
+      ]
+    },
+    {
+      "title": "op-node: remove TODOs referencing #12490",
+      "prNumber": 22292,
+      "type": "other",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786030800975399)_\n\n## Before\n\nTwo `Reset` methods in the derivation pipeline carried an identical TODO ",
+      "files": [
+        "op-node/rollup/derive/batch_mux.go",
+        "op-node/rollup/derive/channel_mux.go"
+      ]
+    },
+    {
+      "title": "ci: build superchain bundle in go-release",
+      "prNumber": 22290,
+      "type": "other",
+      "body": "Human here: the op-deployer go-release job is failing because of a missing go-embed. You can see the failure occurring on a test release branch [here](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/132056/details?workf",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "apko: add busybox and apk-tools to all images",
+      "prNumber": 22287,
+      "type": "other",
+      "body": "Adds `busybox` (shell + coreutils) and `apk-tools` (the apk package manager) to every apko image under `apko/`, so each image has a shell and can install packages at runtime. `busybox` is added only where not already present; additive only ",
+      "files": [
+        "apko/cannon.yaml",
+        "apko/da-server.yaml",
+        "apko/kona-client.yaml",
+        "apko/kona-host.yaml",
+        "apko/kona-node.yaml",
+        "apko/kona-sp1-proposer.yaml",
+        "apko/op-batcher.yaml",
+        "apko/op-challenger.yaml",
+        "apko/op-conductor.yaml",
+        "apko/op-deployer.yaml",
+        "apko/op-dispute-mon.yaml",
+        "apko/op-dripper.yaml",
+        "apko/op-faucet.yaml",
+        "apko/op-interop-filter.yaml",
+        "apko/op-interop-mon.yaml",
+        "apko/op-node.yaml",
+        "apko/op-proposer.yaml",
+        "apko/op-rbuilder.yaml",
+        "apko/op-reth.yaml",
+        "apko/op-supernode.yaml",
+        "apko/op-test-sequencer.yaml",
+        "apko/rollup-boost.yaml"
+      ]
+    },
+    {
+      "title": "rust: bump upstream reth pin",
+      "prNumber": 22285,
+      "type": "other",
+      "body": "## Description\r\n\r\nUpdates the monorepo’s upstream reth pin from `f2eecc65482af4085e43eedb27a32024bf177a0d` to [`aef8d3ef92117f91455e16969f0adf5bf7c6e9e1`](https://github.com/op-rs/reth/commit/aef8d3ef92117f91455e16969f0adf5bf7c6e9e1), the c",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/Cargo.toml",
+        "rust/rollup-boost/Cargo.lock",
+        "rust/rollup-boost/crates/flashblocks-rpc/Cargo.toml",
+        "rust/rollup-boost/crates/rollup-boost/Cargo.toml"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 336.23423339108655,
-      "prScore": 190.39623339108658,
-      "issueScore": 4,
-      "reviewScore": 141,
-      "commentScore": 0.838,
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 640.9625742854357,
+      "prScore": 502.6445742854357,
+      "issueScore": 42,
+      "reviewScore": 95,
+      "commentScore": 1.3179999999999998,
       "summary": null
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 307.72121887849744,
-      "prScore": 197.34121887849744,
-      "issueScore": 42,
-      "reviewScore": 67.5,
-      "commentScore": 0.8799999999999999,
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
+      "totalScore": 630.2008163594724,
+      "prScore": 567.0008163594723,
+      "issueScore": 0,
+      "reviewScore": 63,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 489.2981570943991,
+      "prScore": 239.12015709439908,
+      "issueScore": 6,
+      "reviewScore": 243,
+      "commentScore": 1.178,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 295.32383749409337,
+      "prScore": 222.22383749409335,
+      "issueScore": 2,
+      "reviewScore": 70.5,
+      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
@@ -960,60 +1329,50 @@
     {
       "username": "einar-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 248.4255282409399,
+      "totalScore": 248.6255282409399,
       "prScore": 166.5495282409399,
       "issueScore": 4,
       "reviewScore": 77,
-      "commentScore": 0.8759999999999999,
+      "commentScore": 1.0759999999999998,
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 242.37986948288048,
-      "prScore": 192.27986948288049,
-      "issueScore": 2,
-      "reviewScore": 47.5,
-      "commentScore": 0.6000000000000001,
-      "summary": null
-    },
-    {
-      "username": "claude",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
-      "totalScore": 218.0334858021302,
-      "prScore": 213.5334858021302,
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 231.5768108281277,
+      "prScore": 162.0368108281277,
       "issueScore": 0,
-      "reviewScore": 4.5,
+      "reviewScore": 69,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 195.50534841660513,
+      "prScore": 76.00534841660513,
+      "issueScore": 2,
+      "reviewScore": 117.5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "karlfloersch",
       "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 170.77001511330008,
+      "totalScore": 175.27001511330008,
       "prScore": 170.5700151133001,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 4.5,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 145.44058565310323,
-      "prScore": 76.10058565310322,
-      "issueScore": 0,
-      "reviewScore": 69,
-      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
       "username": "op-will",
       "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
-      "totalScore": 138.33654875359508,
+      "totalScore": 143.33654875359508,
       "prScore": 129.1365487535951,
       "issueScore": 0,
-      "reviewScore": 9,
+      "reviewScore": 14,
       "commentScore": 0.2,
       "summary": null
     },
@@ -1028,12 +1387,32 @@
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 108.5,
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 101.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 108.5,
+      "reviewScore": 101.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 95.1194074514905,
+      "prScore": 75.6194074514905,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 91.90505079247615,
+      "prScore": 71.90505079247615,
+      "issueScore": 0,
+      "reviewScore": 20,
       "commentScore": 0,
       "summary": null
     },
@@ -1058,6 +1437,16 @@
       "summary": null
     },
     {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 66.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 66.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
       "totalScore": 56.44094258831371,
@@ -1068,30 +1457,10 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 52.96411999384422,
-      "prScore": 32.96411999384422,
-      "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "bitwiseguy",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
-      "totalScore": 49.02885417722892,
-      "prScore": 29.52885417722892,
-      "issueScore": 0,
-      "reviewScore": 19.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 47.86105353233603,
-      "prScore": 47.66105353233603,
+      "totalScore": 54.595627122616,
+      "prScore": 54.395627122616,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
@@ -1118,23 +1487,13 @@
       "summary": null
     },
     {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 41.5,
-      "prScore": 0,
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 41.39811209047197,
+      "prScore": 40.760112090471964,
       "issueScore": 0,
-      "reviewScore": 41.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 40,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 40,
-      "commentScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -1148,13 +1507,13 @@
       "summary": null
     },
     {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 32.74816273301043,
-      "prScore": 32.54816273301043,
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 36.974573590279974,
+      "prScore": 6.836573590279973,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
+      "reviewScore": 29.5,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -1165,16 +1524,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 27.47457359027997,
-      "prScore": 6.836573590279973,
-      "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -1222,6 +1571,16 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/229586679?u=0950039d702d16e946056feb12f56fd82e7ca34f&v=4",
       "totalScore": 19.141173934797756,
       "prScore": 19.141173934797756,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "boleklebovski",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/160799963?v=4",
+      "totalScore": 10.4334379124341,
+      "prScore": 10.4334379124341,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -1288,6 +1647,16 @@
       "summary": null
     },
     {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ZakAyesh",
       "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
       "totalScore": 0.33999999999999997,
@@ -1318,9 +1687,9 @@
       "summary": null
     }
   ],
-  "newPRs": 70,
-  "mergedPRs": 43,
-  "newIssues": 28,
-  "closedIssues": 14,
-  "activeContributors": 44
+  "newPRs": 100,
+  "mergedPRs": 63,
+  "newIssues": 30,
+  "closedIssues": 16,
+  "activeContributors": 46
 }
