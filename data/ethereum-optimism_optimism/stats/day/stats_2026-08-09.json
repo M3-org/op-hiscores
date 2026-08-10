@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-09 to 2026-08-10, ethereum-optimism/optimism had 4 new PRs (0 merged), 0 new issues, and 5 active contributors.",
+  "overview": "From 2026-08-09 to 2026-08-10, ethereum-optimism/optimism had 4 new PRs (1 merged), 0 new issues, and 5 active contributors.",
   "topIssues": [],
   "topPRs": [
     {
@@ -16,7 +16,7 @@
       "body": "<!-- ccr-slack-attribution -->\n_Requested by **Adrian Sutton** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786315831137179?thread_ts=1786315831.137179&cid=C0BHEH8TG91)_\n\nFollow-up to #22340, which fixed the next failure up the same `just build-deps` chain.\n\n## Before\n\n`just build-deps` from `op-acceptance-tests` runs `just cannon-prestates`, which always took the native MIPS64 cross-compile. That needs the MIPS64 GCC toolchain, which is apt-only — no macOS package provides it — so on a Mac the recipe could never succeed. Adrian, on macOS:\n\n```\nerror: linker `mips64-linux-gnuabi64-gcc` not found\n  |\n  = note: No such file or directory (os error 2)\n\nerror: could not compile `kona-client` (bin \"kona-client\") due to 1 previous error\nwarning: build failed, waiting for other jobs to finish...\nerror: could not compile `kona-client` (bin \"kona-client-int\") due to 1 previous error\nerror: Recipe `build-kona-client-elfs` failed with exit code 101\nerror: Recipe `build-kona-prestates` failed with exit code 101\nerror: Recipe `cannon-prestates` failed on line 253 with exit code 101\nerror: Recipe `build-deps` failed with exit code 101\n```\n\nA raw rustc linker error, after cargo has compiled the whole dependency graph, naming nothing to install and not mentioning that the repo already has a Docker build that works fine on macOS.\n\n## After\n\n`just cannon-prestates` (and so `just build-deps`) picks a build that this host can actually run:\n\n- **Linux with the cross toolchain** — unchanged, the fast native build.\n- **macOS, or any host without the toolchain** — the reproducible Docker build, which is what CI uses.\n- **Neither available** — a message naming what to install for each path, instead of a linker error:\n\n```\nerror: cannot build the kona prestates: no MIPS64 cross toolchain, and no Docker.\n\nInstall either:\n  * the MIPS64 cross toolchain, for the native build (apt only, so not macOS;\n    provides 'mips64-linux-gnuabi64-gcc'):\n      sudo apt install g++-mips64-linux-gnuabi64 libc6-dev-mips64-cross binutils-mips64-linux-gnuabi64\n  * Docker, for the reproducible build (the supported path on macOS):\n      https://docs.docker.com/get-started/get-docker/\n\nThen re-run, or pin a build with KONA_PRESTATE_BUILD=native|docker.\n```\n\nDocker is never used unconditionally — an environment without Docker keeps working exactly as before.\n\n## How\n\n- `cannon-prestates` now calls a new `rust/justfile` recipe `build-kona-prestates-auto`, which probes for the cross-linker on `PATH` and delegates to the existing `build-kona-prestates` (native) or `build-kona-reproducible-prestate` (Docker). Both write the same per-variant artifacts dirs, so consumers cannot tell which ran; only the hashes differ, and only the Docker build's match releases.\n- **The Docker path also builds the host `cannon` binary.** The reproducible build builds cannon as a Dockerfile stage and exports only the prestate dirs, but `op-devstack` points the challenger's `VmBin` at `cannon/bin/cannon` (`op-devstack/shared/challenger/challenger.go`), which the native path leaves behind. Without this, the fallback would produce prestates whose tests then fail on a missing cannon. Built before the Docker build so a broken Go toolchain fails fast.\n- `build-kona-client-elfs` checks the linker up front, so `cd rust && just build-kona-prestates` (still native-only, as documented) reports a missing toolchain before cargo compiles anything, and points at the Docker recipes as the alternative.\n- The toolchain names move into `MIPS64_CC` / `MIPS64_CXX` / `MIPS64_LINKER`, each defaulting to the literal used today and reading the same environment variable the build already exports (`CARGO_TARGET_MIPS64_UNKNOWN_NONE_LINKER`, `CC_mips64_unknown_none`, `CXX_mips64_unknown_none`). So a differently named toolchain is both probed for *and* used — previously the recipe clobbered such an override. `lint-kona-cannon` picks up the same variables instead of repeating the literals.\n- **Override:** `KONA_PRESTATE_BUILD=native|docker` pins a path and skips detection. There was no existing override to respect; the name follows the repo's existing env-var convention (`KONA_CUSTOM_CONFIGS_DIR`, `KONA_SYNC_SUPERCHAIN`, `RUST_JIT_BUILD`).\n- Docker is probed for the CLI only, not daemon liveness: a stopped daemon already fails with its own actionable error (`Cannot connect to the Docker daemon … Is the docker daemon running?`), and picking a build should not cost a daemon round-trip on machines that never needed Docker.\n\n## CI is unaffected\n\nCI never runs `cannon-prestates`. The `cannon-prestate` jobs in `.circleci/continue/main.yml` and `rust-e2e.yml` run `just reproducible-prestate`, and `rust-ci.yml` runs `just build-kona-reproducible-prestate` — both the Docker path, called directly, and neither goes through the changed recipe. `op-acceptance-tests`' `build-deps` exits early when `$CIRCLECI` is set, so the recipe is only ever exercised on developer machines (the same reason #22340's bug reached `develop`).\n\nInside the prestate Dockerfile, `build-kona-client-elfs` runs on the `cannon-builder` image, which apt-installs `g++-mips64-linux-gnuabi64` (`rust/kona/docker/cannon/cannon.dockerfile`), so the new preflight passes there. It must already be on `PATH` under exactly that name, since the current build exports it as the linker and succeeds.\n\n## Not a mise problem\n\nWorth stating since it would change the right fix: this toolchain is deliberately *not* managed by mise. `mise.toml` pins no MIPS cross-compiler, and `rust/kona/docker/README.md` documents it as \"MIPS64 cross-compilation toolchain (manual, apt only)\" — frozen in the `cannon-builder` image precisely because apt versions are not deterministically pinnable. So there is no mise entry to add, and Docker really is the only option on macOS.\n\n## Verified\n\nWith the pinned `just` 1.46.0, using a stub `mips64-linux-gnuabi64-gcc` on `PATH` and a stub `just` to observe which recipe is selected:\n\n- Linker present → native build selected.\n- Linker absent, Docker present → Docker build selected, preceded by the host cannon build.\n- Neither → the error above, exit 1.\n- `KONA_PRESTATE_BUILD=docker` with the linker present, and `=native` without it → override wins in both directions. An invalid value is rejected by name.\n- `CARGO_TARGET_MIPS64_UNKNOWN_NONE_LINKER=my-custom-mips-gcc` → `MIPS64_LINKER` resolves to it, so the probe and the export agree.\n- End-to-end `just cannon-prestates` with no linker reaches the real `docker build`, failing only on this sandbox's absent daemon.\n- `build-kona-client-elfs` prints the new preflight error without a linker, and proceeds past it (to `install-nightly`) with the stub present.\n- `cd cannon && just cannon` builds `cannon/bin/cannon` successfully on a host with no MIPS toolchain, which is the step the Docker path now adds.\n- `just --evaluate` clean on both justfiles; `just --list` entries render correctly.\n\n## Not verified here\n\n- **The real Rust MIPS build and the real Docker build.** The sandbox has no MIPS toolchain and no Docker daemon, and the `op-rs/reth` git dependency is network-blocked, so cargo cannot even resolve dependencies. The native and Docker recipes themselves are unchanged, but the end-to-end macOS run — `just build-deps` picking Docker and producing usable prestates plus a working `cannon` — needs a machine with Docker. @ajsutton, this is the bit to try.\n- Whether Docker Desktop's `linux/amd64` emulation makes the fallback slow enough on Apple Silicon to want a warning up front.\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01BYVh3yoyDrzVDWufrFtNZh)_",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-08-09T23:36:26Z",
-      "mergedAt": null,
+      "mergedAt": "2026-08-10T01:08:11Z",
       "additions": 109,
       "deletions": 9
     },
@@ -40,7 +40,7 @@
       "body": "<!-- ccr-slack-attribution -->\n_Requested by **Adrian Sutton** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786315831137179?thread_ts=1786315831.137179&cid=C0BHEH8TG91)_\n\n## Before\n\nA developer runs `mise exec -- just build-rust-release` (directly, or via `just build-deps` / `just acceptance-test` from `op-acceptance-tests`) and it dies within a second, before compiling anything:\n\n```\nerror: no bin target named `op-reth-sdm-fixture` in default-run packages\nhelp: available bin in `op-reth-sdm-fixture` package:\n    op-reth-sdm-fixture\n```\n\nNo Rust binaries get built, so local acceptance tests can't start at all.\n\n## After\n\nThe recipe builds all six binaries as intended — `kona-node`, `kona-host`, `op-reth`, `op-reth-sdm-fixture`, `op-rbuilder`, `rollup-boost`.\n\n## How\n\n`rust/Cargo.toml` declares a `default-members` list of four paths:\n\n```toml\ndefault-members = [\n  \"kona/bin/host\",\n  \"kona/bin/client\",\n  \"kona/bin/node\",\n  \"op-reth/bin/\",\n]\n```\n\nA bare `--bin` is resolved **only** against those default members. `op-reth-sdm-fixture` (`rust/op-reth/crates/sdm-fixture-node/`) is a workspace `members` entry but not a default member, so cargo cannot see its bin target. The other three names in that line (`kona-node`, `kona-host`, `op-reth`) happen to live in default members, which is why only the fixture broke.\n\nThe fix pairs `-p` with every `--bin`, matching the two lines directly below it and the `rust-op-reth-binary` CI job, which already builds this binary with `--package op-reth --package op-reth-sdm-fixture`.\n\n**Why not just add `-p op-reth-sdm-fixture`?** Because `-p` narrows package selection for the *whole* cargo invocation, not just the `--bin` that follows it. The one-flag version swaps one breakage for another:\n\n```\n$ cargo build --release --bin kona-node --bin kona-host --bin op-reth \\\n      -p op-reth-sdm-fixture --bin op-reth-sdm-fixture\nerror: no bin target named `kona-node` in `op-reth-sdm-fixture` package\n```\n\nSo all four packages have to be named. All four `-p` values were checked against `cargo metadata` — each package name is identical to its bin name.\n\nBroken since #22289 introduced the fixture.\n\n## Why CI didn't catch this\n\n`op-acceptance-tests/justfile` short-circuits `build-deps` in CI, because CircleCI builds these binaries in dedicated jobs and passes them through the workspace:\n\n```bash\nbuild-deps:\n    #!/usr/bin/env bash\n    set -euo pipefail\n    if [[ -n \"${CIRCLECI:-}\" ]]; then exit 0; fi\n```\n\n`build-rust-release` is therefore only ever executed on developer machines, and a green CI run says nothing about whether it works. Confirmed: `CIRCLECI=true just build-deps` exits 0 immediately without running anything.\n\n## Verification\n\nWhat I confirmed:\n\n- **Reproduced the exact reported error**, and confirmed the fix, against the repo's real package names, real bin targets and real `default-members` list. Sandbox network policy blocks the `op-rs/reth` git dependency (`403` from the proxy on `https://github.com/op-rs/reth`), and cargo resolves the dependency graph *before* target selection — so a real build stops earlier than the bug in this environment. To get past that, I generated a dependency-free mirror of the workspace: all 75 members reproduced with their real `[package] name` and real `[[bin]]` targets from `cargo metadata --no-deps`, stub `main.rs` bodies, and the same `default-members`. Against that mirror:\n  - current `develop` flags → `error: no bin target named `op-reth-sdm-fixture` in default-run packages` (verbatim match to the report)\n  - one-flag `-p` variant → `error: no bin target named `kona-node` in `op-reth-sdm-fixture` package`\n  - this PR's flags → exit 0, producing exactly `kona-host`, `kona-node`, `op-reth`, `op-reth-sdm-fixture`\n- All four `-p` names exist as packages, cross-checked against both `cargo metadata` and each `Cargo.toml`'s `[package] name`.\n- `justfile` parses under the pinned `just` 1.46.0, and `just --dry-run build-rust-release` emits the intended command.\n- Audited every other `--bin` in the repo's justfiles/Makefiles for the same latent bug. All remaining bare `--bin` uses name default-member bins (`kona-node`, `kona-host`, `op-reth`) or live in `rust/rollup-boost`, which declares no `default-members` (so all members are default). `rust/justfile`'s `build-kona-client-elfs` already passes `-p kona-client`. **No other instance of this bug.**\n\nWhat I could **not** verify: a real end-to-end `env -u CIRCLECI just build-deps`. It is not runnable in this sandbox — `mise` is unavailable and cannot be installed (`mise.run` and GitHub release downloads are both blocked, `403`), and the Rust build's `op-rs/reth` git dependency is blocked by the same policy. Both blockers are environmental and unrelated to this change. **A maintainer should still run `env -u CIRCLECI mise exec -- just build-deps` from `op-acceptance-tests/` once to confirm the full path end to end** — that's the acceptance bar this PR targets, and it's the one step I couldn't execute.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01BYVh3yoyDrzVDWufrFtNZh)_",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-08-09T23:01:57Z",
-      "mergedAt": null,
+      "mergedAt": "2026-08-09T23:49:06Z",
       "additions": 3,
       "deletions": 1
     },
@@ -58,22 +58,32 @@
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 8
+    "additions": 3,
+    "deletions": 1,
+    "files": 1,
+    "commitCount": 10
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "justfile: Scope build-rust-release cargo flags with explicit -p",
+      "prNumber": 22340,
+      "type": "other",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Adrian Sutton** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786315831137179?thread_ts=1786315831.137179&cid=C0BHEH8TG91)_\n\n## Before\n\nA developer runs `mise exec -- jus",
+      "files": [
+        "justfile"
+      ]
+    }
+  ],
   "topContributors": [
     {
       "username": "claude",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/81847?u=577eaff0520b33aadc0f9fb6d11f5cdb2dd9486e&v=4",
       "totalScore": 40.97340419588434,
       "prScore": 40.97340419588434,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "claude: Focused on refining development tooling by opening two pull requests, ethereum-optimism/optimism#22341 and ethereum-optimism/optimism#22340, to enhance the `justfile` for build processes, demonstrating an emphasis on bug fixes and testing within their code changes."
     },
     {
       "username": "ajsutton",
@@ -83,7 +93,7 @@
       "issueScore": 0,
       "reviewScore": 10,
       "commentScore": 0,
-      "summary": null
+      "summary": "ajsutton: Focused on enhancing code quality and reliability through extensive testing efforts, modifying 32 files with a net addition of 344 lines of code, and provided two approvals on pull requests."
     },
     {
       "username": "swiftnodes",
@@ -93,7 +103,7 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "swiftnodes: Focused on documentation, submitting a PR to add SwiftNodes to the RPC provider directory in ethereum-optimism/optimism#22339, which involved modifying 1 file with 8 additions."
     },
     {
       "username": "wwared",
@@ -103,11 +113,11 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
+      "summary": "wwared: Focused on addressing a testing issue, opening a pull request in ethereum-optimism/optimism (#22338) to fix a local action test recipe."
     }
   ],
   "newPRs": 4,
-  "mergedPRs": 0,
+  "mergedPRs": 1,
   "newIssues": 0,
   "closedIssues": 0,
   "activeContributors": 5
