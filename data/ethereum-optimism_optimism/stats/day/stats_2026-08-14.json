@@ -1,0 +1,373 @@
+{
+  "interval": {
+    "intervalStart": "2026-08-14T00:00:00.000Z",
+    "intervalEnd": "2026-08-15T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-08-14 to 2026-08-15, ethereum-optimism/optimism had 13 new PRs (9 merged), 2 new issues, and 21 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABMziGxQ",
+      "title": "kona-node: derive L2BlockInfo and SystemConfig without fetching full L2 blocks",
+      "author": "sebastianst",
+      "number": 22432,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nDeriving an `L2BlockInfo` (op-node: `eth.L2BlockRef`) or a `SystemConfig` from an L2 block needs only a handful of header fields plus the block's **first** transaction — the L1-info deposit. Both kona and op-node instead fetch the entire block (`eth_getBlockByX(id, fullTx=true)`) and discard every transaction but the first. On busy chains that wastes the overwhelming majority of the bytes and decode time, on hot paths.\n\nkona already has the minimal constructor — [`L2BlockInfo::from_header_and_first_tx`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/protocol/protocol/src/block.rs#L233), added in #21737 — but only the fault-proof driver uses it. Every RPC-backed path calls `.full()`.\n\nThis issue covers kona; op-node is a follow-up (see below).\n\n## What is actually needed\n\n- `L2BlockInfo`: `hash`, `number`, `parent_hash`, `timestamp` from the header, plus the L1-info deposit's calldata ([`from_block_info_and_first_tx`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/protocol/protocol/src/block.rs#L185)).\n- `SystemConfig`: additionally `gas_limit` and `extra_data` from the header — still nothing beyond the first transaction ([`to_system_config`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/protocol/protocol/src/utils.rs#L16)).\n\n## kona sites\n\n| Site | Today | Needs |\n| --- | --- | --- |\n| [`AlloyL2ChainProvider::block_info_by_id`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/providers/providers-alloy/src/l2_chain_provider.rs#L104) | `get_block_by_{number,hash}(..).full()` | header + first tx (also bypasses the LRU entirely) |\n| [`AlloyL2ChainProvider::block_by_number`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/providers/providers-alloy/src/l2_chain_provider.rs#L230) | `.full()`, LRU of 1024 whole `OpBlock`s | full block only for the span-batch overlap check |\n| ↳ [`l2_block_info_by_number`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/providers/providers-alloy/src/l2_chain_provider.rs#L221) | via `block_by_number` | header + first tx |\n| ↳ [`system_config_by_number`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/providers/providers-alloy/src/l2_chain_provider.rs#L259) | via `block_by_number` | header + first tx |\n| [`OpEngineClient::l2_block_info_by_label`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/client.rs#L237) | `.full()` | **dead code** — no non-test callers; delete |\n| Sync start walk-back: [`sync/mod.rs#L65`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/sync/mod.rs#L65), [`#L105`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/sync/mod.rs#L105), [`forkchoice.rs#L55`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/sync/forkchoice.rs#L55), [`#L91`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/sync/forkchoice.rs#L91) | one `.full()` per block walked back — can span a sequencing window | header + first tx |\n| [`ConsolidateTask::consolidate`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs#L169) | `.full()` for both input variants | full block only for `ConsolidateInput::Attributes` (`AttributesMatch::check`); the `BlockInfo` variant only compares the header hash |\n| [`FinalizeTask`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs#L53) | `.full()` | header + first tx |\n| [`EngineQueries::OutputAtBlock`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/query.rs#L87) | `.full()` | legitimate — the full block *is* the RPC response. Its [comment](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/engine/src/query.rs#L90-L92) already flags the problem |\n\n**The hot one** is `system_config_by_number`: [`StatefulAttributesBuilder::prepare_payload_attributes`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/protocol/derive/src/attributes/stateful.rs#L96) calls it for the parent of **every** derived L2 block. Consecutive calls target consecutive parents, so the LRU misses at the leading edge — one full-block fetch per derived block, in both the derivation and sequencer paths.\n\nRelated: [`create_attributes_builder`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/service/src/service/node.rs#L171) and [`create_pipeline`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/node/service/src/service/node.rs#L194) each construct their own `AlloyL2ChainProvider`, so the caches are disjoint and the same block can be fetched twice.\n\n## Proposed fix\n\n1. A minimal-fetch helper issuing `eth_getBlockByX(id, false)` + `eth_getTransactionByBlockXAndIndex(id, 0)` in one batched JSON-RPC round trip (alloy `RpcClient::new_batch()`), returning the sealed header and the raw first tx — feeding the existing `L2BlockInfo::from_header_and_first_tx`.\n   - By-hash is consistent by construction.\n   - By-number/by-label need an optimistic consistency check (`header.transactions[0] == tx.hash`) with a tx-only refetch by resolved block hash on mismatch (rare: reorg / new-head race).\n2. A `SystemConfig` equivalent of `from_header_and_first_tx` — `to_system_config` currently takes `&OpBlock`.\n3. Route the sites above through it. Keep `.full()` only where the transaction list is genuinely consumed: span-batch overlap validation, `AttributesMatch::check`, `OutputAtBlock`.\n4. Delete `EngineClient::l2_block_info_by_label`.\n\n`trust_rpc` is unaffected: [`verify_block_hash`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/providers/providers-alloy/src/l2_chain_provider.rs#L82) only compares the returned header hash against the requested one — no transaction-root verification is lost.\n\n## op-node (follow-up)\n\n`L2Client.L2BlockRefBy{Label,Number,Hash}` and `SystemConfigByL2Hash` ([`l2_client.go#L110-L172`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/op-service/sources/l2_client.go#L110-L172)) go through `PayloadBy*`, i.e. `eth_getBlockByX(id, true)`. #20532 implemented the minimal-fetch path but was closed; #20264 has since reworked the client fetching code, so it needs adapting rather than rebasing.\n\nNote the structural difference: kona's engine keeps `L2BlockInfo` for all five heads in memory and derives new refs from the payload it just built (`from_payload_and_genesis`), so it has no equivalent of op-node's `L2BlockRefByHash`-on-FCU hot path. Conversely the attributes-builder path is worse in kona, which caches whole blocks where op-node caches the derived `SystemConfig`.\n\n## Deferred / non-goals\n\n- **L1 side.** [`AlloyChainProvider::header_by_hash`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/providers/providers-alloy/src/chain_provider.rs#L155) and [`block_info_by_number`](https://github.com/ethereum-optimism/optimism/blob/ab4abcb7dde289aa11563cfb4f9b7b491f6cd205/rust/kona/crates/providers/providers-alloy/src/chain_provider.rs#L185) already fetch with `fullTx=false`, but still transfer the whole tx-hash list (~6–13 KB for a mainnet L1 block) to read a ~600-byte header. `eth_getHeaderBy*` would fix it but is non-standard across RPC providers, and op-node does the same thing today.\n- Multi-block batching for the sync-start walk-back.\n- Sharing one `AlloyL2ChainProvider` between the pipeline and the attributes builder.\n\n## Tasks\n\n- [ ] kona: minimal-fetch path + dead-code removal (this issue)\n- [ ] op-node: adapt #20532 to the post-#20264 `op-service/sources`\n\n🤖 *Co-created with Claude Opus 5*\n",
+      "createdAt": "2026-08-14T17:49:59Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABMw0Qxg",
+      "title": "circleci: Add alerts if develop-tagged images are out of date due to CI workflows not running",
+      "author": "wwared",
+      "number": 22428,
+      "repository": "ethereum-optimism/optimism",
+      "body": "In #22421, it was noticed that the `kona-publish-prestates` job has not been running for an extended amount of time. This should be something we could have detected earlier with an external slack/grafana alert, checking if the latest develop images that we expect to be published by CI workflows on develop pushes, are out of date or not.\n\nWe should make sure to add freshness alerts for all develop-tracking images published by CI workflows, and alert if the latest pushed image is falling behind the current develop head commit.",
+      "createdAt": "2026-08-14T12:12:28Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM76v50i",
+      "title": "rust: update reth dep to d7d34e7",
+      "author": "bitwiseguy",
+      "number": 22243,
+      "body": "## Description\n\nPins the monorepo reth dependencies to `d7d34e7`, the commit from [reth#26585](https://github.com/paradigmxyz/reth/pull/26585).\n\nThis exposes `PayloadStateRootHandle::take_state_root_rx`, allowing downstream consumers to apply custom timeout handling without spawning a dedicated waiter thread.\n\nThe target commit is a direct child of the previous `f2eecc6` pin, so no shared `revm`/`alloy` updates or production-code adaptations are required. All reth-dependent manifests and lockfiles are updated together.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-04T20:23:44Z",
+      "mergedAt": null,
+      "additions": 469,
+      "deletions": 469
+    },
+    {
+      "id": "PR_kwDODjvEJM7yGcEu",
+      "title": "fix(alloy-op-evm): discard SDM warming on rejected candidates",
+      "author": "nonsense",
+      "number": 21800,
+      "body": "## Overview\n\n- restore SDM block-warming state when a producer candidate fails state validation\n- share the rollback path for rejected and executed-but-declined candidates\n- add regression coverage for nonce, insufficient-funds, and inspected-vs-plain execution paths\n\n## Tests\n\n- `cd rust && cargo nextest run --package alloy-op-evm`\n- `cd rust && cargo clippy --package alloy-op-evm --all-targets --all-features -- -D warnings`\n- `cd rust && cargo check --package alloy-op-evm --no-default-features`\n\nReplaces #21794 (was opened from a fork, which prevents CI from starting).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-15T15:42:36Z",
+      "mergedAt": null,
+      "additions": 294,
+      "deletions": 31
+    },
+    {
+      "id": "PR_kwDODjvEJM7-uiNr",
+      "title": "docs: migrate flashblocks -> subblocks",
+      "author": "bitwiseguy",
+      "number": 22417,
+      "body": "## Summary\r\n\r\nRenames Flashblocks to Subblocks across the docs, updates 250 ms to 200 ms.\r\n\r\n| File | Change |\r\n|---|---|\r\n| `op-stack/features/subblocks.mdx` | Renamed from `flashblocks.mdx` and rewritten. Sidecar-free architecture, payload/zeroed-field table, corrected FAQ. The long-lived page the issue asked for |\r\n| `chain-operators/guides/features/flashblocks-guide.mdx` | Opens with a zero-support warning and the OP Enterprise migration path. All setup steps preserved. Keeps its path — it documents the Flashblocks stack, which keeps that name |\r\n| `app-developers/.../integrating-subblocks.mdx` | Renamed. `--flashblocks-url` self-host path replaces the `base/node-reth` pointer. Dropped the `eth_estimateGas(\"pending\")` entry — that isn't how estimation works |\r\n| `app-developers/.../subblocks-and-gas-usage.mdx` | Renamed. Gas table recut for a 200 ms interval. Every `op-rbuilder` reference replaced — that component isn't in the path under subblocks |\r\n| `node-operators/.../execution-clients.mdx` | New Subblocks section: `--flashblocks-url` for RPC nodes, and why an ordinary node leaves `--flashblock-consensus` unset |\r\n| 4 finality / network-info / fact-sheet pages | Terminology, 250 ms → 200 ms, link retargeting |\r\n| `docs.json` | 3 nav updates, 7 redirect destinations retargeted, 3 new redirects |\r\n| `notices/subblocks.mdx` | Link retargeting only, so #22383's notice doesn't point at moved pages |\r\n\r\n## Related Issues:\r\n* Closes https://github.com/ethereum-optimism/core-team/issues/2809\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-13T17:54:48Z",
+      "mergedAt": "2026-08-14T20:37:27Z",
+      "additions": 282,
+      "deletions": 328
+    },
+    {
+      "id": "PR_kwDODjvEJM7w4gxc",
+      "title": "fix(op-reth): reserve Isthmus operator fee in tx-pool balance check",
+      "author": "PrazwalR",
+      "number": 21718,
+      "body": "## Description\n\nFixes #21608.\n\n`OpTransactionValidator::apply_op_checks` reserved only the **L1 data fee** on top of the intrinsic tx cost when checking sender balance at pool admission. Post-Isthmus, execution additionally charges the **operator fee** up front from the sender's balance, sized by the tx gas limit (`L1BlockInfo::tx_cost` → `operator_fee_charge`, gated on `spec.is_enabled_in(ISTHMUS)`). A sender funded for `gas × maxFee + value + L1 data fee` but not the operator fee was therefore admitted to the pool and propagated, but the tx could never execute — wasted pool space and propagation bandwidth, and an admission-parity gap vs op-geth, whose pool does charge it (`NewOperatorCostFunc` / `TotalTxCost` in `core/txpool/validation.go`).\n\n## Changes\n\n- `apply_op_checks`: when Isthmus is active at the tracked block timestamp **and** both operator fee params are present, add `operator_fee_charge(&encoded, U256::from(gas_limit), spec)` to the reserved cost. The spec is derived per-timestamp via `revm_spec_by_timestamp_after_bedrock`, so the Jovian formula change is handled automatically.\n- The params-present guard is load-bearing: `operator_fee_charge` panics (`.expect()`) on unset params, which is the validator's state before the first post-Isthmus L1-info block is tracked (e.g. boot at genesis). In that window no fee is reserved, matching current behavior until the first block updates the tracked info.\n- Gas limit is the worst-case charge, matching op-geth's `tx.Gas()` and execution's upfront deduction exactly.\n\nScope: pool admission only — no block-validation, execution, or state-root change. The sibling admission gap (#21546, missing `EffectiveGasLimit` / `l1InfoGasOverhead` reservation) is intentionally not bundled.\n\n## Tests\n\nThree new unit tests in `validator.rs` (in-module, to seed the tracked `L1BlockInfo` operator fee params):\n\n- `operator_fee_short_balance_is_rejected` — balance one wei short of `cost + operator_fee` → rejected with insufficient funds. Fails without the fix (tx is admitted), passes with it.\n- `operator_fee_covered_balance_is_accepted` — exact balance → valid.\n- `missing_operator_fee_params_do_not_panic_or_reserve` — post-Isthmus timestamp with untracked params → no panic, tx accepted.\n\nVerified locally: `cargo test -p reth-optimism-txpool -p reth-optimism-primitives --all-features` (59 + 27 passed), rustfmt (pinned nightly) clean, `cargo clippy --all-features --all-targets -- -D warnings` clean on both crates.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-13T03:18:32Z",
+      "mergedAt": null,
+      "additions": 184,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDODjvEJM7-3tHB",
+      "title": "docs: add StandardValidator reviewer agent",
+      "author": "claude",
+      "number": 22420,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Adrian Sutton** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1786659848484799)_\n\n## Before\n\nNothing in the repo systematically looks for checks `StandardValidator` *should* make but doesn't. Gaps surface either when feature work happens to touch the validator, or when an auditor finds them — U19 turned up nine.\n\n## After\n\nA reviewer agent with documented criteria and three concrete techniques: cross-game symmetry (compare what each dispute-game path actually asserts, resolved through the shared helpers — the error-code suffixes collide across game types, so a string-level diff gives false negatives on the ZK path), diff-driven review (what does a change to a validated contract imply the validator should now assert), and read-versus-assert coverage.\n\nThe criteria also carry the parts that make such a review useful rather than noisy: the false-positive traps to clear first (pass-through getters, immutables already pinned by an implementation-address check, composite values), and the U19 outcome — most \"expected constant never asserted\" findings were declined — so findings must justify their bytecode cost against the EIP-170 budget.\n\n## How\n\n`docs/ai/standard-validator-review.md` holds the criteria; `.claude/agents/standard-validator-reviewer.md` is a thin wrapper that reads and executes it, matching the existing `ci-config-reviewer` / `reth-update-reviewer` pairs. Indexed in `AGENTS.md`.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-14T00:55:12Z",
+      "mergedAt": null,
+      "additions": 166,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 625,
+    "deletions": 397,
+    "files": 27,
+    "commitCount": 40
+  },
+  "completedItems": [
+    {
+      "title": "kona-tests: fix local action test recipe",
+      "prNumber": 22338,
+      "type": "bugfix",
+      "body": "Fix the local `action-tests-single` recipe to build and locate `kona-host` in the unified Rust workspace.\n\nTested from both `rust/kona` and `rust/kona/tests` with `TestSimpleEmptyChain`.",
+      "files": [
+        "rust/kona/tests/justfile"
+      ]
+    },
+    {
+      "title": "docs: add subblocks notice",
+      "prNumber": 22383,
+      "type": "docs",
+      "body": "## Summary\n\nNew notice announcing the flashblocks → subblocks evolution: the subblock interval drops from 250 ms to 200 ms, and four stream payload fields are set to their zero value. Rolling out to OP Sepolia on Aug 14 and OP Mainnet on Au",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/notices/index.mdx",
+        "docs/public-docs/notices/subblocks.mdx"
+      ]
+    },
+    {
+      "title": "op-reth: add subblocks CLI flag aliases",
+      "prNumber": 22431,
+      "type": "other",
+      "body": "Adds --subblocks-url and --subblocks-consensus aliases for op-reth's existing Flashblocks flags. Existing flag names remain supported, and a parser test covers using both new aliases together.\n\nTested with targeted nextest and Rust formatti",
+      "files": [
+        "rust/op-reth/crates/node/src/args.rs"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests: cover ZK challenger recovery paths",
+      "prNumber": 22430,
+      "type": "tests",
+      "body": "Adds acceptance coverage for two previously uncovered ZK challenger paths:\r\n\r\n- The challenger’s super-root RPC times out, retries, then challenges an invalid proposal after the source recovers.\r\n- A multichain proposal corrupted only on Ch",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/honest_challenger_test.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/singlechain_interop_no_supernode_from_runtime.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/stallable_proxy.go"
+      ]
+    },
+    {
+      "title": "ci: bump apko factory pin to restore version stamping",
+      "prNumber": 22426,
+      "type": "other",
+      "body": "Points the apko workflows at factory `103d850` (ethereum-optimism/factory#57), which restores the `--env-file` metadata pass so `GIT_VERSION`/`GIT_COMMIT`/`GIT_DATE` reach the melange sandbox. Fixes apko release images stamped `v0.0.0-unkno",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    },
+    {
+      "title": "mise: Add protoc",
+      "prNumber": 22423,
+      "type": "other",
+      "body": "`cargo build` on the Rust workspace fails on a clean machine: prost-build shells out to `protoc` while building `sp1-prover-types`, and errors out when it is missing, telling the developer to `apt-get install protobuf-compiler` by hand.\n\nCI",
+      "files": [
+        "mise.toml"
+      ]
+    },
+    {
+      "title": "rust: Fix cargo-deny sources and advisories",
+      "prNumber": 22422,
+      "type": "bugfix",
+      "body": "`cargo deny check` currently fails with `advisories FAILED, sources FAILED`. It has not run anywhere since 2026-06-05, so the failures accumulated unnoticed — see #22421 for why the job stopped running.\n\n**sources** (105 errors, one cause):",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/deny.toml"
+      ]
+    },
+    {
+      "title": "docs: migrate flashblocks -> subblocks",
+      "prNumber": 22417,
+      "type": "docs",
+      "body": "## Summary\r\n\r\nRenames Flashblocks to Subblocks across the docs, updates 250 ms to 200 ms.\r\n\r\n| File | Change |\r\n|---|---|\r\n| `op-stack/features/subblocks.mdx` | Renamed from `flashblocks.mdx` and rewritten. Sidecar-free architecture, payloa",
+      "files": [
+        "docs/public-docs/app-developers/guides/transactions/integrating-subblocks.mdx",
+        "docs/public-docs/app-developers/guides/transactions/subblocks-and-gas-usage.mdx",
+        "docs/public-docs/chain-operators/guides/features/flashblocks-guide.mdx",
+        "docs/public-docs/chain-operators/guides/features/subblocks-guide.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/node-operators/guides/configuration/execution-clients.mdx",
+        "docs/public-docs/notices/subblocks.mdx",
+        "docs/public-docs/op-mainnet/network-information/connecting-to-op.mdx",
+        "docs/public-docs/op-mainnet/network-information/transaction-finality.mdx",
+        "docs/public-docs/op-stack/features/flashblocks.mdx",
+        "docs/public-docs/op-stack/features/subblocks.mdx",
+        "docs/public-docs/op-stack/introduction/fact-sheet.mdx",
+        "docs/public-docs/op-stack/transactions/transaction-finality.mdx"
+      ]
+    },
+    {
+      "title": "docs: Note that Upgrade 20 clears the SystemConfig overhead value",
+      "prNumber": 22413,
+      "type": "docs",
+      "body": "The U20 notice said the stored `overhead` value \"does not change during the upgrade\". The `SystemConfig` reinitializer writes `overhead = 0`, so an ordinary U20 upgrade clears any legacy nonzero value.\n\nUpdate the notice to state that `over",
+      "files": [
+        "docs/public-docs/notices/upgrade-20.mdx"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 79.52129522128904,
+      "prScore": 79.08329522128903,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 68.44434315684042,
+      "prScore": 68.44434315684042,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 53.7,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 51.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 53.34591843300217,
+      "prScore": 43.34591843300217,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 50.92681986512501,
+      "prScore": 41.42681986512501,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 31.893588051285533,
+      "prScore": 31.893588051285533,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
+      "totalScore": 31.537870453239158,
+      "prScore": 31.33787045323916,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 21.22602104473326,
+      "prScore": 21.22602104473326,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 18.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 12.315319181170905,
+      "prScore": 11.975319181170905,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 2.44,
+      "prScore": 0,
+      "issueScore": 2.1,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    }
+  ],
+  "newPRs": 13,
+  "mergedPRs": 9,
+  "newIssues": 2,
+  "closedIssues": 0,
+  "activeContributors": 21
+}
