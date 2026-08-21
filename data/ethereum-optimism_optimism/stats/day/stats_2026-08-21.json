@@ -1,0 +1,580 @@
+{
+  "interval": {
+    "intervalStart": "2026-08-21T00:00:00.000Z",
+    "intervalEnd": "2026-08-22T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-08-21 to 2026-08-22, ethereum-optimism/optimism had 40 new PRs (12 merged), 7 new issues, and 24 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABNwxOrA",
+      "title": "op-supernode: observations from mirroring its behaviour in lokahi",
+      "author": "claude",
+      "number": 22636,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Found while working on #22547.\n\nlokahi mirrors op-supernode's functional behaviour by instruction. Doing that closely surfaced places where the behaviour we copied may not be what was intended. This is a record for later triage, not a report of anything blocking us — lokahi matches op-supernode in every case below, or documents where it cannot yet.\n\nSeven candidates were checked against the code. Five are below; two were dropped and are listed at the end with the reason.\n\n## 1. An interop activation override skips the cross-chain consistency checks, silently\n\n`resolveInteropActivationTimestamp` returns the override before reading any rollup config — `op-supernode/supernode/supernode.go:164-167`:\n\n```go\nfunc resolveInteropActivationTimestamp(override *uint64, vnCfgs map[eth.ChainID]*opnodecfg.Config) (*uint64, error) {\n\tif override != nil {\n\t\treturn override, nil\n\t}\n```\n\nThe three \"one supernode verifies one interop cluster\" errors in that function are therefore on the no-override path only: a chain with no Lagoon time alongside one that has it (`:180`, `:190`), and mismatched Lagoon times (`:201`). Nothing is logged. A chain set the scheduled path would refuse is accepted under `--interop.activation-timestamp`.\n\nlokahi mirrors the skip — the override wins and the forks are not consulted — but logs at INFO for each chain whose scheduled Lagoon time disagrees with it (`rust/lokahi/src/interop/mod.rs:130-153`). lokahi first required the override to agree with any scheduled Lagoon time and had to stop: the devstack presets that pass an override schedule Lagoon well after it, and `TestInteropFaultProofs_ActivationBoundary`, `_PreForkActivation` and `TestPostInbox` all fail under that rule, which op-supernode passes.\n\nOpen question: is skipping those checks under an override intended, or should the override be validated against the schedules — or at least warn when they disagree?\n\n## 2. The invalidated-output deny list has opposite failure postures at its two call sites\n\nSame read, same error, opposite decisions.\n\nFails **open** — `op-node/rollup/engine/payload_process.go:61-67`: on a read error, logs `\"Failed to check SuperAuthority denylist, proceeding with payload\"` and inserts the payload.\n\nFails **closed** — `op-node/rollup/attributes/attributes.go:240-248`: on the same error, emits `EngineTemporaryErrorEvent` and returns without promoting or reorging, with the reasoning inline (\"without a deny-list result we cannot promote the block, and we must not reorg either\").\n\nBoth are explicit and both are logged, so this reads as considered rather than accidental. The consequences differ: the first inserts a block that may be denied, the second stalls consolidation until the next poke.\n\nlokahi has no deny-list gate on the insert path yet, so there is nothing to diverge — the invalidated-output archive exists (`rust/lokahi-interop/src/archive.rs`) but the engine-side gate does not.\n\nOpen question: is the asymmetry the intended read of the two different consequences, or has one site drifted from the other?\n\n## 3. A missing invalidated-output archive entry is silent\n\n`OptimisticOutputAtTimestamp` (`op-supernode/supernode/chain_container/chain_container.go:668-684`) consults the deny list and falls through to the current canonical output when it finds nothing:\n\n```go\n\tif outV0 != nil {\n\t\treturn outV0, nil\n\t}\n\t...\n\treturn c.OutputV0AtBlockNumber(ctx, blockNum)\n```\n\n`LastDeniedOutputV0` returns `(nil, nil)` for \"no entry at this height\" (`chain_container/invalidation.go:152-182`) — the same answer for \"nothing was invalidated here\" and \"the record of an invalidation is gone\". Read *errors* fail the call and are wrapped (`chain_container.go:676-678`); an absent entry produces no error and no log.\n\nWhere an entry is expected and absent, the replacement block's output is served as the optimistic output, through `buildOptimisticBranch` (`op-supernode/supernode/activity/superroot/superroot.go:120`) into `SuperRootAtTimestamp` — a well-formed but incorrect superroot, handed to op-proposer and op-challenger for the whole fault-dispute window. That silence is the part worth raising; contrast item 2, where read errors are explicit at both sites.\n\nlokahi's archive returns `Option` from its lookups and states the fallthrough as the thing a caller must not do (`rust/lokahi-interop/src/archive.rs:11-14`). Where lokahi has no archive yet it says so and reports the canonical output, matching op-supernode (`rust/lokahi/src/query/chain.rs:119-125`).\n\nOpen question: should a miss at a height believed invalidated be distinguishable from a legitimately absent entry — if only by a log line?\n\n## 4. Non-zero padding in the executing-message identifier is a validity difference from kona\n\n`Message.DecodeEvent` rejects non-zero padding in the 256-bit identifier fields (`op-core/interop/messages/messages.go:96-109`): a block number above 2^64, a log index above 2^32 or a timestamp above 2^64 fails to decode.\n\nTwo op-supernode call sites discard that error, so such a log is indexed as an ordinary log rather than as an executing message:\n\n- `op-supernode/supernode/activity/interop/logdb.go:239` — `execMsg, _ := messages.DecodeExecutingMessageLog(l)`\n- `op-supernode/supernode/activity/interop/verification_view.go:78` — `if execMsg, err := messages.DecodeExecutingMessageLog(entry); err == nil && execMsg != nil`\n\nop-interop-filter does the opposite with the same decoder: `filter/logsdb_chain_ingester.go:841-843` wraps it as `ErrInvalidLog` and fails the block.\n\nkona accepts the full 256-bit fields — `MessageIdentifier` declares `blockNumber`, `logIndex` and `timestamp` as `uint256` and ABI-decodes them with no padding check (`rust/kona/crates/protocol/interop/src/message.rs:17-24`).\n\nNo real block can carry fields that wide, so the two agree in practice. It is still a validity rule that differs between two implementations of the same spec, not a stylistic difference — and within Go the same decode error is fatal in one component and ignored in another.\n\nlokahi narrowed to Go's behaviour rather than inventing a third: the identifier is `try_from`'d into u64/u32/u64 and a message that does not fit is dropped (`rust/lokahi-interop/src/verify.rs:253-266`).\n\nOpen question: which is the rule — reject the wide log, or accept it? And should the two Go postures on the same error agree?\n\n## 5. op-test-sequencer: nil ensemble in `config.Ensemble.Start`'s cleanup\n\nFor the record, and to explain a measurement distortion. A fix is already up as #22631, so nothing is being asked for here.\n\n`config.Ensemble.Start` names its first result `ensemble` and defers a cleanup that closes it on failure (`op-test-sequencer/sequencer/backend/work/config/static.go:37-46`). Every error path returns `nil, err` (`:51`, `:54`, `:57`, `:60`, `:63`), writing nil into the named result before the defer runs, so the cleanup calls `Close` on a nil `*work.Ensemble` and panics in `work.(*Ensemble).Close` (`op-test-sequencer/sequencer/backend/work/ensemble.go:48-51`) — and the services already started are never closed.\n\nA panic in teardown takes down the whole test binary, not just the failing test. Measured on the interop acceptance suites: 41 result rows lost outright and a run reporting ~345 results where a complete run reports 793. It also hid the real failure (a missing `optimism_dependencySet`) underneath the panic. This distorted several of our own measurements before it was diagnosed, which is why it is recorded alongside the rest.\n\n## Checked and dropped\n\n**`safeHeadAtL1Block` over-reporting safety after a reset.** Two of the three sub-claims do not hold in the Go code: engine-confirmed resets *do* truncate the record — `onEngineConfirmedReset` calls `SafeHeadReset` (`op-node/rollup/driver/sync_deriver.go:198-200`), which deletes entries from the rewound head forward (`op-node/node/safedb/safedb.go:125-177`) — and there is no \"delegate mode\" in the Go safedb that records nothing. The remaining claim, that the rewound head is paired with an earlier L1 block than the one that made it safe, is not what the code does: `SafeHeadReset` rewrites the earliest entry whose recorded head reached that height, and explicitly declines to record anything when the reset lands before the first entry (`safedb.go:160-168`). The observation came from reviewing an unmerged Rust PR rather than from shipped Go behaviour, so it is dropped here.\n\n**op-node taking the sequencer p2p key as a hex flag with no file-path option.** Not a rough edge — a documented choice. `LoadSignerSetup` gives the reasoning inline: \"Unencrypted keys from file are bad because they are easy to leak (and we are not checking file permissions)\" (`op-node/p2p/cli/load_signer.go:24-25`), and `--signer.*` is the supported alternative to an inline key.\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_\n",
+      "createdAt": "2026-08-21T22:00:34Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABNwmxZg",
+      "title": "flaky test: `TestSDMActivatesAtLagoonBoundary`",
+      "author": "wwared",
+      "number": 22630,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Reporting a timing-dependent acceptance-test failure.\n\n**Failed CI job:** https://circleci.com/gh/ethereum-optimism/optimism/5502808\n**Date:** 2026-08-21\n**Test:** `TestSDMActivatesAtLagoonBoundary`\n**Job:** `memory-all-opn-op-reth-fusaka`\n\nEncountered while working on ethereum-optimism/optimism#22604. That PR changes only Kona Rust code and dependencies.\n\n**Failure:**\n\n```text\nop-acceptance-tests/tests/sdm/boundary_test.go:78\nError: Should be false\nTest: TestSDMActivatesAtLagoonBoundary\nMessages: Lagoon must not be active yet at the start of the boundary test\n```\n\n**Observed timeline:**\n\n- The test schedules Lagoon 30 seconds after L2 genesis (`boundaryLagoonOffset = 30`).\n- The failing run logged L2 genesis time `1787326838` and Lagoon time `1787326868`.\n- Before the assertion ran, the sequencer produced block 15 with timestamp `1787326868`, exactly the Lagoon activation timestamp.\n- `L2Network.IsForkActive` checks the current unsafe-head timestamp, so the assertion correctly observed Lagoon as active after setup consumed the full 30-second runway.\n\nThe same job passed all eight shards on the preceding PR commit: https://circleci.com/gh/ethereum-optimism/optimism/5502368. This makes setup/runtime scheduling the non-deterministic variable rather than the Kona Rust diff.\n\nCircleCI Insights did not yet return a record for this test when the issue was filed.",
+      "createdAt": "2026-08-21T21:33:44Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABMIIJAg",
+      "title": "kona-node: crash loop on Consolidate(SealTaskFailed(UnsafeHeadChangedSinceBuild)) during deep catch-up",
+      "author": "einar-oplabs",
+      "number": 22342,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWhile re-deriving a large backlog behind a fast-moving unsafe tip, kona-node repeatedly exits with:\n\n```\nCritical error in sub-routine: EngineTask(Consolidate(SealTaskFailed(UnsafeHeadChangedSinceBuild)))\nFailed to start rollup node service: EngineTask(Consolidate(SealTaskFailed(UnsafeHeadChangedSinceBuild)))\n```\n\nThe error is treated as fatal, so the node crash-loops instead of retrying the seal/consolidation — on our network it restarted **~140 times over ~1.5 days (~every 5 minutes)** and then self-resolved the moment derivation caught up with the tip.\n\n## Environment / repro\n\n- `sdm-net-0` SSD devnet (chain 420120183, Sepolia L1, 1s block time), kona-node **v1.6.1-rc.3** as validator CL (`sync-2`, snapsync node)\n- The node had ~350k blocks of safe-head backlog (it was down ~14h during an unrelated incident, then re-derived from genesis)\n- With a 1s block time the unsafe head advances during every consolidation attempt, so the `UnsafeHeadChangedSinceBuild` race window is effectively permanent until caught up\n- Crash-looped from 2026-08-07 ~afternoon until catch-up completed (~2026-08-08 early morning), then stable; zero occurrences since\n- A twin kona node on the same network (`rpc-2`, archive) went through the same catch-up earlier without hitting the loop, so timing-dependent\n- Notable: the chain carries SDM/PostExec (`0x7d`) transactions post-Lagoon; kona consolidated those blocks fine once past the race (safe head advanced through the rebate blocks), so this does **not** appear PostExec-related — it's a liveness/resilience issue in the engine's consolidate seal task\n\n## Expected\n\nA seal task losing the race against a new unsafe head is an ordinary condition on 1s-block chains and should be retried within the engine task loop (or trigger a pipeline step re-run), not bubble up as a critical error that exits the node. Each crash-restart also discards warm state, making catch-up slower and the window longer.\n\nFull logs and the live network are available on request (context: #proj-sdm, optimism#21273).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-08-10T09:46:13Z",
+      "closedAt": "2026-08-21T08:01:50Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABNwaAXg",
+      "title": "op-node,kona: retain Holocene span batches while validity is undecided",
+      "author": "sebastianst",
+      "number": 22629,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Problem\n\nThe Holocene span-batch stages consume a span batch before checking it, then return `NotEnoughData` when validation returns `BatchUndecided` without retaining the batch for another attempt:\n\n- op-node pulls from the previous stage before validation, then skips an undecided span: https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/op-node/rollup/derive/batch_stage.go#L120-L153\n- kona does the same in `BatchStream`: https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/rust/kona/crates/protocol/derive/src/stages/batch/batch_stream.rs#L135-L191\n\n`BatchUndecided` covers both insufficient L1 context and local L2 fetch failures. Current return sites include:\n\n- missing or incomplete L1 origin context in op-node: https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/op-node/rollup/derive/batches.go#L218-L230 and https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/op-node/rollup/derive/batches.go#L297-L312\n- parent lookup failure in op-node: https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/op-node/rollup/derive/batches.go#L257-L277\n- overlap payload lookup failure in op-node: https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/op-node/rollup/derive/batches.go#L439-L450\n- the equivalent kona prefix paths: https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/rust/kona/crates/protocol/protocol/src/batch/span.rs#L614-L643 and https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/rust/kona/crates/protocol/protocol/src/batch/span.rs#L682-L710\n- the equivalent kona overlap lookup: https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/rust/kona/crates/protocol/protocol/src/batch/span.rs#L542-L559\n\nThe pre-Holocene op-node `BatchQueue` instead retains the undecided batch and all later batches for retry: https://github.com/ethereum-optimism/optimism/blob/7c35c5c3e1e1e5defabbd16f70262372c394a167/op-node/rollup/derive/batch_queue.go#L184-L192\n\nPR #22215 made this pre-existing lifecycle bug easier to hit by adding one payload lookup per overlapped block. Public discussion: https://github.com/ethereum-optimism/optimism/pull/22215#issuecomment-5219543793\n\n## Impact\n\nA temporary local fetch failure or temporarily incomplete context can cause one node to skip a valid span batch while another accepts it. The resulting local safe-chain split persists until pipeline replay or restart recovers the batch from L1. Authenticated fault-proof execution is unaffected when the required oracle data is available, but node availability and cross-client consistency are degraded.\n\n## Expected behavior\n\nRetain the in-flight Holocene span batch while validity is `BatchUndecided`, then retry the same batch when the missing context or fetch result becomes available. Mirror the pending-slot lifecycle in op-node and kona. `BatchDrop`, `BatchPast`, and accepted-span behavior must remain unchanged.\n\n## Acceptance criteria\n\n- op-node and kona retain and retry the same Holocene span batch after every `BatchUndecided` return path.\n- A transient parent-block lookup failure succeeds on retry without replaying the whole pipeline.\n- A transient overlap-payload lookup failure succeeds on retry without replaying the whole pipeline.\n- Insufficient L1-origin context retries once the required origin enters view.\n- Permanent invalidity discovered after an undecided attempt still drops the whole span/channel as required.\n- Equivalent fault-injection tests pin the lifecycle in both clients.\n\n🤖 *Co-created with openai-codex/gpt-5.6-sol*",
+      "createdAt": "2026-08-21T21:01:15Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABNvsqnA",
+      "title": "op-devstack: schedule Lagoon on the chains in the interop acceptance presets instead of passing an activation timestamp",
+      "author": "claude",
+      "number": 22625,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of #22547.\n\n## Situation\n\nThe interop acceptance presets configure two things that mean the same thing in two different ways, and only one of them is written into the rollup configs.\n\n`newTwoL2SupernodeRuntimeWithConfig` and `startSingleChainSharedSupernode` in `op-devstack/sysgo/multichain_supernode_runtime.go` compute an interop activation timestamp as `l2ANet.rollupCfg.Genesis.L2Time + delaySeconds` and pass it to the supernode as `InteropActivationTimestamp`. For the two-L2 presets with `delaySeconds > 0` the chains also get `l2Cfg.WithForkAtOffset(opforks.Lagoon, &delaySeconds)`, so the fork and the timestamp agree. For the presets built on `presets.NewSimpleInterop` — the single-chain interop world, and the ZK and dispute-monitor presets layered on it — the chains get no Lagoon time at all, and the activation exists only as that supernode parameter.\n\nThat works for op-supernode, which takes the activation timestamp as its own configuration independent of the rollup configs it hosts. It does not work for lokahi, which reads Lagoon time out of each chain's rollup config, because that is also where the interop message rules it applies read it: a verifier activating somewhere its chains' configs do not would put the verifier and the proof on different rules. Handed rollup configs with `LagoonTime == nil`, lokahi has nothing to activate on and leaves interop off.\n\nMeasured on #22620 by running the acceptance suites against lokahi: this accounted for 22 of 138 failures, e.g. `TestZKDisputeMonitorSkipsLaggedGameUntilRootSourceCatchesUp`.\n\n## What exists now\n\n#22620 gives lokahi an explicit override so it can be configured the way op-supernode already is — an `[interop] activation-timestamp` key, resolved in `rust/lokahi/src/config.rs` and applied in `InteropActor::activation` (`rust/lokahi/src/interop/mod.rs`). It supplies an activation for a chain whose rollup config schedules no Lagoon, and is refused if it disagrees with a fork a chain does schedule. The devstack writes it from the timestamp the preset already computes, in `lokahiConfigFile` (`op-devstack/sysgo/l2_cl_lokahi.go`).\n\nThat unblocks the suites, but it is a bridge: it exists because the presets describe interop activation as a supernode parameter rather than as a property of the chains.\n\n## Proposal\n\nHave those presets schedule the Lagoon hard fork on the chains instead of passing an activation timestamp, so both implementations read the activation from the same place and the override becomes unnecessary.\n\nStarting points:\n\n- `op-devstack/sysgo/multichain_supernode_runtime.go` — `newTwoL2SupernodeRuntimeWithConfig` already does this for `delaySeconds > 0` via `WithForkAtOffset(opforks.Lagoon, &delaySeconds)`; the single-chain path in `startSingleChainSharedSupernode` is the one that does not.\n- `presets.NewSimpleInterop` and the presets layered on it (`presets.WithZK`, the dispute-monitor system in `op-acceptance-tests/tests/proofs/zk/dispute_monitor_test.go`).\n- Worth checking against `WithForkAtGenesis`, which writes Lagoon as `0` while the computed timestamp is the genesis L2 time — the same activation point spelled two ways, so any comparison between the two needs clamping to genesis rather than numeric equality.\n\nOnce the presets carry the fork, the `[interop] activation-timestamp` override and the devstack code that writes it can both be removed.\n\n## Provenance\n\nAdrian Sutton asked for this to be tracked rather than done now: implement the override in lokahi to get the tests passing as they stand, and log an issue to update the tests to set the Lagoon hard fork time instead, for potential follow-up later. This issue is that record — it is not intended to be picked up as part of #22620.\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_\n",
+      "createdAt": "2026-08-21T19:15:43Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABAh04LA",
+      "title": "feat: interop message-expiry refunds (censorship escape hatch for SuperchainETHBridge)",
+      "author": "opsuperchain",
+      "number": 22601,
+      "body": "# feat: interop message-expiry refunds (censorship escape hatch for SuperchainETHBridge)\n\n## Problem\n\nInterop **executing messages cannot be force-included via deposit transactions** — `CrossL2Inbox.validateMessage` requires the message checksum slot to be warm via the tx's EIP-2930 access list, and deposits have no access list (upstream even added an explicit `CrossL2Inbox_NoExecutingDeposits` guard). So the force-inclusion path that normally defeats sequencer censorship does **not** work for interop: if a destination sequencer refuses to relay an executing message, delivery is impossible.\n\nFor `SuperchainETHBridge.sendETH` this strands funds: the ETH is burned into `ETHLiquidity` on the **source** before the message is sent, and only minted on the destination inside `relayETH`. A censored relay means the ETH is burned on A and never minted on B — permanently in flight, with no way for the sender to recover it. Interop ETH therefore lacks the \"always recoverable to the sender\" property that L1↔L2 bridging has.\n\n## Key protocol fact this builds on\n\n`MESSAGE_EXPIRY_WINDOW` (7 days, per-depset configurable) is a **protocol validity rule**, enforced both at cross-safety (op-supernode invalidates heads carrying expired executing messages) and **in the fault proof** (kona's `MessageGraph` forces a deposit-only replacement block). Once a destination chain's clock passes `initiatingTimestamp + window` with the message still unrelayed, **delivery is permanently impossible** — no valid block can ever relay it. This PR turns that permanent fact into a recoverable refund, riding only existing censorship-resistant rails (withdrawals and deposits). It does **not** add any new expiry machinery and does **not** modify `L2ToL2CrossDomainMessenger`.\n\n## Mechanism\n\nFor a message `H` sent A→B that was never relayed on B:\n\n1. **B (attest)** — anyone calls `MessageExpiryRelay.attestUndelivered(H, sourceChainId, minGas)`. The relay checks the local `L2ToL2CrossDomainMessenger.successfulMessages(H) == false` and exports `(H, sourceChainId, block.timestamp)` to the `MessageExpiryHub` on L1 via B's ordinary L2→L1 withdrawal. (This is *not* an executing message, so if B censors it, it is itself force-includable as a deposit.)\n2. **L1 (route)** — after the withdrawal finalizes, `MessageExpiryHub.receiveExpiryNotice` authenticates the calling L1CrossDomainMessenger and its cluster, records the notice, then `forwardExpiryNotice` deposits it into the source chain via A's L1CrossDomainMessenger (force-includable).\n3. **A (consume)** — `MessageExpiryRelay.receiveExpiry` verifies the attestation against the recorded send: the attestor must equal the recorded destination and `attestedAt` must be strictly beyond `recordedAt + expiryWindow`. It then notifies the sending application once.\n4. **App (refund)** — `SuperchainETHBridge.onMessageExpired` re-mints the burned ETH and force-sends it back to the original sender.\n\n**No double-spend:** the attestation only exists if `H` was undelivered; the refund only fires once `attestedAt > recordedAt + expiryWindow`; past the window, delivery is protocol-impossible; and both the relay record and the bridge's pending-send entry are deleted before any external call. Delivery and refund are mutually exclusive.\n\n## Reusable primitive\n\nThe escape hatch is **not** ETH-bridge-specific. Any L2 contract that sends interop messages can opt in:\n- call `MessageExpiryRelay.recordSentMessage(...)` when it sends (preimage-verified, so only the actual sender can register as the handler for a message hash), and\n- implement `IMessageExpiryHandler.onMessageExpired(msgHash, attestorChainId, attestedAt)` to compensate.\n\n`SuperchainETHBridge` is the first consumer and the reference integration.\n\n## SuperchainETHBridge diff (minimal)\n\n`1.0.1 → 1.1.0`. `sendETH` records the pending send and registers with the relay (guarded by a code-size check so non-interop chains are unaffected); new `onMessageExpired` refunds the sender. `relayETH` and everything else are untouched. The contract previously had zero storage; `pendingETHSends` is added at slot 0.\n\n## New contracts\n\n- `src/L2/MessageExpiryRelay.sol` — predeploy `0x42…2E` (proxied, interop-gated), both source-side (record/receive) and destination-side (attest) roles; same address on every chain.\n- `src/L1/MessageExpiryHub.sol` — ownerless L1 singleton that routes notices between the chains of an interop cluster. Cluster membership is derived on-chain per call (SystemConfig ↔ L1CrossDomainMessenger ↔ OptimismPortal bidirectional binding + shared ETHLockbox authorization + shared AnchorStateRegistry); notices are namespaced by the cluster's lockbox so chains with colliding IDs across clusters cannot interfere.\n- `interfaces/L2/IMessageExpiryHandler.sol` — the opt-in callback interface.\n\nPredeploy wired through `Predeploys.sol`, `L2ContractsManager` (`→ 1.15.0`), `L2Genesis`, the Go predeploy registry, and the NUT upgrade bundle. The relay proxy ships **uninitialized** (fails closed); `hub`/`expiryWindow` are set post-deploy by the ProxyAdmin owner.\n\n## Testing\n\n- **Unit (forge):** full auth + boundary matrices for all three contracts, including sender-binding, exact expiry off-by-one, cross-cluster non-interference, and the refund end-state. (~70 tests.)\n- **Acceptance (`op-acceptance-tests/tests/interop/expiry`, in-process two-chain interop devnet):** end-to-end — `sendETH` A→B, never relay, wait past a 12s expiry window, attest on B, prove + finalize the withdrawal on L1, forward through the hub, deposit into A, assert the sender is refunded exactly and all records are cleared. Plus a delivered-message regression guard (normal relay still works on the 1.1.0 bridge, and attesting a delivered message reverts). Runs without time-travel by shrinking the L1 dispute windows via new deployer options.\n\n## Security\n\nTwo independent adversarial reviews were run. Both found the same **critical** in an earlier revision — the hub authenticated the incoming messenger but not the portal, letting a forged SystemConfig point at a real cluster-authorized portal and mint a false notice. **Fixed** by binding `portal.systemConfig() == systemConfig` (plus a registration-overwrite guard, notice-key namespacing by source chain, an attestation-timestamp bound, a monotone `expiryWindow` setter + `hub` setter for remediation, and a contract-handler requirement). Details and the list of attacks that were tried and failed are in the review notes.\n\n## Known follow-ups (not in this PR)\n\n- **Deploy/init wiring:** this is contracts-first. A production rollout needs a deploy script for `MessageExpiryHub` and an OPCM/governance step to `initialize` each relay proxy (`hub`, `expiryWindow`). The feature fails closed until then.\n- **`expiryWindow` ↔ depset coupling:** the relay's window must be ≥ the dependency-set message-expiry window, but there is no on-chain link on L2 today (it is trusted ProxyAdmin-owner config, guarded only by the monotone setter). When the protocol exposes the depset window on-chain, self-validate.\n- **Hub guardian pause:** considered as an incident kill-switch, deliberately omitted to avoid adding a trust role to an ownerless singleton; remediation today is re-pointing relays via `setHub`.\n- Cluster liquidity/ASR migrations strand pending notices until re-attested (multi-day, recoverable).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T09:12:56Z",
+      "mergedAt": null,
+      "additions": 4108,
+      "deletions": 39
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAlI5iA",
+      "title": "op-devstack: run the interop acceptance suites against lokahi",
+      "author": "claude",
+      "number": 22620,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\nPart of #22546. Part of #22547.\n\n## Before\n\n`DEVSTACK_SUPERNODE_KIND=lokahi` was refused by the shared-supernode and interop presets, and the refusal was load-bearing rather than incidental. `startTwoL2SharedSupernode` returned the concrete in-process `*SuperNode`, `MultiChainRuntime.Supernode` was that concrete type, and the presets passed that same value as **both** the frontend's backing and the test control. Nothing dispatched on kind, so deleting the gate would not have let lokahi through — it would have brought up the Go op-supernode while the environment asked for lokahi. A false green, which is worse than failing fast.\n\nUnderneath that, lokahi had no answers for the four `apis.SupernodeInteropTestAPI` methods the presets drive a verifier through, and its launch path refused the interop activation timestamp every interop preset passes.\n\nThe CI variant `memory-all-kona-lokahi-op-reth-<fork>` was named for lokahi but pinned to `supernode_kind: op-supernode`, so its interop presets were a second run of the op-node variant's assertions.\n\n## After\n\n**The runtime dispatches.** `MultiChainRuntime.Supernode` is now `SharedSupernode` (`op-devstack/sysgo/shared_supernode.go`), an interface holding exactly what the presets already ask of a supernode: `stack.SupernodeTestControl`, `stack.ControlledLifecycle`, and `QueryRPC()`. Both bring-ups dispatch on the resolved kind, the way the per-chain `l2_cl_kind` switch does for op-node versus kona-node, and hand back `L2CLNode` per chain — a chain of the Go supernode is a route on one shared RPC, a chain of lokahi is its own socket behind its own proxy, and everything the presets do with them is on that interface. `QueryRPC` names the query API rather than \"the supernode's URL\", because for lokahi those are different addresses.\n\n**lokahi answers the test-control surface.** The verifier gains the state those four methods report — a cold-start attempt counter, and a pause the round loop honours where it picks the timestamp to attempt, which is where op-supernode checks it too. They are served over the process-wide RPC (`rust/lokahi/src/interop/test_api.rs`) through the same query channel #22615 added, so a pause set and a frontier reported come from one turn of the actor and cannot disagree. The Go client is `sources.SupernodeInteropTestClient`, implementing the same interface the in-process supernode implements by calling itself, so the DSL cannot tell which it is driving.\n\n**lokahi takes an interop activation timestamp, and lets it govern.** op-supernode takes the activation as its own configuration; lokahi read it from each chain's Lagoon time. There is now an explicit `[interop] activation-timestamp`, because the simple-interop presets hand op-supernode a timestamp and write rollup configs with no Lagoon at all, leaving lokahi nothing to read — 22 of the original 138 failures. Absent the key, nothing changes: lokahi still reads the forks.\n\nI first made the override refuse a chain whose scheduled Lagoon disagreed with it, and argued for that guard here: the message rules the verifier applies read the fork, so activating somewhere the chain's own config does not would put the verifier and the proof on different rules. The acceptance run then refused four tests over it — `TestInteropFaultProofs_ActivationBoundary`, `_PreForkActivation`, `TestPostInbox` — which schedule Lagoon well after the timestamp their preset supplies.\n\n**op-supernode does not do that, so the guard is gone.** `resolveInteropActivationTimestamp` returns the override before it reads any rollup config (`op-supernode/supernode/supernode.go:164-167`): scheduled forks are never consulted, never compared, and the cross-chain consistency checks in that function are skipped along with them. The override is then the single value handed to `interop.New` (`supernode.go:128`) and the only gate in `IsActiveAt` (`activity/interop/interop.go:1277`), so it governs both when verification starts and which rules apply — there is no second source for it to diverge from. Adrian's rule decides it: lokahi is meant to mirror op-supernode's behaviour, and where a test fails because lokahi does not, lokahi is what changes. My reasoning for the guard was about what would be *safer*, not about what op-supernode *does*, and the target here is the latter.\n\nThat widening is real and worth naming: a set the scheduled path rejects as \"not one cluster\" is accepted when an activation is supplied. It is still rejected when none is, and both halves are pinned by `an_override_skips_the_cross_chain_checks_as_op_supernode_does`.\n\nop-supernode logs nothing when the two disagree. lokahi logs it at INFO — taking one number over another the operator also wrote down deserves a line, a log cannot change what the verifier does, and INFO rather than WARN because for the presets that pass an override the disagreement is the normal case.\n\n**An overridden activation also has to carry a dependency set.** `load_dependency_set` requires one from `lagoon_time.is_some()` alone, which an override bypasses — a chain would have joined the cluster with interop on and nothing for the verifier to read messages against, surfacing as a missing-message error later rather than a configuration error at startup. The requirement is restated in `Supernode::load`, the one place that knows interop is on for the whole hosted set. Noting one loose end honestly: op-supernode does *not* require a dependency set on that path either (`supernode.go:120-126` reads one only for the expiry window, defaulting it when absent), so this guard is itself a divergence. It never fires in the suites, because the presets all supply dependency sets, so it is left in place and flagged rather than removed.\n\nThe first version of that check compared the two as raw numbers, and the acceptance run showed the comparison wrong: a preset with `delaySeconds == 0` calls `WithForkAtGenesis`, which writes Lagoon as `0`, while the timestamp it hands op-supernode is genesis L2 time plus that same zero offset. Both mean \"interop from the first block\" and select exactly the same blocks, but 86 tests were refused over the difference. Both sides are now clamped to genesis before comparing, which is what interop actually applies to; a schedule after the first block still has to agree.\n\n**One address across a restart.** Found while wiring this, and not previously flagged: lokahi's process-wide RPC asks for port 0, because only a bound address is reported and only a port lokahi chose can be discovered from its startup log — so it moved on every restart. Survivable while the only readers were `LokahiSupernode`'s own accessors, which compared the address and rebuilt their client; not survivable once the presets read through it, because the frontend builds its query-API client once at construction and the acceptance tests that wipe the data directory or take the execution layers away go on to use it. It is behind a `tcpproxy` now, created once and repointed on every start, exactly as the per-chain sockets are.\n\n**The CI variant stays on op-supernode, and now says why with numbers.** The flip was made, the suites ran against lokahi for the first time, and the result is in \"Do the suites pass?\" below. The flip is reverted so a required check is not held red on a follow-up list; the comment above the job now names the four remaining gaps with test names and counts.\n\n## Do the suites pass against lokahi?\n\nNot yet, and here is exactly where they stand. The flip was made on `fd2b5db` and the variant ran: **202 passed, 25 skipped, 138 failed** (CircleCI 5504740). The op-supernode control variant on the same commit was **fully green — 797 tests, 787 passed, 10 skipped** — so the `SharedSupernode` refactor did not disturb the Go path, and every failure below is lokahi-specific.\n\nBy cause, with the counts summing to 138:\n\n| # | Cause | Kind | Status |\n|---|---|---|---|\n| 86 | Activation compared as raw numbers: Lagoon `0` vs a genesis-time request | mine | **fixed in this PR** |\n| 22 | `NewSimpleInterop` presets hand lokahi rollup configs with no Lagoon time while asking op-supernode to activate interop at a timestamp | lokahi cannot express it | follow-up |\n| 16 | Parent tests aggregating subtests that failed for the causes above/below | collateral | resolves with them |\n| 7 | `optimism_dependencySet` not served by lokahi | lokahi missing a method | follow-up |\n| 3 | Preinterop proposer gets \"Method not found\" for `superroot_atTimestamp` | lokahi missing the API when no interop is scheduled | follow-up |\n| 3 | Activation genuinely diverges after genesis (e.g. `TestInteropFaultProofs_PreForkActivation`) | needs a per-preset decision | follow-up |\n| 1 | `supernode/advance_multiple` asserts both chains' CL RPCs share one `host:port` | harness assumes op-supernode's shape | follow-up |\n\nThe four follow-up causes, named:\n\n- **`optimism_dependencySet` (7).** The test-sequencer's standard builder fetches it from the per-chain CL whenever `LagoonTime` is set (`standardbuilder/config.go:71`). The string `dependencySet` does not appear anywhere in the Rust tree. Affects `TestPostInteropUpgradeComprehensive`, `TestPostInbox`, `TestPreNoInbox`, `TestFinalizedL2DoesNotRegressAcrossActivation`, `TestSupernodeInteropETHBridgeRoundTrip`, `TestSupernodeInteropActivationAfterGenesis`, `TestSupernodeResyncSchedulesAtActivation_PreActivation`.\n- **No Lagoon in the rollup config (22).** `presets.NewSimpleInterop` and the ZK/dispute-mon presets built on it pass an `interopActivationTimestamp` while the rollup config lokahi is handed (`json.Marshal(chain.net.rollupCfg)`) has `LagoonTime == nil`. op-supernode is *told* the activation; lokahi can only read the fork, so it has nothing to activate on. Closing this means either scheduling Lagoon in the rollup configs these presets write, or giving lokahi an explicit override — a design call, not a wiring fix.\n- **Query API absent pre-interop (3).** `superroot_atTimestamp` and `supernode_syncStatus` come back \"Method not found\" in the preinterop presets, so lokahi does not expose the super-root query API when no interop is scheduled. Its own `Branch::Handoff` already models that case, so this looks like registration rather than logic.\n- **One socket per chain vs `/chainID` routes (1).** `advance_multiple_test.go:34` asserts `uA.Host == uB.Host` to check \"the two CLs are using the same supernode\". That is true by construction for op-supernode and false for lokahi, which gives each chain its own socket — while the chains do share one supernode. The assertion needs an implementation-neutral spelling; picking it is the suite owner's call, so it is not rewritten here.\n\n**Also found, worth its own fix:** `op-test-sequencer`'s `config.(*Ensemble).Start` names its return value `ensemble`, so `return nil, err` nils it before the deferred `ensemble.Close()` runs — every error inside `Start` becomes a `SIGSEGV` instead of a message (`work/config/static.go:38-44`, `work/ensemble.go:48`). That panic aborts the whole test binary, which is why the raw failure counts per index (14, 15, 19) far exceed the distinct causes. It is pre-existing and unrelated to lokahi, so it is not fixed here, but it masked the `optimism_dependencySet` error until the log was read by hand.\n\n## What is verified where\n\nLocally: `go build` over the affected trees, `go vet ./op-devstack/... ./op-acceptance-tests/...`, `go test` for `op-devstack/sysgo` (including 7 tests for the activation check), `op-devstack/dsl` and `op-service/sources`; `cargo test -p lokahi-interop --test round_loop` (32 pass, 8 new, covering the pause and the attempt counter against the real round loop rather than the RPC plumbing); `cargo +nightly fmt --all --check` clean; and `cargo clippy -p lokahi -p lokahi-interop --all-features --all-targets -- -D warnings` clean.\n\nOn CI at `fd2b5db`: `rust-fmt`, `rust-clippy`, `rust-docs`, `rust-tests`, `go-lint`, `go-tests`, `cannon-go-lint-and-test` and `op-reth-e2e-sysgo-tests` all green.\n\n## Known divergences, stated rather than hidden\n\n- **`WithInteropLogBackfillDepth` is not plumbed to lokahi.** lokahi's `log_backfill_depth` stays at the expiry-window default, so cold start backfills from the interop activation timestamp instead of from a shallower window. That is a *wider* window than the option asks for, and `AssertBackfillCovers`' invariants hold either way (its lower bound clamps at activation); the cost is cold-start work, which on a devnet chain is small. Adding the config knob is a follow-up, not a correctness fix.\n- **`verifierSyncMode` has no lokahi counterpart** and is not passed on. kona's validator reaches EL-sync completion through gossip rather than through a sync-mode setting, so there is nothing to select.\n\n## Stacking\n\nBased on #22618. #22615 and #22610's other child #22607 are **siblings** of it, not ancestors, and both are load-bearing here — #22615's `InteropQuery` channel is what the test-control API rides on, and #22607's `RestartWithFreshDataDir` is required by `SharedSupernode`. Both are merged into this branch, so this PR carries their diffs until they land, at which point it shrinks to its own.\n\n## Reviews\n\nThe repo's `rust-code-reviewer`, `go-code-reviewer` and `ci-config-reviewer` agents were not available in this session, so all three were worked by hand against `.claude/agents/*` and `docs/ai/*`, including the CI-config checklist since this touches `.circleci/`.\n\nFindings fixed: two standalone functions folded into associated functions on `InteropTestHandle`; a `match` on `Option` replaced with `is_some_and`; the verifier's new test-control behaviour given tests against the real round loop (the checklist's TDD item — the RPC wire types had tests, the loop behaviour did not); a config check restructured so it does not depend on an assertion aborting the loop it is in; the unguarded read of the supernode's address documented as write-once; and `snake_case`/`camelCase` backticked for `clippy::doc_markdown`.\n\nAlso checked and left alone: `RestartWithFreshDataDir` recreates the wiped data directory with `0o755`, which is the mode the Go supernode's own restart uses at `l2_cl_supernode.go:199`. Matching the reference implementation, so unchanged.\n\nDismissed, with reason:\n\n- **`go-code-reviewer` step 0 and `rust-code-reviewer` step 0 — run the repo lint recipes via `mise exec -- just l` / `just lint-go`.** Not run in that form: `just`/`mise` are not on PATH here. The underlying checks were run directly instead — `cargo +nightly fmt --all --check` and `cargo clippy --all-features --all-targets -- -D warnings` over both changed crates, both clean — and CI's `go-lint`, `rust-clippy`, `rust-fmt` and `rust-docs` are green on the merged head.\n- **`rust-code-reviewer` — \"prefer struct methods over standalone functions\"** for `requireInteropActivationFromRollupConfigs` and `startSharedLokahiSupernode`. Left as package-level Go functions: the surrounding `op-devstack/sysgo` package is written that way throughout (`startTwoL2SharedSupernode`, `startLokahiSupernode`, `waitForSupernodeRoute`), and the checklist's \"respect existing project patterns\" boundary applies. The guidance is Rust-side in any case.\n- **`go-code-reviewer` — table-driven tests where cases are homogeneous.** The four new `sysgo` tests are distinct scenarios (match, divergence, missing Lagoon, absent request) whose value is in the prose explaining why each matters, not in shared mechanics.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T17:29:12Z",
+      "mergedAt": null,
+      "additions": 4065,
+      "deletions": 125
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAhwa0g",
+      "title": "lokahi: run N chains in one process",
+      "author": "claude",
+      "number": 22599,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\n**Before:** `lokahi` printed a greeting. Running several OP Stack chains meant several kona-node processes, each polling the L1 for itself.\n\n**After:** `lokahi node --config <file>` runs N chains in one process. Each chain gets the same actor group a single-chain kona-node runs, and one L1 watcher serves all of them. Cross-safe promotion is still the trivial one — cross-safe follows local-safe — so this is N independent kona-nodes in one process; interop consolidation replaces that promotion in a later phase.\n\n**How:** one `RollupNode::compose` per configured chain, and every chain's actors run under a single `run_actors` call — which is what makes failure process-wide, rather than leaving a node that answers for a dead chain. `L1Config::l1_watcher` takes every chain's `L1WatcherPorts`, so the L1 streams are polled once per process. Configuration is layered: `[l1]` and `[defaults]` state what the chains share, each `[[chains]]` entry only what is specific to it. The chain set is settled at startup, and what N chains make possible to get wrong — the same chain twice, two chains on one port or in one data directory, chains on different L1s — is a startup error naming the chains involved. Per chain: its own data directory (P2P identity, bootstore, admin state), its own RPC socket, its own metric registration.\n\n`#22532` is the first item that needs three parallel lines, so this branch merges the multi-chain L1 watcher (#22567) and the `chain_id` metric label (#22569) into the composition line. Where they disagreed:\n\n- The watcher published the observed L1 head once for the whole process, but composition gives each chain its own head watch — so the head is now published per chain, and every chain's sequencer sees it.\n- #22569 made `EngineSyncState::apply_update` private and threaded the chain id through `EngineState::apply_sync_update`; this line had split local-safe from cross-safe with a single promotion entry point. The chain id now runs through the promotion path too, with `EngineState::apply_cross_safe_promotion` mirroring `apply_sync_update`. #22569's `safe_head` metric arm went with the field it read; the cross-safe label is emitted at the promotion entry point instead.\n\nThe loose end noted on #22530 also became real here: `NodeActor::Error` is only `Debug`, so a dying actor could not say which chain it belonged to. `label_chain` labels a chain's actors as the host collects them and the supervision line reads `chain 901: <debug>`. A single-chain host labels nothing, so kona-node's output is untouched.\n\nPart of #22532, under the #22521 epic.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5)_",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T09:03:13Z",
+      "mergedAt": null,
+      "additions": 3791,
+      "deletions": 905
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAi-c4w",
+      "title": "lokahi-interop: verification round loop",
+      "author": "claude",
+      "number": 22605,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\nPart of #22536, under the #22522 epic.\n\n**Before.** `lokahi-interop` held the verifier's three stores and nothing that used them. Nothing decided which L2 timestamp to verify next, read the chains to find out what was at it, or applied the interop message-validity rules to what it found.\n\n**After.** It holds the verification round loop: `Verifier::step` observes every chain and the L1 once, decides from that snapshot alone, write-ahead-logs an effectful decision, then applies it. Cold start picks the first verifiable timestamp from the chains' own safe-head history and backfills the log stores behind it; a condition no retry can fix halts the verifier instead of spinning.\n\nOnly `Wait` and `Advance` are applied. A round that reaches `Invalidate` or `Rewind` records the decision and holds the verified frontier where it is — cross-safety stops rather than promoting a block the verifier believes is wrong — and writes nothing to the WAL, since a slot holding a transition this build cannot apply would wedge the node on every restart.\n\n**How.** Four modules. `decide.rs` is pure: `RoundObservation` in, `Decision` out, no I/O. `chain.rs` is the read-only observation seam — `InteropChain` for one chain, `L1Canonical` for the L1 — plus `ChainAt`, which carries the four verdicts of #22527's `local_safe_snapshot_at` through to the loop rather than flattening them, because the loop treats each differently. `verify.rs` applies `kona_interop::MessageRules` and answers existence from the round's own frontier view first, then the log stores. `verifier.rs` is the loop.\n\nThe rules themselves are not reimplemented: they are #22534's shared `MessageRules`, so a node's verdict and a proof's verdict on the same message cannot differ. #22536 depends on both #22534 and #22535, which sit on sibling branches, so this branch merges #22534's (#22565) — that merge is the `rules.rs`/`graph.rs` part of the diff and lands with that PR.\n\nTwo things worth a look:\n\n- A crash during the very first advance used to re-run cold start with a WAL slot pending, letting it pick a start from today's safe heads while a transition for the old one sat unapplied. `Verifier::new` now treats a slot as a resume.\n- kona's parser accepts the full 256-bit identifier fields the `ExecutingMessage` event declares; Go rejects non-zero padding at decode time and, because its caller discards the decode error, treats such a log as an ordinary one. `verify.rs` narrows to Go's behaviour rather than inventing a third.\n\n**Missing local history is not evidence against a block.** The store lookup in `verify.rs` mapped `StoreError::Skipped` and `StoreError::Future` to `RuleViolation::NoSuchMessage`, on the premise that every log store holds every timestamp below the round's. Nothing enforced that premise. The log stores are separate databases from the verified store, and `Verifier::new` skips backfill on resume, so a store that was truncated, reseeded or lost made a valid executing message look like a protocol violation: the round decided `Invalidate`, cross-safety froze permanently, and the verifier still reported `Running`. In the phase that applies `Invalidate`, the same input would invalidate a valid block.\n\nBelow the round's timestamp the earlier rules have already established that a block must be there, so its absence is evidence about this node and not about the message, and it now halts with the chain and timestamp named. `Conflict` and `NotFound` — where the store does cover the position and disagrees — stay rule violations, as does `Future` at the round's own timestamp, where the frontier view is the whole answer because no store has sealed that block yet. `Verifier::new` also checks on resume that each chain's log store still covers the window rounds will ask about, instead of assuming it.\n\nThe test world had been hiding this: it backfilled 5 seconds behind a 20-second expiry window, a store too shallow to answer every message a round may legally reference, so both resume tests were asserting a state no real run can reach — one committed a frontier at 110 over empty log stores. It now backfills the whole window, as the real default does, and the backfill-depth test keeps a shallow depth of its own.\n\n**Store failures no retry can clear now halt.** `RoundError::is_transient` negated a single variant rather than naming the permanent ones, so every `StoreError` added since defaulted to \"retry\": `UnsupportedVersion` — a record written by a build that disagrees about the format — and `Closed` returned `Pace::Retry` from every round, forever. The permanent set is now named. The rest stay retryable on purpose, because the next round observes the chains again and may ask something different, and halting on those would stop a node that would have recovered.\n\nDeferred to #22537: wiring this to the chain controllers and the promotion entry point, and capping the published `current_l1` at the lowest L1 block any chain has derived from — that needs the L1 half of each chain's sync status, which this seam does not carry.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5)_",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T12:10:12Z",
+      "mergedAt": null,
+      "additions": 3378,
+      "deletions": 246
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAiYjQw",
+      "title": "lokahi-interop: interop actor stores",
+      "author": "claude",
+      "number": 22603,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\nPart of #22535, under the #22547 tracking issue.\n\n**Before:** lokahi had nowhere to keep interop state. Nothing recorded which timestamps had been verified, nothing remembered a decision that was half-applied when the process died, nothing could answer \"does this initiating message exist?\" without refetching receipts, and the output roots of invalidated blocks were simply lost once the EL pruned the replaced block.\n\n**After:** the three stores the verification round loop will be written against, each in its own database, each surviving a restart.\n\nNew crate `lokahi-interop`: the verified frontier with a single-slot write-ahead log, one log store per chain, and the invalidated-output archive.\n\n## How\n\n- **Verified store.** One record per verified timestamp, committed one second at a time with no gaps. Re-committing a timestamp already stored succeeds when the result is equal — that is the crash-replay case, where the write landed but the WAL slot had not yet been cleared — and is rejected when it differs. The WAL slot holds the effectful decision currently being applied: written and fsynced before any durable side effect, cleared after the last one, so a restart either finds nothing or finds the decision to re-apply. Records are a versioned, self-describing binary encoding rather than JSON.\n- **Log store, one per chain.** A sealed block is one record: 80-byte header, one 32-byte hash per log, one 88-byte entry per executing message — op-supernode's `raftwallogdb` layout byte for byte. So `contains` is a single record read plus fixed-offset indexing, and it separates \"not indexed yet\" from \"cannot exist any more\" from \"below our history\" the way the Go verifier's branches expect. The checksum computation it compares against is pinned to Go by golden vectors.\n- **Invalidated-output archive.** Outputs only, its own database, since it is the only store here whose loss is neither recoverable nor visible: a miss makes the optimistic superroot branch serve the replacement block's output instead — well-formed, wrong, no error. Recording is idempotent so the interop actor can drive it from its WAL entry on every replay, and pruning by decision timestamp undoes archiving whose basis was reorged out.\n- **Backend seam.** Every store is generic over a small `Kv` trait. rocksdb is the on-disk backend, behind an off-by-default `rocksdb` feature (following `kona-safedb`), with an in-memory backend the unit tests use. A different engine is a new `Kv` impl, not a rewrite.\n\nStorage-engine and retention decisions follow the ones recorded on #22535. The checksum lives here for now because the log store needs it; a later comment on #22534 places the computation in the shared kona-interop rules instead, so this module is written to be relocated wholesale rather than duplicated.\n\nThe `rocksdb` backend and its on-disk tests are verified both locally and in CI, including restart durability; everything at default features (fmt, clippy, 51 unit tests, rustdoc) is clean.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5)_",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T10:33:31Z",
+      "mergedAt": null,
+      "additions": 3160,
+      "deletions": 3
+    }
+  ],
+  "codeChanges": {
+    "additions": 1795,
+    "deletions": 572,
+    "files": 75,
+    "commitCount": 202
+  },
+  "completedItems": [
+    {
+      "title": "kona-node: Serve the system config lookup from imported blocks",
+      "prNumber": 22466,
+      "type": "other",
+      "body": "> Stacked on #22465.\n\nThe sequencer's attributes builder and the derivation pipeline each reconstruct the `SystemConfig` of the block they are building on top of, once per block. That block is one the node has just imported, yet both fetche",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/bin/node/Cargo.toml",
+        "rust/kona/bin/node/src/flags/metrics.rs",
+        "rust/kona/crates/node/engine/src/block_sink.rs",
+        "rust/kona/crates/node/engine/src/client.rs",
+        "rust/kona/crates/node/engine/src/lib.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/seal/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/util.rs",
+        "rust/kona/crates/node/engine/src/test_utils/engine_client.rs",
+        "rust/kona/crates/node/service/Cargo.toml",
+        "rust/kona/crates/node/service/src/actors/engine/actor.rs",
+        "rust/kona/crates/node/service/src/service/block_sink.rs",
+        "rust/kona/crates/node/service/src/service/builder.rs",
+        "rust/kona/crates/node/service/src/service/mod.rs",
+        "rust/kona/crates/node/service/src/service/node.rs",
+        "rust/kona/crates/proof/proof/src/l1/pipeline.rs",
+        "rust/kona/crates/proof/proof/src/l2/chain_provider.rs",
+        "rust/kona/crates/protocol/derive/src/attributes/stateful.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/core.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/chain_providers.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/sys_config_fetcher.rs",
+        "rust/kona/crates/protocol/derive/src/traits/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/traits/providers.rs",
+        "rust/kona/crates/providers/providers-alloy/Cargo.toml",
+        "rust/kona/crates/providers/providers-alloy/src/buffered_l2_chain_provider.rs",
+        "rust/kona/crates/providers/providers-alloy/src/l2_chain_provider.rs",
+        "rust/kona/crates/providers/providers-alloy/src/lib.rs",
+        "rust/kona/crates/providers/providers-alloy/src/pipeline.rs",
+        "rust/kona/crates/providers/providers-local/Cargo.toml",
+        "rust/kona/crates/providers/providers-local/src/buffer.rs",
+        "rust/kona/crates/providers/providers-local/src/buffered.rs",
+        "rust/kona/crates/providers/providers-local/tests/integration.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/seal/task_test.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/traits.rs",
+        "rust/kona/crates/protocol/protocol/src/test_utils.rs"
+      ]
+    },
+    {
+      "title": "kona-node: deserialize beacon blobs into boxed values",
+      "prNumber": 22517,
+      "type": "other",
+      "body": "## Description\n\nDeserialize Beacon API blobs directly into their final heap allocations instead of using `GetBlobsResponse.data: Vec<FixedBytes<131072>>`.\n\nThe generated release-profile serde function for `FixedBytes<131072>` reserves `0x14",
+      "files": [
+        "rust/kona/crates/providers/providers-alloy/src/beacon_client.rs",
+        "rust/Cargo.lock",
+        "rust/kona/bin/host/Cargo.toml",
+        "rust/kona/crates/providers/providers-alloy/Cargo.toml",
+        "rust/justfile"
+      ]
+    },
+    {
+      "title": "claude: add opt-in watch-reviews skill with org-member trust boundary",
+      "prNumber": 22580,
+      "type": "other",
+      "body": "Watching CI is an obligation (#22574). Watching *reviews* is opt-in, because doing it safely needs a trust boundary: anyone with a GitHub account can comment on a public PR, so a comment body is untrusted input rather than instruction, and ",
+      "files": [
+        ".claude/skills/watch-reviews/SKILL.md",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "title": "docs,agents: add the deletion-reviewer agent and its review guide",
+      "prNumber": 22577,
+      "type": "docs",
+      "body": "Adds a `deletion-reviewer` agent (`.claude/agents/`) with a paired guide (`docs/ai/deletion-review.md`), registered in the pre-PR review table with the trigger: *the diff deletes a public symbol, wire/RPC field, metric name or label value, ",
+      "files": [
+        ".claude/agents/deletion-reviewer.md",
+        "AGENTS.md",
+        "docs/ai/deletion-review.md"
+      ]
+    },
+    {
+      "title": "kona-engine: skip unsafe-head staleness check for seals atomic with their build",
+      "prNumber": 22557,
+      "type": "other",
+      "body": "## Description\n\nFixes the kona-node crash loop from #22342: `Critical error in sub-routine: EngineTask(Consolidate(SealTaskFailed(UnsafeHeadChangedSinceBuild)))` while re-deriving a deep backlog behind a fast-moving unsafe tip.\n\n### Root ca",
+      "files": [
+        "rust/kona/crates/node/engine/src/task_queue/tasks/seal/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/seal/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/seal/task_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/util.rs",
+        "rust/kona/crates/node/service/src/actors/engine/actor.rs",
+        "rust/kona/crates/node/engine/src/lib.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/build/task_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/mod.rs"
+      ]
+    },
+    {
+      "title": "kona-sp1: retain admitted proof request ownership",
+      "prNumber": 22627,
+      "type": "other",
+      "body": "## Description\r\n\r\nThe fail-fast chunk collector can drop sibling futures that already own submitted SPN request IDs. SPN keeps those requests alive while the proposer loses the ID and stops polling.\r\n\r\nStop admitting queued chunks after the",
+      "files": [
+        "rust/kona/sp1/crates/proposer/src/proving.rs"
+      ]
+    },
+    {
+      "title": "superchain: update registry pin for World Chain Karst activations",
+      "prNumber": 22624,
+      "type": "other",
+      "body": "## Summary\n\nBumps the `superchain-registry` submodule pin from `7715c7d` to `08d6a44` (registry tip) and regenerates the dependent Go and Rust artifacts via `just sync-superchain`.\n\nThe activation change this bump is for is registry [#1313]",
+      "files": [
+        "op-core/superchain/superchain-configs.zip.sha256",
+        "rust/kona/crates/protocol/registry/etc/configs.json",
+        "rust/op-reth/crates/chainspec/res/superchain-configs.tar.sha256",
+        "superchain-registry"
+      ]
+    },
+    {
+      "title": "Update release docs: op-node v1.19.5, kona-node v1.6.4, op-batcher v1.16.13",
+      "prNumber": 22614,
+      "type": "other",
+      "body": "## Summary\nPrepend the newest GitHub releases published on 2026-08-20 for op-node, kona-node, and op-batcher, and refresh the index cards.\n\n## Changes\n- `releases/op-node.mdx`: prepend v1.19.5 (Aug 20, 2026); demote v1.19.4 to `Stable`.\n- `",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/kona-node.mdx",
+        "docs/public-docs/releases/op-batcher.mdx",
+        "docs/public-docs/releases/op-node.mdx"
+      ]
+    },
+    {
+      "title": "interop: State the message expiry check as a subtraction",
+      "prNumber": 22609,
+      "type": "other",
+      "body": "The interop message expiry check computed `init + window`, which can overflow uint64, and\neach component handled that differently: op-core saturated the sum so an overflowing message\nnever expired, op-supernode and op-interop-mon wrapped si",
+      "files": [
+        "op-core/interop/depset/links.go",
+        "op-interop-filter/filter/lockstep_cross_validator.go",
+        "op-interop-filter/filter/lockstep_cross_validator_test.go",
+        "op-interop-mon/monitor/updater.go",
+        "op-interop-mon/monitor/updater_test.go",
+        "op-service/README.md",
+        "op-service/safemath/safemath.go",
+        "op-service/safemath/safemath_test.go",
+        "op-supernode/supernode/activity/interop/algo.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "rust/kona/crates/protocol/interop/src/graph.rs"
+      ]
+    },
+    {
+      "title": "kona-host: harden online preimage fetching",
+      "prNumber": 22604,
+      "type": "other",
+      "body": "## Summary\r\n\r\n- route `kona-host` HTTP(S) RPCs explicitly through Alloy's Reqwest transport while preserving WebSocket and IPC endpoints\n- load platform-native certificate roots alongside embedded WebPKI roots for Alloy WSS connections\r\n- r",
+      "files": [
+        "docs/ai/rust-dev.md",
+        "rust/Cargo.lock",
+        "rust/kona/bin/host/Cargo.toml",
+        "rust/kona/bin/host/src/backend/online.rs",
+        "rust/kona/bin/host/src/eth/mod.rs",
+        "rust/kona/crates/providers/providers-alloy/Cargo.toml"
+      ]
+    },
+    {
+      "title": "kona-sp1-proposer: default proof strategies to auction",
+      "prNumber": 22593,
+      "type": "other",
+      "body": "Default both kona-sp1-proposer proof strategies to `auction` instead of `reserved`.",
+      "files": [
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/src/config.rs"
+      ]
+    },
+    {
+      "title": "kona-sp1: Fix misleading guest warning",
+      "prNumber": 22592,
+      "type": "bugfix",
+      "body": "super_range.rs is used by the super-range guest program and the kona-sp1-proposer host. The warning is inappropriate to be displayed in the host because the dependency set is expected to be supplied as a proposer input (or implied from the ",
+      "files": [
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
+      "totalScore": 328.42466279581015,
+      "prScore": 323.88666279581014,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 144.7402249115479,
+      "prScore": 40.2402249115479,
+      "issueScore": 2,
+      "reviewScore": 102.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 138.89680452127322,
+      "prScore": 105.89680452127322,
+      "issueScore": 0,
+      "reviewScore": 33,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 129.93447592961033,
+      "prScore": 98.23447592961034,
+      "issueScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 103.32770215636128,
+      "prScore": 49.32770215636129,
+      "issueScore": 0,
+      "reviewScore": 54,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 91.30394262379154,
+      "prScore": 62.503942623791545,
+      "issueScore": 4.1,
+      "reviewScore": 24.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 77.23651100359119,
+      "prScore": 56.896511003591186,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 74.54501135689677,
+      "prScore": 63.54501135689676,
+      "issueScore": 6,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 57.21620084024218,
+      "prScore": 43.51620084024218,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 45.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 45,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 39.129906649788,
+      "prScore": 29.629906649788,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 29.737968093128547,
+      "prScore": 29.537968093128548,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 22.923306144334052,
+      "prScore": 22.583306144334053,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "its-everdred",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1020682?u=ef69e13586ebc33960d4aa1bf7ef3938bebd59a3&v=4",
+      "totalScore": 21.060879734614026,
+      "prScore": 21.060879734614026,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "MRShimamoto",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/156122964?u=ed29f0b92c9939300c32c6876486691b25437b49&v=4",
+      "totalScore": 19.37783736946483,
+      "prScore": 19.37783736946483,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 18.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "palango",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/90851?v=4",
+      "totalScore": 16.96339476332431,
+      "prScore": 16.76339476332431,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 14.458509558630439,
+      "prScore": 14.458509558630439,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teamskew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/318406340?v=4",
+      "totalScore": 11.776096538021482,
+      "prScore": 11.776096538021482,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 40,
+  "mergedPRs": 12,
+  "newIssues": 7,
+  "closedIssues": 2,
+  "activeContributors": 24
+}
