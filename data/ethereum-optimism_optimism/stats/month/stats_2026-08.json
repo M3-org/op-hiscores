@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-01 to 2026-09-01, ethereum-optimism/optimism had 344 new PRs (206 merged), 108 new issues, and 84 active contributors.",
+  "overview": "From 2026-08-01 to 2026-09-01, ethereum-optimism/optimism had 353 new PRs (209 merged), 109 new issues, and 84 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABNcmTcQ",
@@ -82,6 +82,18 @@
       "deletions": 1
     },
     {
+      "id": "PR_kwDODjvEJM8AAAABAmqe1g",
+      "title": "DO NOT MERGE: combined measurement branch for the lokahi interop suites",
+      "author": "claude",
+      "number": 22634,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\n**DO NOT MERGE.** This is a temporary measurement branch. It exists only so CI will run the interop acceptance suites against lokahi with three in-flight changes stacked together, and it will be closed as soon as the numbers are recorded. Nothing here is intended for review or merge, and the acceptance job is expected to be red -- that red is the measurement.\n\nPart of #22546.\n\n## What is on this branch\n\n#22620's head, with two open PRs merged into it and the acceptance variant flipped to `supernode_kind: lokahi`:\n\n| | head measured |\n| --- | --- |\n| #22620 (base of this branch) | `c06d92d4f8146a5c517ec749a79b52cd3d74a114` |\n| #22626 -- safe-head lower bound re-read each round instead of latched at cold start | `5c3b717231a7144549e05986aff00214cd6eb920` |\n| #22628 -- chain RPCs served on one socket, routed by chain | `e6c4738715b5b27691168f5de899d5f5e80710d4` |\n| #22631 -- op-test-sequencer teardown panic, nil ensemble handed to a deferred `Close` | `4bacec0182dbd079fa5d2163d0742f171186f2d1` |\n\nEvery merged head was re-resolved from the API immediately before merging, because each had moved from the SHA originally quoted.\n\n`scoped-commits subject check` is expected to fail on this branch and should be ignored: it lints commit-message subjects, and the commits here are merge commits on a branch that exists to be thrown away. Fixing it would mean rewriting history for no gain. `rust-clippy` and `rust-tests` are the checks that matter -- they are the verdict on the merge resolution below -- and `memory-all-kona-lokahi-op-reth-fusaka` is also expected red, because lokahi does not pass the suites yet; its contents are the deliverable, not its colour.\n\n## The merge conflict, and how it was resolved\n\n#22626 and #22628 conflict in `rust/lokahi/src/supernode.rs`. #22626 changes `Supernode.chains` to `Box<[OpenChain]>` -- its new post-`Chain::load` phase, which carries the safe-head database -- while #22628 keeps `Box<[Chain]>` and rewrites the neighbouring `admin_rpc` doc comment for the single socket.\n\nResolved by taking #22626's `OpenChain` field type together with #22628's single-socket doc comment. They are different concerns on adjacent lines, so both intents survive. `struct Chain` and `struct OpenChain` both remaining is deliberate on #22626's part: `Chain` is the configured phase, `OpenChain` the opened one.\n\nThe conflict is larger than the field type alone. `compose` gained an `rpc: Option<&SupernodeRpc>` parameter on #22628 while #22626 moved `compose` from `impl Chain` onto `impl OpenChain`, so the parameter had to move with it. In the merged tree `compose` sits on `impl OpenChain` (`supernode.rs:422`), takes the `rpc` parameter, and is called at `:282` as `.compose(&l1, &l1_chain_config, rpc.as_ref())`.\n\nThe failure mode that would have compiled is keeping #22626's body and signature but never threading `rpc` through, or losing `safe_db`. Both were checked by reading, because a dropped safe-head database does not fail to compile -- it surfaces later as `NotEnabled` to `HistoryUnavailable`, which prints the *same* halt string as pruned records (`lokahi/src/interop/chain.rs:133`), so it would inflate the very number this branch exists to measure. In the merged tree:\n\n- `rpc` reaches the per-chain RPC construction at `:485` (`rpc.map(|rpc| rpc_builder(&settings, rpc.addr()))`) and the chain-routed launcher at `:493-494` (`rpc.map(|rpc| rpc.launcher(settings.l2_chain_id))` into `with_rpc_launcher`).\n- `safe_db` reaches the chain controller at `:489` (`.with_safe_db(safe_db)`), on the same builder chain as `with_dependency_set` and `with_external_cross_safe`.\n- The destructure is `OpenChain`'s five-field pattern, not `Chain`'s three.\n- `Chain::load` stays pure and `.open()` stays the last step, after every check: load at `:141`, activation at `:146`, both `bail!`s at `:161` and `:177`, `.open()` only at `:195`. A rejected chain set still leaves no rocksdb LOCK behind.\n- `admin::serve` is gone and `admin::module` is used with `rpc.set_root(...)` at `:257`; `rpc_socket` is absent repo-wide. #22626 touches none of those, so they land cleanly.\n\n**The build was never run locally.** Disk in the container stayed between 200 MB and 1 GB throughout and a lokahi build needs roughly 2.6 GB, so `rust-clippy` and `rust-tests` on this branch are the first compile of this tree. If they fail, the resolution is wrong and the acceptance numbers from this run are void.\n\nThe conflict is a real one that will recur when these two PRs are restacked for real, independently of this branch.\n\n## What is being measured\n\nPass / fail / skip and the total record count from `memory-all-kona-lokahi-op-reth-fusaka`, against these baselines:\n\n- op-supernode control: 768 passed, 0 failed, 25 skipped, **793 records**\n- lokahi, first measured run: 202 / 138 / 25 on 365 records\n- lokahi, with the interop activation override: 190 / 130 / 25 on 345 records\n\n#22631 is in the merge specifically to protect the record count: without it the nil-receiver teardown panic kills whole test binaries and takes their results with them, which is how an earlier run reported only 345 of 793. A pass/fail split measured on a third of the suite cannot be compared to anything.\n\nThe record count matters as much as the pass count: a large shortfall against 793 means test binaries died and took their results with them, so a lower failure count can mean less evidence rather than more passing. The specific question is whether the 79 tests that halted on `which L1 block made timestamp N safe is no longer recorded on this node` clear, which is what #22626 predicts.\n\n---\n_Generated by [Claude Code](https://claude.com/claude-code)_\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T21:57:18Z",
+      "mergedAt": null,
+      "additions": 5824,
+      "deletions": 564
+    },
+    {
       "id": "PR_kwDODjvEJM7xddvd",
       "title": "op-script-engine: Rust forge-script executor + Go client and parity gates",
       "author": "sebastianst",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 4988,
       "deletions": 2803
-    },
-    {
-      "id": "PR_kwDODjvEJM71F16L",
-      "title": "op-deployer: continue prepared chain deployments",
-      "author": "lumoswiz",
-      "number": 21974,
-      "body": "**Description**\r\n\r\nAdds `op-deployer continue` for prepared deployments. `prepare` now snapshots its canonical intent, predicted addresses, deployer, OPCM, anchor timing, and contract artifact digests. `continue` uses that snapshot as its authority and rejects drift before execution.\r\n\r\nAll pending chains are simulated and verified before any transaction. Each send rechecks the anchor and deployer nonce, checkpoints the chain only after a canonical receipt, and verifies live configuration from one L1 block.\r\n\r\nRetries reconcile complete deployments, reject partial deployments, and redeploy a checkpointed chain only when its deployment disappeared while the prepared anchor remains valid.\r\n\r\n**Tests**\r\n\r\nCovers prepared-input and artifact drift, all-chain preflight, broadcast guards, exact configuration checks, retries, reconciliation, reorg recovery, the full workflow, and the CLI.\r\n\r\n**Additional context**\r\n\r\nStacked on #21897. The starting anchor proposal and prestate remain in chain state because they are derived after address prediction. Other continuation inputs cannot silently diverge from the prediction, including across retries after chain state is normalized.\r\n\r\nAcross multiple chains, independent L1 transactions cannot be atomic. A later failure leaves completed chains checkpointed for retry.\r\n\r\n**Metadata**\r\n\r\nCloses #21669\r\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-22T21:37:29Z",
-      "mergedAt": "2026-08-03T18:34:38Z",
-      "additions": 4963,
-      "deletions": 318
     }
   ],
   "codeChanges": {
-    "additions": 63353,
-    "deletions": 66887,
-    "files": 1059,
-    "commitCount": 1403
+    "additions": 63596,
+    "deletions": 67768,
+    "files": 1103,
+    "commitCount": 1513
   },
   "completedItems": [
     {
@@ -2861,6 +2861,25 @@
       ]
     },
     {
+      "title": "kona-protocol: Add a hash-keyed L2BlockInfo lookup for the reset walk-back",
+      "prNumber": 22467,
+      "type": "other",
+      "body": "> Stacked on #22466.\n\nSame drift as #22465, in the same function. op-node's `initialReset` walks back by parent hash; kona walked back by decrementing a height while holding the parent hash it needed:\n\n```go\n// op-node pipeline.go:245\nparen",
+      "files": [
+        "rust/kona/crates/proof/proof/src/l2/chain_provider.rs",
+        "rust/kona/crates/proof/proof/src/sync.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/core.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/chain_providers.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/sys_config_fetcher.rs",
+        "rust/kona/crates/protocol/derive/src/traits/providers.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/traits.rs",
+        "rust/kona/crates/protocol/protocol/src/test_utils.rs",
+        "rust/kona/crates/providers/providers-alloy/src/buffered_l2_chain_provider.rs",
+        "rust/kona/crates/providers/providers-alloy/src/l2_chain_provider.rs",
+        "rust/kona/crates/providers/providers-local/src/buffered.rs"
+      ]
+    },
+    {
       "title": "kona-node: Serve the system config lookup from imported blocks",
       "prNumber": 22466,
       "type": "other",
@@ -3321,6 +3340,66 @@
       ]
     },
     {
+      "title": "kona!: remove op-supervisor-era interop legacy",
+      "prNumber": 22552,
+      "type": "other",
+      "body": "Deletes the op-supervisor-era interop remnants from kona so lokahi starts from a clean slate (58 files, +96/−1009):\n\n- `InteropMode` (unreachable; pipeline is now unconditionally polled), `IndexedTraversal`/`TraversalStage`/`OnlinePipeline:",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/design/derivation.mdx",
+        "docs/public-docs/node-operators/kona-node/rpc/rollup.mdx",
+        "docs/public-docs/op-stack/fault-proofs/kona/proof/custom-backend.mdx",
+        "rust/kona/crates/node/engine/src/metrics/mod.rs",
+        "rust/kona/crates/node/engine/src/state/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs",
+        "rust/kona/crates/node/engine/src/test_utils/engine_state.rs",
+        "rust/kona/crates/node/rpc/src/rollup.rs",
+        "rust/kona/crates/node/service/src/lib.rs",
+        "rust/kona/crates/node/service/src/service/builder.rs",
+        "rust/kona/crates/node/service/src/service/mod.rs",
+        "rust/kona/crates/node/service/src/service/mode.rs",
+        "rust/kona/crates/node/service/src/service/node.rs",
+        "rust/kona/crates/protocol/derive/README.md",
+        "rust/kona/crates/protocol/derive/src/errors/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/lib.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/builder.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/core.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/mod.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/types.rs",
+        "rust/kona/crates/protocol/derive/src/stages/attributes_queue.rs",
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_provider.rs",
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_queue.rs",
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_stream.rs",
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_validator.rs",
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_assembler.rs",
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_bank.rs",
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_provider.rs",
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_reader.rs",
+        "rust/kona/crates/protocol/derive/src/stages/frame_queue.rs",
+        "rust/kona/crates/protocol/derive/src/stages/l1_retrieval.rs",
+        "rust/kona/crates/protocol/derive/src/stages/mod.rs",
+        "rust/kona/crates/protocol/derive/src/stages/traversal/indexed.rs",
+        "rust/kona/crates/protocol/derive/src/stages/traversal/mod.rs",
+        "rust/kona/crates/protocol/derive/src/stages/traversal/polling.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/attributes_queue.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/batch_provider.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/batch_stream.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/channel_provider.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/channel_reader.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/frame_queue.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/traits/stages.rs",
+        "rust/kona/crates/protocol/derive/src/types/signals.rs",
+        "rust/kona/crates/protocol/interop/src/control.rs",
+        "rust/kona/crates/protocol/interop/src/derived.rs",
+        "rust/kona/crates/protocol/interop/src/event.rs",
+        "rust/kona/crates/protocol/interop/src/lib.rs",
+        "rust/Cargo.lock",
+        "rust/kona/crates/protocol/interop/Cargo.toml"
+      ]
+    },
+    {
       "title": "kona-node: always reset the engine on a pipeline reset",
       "prNumber": 22551,
       "type": "other",
@@ -3424,36 +3503,45 @@
       "files": [
         "rust/kona/sp1/crates/ethereum/client/src/super_range.rs"
       ]
+    },
+    {
+      "title": "docs: extend the deletion review guide with build-metadata fallout",
+      "prNumber": 22643,
+      "type": "docs",
+      "body": "Extends `docs/ai/deletion-review.md` with the check classes that are invisible to every compile/clippy/test gate — each one observed to slip through review on a real deletion PR before being caught late:\n\n- **Orphaned dependencies**: grep e",
+      "files": [
+        "docs/ai/deletion-review.md"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "claude",
       "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
-      "totalScore": 1860.224566570254,
-      "prScore": 1651.9705665702538,
+      "totalScore": 2068.9574066254445,
+      "prScore": 1860.2654066254445,
       "issueScore": 12.1,
       "reviewScore": 193.5,
-      "commentScore": 2.654,
+      "commentScore": 3.0919999999999996,
       "summary": "claude: Focused on structuring and expanding the documentation framework for the Optimism ecosystem, notably merging PR #22184 to establish tab skeletons and indices for App Developers and Chain Operators. They also initiated work on the OP Mainnet \"keep-and-grow\" documentation via PR #22185, contributing over 160 lines of new content and configuration. Their efforts this month were dedicated entirely to improving the information architecture and accessibility of technical docs."
     },
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 1700.9652205989025,
-      "prScore": 983.9692205989026,
+      "totalScore": 1783.5446685262234,
+      "prScore": 1044.0486685262233,
       "issueScore": 82.2,
-      "reviewScore": 631.5,
+      "reviewScore": 654,
       "commentScore": 3.296,
       "summary": "sebastianst: Focused on optimizing the core architecture of the OP Stack, most notably by refactoring the op-node to run the sequencer on its own goroutine (#22241) to address thread contention and starvation issues (#22232). They made significant contributions to the Lagoon upgrade specifications and implementation, including refining the DA footprint for post-exec transactions (#926, #22219) and enhancing the engine controller with direct-call build methods (#22238). Beyond these technical implementations, they maintained high code quality through 55 PR reviews and the creation of 9 issues to track pipeline improvements and decoupling efforts. Their work primarily centered on system performance, sequencer stability, and protocol upgrades, involving substantial modifications to over 500 files."
     },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 1440.8328212661352,
+      "totalScore": 1455.8328212661352,
       "prScore": 1135.6608212661351,
       "issueScore": 2,
-      "reviewScore": 300,
+      "reviewScore": 315,
       "commentScore": 3.1719999999999997,
       "summary": "ajsutton: Focused primarily on quality assurance and registry maintenance, contributing significant effort to testing infrastructure which accounted for over half of their code modifications. They played a key role in codebase stability by conducting 11 pull request reviews and managing configuration updates, such as the proposal to streamline the Sepolia devnet registry in ethereum-optimism/superchain-registry #1304. Their technical activity involved modifying 34 files with over 750 lines of code changes, demonstrating a consistent focus on refining test suites and maintaining cross-repository standards."
     },
@@ -3480,11 +3568,11 @@
     {
       "username": "einar-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 714.7306487188813,
+      "totalScore": 714.9306487188813,
       "prScore": 470.4246487188813,
       "issueScore": 24.3,
       "reviewScore": 216,
-      "commentScore": 4.005999999999999,
+      "commentScore": 4.2059999999999995,
       "summary": "einar-oplabs: Focused on optimizing CI infrastructure and improving developer experience, notably reducing the makespan of CI pipelines by sharding test jobs and increasing parallelism in ethereum-optimism/optimism#22202. They significantly enhanced system reliability by implementing retries for transient failures in Go and Forge workflows (#22200) and caching build artifacts to speed up contract builds (#22199). Beyond infrastructure, they addressed testing stability by sampling field elements in the kona-proof tests (#22201) and investigating flaky test behaviors in the op-supernode (#22234). Their work this month, characterized by over 9,000 lines of code changes across 325 files, primarily centered on CI configuration, test suite hardening, and bug fixes."
     },
     {
@@ -3558,14 +3646,34 @@
       "summary": "karlfloersch: Focused on enhancing the security and reliability of the Optimism network's node and bridge infrastructure, contributing over 1,500 lines of code across several high-impact open pull requests. Their work prioritized critical validation logic within the op-node to ensure data integrity during span batch overlaps (#22215, #22214) and advanced the interoperability layer by reviving the SuperchainTokenBridge (#22259). Additionally, they provided technical oversight through four code reviews and addressed safety concerns in the op-supernode's logging database (#22253). This month’s efforts were primarily centered on bug fixes and testing to strengthen the robustness of cross-chain derivation and token bridging."
     },
     {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 241.06504245717753,
+      "prScore": 81.12504245717751,
+      "issueScore": 4,
+      "reviewScore": 155,
+      "commentScore": 0.94,
+      "summary": "geoknee: Focused on enhancing testing infrastructure within the ethereum-optimism/optimism repository by identifying and addressing gaps in proof testing. They successfully drove the addition of coverage in `rust/kona/tests/proofs` through the creation and resolution of issue #21344. Additionally, they contributed to the development process by providing two technical reviews on open pull requests, demonstrating a primary focus on software delivery management and test coverage."
+    },
+    {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 218.7365110035912,
+      "totalScore": 223.7365110035912,
       "prScore": 56.896511003591186,
       "issueScore": 0,
-      "reviewScore": 161.5,
+      "reviewScore": 166.5,
       "commentScore": 0.33999999999999997,
       "summary": "sbvegan: Focused on quality assurance and peer feedback this month, contributing two pull request approvals. Their activity centered on reviewing the work of others to ensure code standards were met. Overall, their primary focus was on supporting the development pipeline through the review process."
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 209.9884437963415,
+      "prScore": 79.9884437963415,
+      "issueScore": 0,
+      "reviewScore": 130,
+      "commentScore": 0,
+      "summary": "digorithm: Focused on refining the proposer architecture within the optimism repository, notably identifying and tracking follow-up improvements and the porting of the defend/prove path through issues #22086 and #22147. They played a significant role in code quality assurance by conducting 15 pull request reviews, including critical feedback and approvals. Despite no merged pull requests, their high-volume code modifications of over 56,000 total lines across 17 commits demonstrate a massive scale of technical activity. Their work primarily centered on general system maintenance and extensive testing infrastructure."
     },
     {
       "username": "bitwiseguy",
@@ -3576,16 +3684,6 @@
       "reviewScore": 29.5,
       "commentScore": 0,
       "summary": "bitwiseguy: Focused on maintaining core infrastructure by managing critical dependency updates within the ethereum-optimism/optimism repository. They successfully merged a significant update to the upstream Reth pin in PR #22285, which involved substantial modifications across 21 files (+432/-432 lines). Beyond their direct code contributions, they provided essential technical oversight by completing 4 pull request reviews to ensure project stability. Their primary focus this month was centered on Rust-based dependency management and ensuring alignment with upstream protocol developments."
-    },
-    {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 204.9884437963415,
-      "prScore": 79.9884437963415,
-      "issueScore": 0,
-      "reviewScore": 125,
-      "commentScore": 0,
-      "summary": "digorithm: Focused on refining the proposer architecture within the optimism repository, notably identifying and tracking follow-up improvements and the porting of the defend/prove path through issues #22086 and #22147. They played a significant role in code quality assurance by conducting 15 pull request reviews, including critical feedback and approvals. Despite no merged pull requests, their high-volume code modifications of over 56,000 total lines across 17 commits demonstrate a massive scale of technical activity. Their work primarily centered on general system maintenance and extensive testing infrastructure."
     },
     {
       "username": "0xiamflux",
@@ -3616,16 +3714,6 @@
       "reviewScore": 175.5,
       "commentScore": 0.43799999999999994,
       "summary": "mds1: Focused primarily on quality assurance and codebase oversight, providing 13 comprehensive reviews and 3 targeted PR comments to ensure technical standards across the project. While they did not merge any pull requests this month, they contributed a significant addition of 279 lines of code across 5 files in a single commit. Their activity demonstrates a strong emphasis on collaborative code review and foundational development work."
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 166.86504245717754,
-      "prScore": 81.12504245717751,
-      "issueScore": 2,
-      "reviewScore": 83,
-      "commentScore": 0.74,
-      "summary": "geoknee: Focused on enhancing testing infrastructure within the ethereum-optimism/optimism repository by identifying and addressing gaps in proof testing. They successfully drove the addition of coverage in `rust/kona/tests/proofs` through the creation and resolution of issue #21344. Additionally, they contributed to the development process by providing two technical reviews on open pull requests, demonstrating a primary focus on software delivery management and test coverage."
     },
     {
       "username": "op-will",
@@ -3686,6 +3774,16 @@
       "reviewScore": 0,
       "commentScore": 0.4,
       "summary": "raddaslul: Focused on infrastructure maintenance and registry updates, specifically addressing compatibility for op-deployer 0.7.1 and OPCM V2 Registry support in ethereum-optimism/superchain-registry (#1303). Their work this month involved significant code modifications across 31 files, with a heavy emphasis on bugfixes and testing to ensure system stability. They also initiated a chore task for RECA Standard game type registration in ethereum-optimism/superchain-ops (#1514). Overall, their primary focus remained on registry integrity and supporting deployment tooling through targeted bugfix and testing efforts."
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 82.60335875993155,
+      "prScore": 73.60335875993155,
+      "issueScore": 4,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": "pauldowman: Focused on project management and environment stability within the ethereum-optimism/optimism repository, notably resolving a toolchain warning via PR #22386. They played a key role in defining technical requirements by creating four high-impact issues related to ZK game monitoring (#18424), op-deployer enhancements (#21429), fast finality mode (#22112), and contract deployment (#22176), all of which were successfully closed. Their activity this month centered on bugfix work and infrastructure coordination to support new protocol features."
     },
     {
       "username": "palango",
@@ -3908,16 +4006,6 @@
       "summary": "harshinsecurity: Focused on enhancing the robustness of block processing within the optimism repository, specifically by addressing unhandled payload statuses in the op-node. They authored a significant update in PR #22182 (+94/-4 lines) to ensure the system rejects invalid statuses during the CommitBlock phase. This work involved a balanced effort between core code logic and comprehensive test coverage to validate the new error-handling behavior. Their primary focus this month was on improving the reliability and security of the node's consensus layer through rigorous testing and validation."
     },
     {
-      "username": "pauldowman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 17.866306144334054,
-      "prScore": 8.866306144334056,
-      "issueScore": 4,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": "pauldowman: Focused on project management and environment stability within the ethereum-optimism/optimism repository, notably resolving a toolchain warning via PR #22386. They played a key role in defining technical requirements by creating four high-impact issues related to ZK game monitoring (#18424), op-deployer enhancements (#21429), fast finality mode (#22112), and contract deployment (#22176), all of which were successfully closed. Their activity this month centered on bugfix work and infrastructure coordination to support new protocol features."
-    },
-    {
       "username": "zloglevel",
       "avatarUrl": "https://avatars.githubusercontent.com/u/227594782?v=4",
       "totalScore": 15.468873864173311,
@@ -4068,6 +4156,26 @@
       "summary": "NexusAther: Focused on expanding the ecosystem's asset support by initiating the integration of wRATR (Wrapped Ratatoskr) on the Base network. This work is currently captured in an open pull request within the ethereum-optimism.github.io repository (#1346), which involves adding necessary configurations to the platform. Their primary focus this month was centered on infrastructure and configuration updates to support new token listings."
     },
     {
+      "username": "ameniki",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/196974781?v=4",
+      "totalScore": 8.08743897916644,
+      "prScore": 8.08743897916644,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jvoidial",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/218412056?u=e45d4db8e68afc1ab154e6104a56575a9be3ba12&v=4",
+      "totalScore": 7.684674030744707,
+      "prScore": 7.484674030744706,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "girginomer10",
       "avatarUrl": "https://avatars.githubusercontent.com/u/67194558?u=b9675cc7d1b268ec4f2463e3430716304c5c258b&v=4",
       "totalScore": 7.52861228866811,
@@ -4198,9 +4306,9 @@
       "summary": null
     }
   ],
-  "newPRs": 344,
-  "mergedPRs": 206,
-  "newIssues": 108,
-  "closedIssues": 72,
+  "newPRs": 353,
+  "mergedPRs": 209,
+  "newIssues": 109,
+  "closedIssues": 73,
   "activeContributors": 84
 }

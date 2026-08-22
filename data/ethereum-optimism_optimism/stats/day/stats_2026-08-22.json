@@ -1,0 +1,300 @@
+{
+  "interval": {
+    "intervalStart": "2026-08-22T00:00:00.000Z",
+    "intervalEnd": "2026-08-23T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-08-22 to 2026-08-23, ethereum-optimism/optimism had 9 new PRs (3 merged), 1 new issues, and 9 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABNccV4g",
+      "title": "kona: remove op-supervisor-era interop legacy (lokahi phase 0)",
+      "author": "sebastianst",
+      "number": 22519,
+      "repository": "ethereum-optimism/optimism",
+      "body": "First step of the lokahi (rust-supernode) work: delete the op-supervisor-era interop remnants from kona-node so lokahi starts from a clean slate. All of this predates the current interop design (op-supervisor itself was removed from the Go side in #20891/#20997); none of it is reachable or load-bearing today, except one live bug noted below.\n\n## Scope (permalinks at `3233dd8b`)\n\n- **`InteropMode`** — unreachable (no builder setter, no CLI flag; `RollupNodeBuilder` hardcodes `Polled`). Collapse to unconditional polled traversal: [mode.rs](https://github.com/ethereum-optimism/optimism/blob/3233dd8bde590372e5820ae9f68c5b2c25e8ba51/rust/kona/crates/node/service/src/service/mode.rs)\n- **`IndexedTraversal` / `TraversalStage` / `OnlinePipeline::new_indexed`** — inert even if reached (`Signal::ProvideBlock` is never constructed anywhere): [indexed.rs](https://github.com/ethereum-optimism/optimism/blob/3233dd8bde590372e5820ae9f68c5b2c25e8ba51/rust/kona/crates/protocol/derive/src/stages/traversal/indexed.rs)\n- **kona-interop's unused managed-mode wire types** `ManagedEvent` / `ControlEvent` / `BlockReplacement` — zero users in tree: [event.rs](https://github.com/ethereum-optimism/optimism/blob/3233dd8bde590372e5820ae9f68c5b2c25e8ba51/rust/kona/crates/protocol/interop/src/event.rs), [control.rs](https://github.com/ethereum-optimism/optimism/blob/3233dd8bde590372e5820ae9f68c5b2c25e8ba51/rust/kona/crates/protocol/interop/src/control.rs), [replacement.rs](https://github.com/ethereum-optimism/optimism/blob/3233dd8bde590372e5820ae9f68c5b2c25e8ba51/rust/kona/crates/protocol/interop/src/replacement.rs)\n- **The derivation actor's `is_interop_active` reset suppression** — on `PipelineErrorKind::Reset` (e.g. an L1 reorg) the actor skips the engine reset when the chain's fork schedule says interop is active, then parks in `AwaitingSignal` forever: [actor.rs#L130-L142](https://github.com/ethereum-optimism/optimism/blob/3233dd8bde590372e5820ae9f68c5b2c25e8ba51/rust/kona/crates/node/service/src/actors/derivation/actor.rs#L130-L142). It assumed an external supervisor would drive the reset; none exists. This is a **live park-forever bug** on interop-activated chains and its removal is the one intentional behavior change here — red/green test required (failing test on the parked behavior first).\n- **The cross/local-unsafe distinction** — old-design remnant; there is only one unsafe head, with no interop cross-checks on the unsafe chain. Delete `cross_unsafe_head` state and its writers (e.g. `InsertTask` unconditionally setting `cross_unsafe = unsafe`): [state/core.rs](https://github.com/ethereum-optimism/optimism/blob/3233dd8bde590372e5820ae9f68c5b2c25e8ba51/rust/kona/crates/node/engine/src/state/core.rs). The `cross_unsafe_l2` field of `optimism_syncStatus` ([rollup.rs#L57](https://github.com/ethereum-optimism/optimism/blob/3233dd8bde590372e5820ae9f68c5b2c25e8ba51/rust/kona/crates/node/rpc/src/rollup.rs#L57)) and the `cross-unsafe` block-label metric series are **dropped** — only `unsafe_l2` remains. In-repo consumers are adapted in the same change (devstack DSL `safety.CrossUnsafe` mapping, kona-facing acceptance-test assertions); the shared Go `eth.SyncStatus` type keeps the field since op-node still populates it.\n\n## Acceptance\n\n- kona unit suites and the Go acceptance gate (kona-op-reth) pass. Permitted test edits only: removal of tests owned by deleted machinery, the `cross_unsafe_l2` compat assertion, and the new reset-behavior test.\n- Grep-clean for the deleted symbols.\n- `cross_unsafe_l2` asserted absent from the serialized `optimism_syncStatus` response; adapted Go consumers (devstack/acceptance) pass.\n\nAnything else that turns out to be an old-interop artifact during implementation is equally fair game: ignore/replace/remove rather than build on it.\n\n🤖 *Co-created with Claude (Fable 5)*\n",
+      "createdAt": "2026-08-19T21:14:33Z",
+      "closedAt": "2026-08-22T03:04:42Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABNy9HUQ",
+      "title": "kona-node: NetworkActor stalls the p2p swarm for the duration of a remote-signer HTTP call",
+      "author": "geoknee",
+      "number": 22646,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`NetworkActor::step()` awaits the block signature **inline in its `select!` arm**. With a remote signer that is an HTTP round-trip, and until it resolves `step()` has not returned — so the `select!` is not re-entered and no other arm is serviced, including the libp2p swarm event stream.\n\nThis is the kona-node counterpart of #22554, but the victim is different. In op-node a slow signer was subtracted from the next block's build window. Here the sequencer is already insulated (see below); what stalls instead is **p2p processing**.\n\nThere is also **no deadline** on the signing call, so a signer connection that hangs rather than errors wedges the network actor indefinitely.\n\n## The code\n\n`crates/node/service/src/actors/network/actor.rs`, one `select!` (line 107) whose `publish_rx` arm (line 136) signs before publishing:\n\n```rust\nSome(block) = self.publish_rx.recv(), if !self.publish_rx.is_closed() => {\n    // ...\n    let signature = signer.sign_block(payload_hash, chain_id, sender_address).await?;   // :151 blocks here\n    match self.handler.gossip.publish(selector, block, signature) {                     // :153\n```\n\nWhile that future is in flight, none of the sibling arms run:\n\n| Arm | What stops |\n| --- | --- |\n| `self.handler.gossip.next()` (:159) | the libp2p swarm event stream — inbound block gossip is not consumed |\n| `unsafe_block_rx` | inbound unsafe blocks are not forwarded to the engine |\n| `handler.enr_receiver` | discovered peers are not dialed |\n| `peer_score_inspector.tick()` | peer scoring / monitoring |\n| `admin_query_rx`, `p2p_rpc_rx` | admin `PostUnsafePayload`, p2p RPC |\n\n`RemoteSigner`'s HTTP client is built without a timeout — `build_http_client` (`crates/node/sources/src/signer/remote/client.rs:103`) calls `reqwest::Client::builder()` and never sets `.timeout(...)`, and there is no timeout anywhere under `crates/node/sources/src/signer/`. reqwest's default is no request timeout.\n\n## What is *not* affected\n\nThe sequencer does **not** block on the signer, which is worth stating because it is the part op-node got wrong:\n\n- `SequencerActor::seal_and_commit_payload_if_applicable` hands the payload off via `schedule_execution_payload_gossip` (`actors/sequencer/actor.rs:207`).\n- That trait is documented as fire-and-forget: \"should return as quickly as possible and offers no guarantees that the payload actually was gossiped successfully\" (`actors/network/gossip.rs`).\n\nTwo caveats on that insulation:\n\n1. It is still a bounded `mpsc::Sender::send().await`, so it is not immune — just deeply buffered. The channel is capacity **256** (`service/node.rs:469`), i.e. ~8.5 minutes of 2s blocks before the sequencer feels backpressure.\n2. 256 in-flight payload envelopes is a large memory ceiling, and the implied overflow policy is \"eventually block the sequencer\". For comparison, the op-node fix (#22585) deliberately chose a much smaller bound that drops the oldest entry rather than ever making the sequencer wait, on the grounds that an ungossiped block still reaches other nodes via L1 and derivation or other sync mechanisms, whereas a sequencer that stops building produces nothing for anyone. The two implementations currently disagree on that trade.\n\n## Suggested fix\n\n1. **Get the `await` out of the `select!` arm.** Sign and publish from a dedicated task rather than inside `step()`, so the swarm keeps being polled during the round-trip.\n2. **Keep publishing ordered and bounded.** A single signing task draining a bounded queue preserves seal order — a verifier cannot follow the chain past a block it never received over gossip alone — and bounds memory well below 256 envelopes.\n3. **Put a deadline on the signing call**, on the reqwest client or via `tokio::time::timeout`. This is what turns a hung signer from degraded gossip into an indefinitely wedged network actor, and it stands on its own.\n4. **Choose the overflow policy deliberately**, and ideally make it agree with op-node's.\n\n## Confidence and how to confirm\n\nThis is a **structural finding from reading the code; it has not been measured.** Whether a few hundred milliseconds of unpolled swarm meaningfully degrades inbound gossip in practice is unverified — gossipsub has internal buffering and may absorb it. The unbounded-wait case (hung signer, no timeout) is the unambiguous one.\n\nTo confirm the degraded-but-not-hung case, run a kona-node sequencer against a remote signer with injected latency and watch whether inbound unsafe-payload handling and peer scoring stall in step with the signing round-trips.\n\n## Related\n\n- #22554 — the op-node instance of the same shape (sequencer build window rather than p2p)\n- #22585 — the op-node fix, including the ordering/bounding/overflow discussion\n",
+      "createdAt": "2026-08-22T07:37:28Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABAoNYXw",
+      "title": "lokahi-interop,kona: apply Decision::Invalidate as the deposits-only block replacement",
+      "author": "claude",
+      "number": 22645,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\nApplies the interop verifier's `Decision::Invalidate` as the deposits-only block replacement flow, mirroring op-supernode's supervisor-driven invalidate-and-replace. Part of #22547. Part of #22523.\n\n## Before\n\n`rust/lokahi-interop/src/verifier.rs` routed `Invalidate | Rewind` to `hold()` — \"Interop verification reached a decision this phase does not apply\" — so an invalid cross-chain message stalled the verified frontier forever: the verifier logged `Block found invalid` every 500ms, cross-safety never advanced, and the reorg acceptance family failed with \"expected head to reorg ... but got\" the same head (`TestReorgInitExecMsg`, `TestReorgInvalidExecMsgs/*`, measured in CircleCI jobs 5511460/5511920).\n\nA second, adjacent defect: the consolidation seal path escalated `UnsafeHeadChangedSinceBuild` to **Critical** and crashed the node (`seal/error.rs`), measured as `TestSequencingWindowExpiry`'s failure.\n\n## After\n\nThe full replacement loop runs, in op-supernode's shape and order:\n\n1. **Decide + write ahead** — an `Invalidate` round is written to the verified store's WAL slot before any side effect (`verifier.rs::progress`), like `Advance` always was.\n2. **Archive first** — each invalid head's output preimage (state root, message-passer storage root, block hash, decision timestamp) is recorded in the per-chain invalidated-output archive **before the rewind**, mirroring `InvalidateBlock`'s deny-list-add-then-rewind order (`op-supernode/supernode/chain_container/invalidation.go:392-465`). The write is **driven from the WAL on every replay** — the #22540 hazard: the \"already replaced, just ack\" replay branch skips the rewind but never the archive write, because a missing archive entry is silent and hands op-proposer the replacement block's output as a well-formed but wrong superroot. Pinned by `a_replayed_invalidation_still_archives_when_the_rewind_is_skipped`.\n3. **Rewind** — a new `RewindableChain` seam takes the chain onto the invalidated block's parent, via a new `ChainControllerRequest::Rewind` that uses the targeted `Engine::reset_to` (no walkback — the caller knows the block, `chain_container.go:749`'s shape), rewinds the safe-head DB and resets derivation. A canonical block at the height that differs means \"already replaced, skip\"; a missing block is a partial rewind driven to completion (`invalidation.go:438-455`).\n4. **Replace** — derivation re-derives the height from the same L1 batch and deterministically rebuilds the invalid block; a new **deny-list seam in kona-engine** (`kona_engine::DenyList`, backed by the archive — the archive *is* the deny list, as in op-supernode) turns that rebuild into a **deposits-only build at the same height** through the existing Holocene fallback machinery, flushing the channel exactly as op-node's `DepositsOnlyAttributes` does (`attributes_queue.go:167`).\n5. **Re-verify** — no frontier is committed by the invalidation (`applyPendingTransition` for `DecisionInvalidate` commits nothing either); the next round re-verifies the same timestamp against the replacement and advances.\n\nThe deny list is consulted at op-node's three checkpoints **with op-node's three error postures**, each cited at its call site:\n- seal-time insert of derived payloads: **fails open**, logged at error (`payload_process.go:56-85`);\n- consolidation adoption: **fails closed**, stall and retry (`attributes.go:241-256`);\n- unsafe ingestion: window-gated from a denial until finality passes the highest denied height, **fails open**, always logged (`engine_controller.go:776-799`); `opstack_commitBlockV1` answers the caller (`ErrPayloadDenied`).\n\nThe seal-time stale-head guard is now **scoped to sequencer builds**, as op-node scopes its equivalent (`ErrStaleBuild`, `!attrs.IsDerived()`, `op-node/rollup/engine/build_start.go:62-68`), and `SealTaskError::UnsafeHeadChangedSinceBuild` — which only that path can now produce — is **Reset**, not Critical. The first head of this branch (93ec4a3) only downgraded the severity, and the combined measurement (job 5512168) showed why that is not enough: consolidation forces a derived rebuild on the **local-safe** parent exactly when the unsafe chain ahead of it must be reorged out, so the guard *always* fired on that path, every Reset re-derived the same attributes, and post-replacement `TestReorgInitExecMsg` livelocked — `Received reset request err=Consolidate(SealTaskFailed(UnsafeHeadChangedSinceBuild))` every ~50ms while the safe head never advanced past the divergence (the same mechanism behind `TestSequencingWindowExpiry`'s original consolidate crash under Critical). A derived seal now proceeds under a moved unsafe head: op-node only warns there (`build_start.go:73-77`) and snaps the unsafe head onto the built block afterwards (`tryUpdateUnsafe`, `engine_controller.go:1210-1217`), which kona's `InsertTask` already mirrors via its post-insert `SynchronizeTask`. A node composed without a deny list (standalone kona-node) is unchanged: every new parameter defaults to `None`.\n\nUn-guarding the derived seal exposed the next livelock one stage later (measured in-session at head cce56455's precursor: 411,805 deny/replace/flush cycles at ~200Hz over a 35-minute `TestReorgInitExecMsg` run, the safe head pinned one block before the divergence): the deposits-only replacement imports a block *for* the queued attributes and advances local-safe past their parent, but the consolidate task returns the flush signal as an error and `Engine::drain` keeps errored tasks queued for retry (`core.rs:241-254`) — so the retried task re-consolidated the same user-tx attributes against the replacement it had just imported, mismatched, rebuilt the denied block, and replaced it again, forever. op-node converges through its queued-attributes checks against the pending-safe head (`attributes.go:156-182`): a parent the pending-safe head moved past is dropped — *\"expected after successful processing of these attributes\"* — and a parent at the right height with the wrong hash is a `ResetEvent`. `ConsolidateTask::execute` now mirrors both arms: the drop is a no-op success, the conflict is the new Reset-severity `ParentConflictsWithLocalSafe`; delegated `BlockInfo` input names its own target and is not gated. With both fixes, an in-session `TestReorgInitExecMsg` run **passes in 40.3s** — exactly one invalidation, one deny→deposits-only replacement, one channel flush, zero loop iterations.\n\n## How\n\n- `rust/lokahi-interop`: `Verifier::with_replacements` wires per-chain `ChainReplacement { archive, chain }` routes (refused unless every chain has one); `apply_invalidate` runs archive-then-rewind per chain, idempotently, and preserves the WAL slot on a failed rewind (\"transition preserved for retry\"); genesis-height invalidation halts loudly. A verifier built without routes still holds, and writes nothing to the WAL it could not re-apply.\n- `rust/kona/crates/node/engine`: new `deny.rs` (trait + `SharedDenyList`), threaded into `SealTask`/`ConsolidateTask`/`CommitTask` and `build_and_seal`; new `test_utils::StaticDenyList`.\n- `rust/kona/crates/node/service`: `ChainControllerRequest::Rewind` + `rewind_to` (reset_to + safe-db rewind + derivation reset), the unsafe-ingestion gate, `RollupNodeBuilder::with_deny_list`.\n- `rust/lokahi`: each chain opens `invalidated-outputs/` next to its safe-head DB; one `Arc` handle goes to the chain controller (deny reads) and the interop verifier (invalidation writes), so the two cannot see different stores; `ChainRewindRoute` implements the rewind seam over the controller queue.\n\n## Fail-first evidence\n\nAll five new behaviours were watched failing before the implementation landed:\n- `an_invalid_message_archives_the_output_and_rewinds_the_chain`, `a_replayed_invalidation_still_archives_when_the_rewind_is_skipped`, `a_failed_rewind_keeps_the_invalidation_pending_and_retries_it`, `an_invalidation_of_genesis_halts_rather_than_rewinding` (round_loop, 4 failed pre-impl);\n- `a_changed_unsafe_head_is_a_reset_not_a_crash` (failed: severity was Critical);\n- the seal/consolidate deny tests failed pre-check (payload inserted / block adopted);\n- `stale_head::a_derived_rebuild_seals_under_a_moved_unsafe_head` (failed against the guard as first landed: the derived seal returned `UnsafeHeadChangedSinceBuild` instead of converging — the measured livelock in unit form); `stale_head::a_stale_sequencer_build_is_still_dropped` pins the guard that remains.\n- `stale::attributes_the_local_safe_head_moved_past_are_dropped` and `stale::a_conflicting_parent_at_the_local_safe_height_is_a_reset` (both failed against the pre-drop consolidate: rebuild attempted / no conflict raised); `stale::the_delegation_path_is_not_gated` pins the ungated arm. End-to-end: `TestReorgInitExecMsg` in-session, 2097s livelock before → 40.3s pass after.\n\n## Verification\n\n- `cargo nextest run -p lokahi -p lokahi-interop -p kona-engine -p kona-node-service`: **484 passed, 0 failed**.\n- `cargo clippy -p lokahi -p lokahi-interop -p kona-engine -p kona-node-service --all-features --all-targets -- -D warnings`: clean.\n- nightly `cargo fmt --all` and the scoped `lint-docs` rustdoc check (`-D warnings`): clean.\n\n## Recorded divergences from op-supernode (behaviour-neutral)\n\n- op-supernode captures the invalidated blocks' **parent payloads into the WAL** because its `engine.Rewind` needs full `ExecutionPayloadEnvelope`s; kona's `Engine::reset_to` takes head infos, and the parent is re-read from the (unchanged-below-the-rewind) canonical chain at apply time, so the WAL carries no payloads.\n- op-supernode **freezes every chain's VN** before a multi-chain rewind because a peer VN's forkchoice updates race the rewind; in lokahi cross-safe moves only on the verifier's own promotions and each rewind is ordered through that chain's single controller queue, so there is no equivalent race to freeze against.\n- `Decision::Rewind` (the committed-frontier-L1-reorg case) is **still held**, unchanged — this PR applies invalidation only. Archive pruning on such a rewind (`prune_at_or_after` exists) is wired when that decision is.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5)_",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-22T06:19:21Z",
+      "mergedAt": null,
+      "additions": 1841,
+      "deletions": 66
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAnm8oQ",
+      "title": "lokahi: serve the experimental opstack block-building namespace on chain routes",
+      "author": "claude",
+      "number": 22644,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\n## Before\n\nA lokahi chain route refused every `opstack_*` call with `-32601 Method not found`. op-supernode's virtual op-nodes serve the experimental block-building namespace on every chain's route (`op-node/node/node.go` `registerAPIs`, gated on `ExperimentalOPStackAPI`, which the devstack's `makeNodeCfg` always sets), and the op-test-sequencer's standard builder/committer/publisher drive block building through it: `opstack_openBlockV1`, `opstack_cancelBlockV1`, `opstack_sealBlockV1`, `opstack_commitBlockV1`, `opstack_publishBlockV1`. Under lokahi, every acceptance test that sequences through the test sequencer (`dsl/sequencer.go` `New()`/`Next()`) failed at the first `opstack_openBlockV1` — the 18-test failure bucket of CircleCI job 5510201 (e.g. `unsafe_head_test.go:82`).\n\n## After\n\nEach chain's route serves the namespace with op-node's semantics, exactly when the chain's configuration asks for it, and the devstack asks for it the way it does on op-supernode.\n\n## How\n\nop-node is the spec, and each lokahi chain *is* a kona node, so the namespace is implemented in kona and registered where op-node registers its own — in the node's RPC module set, which lokahi's launcher routes under `/<chain-id>`:\n\n- **kona-rpc** — `opstack` jsonrpsee namespace with wire types matching the Go types field for field (`eth.BlockID`, `eth.PayloadInfo`, `opsigner.SignedExecutionPayloadEnvelope`; serde tests pin Go-shaped JSON), and op-node's `-401xx` build error codes (`op-service/apis/opstack.go`). `RpcBuilder` gains `experimental_opstack`, default off.\n- **kona-node-service** — `OpStackRpc` (`actors/rpc/opstack.rs`) delegates as op-node's does:\n  - `openBlockV1` = `EngineController.OpenBlock`: parent-exists check, then a direct `engine_forkchoiceUpdated` with head = parent and the given attributes (safe/finalized labels from the engine-state watch), with `startPayload`'s error mapping code for code.\n  - `sealBlockV1`/`cancelBlockV1` = `SealBlock`/`CancelBlock`: a direct `engine_getPayload` versioned by the job's timestamp; sealing does **not** canonicalize. An unknown payload id is `-40120`.\n  - `commitBlockV1` = `CommitBlock`: `engine_newPayload` + unsafe-head move + canonicalizing FCU. Those writes move state the `ChainController` owns, so the request goes through its queue as a new `ChainControllerRequest::CommitBlock`.\n  - `publishBlockV1` = `OpNode.PublishBlock`: the signed envelope goes out on the chain's gossip topic with the caller's signature as given (the publish channel item can now carry a pre-made signature; the sequencer's own unsigned path is unchanged).\n- **kona-engine** — new `CommitTask`: an `InsertTask` with a result channel, following `SealTask`'s always-succeeds-with-channel pattern, so the caller hears the `newPayload` verdict once instead of the queue retrying (or silently dropping an invalid payload) behind their back.\n- **kona-node** — `--rpc.experimental-opstack-api`, so a standalone kona-node can serve the namespace too.\n- **lokahi** — `experimental-opstack-api` in the TOML (`[defaults]` and per chain, default off), passed into each chain's `RpcBuilder`.\n- **op-devstack** — the generated lokahi TOML sets `experimental-opstack-api = true` in `[defaults]`, mirroring `makeNodeCfg`'s `ExperimentalOPStackAPI: true` for op-supernode's virtual nodes.\n\nDeliberate, documented divergences from op-node:\n\n- `publishBlockV1` schedules the payload onto the network actor's publish queue and answers; op-node awaits the gossipsub publish. A gossip failure is logged by the network actor rather than returned (the devstack dsl ignores publish errors either way).\n- `commitBlockV1` refuses a payload that does not descend from the local-safe head (kona's unsafe-head admission rule); op-node has no counterpart. The refusal is returned to the caller, not silently dropped like the gossip path drops it.\n- open/seal/cancel are direct engine calls, as in op-node, but kona serializes them against the queue's own engine traffic only through the execution layer, not through op-node's controller mutex; the payload build job lives in the EL, so a concurrent queue FCU does not invalidate it.\n\n## Testing\n\n- `rust/lokahi/tests/opstack_route.rs` (two_chains.rs style, real binary against stubbed L1/EL): fail-first verified — with the namespace unregistered, the flag-on test fails with `-32601` where op-node behaviour is expected; with it, both tests pass. Gate off → `-32601`; gate on → `openBlockV1` refuses a missing parent with op-node's message and code, `sealBlockV1` fails as the `-40199` build error, `commitBlockV1` reaches the controller and returns the engine's refusal, `publishBlockV1` schedules and answers, and the namespace stays off the supernode root.\n- kona-engine `CommitTask` unit tests (refusal answered + no retry; invalid payload reaches the caller once); kona-rpc serde parity tests against Go JSON; lokahi config-resolution test; devstack TOML test.\n- `cargo test -p lokahi -p lokahi-interop -p kona-engine -p kona-rpc -p kona-node-service -p kona-node`, scoped clippy `--all-features --all-targets -- -D warnings`, nightly fmt.\n- A full local acceptance-test run does not fit this machine's disk (contracts + release Rust builds); the 18-test bucket is measured via the combined branch's CI run after merging this into #22634.\n\n## Measured (CircleCI job 5511460, head b9383a38 on #22634)\n\nThe RPC seam works end to end: **zero `Method not found` in the whole run**. In `TestReorgInitExecMsg`'s log the test sequencer's forced reorg goes through this namespace and sticks — `committer.go:54 \"Committed block to op-stack\" block=a3727f..:13`, op-reth canonicalizes the sibling 13–15, lokahi's own sequencer continues on the new fork at 16+ (so `CommitTask`'s state update mirrors op-node's `SetUnsafeHead` + FCU correctly), and the DSL confirms `reorg on divergence block` on that chain. `TestReorgUnsafeHead` (the seam bucket's pure-reorg test) went fail → pass.\n\nThe other former Method-not-found tests now progress past sequencing and stop at pre-existing lokahi gaps that this PR does not claim to implement:\n\n1. **Interop invalidation is not applied.** The verifier detects the invalid block and reaches `Decision::Invalidate`, but the phase deliberately holds instead of applying it — `lokahi-interop/src/verifier.rs` `progress()`: `Decision::Invalidate | Decision::Rewind => Self::hold(..)`, logging `Interop verification reached a decision this phase does not apply` every 500 ms round. The deposits-only replacement never happens, so the dependent chain's head never reorgs (`expected head to reorg …` after 30–50 attempts). Affects `TestReorgInitExecMsg`, `TestReorgInvalidExecMsgs/*`, and the supernode reorg/replacement tests; `TestL2ReorgAfterL1Reorg` (failing identically before this PR) sits on the same phase's unapplied `Rewind` decision. op-supernode's counterpart is the supervisor-driven invalidate → deposits-only replacement flow; in lokahi that is the verifier's decision-application phase, a separate feature.\n2. **cross-unsafe is not tracked.** kona has no cross-unsafe head; `lokahi/src/query/wire.rs` documents `cross_unsafe_l2` decoding as zero Go-side. `TestPostInteropUpgradeComprehensive` waits for cross-unsafe ≥ 3 and reads 0 forever.\n3. **Supernode query gaps.** `TestInteropFaultProofs` / `TestPreinteropFaultProofs*` reach `no optimistic output for chain N at timestamp T`: `QueryChain::optimistic_at` answers `None` on `ChainAt::NotYet`, which `ChainAt::from_snapshot` also returns for a local-safe head whose L1 pairing is `Unpaired`; lokahi also has no invalidated-output archive (documented in `lokahi/src/query/chain.rs`). `TestFPP` fails with `no longer records which L1 block made its block at timestamp T safe` — safe-db early-history, failing **identically before this PR** (job 5510201).\n4. **`TestSequencingWindowExpiry`: lokahi exits** with `Error: chain 901: EngineTask(Consolidate(SealTaskFailed(UnsafeHeadChangedSinceBuild)))` — the consolidation deposit-replacement path's seal (`kona-engine` `seal/task.rs`, parent-vs-unsafe-head check) has no result channel, so the error escalates to `Critical` (`seal/error.rs`) and halts the node; the identical crash appears in job 5510201, before this PR.\n5. **`interop/proofs/serial` 30 m `TestMain` timeout** is downstream of 1 and 3: `TestInteropFaultProofs_IntraBlock`'s subtests burn 300–663 s retry budgets serially and the package alarm fires 21 m 30 s in; several IntraBlock subtests newly pass inside.\n\nThe one pass→fail signal, `interop/message TestInitExecMsgWithDSL` (16 s pass → 30 m silent hang, empty JUnit body), does not touch this PR's code paths: the test never drives the test sequencer, and the test sequencer has no auto-loop (`fullseq.Sequencer.forceStart` returns `ErrNotImplemented`), so no `opstack_*` method is ever called in that test; the namespace registration is inert without calls. The same head passed the op-node matrix job (5511459), and 12 of 13 tests in the same package passed on the lokahi run. A rerun of the lokahi job at the same head (job 5511920) confirms it: **`TestInitExecMsgWithDSL` passes in 17.4 s**. Against the pre-opstack baseline (5510201), the rerun's only stable delta is `TestReorgUnsafeHead` fail → pass; the rerun's one new one-off, `TestPreinteropSingleChainFaultProofs`, fails with the pre-existing safe-db signature (`no longer records which L1 block …`, gap 3 above) and passed at the same head in 5511460.\n\nDeliberately unchanged after the measurement: `commitBlockV1`'s local-safe-descendant refusal. None of the measured failures implicate it — the reorg tests stop the batchers before forking, so every commit landed above local-safe and succeeded — and the flow that would commit at or below local-safe (invalid-block replacement) rewinds derivation first in op-node too, so its commits also land above the rewound local-safe.\n\nReview notes: the repo's `rust-code-reviewer`/`go-code-reviewer` agents could not be dispatched from this session; the diff was self-reviewed against `docs/ai/rust-dev.md` and `docs/ai/go-dev.md` instead.\n\nPart of #22547\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5)_\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-22T02:49:48Z",
+      "mergedAt": null,
+      "additions": 1454,
+      "deletions": 58
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAnTBSA",
+      "title": "rust: fix upstream mirror review gaps",
+      "author": "sebastianst",
+      "number": 22641,
+      "body": "Fixes the review findings on #22477.\n\n- makes the mirror checker fail closed, tested, and required by Rust CI\n- corrects and completes the `UPSTREAM-MIRROR` inventory\n- makes tag advances and fork cherry-picks explicit reviewer inputs\n- aligns the update skill, review guide, and executable bump procedure\n\nVerification:\n- `cd rust && just lint`\n- 22 checker contract tests plus live inventory/stale-worklist smoke checks\n- merged and setup CircleCI config validation\n- Rust, CI, checker, docs, skill, test, type-design, and overall review gates\n\nStacked on #22477.\n\n🤖 *Co-created with openai-codex/gpt-5.6-sol*",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-22T00:56:58Z",
+      "mergedAt": null,
+      "additions": 933,
+      "deletions": 319
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAqzpbw",
+      "title": "lokahi-interop: apply the L1-reorg Rewind decision",
+      "author": "claude",
+      "number": 22648,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\nPart of #22537. Based on #22647 (`claude/lokahi-fp-queries`); only the last commit is new here.\n\nThis is the path #22645 deliberately deferred: what the verifier does when an L1 reorg invalidates a frontier it already committed.\n\n## Before\n\n`Decision::Rewind` was decided but never applied: the round logged it and held the verified frontier forever, so a single L1 reorg beneath committed interop data stalled cross-safety permanently (`TestL2ReorgAfterL1Reorg` and friends).\n\n## After\n\nThe rewind is applied, mirroring op-supernode behaviour for behaviour (file:line for each in the commit message and code):\n\n- **What gets rewound**: the verified results at or after the last verified timestamp are dropped (`applyRewindPlan`, `op-supernode/supernode/activity/interop/interop.go:1032-1040`), one frontier per round — a deeper reorg is detected again next round, exactly as op-supernode iterates.\n- **To where**: the log stores land on the previous verified frontier, or clear entirely when none is retained — op-supernode's full-rewind branch (`interop.go:1066-1094`, `buildRewindPlan` `:948-960`).\n- **Archive involvement**: each chain's archived outputs recorded by decisions at or after the rewound timestamp are pruned — the archive is the deny list, so this revokes denials whose basis was reorged out (`interop.go:1057-1062`, `PruneDeniedAtOrAfterTimestamp` `chain_container/invalidation.go:490-502`). Only when such an entry existed are the chains' engines reset onto the previous frontier (`shouldResetEnginesOnRewind` `interop.go:1019-1030`, `resetChainEnginesIfNeeded` `:1099-1122`): a revoked invalidation's deposits-only replacement is canonical and derivation alone will not remove it. With nothing revoked, the engines are untouched — kona's own derivation absorbs the L1 reorg.\n- **Error/retry posture**: the whole plan is decided up front and WAL'd before any side effect (`interop.go:732-740`); failures preserve the slot and retry the idempotent plan whole (\"transition preserved for retry\", `:786-788`); the L1 cursor is cleared before applying (`:783-785`); success reports no progress and the next round re-observes on the new L1.\n\nThe engine move reuses the chain controller's existing rewind request through a new `RewindableChain::reset_to`; a verifier built without replacement routes still holds the decision, as it does for invalidations. The WAL replay now also runs before cold start, so a full rewind that crashed after emptying the verified store cannot replay its store-clear on top of a fresh backfill.\n\n**Recorded divergences** (mechanism, not behaviour): op-supernode captures the reset-target payloads into the WAL at build time; lokahi re-reads the target block at apply time — it sits below everything the reorg touched, the same argument the invalidation path already documents. op-supernode joins per-chain apply errors and continues; lokahi returns on the first — both preserve the slot and re-apply the idempotent plan whole. A rewind at timestamp zero is `Invariant` (halt) rather than a retried error: it is unreachable through the round loop, and this crate's convention names unreachable states.\n\n## Testing\n\nFail-first: the four behavioural tests fail against the held-frontier code (verified by disabling the apply dispatch). New round-loop tests cover the plain rewind (engines untouched, log stores landed, recovery re-verifies the timestamp), the revoking rewind (archive pruned, earlier entries kept, every engine reset), the full rewind (stores cleared, loop recovers), the failed-apply retry, and the crash-replay-before-cold-start ordering; WAL encoding round-trips in unit and on-disk tests. `cargo test -p lokahi-interop -p lokahi --all-features`, clippy `--all-features --all-targets -D warnings`, rustdoc lints, and `fmt --check` are green on the touched crates.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5)_",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-22T21:23:55Z",
+      "mergedAt": null,
+      "additions": 701,
+      "deletions": 41
+    },
+    {
+      "id": "PR_kwDODjvEJM7ySzS7",
+      "title": "chore: add targeted pre-push checks",
+      "author": "ajsutton",
+      "number": 21835,
+      "body": "Adds a changed-file selector for local pre-push checks, plus Claude and Codex reminders to run it after committing. Adds the targeted Go package Just recipe and makes CircleCI config merging independent of the caller's working directory.\n\nVerified with:\n- selector routing smoke tests across Go, Rust, contracts, acceptance tests, and CircleCI\n- Claude and Codex hook payload smoke tests\n- `ops/scripts/precommit-targets.sh --run`",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-16T01:35:52Z",
+      "mergedAt": null,
+      "additions": 585,
+      "deletions": 17
+    }
+  ],
+  "codeChanges": {
+    "additions": 243,
+    "deletions": 881,
+    "files": 63,
+    "commitCount": 109
+  },
+  "completedItems": [
+    {
+      "title": "kona-protocol: Add a hash-keyed L2BlockInfo lookup for the reset walk-back",
+      "prNumber": 22467,
+      "type": "other",
+      "body": "> Stacked on #22466.\n\nSame drift as #22465, in the same function. op-node's `initialReset` walks back by parent hash; kona walked back by decrementing a height while holding the parent hash it needed:\n\n```go\n// op-node pipeline.go:245\nparen",
+      "files": [
+        "rust/kona/crates/proof/proof/src/l2/chain_provider.rs",
+        "rust/kona/crates/proof/proof/src/sync.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/core.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/chain_providers.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/sys_config_fetcher.rs",
+        "rust/kona/crates/protocol/derive/src/traits/providers.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/traits.rs",
+        "rust/kona/crates/protocol/protocol/src/test_utils.rs",
+        "rust/kona/crates/providers/providers-alloy/src/buffered_l2_chain_provider.rs",
+        "rust/kona/crates/providers/providers-alloy/src/l2_chain_provider.rs",
+        "rust/kona/crates/providers/providers-local/src/buffered.rs"
+      ]
+    },
+    {
+      "title": "kona!: remove op-supervisor-era interop legacy",
+      "prNumber": 22552,
+      "type": "other",
+      "body": "Deletes the op-supervisor-era interop remnants from kona so lokahi starts from a clean slate (58 files, +96/−1009):\n\n- `InteropMode` (unreachable; pipeline is now unconditionally polled), `IndexedTraversal`/`TraversalStage`/`OnlinePipeline:",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/design/derivation.mdx",
+        "docs/public-docs/node-operators/kona-node/rpc/rollup.mdx",
+        "docs/public-docs/op-stack/fault-proofs/kona/proof/custom-backend.mdx",
+        "rust/kona/crates/node/engine/src/metrics/mod.rs",
+        "rust/kona/crates/node/engine/src/state/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs",
+        "rust/kona/crates/node/engine/src/test_utils/engine_state.rs",
+        "rust/kona/crates/node/rpc/src/rollup.rs",
+        "rust/kona/crates/node/service/src/lib.rs",
+        "rust/kona/crates/node/service/src/service/builder.rs",
+        "rust/kona/crates/node/service/src/service/mod.rs",
+        "rust/kona/crates/node/service/src/service/mode.rs",
+        "rust/kona/crates/node/service/src/service/node.rs",
+        "rust/kona/crates/protocol/derive/README.md",
+        "rust/kona/crates/protocol/derive/src/errors/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/lib.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/builder.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/core.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/mod.rs",
+        "rust/kona/crates/protocol/derive/src/pipeline/types.rs",
+        "rust/kona/crates/protocol/derive/src/stages/attributes_queue.rs",
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_provider.rs",
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_queue.rs",
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_stream.rs",
+        "rust/kona/crates/protocol/derive/src/stages/batch/batch_validator.rs",
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_assembler.rs",
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_bank.rs",
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_provider.rs",
+        "rust/kona/crates/protocol/derive/src/stages/channel/channel_reader.rs",
+        "rust/kona/crates/protocol/derive/src/stages/frame_queue.rs",
+        "rust/kona/crates/protocol/derive/src/stages/l1_retrieval.rs",
+        "rust/kona/crates/protocol/derive/src/stages/mod.rs",
+        "rust/kona/crates/protocol/derive/src/stages/traversal/indexed.rs",
+        "rust/kona/crates/protocol/derive/src/stages/traversal/mod.rs",
+        "rust/kona/crates/protocol/derive/src/stages/traversal/polling.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/attributes_queue.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/batch_provider.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/batch_stream.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/channel_provider.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/channel_reader.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/frame_queue.rs",
+        "rust/kona/crates/protocol/derive/src/test_utils/pipeline.rs",
+        "rust/kona/crates/protocol/derive/src/traits/stages.rs",
+        "rust/kona/crates/protocol/derive/src/types/signals.rs",
+        "rust/kona/crates/protocol/interop/src/control.rs",
+        "rust/kona/crates/protocol/interop/src/derived.rs",
+        "rust/kona/crates/protocol/interop/src/event.rs",
+        "rust/kona/crates/protocol/interop/src/lib.rs",
+        "rust/Cargo.lock",
+        "rust/kona/crates/protocol/interop/Cargo.toml"
+      ]
+    },
+    {
+      "title": "docs: extend the deletion review guide with build-metadata fallout",
+      "prNumber": 22643,
+      "type": "docs",
+      "body": "Extends `docs/ai/deletion-review.md` with the check classes that are invisible to every compile/clippy/test gate — each one observed to slip through review on a real deletion PR before being caught late:\n\n- **Orphaned dependencies**: grep e",
+      "files": [
+        "docs/ai/deletion-review.md"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
+      "totalScore": 208.73284005519054,
+      "prScore": 208.29484005519055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 82.5794479273208,
+      "prScore": 60.0794479273208,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 74.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 72,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 64.73705261559749,
+      "prScore": 64.73705261559749,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ameniki",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/196974781?v=4",
+      "totalScore": 8.08743897916644,
+      "prScore": 8.08743897916644,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jvoidial",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/218412056?u=e45d4db8e68afc1ab154e6104a56575a9be3ba12&v=4",
+      "totalScore": 7.684674030744707,
+      "prScore": 7.484674030744706,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 9,
+  "mergedPRs": 3,
+  "newIssues": 1,
+  "closedIssues": 1,
+  "activeContributors": 9
+}
