@@ -1,0 +1,205 @@
+{
+  "interval": {
+    "intervalStart": "2026-08-24T00:00:00.000Z",
+    "intervalEnd": "2026-08-25T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-08-24 to 2026-08-25, ethereum-optimism/optimism had 4 new PRs (3 merged), 0 new issues, and 13 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABC3faEw",
+      "title": "[PCD] Default-`X` benchmarking",
+      "author": "0xOneTony",
+      "number": 20916,
+      "repository": "ethereum-optimism/optimism",
+      "body": "`X` (the offset between the chosen L1 anchor's timestamp and the committed L2 `genesis_time`) must be large enough that `genesis_time` is still in the future when `OPCM.deploy()` is mined; otherwise `op-node` will produce empty filler blocks at L2 block time to fill the gap. Measure end-to-end runtime of the off-chain portion of the pipeline (anchor selection through prestate generation) against a real prestate builder, repeated enough times to get a stable result. Propose a default `X`.",
+      "createdAt": "2026-05-20T14:34:05Z",
+      "closedAt": "2026-08-24T16:57:43Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABA0z63Q",
+      "title": "contracts-bedrock: run L1 and L2 test suites on different EVM versions",
+      "author": "maurelian",
+      "number": 22657,
+      "body": "Testing branch for Glamsterdam (Amsterdam EVM) readiness — draft to exercise CI.\n\nAmsterdam activates on L1 only, so `just test` now partitions its file list and runs everything outside `test/L2` against the Amsterdam EVM while `test/L2` stays on the default. CI calls `just test` / `just test-rerun` instead of forge directly, and installs a source-built forge at foundry commit f7a1468 (Amsterdam support was reverted upstream; the build is cached by commit).\n\nExpected red: the Amsterdam pass fails on the known blockers (OPCM deploy gas, messenger baseGas) documented in the branch.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-24T16:20:12Z",
+      "mergedAt": null,
+      "additions": 266,
+      "deletions": 14
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABA3E26Q",
+      "title": "op-reth: meter PostExec structural validation failures",
+      "author": "nonsense",
+      "number": 22660,
+      "body": "## Description\n\nAdds a reason-labelled execution-client counter for PostExec block-level structural validation failures:\n\n`optimism_post_exec.validation_failures{reason=\"...\"}`\n\nThe bounded reason labels cover:\n\n- `invalid_encoding_or_schema`\n- `sdm_inactive`\n- `multiple_transactions`\n- `not_last`\n- `block_number_mismatch`\n\nThe counter is recorded when op-reth rejects malformed PostExec structure while converting an Engine API payload, preparing block execution, or rebuilding derived payload attributes.\n\nThis addresses the observability question raised in https://github.com/ethereum-optimism/design-docs/pull/388#discussion_r3829898758.\n\n## Tests\n\n- `cd rust && just fmt-check`\n- `cd rust && cargo clippy -p reth-optimism-evm -p reth-optimism-payload-builder -p reth-optimism-node --all-targets --all-features -- -D warnings`\n- `cd rust && cargo nextest run -p reth-optimism-evm -p reth-optimism-payload-builder -p reth-optimism-node --lib`\n- `cd rust && cargo check -p reth-optimism-evm --no-default-features`\n\n## Review\n\nThe automated Rust review agent was unavailable in this harness; the change was manually reviewed against `docs/ai/rust-dev.md`.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-24T21:58:21Z",
+      "mergedAt": null,
+      "additions": 195,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDODjvEJM7_CSA5",
+      "title": "alloy-op-evm: regression-test dropped-tx SDM policy-touch rollback",
+      "author": "nonsense",
+      "number": 22427,
+      "body": "## Overview\n\nAdds a regression test for the SDM producer-policy \"Leak B\" residual and a doc-comment guard on the raw execution path. **Test-only + doc — no production behavior change.**\n\nLeak B: in Produce mode, a dropped state-invalid tx still records its fee-vault touches on the `transact_raw` error path (`note_post_exec_account_touch` runs before the error is surfaced). This is *neutralized today* — `execute_transaction_with_commit_condition` snapshots the producer policy in Produce mode and restores it on `Err` — but that neutralization was unpinned for this specific path:\n\n- the existing `warm_set_leak` tests use a stateless policy (`FixedRefundPolicy`) and assert on gas, so they cannot observe a policy-map leak;\n- `execution_error_restores_refund_policy_snapshot` mutates policy state in `begin_tx` (pre-execution), not via `note_account_touch` (the error-path call Leak B rides).\n\nNot an active bug: the only direct caller of `execute_transaction_without_commit` is a happy-path test; every production path (op-reth build loop, op-rbuilder, premium's producer) routes through the wrapper, and the public policy is stateless.\n\n## Changes\n\n- **Test** (`block/tests/structural_tests.rs`): a stateful `FeeVaultTouchPolicy` whose only mutation is in `note_account_touch`, plus `dropped_nonce_too_low_tx_...` and `dropped_eip3607_tx_...` cases asserting a dropped tx leaves the policy's block-scoped set empty, via the production `execute_transaction` path.\n- **Doc** (`block/mod.rs`): note that `execute_transaction_without_commit` does not roll back producer-policy state, so a fallible tx must go through `execute_transaction_with_commit_condition`. This is what guards against a future direct raw-path caller — the actual residual.\n\n## Verification\n\n- `cargo nextest run --package alloy-op-evm` — 72 passed.\n- **Non-vacuity**: both new tests fail with `a dropped failing tx left fee-vault touches in the producer policy` when the wrapper's `Err`-branch restore is temporarily removed (reverted after).\n- `just fmt-fix`, `cargo clippy --package alloy-op-evm --all-targets --all-features -- -D warnings`, `just check-no-std` — clean.\n\n## Note\n\nThis makes #21800 redundant: its rejected-candidate rollback already landed via #21359, and develop's wrapper restores on both execution error and commit-decline. #21800 can be closed as superseded (it also still edits the pre-#22289 `block/tests.rs`).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-14T09:55:28Z",
+      "mergedAt": "2026-08-24T23:10:06Z",
+      "additions": 176,
+      "deletions": 13
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAUKzUQ",
+      "title": "op-deployer: set the default genesis time offset to 3H and enforce a …",
+      "author": "0xiamflux",
+      "number": 22512,
+      "body": "## Context\r\n`DefaultGenesisTimeOffsetSeconds` drops from 6h to 3h. A new `MinGenesisTimeOffsetSeconds` of 1h is enforced in `PrepareConfig.Check`. Resolves the `TODO(#20916)` that deferred a minimum until the L2 deployment was benchmarked.\r\n\r\n## Tests\r\n\r\n- `TestPrepareConfigCheck` covers both edges of the floor.\r\n- Updates tests to use `MinGenesisTimeOffsetSeconds`.\r\n\r\nCloses #20916",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-19T17:35:04Z",
+      "mergedAt": "2026-08-24T16:57:42Z",
+      "additions": 34,
+      "deletions": 19
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABA1vChw",
+      "title": "dependabot(gomod): bump github.com/prometheus/common from 0.64.0 to 0.70.1",
+      "author": "dependabot",
+      "number": 22658,
+      "body": "Bumps [github.com/prometheus/common](https://github.com/prometheus/common) from 0.64.0 to 0.70.1.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/prometheus/common/releases\">github.com/prometheus/common's releases</a>.</em></p>\n<blockquote>\n<h2>v0.70.1</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Update CHANGELOG for v0.70.0 by <a href=\"https://github.com/roidelapluie\"><code>@​roidelapluie</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/945\">prometheus/common#945</a></li>\n<li>config: clarify sensitive redirect headers match net/http by <a href=\"https://github.com/roidelapluie\"><code>@​roidelapluie</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/924\">prometheus/common#924</a></li>\n<li>Synchronize common files from prometheus/prometheus by <a href=\"https://github.com/prombot\"><code>@​prombot</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/946\">prometheus/common#946</a></li>\n<li>build(deps): bump actions/checkout from 7.0.0 to 7.0.1 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/950\">prometheus/common#950</a></li>\n<li>build(deps): bump actions/setup-go from 6.5.0 to 7.0.0 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/949\">prometheus/common#949</a></li>\n<li>build(deps): bump the codeql group with 4 updates by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/948\">prometheus/common#948</a></li>\n<li>build(deps): bump golang.org/x/net from 0.56.0 to 0.57.0 in the golang-org-x group across 1 directory by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/947\">prometheus/common#947</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/prometheus/common/compare/v0.70.0...v0.70.1\">https://github.com/prometheus/common/compare/v0.70.0...v0.70.1</a></p>\n<h2>v0.70.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>config: fix TLSVersion.String() printing pointer address by <a href=\"https://github.com/s3onghyun\"><code>@​s3onghyun</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/929\">prometheus/common#929</a></li>\n<li>build(deps): bump golang.org/x/net from 0.55.0 to 0.56.0 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/933\">prometheus/common#933</a></li>\n<li>Manually go mod tidy by <a href=\"https://github.com/SuperQ\"><code>@​SuperQ</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/934\">prometheus/common#934</a></li>\n<li>Synchronize common files from prometheus/prometheus by <a href=\"https://github.com/prombot\"><code>@​prombot</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/937\">prometheus/common#937</a></li>\n<li>route: add support for the QUERY HTTP method by <a href=\"https://github.com/roidelapluie\"><code>@​roidelapluie</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/932\">prometheus/common#932</a></li>\n<li>Combine and extend Prometheus text and OpenMetrics 1.0 encoder benchmarks by <a href=\"https://github.com/dashpole\"><code>@​dashpole</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/943\">prometheus/common#943</a></li>\n<li>build(deps): bump the codeql group with 4 updates by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/938\">prometheus/common#938</a></li>\n<li>build(deps): bump actions/setup-go from 6.2.0 to 6.5.0 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/940\">prometheus/common#940</a></li>\n<li>build(deps): bump actions/upload-artifact from 4.6.2 to 7.0.1 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/942\">prometheus/common#942</a></li>\n<li>build(deps): bump ossf/scorecard-action from 2.1.2 to 2.4.3 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/939\">prometheus/common#939</a></li>\n<li>build(deps): bump actions/checkout from 3.1.0 to 7.0.0 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/941\">prometheus/common#941</a></li>\n</ul>\n<h2>New Contributors</h2>\n<ul>\n<li><a href=\"https://github.com/s3onghyun\"><code>@​s3onghyun</code></a> made their first contribution in <a href=\"https://redirect.github.com/prometheus/common/pull/929\">prometheus/common#929</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/prometheus/common/compare/v0.69.0...v0.70.0\">https://github.com/prometheus/common/compare/v0.69.0...v0.70.0</a></p>\n<h2>v0.69.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>config: strip credentials on cross-host redirects by <a href=\"https://github.com/roidelapluie\"><code>@​roidelapluie</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/901\">prometheus/common#901</a></li>\n<li>Modernize Go by <a href=\"https://github.com/SuperQ\"><code>@​SuperQ</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/919\">prometheus/common#919</a></li>\n<li>config: make isCrossHostRedirect sticky across the redirect chain by <a href=\"https://github.com/roidelapluie\"><code>@​roidelapluie</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/920\">prometheus/common#920</a></li>\n<li>config: check cross-host redirect before OAuth2 token fetch by <a href=\"https://github.com/roidelapluie\"><code>@​roidelapluie</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/921\">prometheus/common#921</a></li>\n<li>expfmt: fix nil pointer panic when parsing empty braces &quot;{}&quot; by <a href=\"https://github.com/roidelapluie\"><code>@​roidelapluie</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/922\">prometheus/common#922</a></li>\n<li>model: reduce allocations in Time.UnmarshalJSON by <a href=\"https://github.com/bboreham\"><code>@​bboreham</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/918\">prometheus/common#918</a></li>\n<li>config: resolve LoadHTTPConfigFile paths relative to the config file by <a href=\"https://github.com/roidelapluie\"><code>@​roidelapluie</code></a> in <a href=\"https://redirect.github.com/prometheus/common/pull/925\">prometheus/common#925</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/prometheus/common/compare/v0.68.1...v0.69.0\">https://github.com/prometheus/common/compare/v0.68.1...v0.69.0</a></p>\n<h2>v0.68.1</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>build(deps): bump golang.org/x/net from 0.52.0 to 0.53.0 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/903\">prometheus/common#903</a></li>\n<li>build(deps): bump golang.org/x/net from 0.53.0 to 0.55.0 by <a href=\"https://github.com/dependabot\"><code>@​dependabot</code></a>[bot] in <a href=\"https://redirect.github.com/prometheus/common/pull/914\">prometheus/common#914</a></li>\n</ul>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a href=\"https://github.com/prometheus/common/blob/main/CHANGELOG.md\">github.com/prometheus/common's changelog</a>.</em></p>\n<blockquote>\n<h1>Changelog</h1>\n<h2>main / unreleased</h2>\n<h3>What's Changed</h3>\n<h2>v0.70.0 / 2026-07-10</h2>\n<h3>Enhancements</h3>\n<ul>\n<li>route: add support for the QUERY HTTP method. <a href=\"https://redirect.github.com/prometheus/common/issues/932\">#932</a></li>\n</ul>\n<h3>Bugfixes</h3>\n<ul>\n<li>config: fix <code>TLSVersion.String()</code> printing a pointer address instead of the numeric version for unknown TLS versions. <a href=\"https://redirect.github.com/prometheus/common/issues/929\">#929</a></li>\n</ul>\n<h3>Internal</h3>\n<ul>\n<li>expfmt: add <code>BenchmarkConvertMetricFamily</code> comparing the Prometheus text and OpenMetrics 1.0 encoders. <a href=\"https://redirect.github.com/prometheus/common/issues/943\">#943</a></li>\n<li>Update Go dependencies. <a href=\"https://redirect.github.com/prometheus/common/issues/933\">#933</a> <a href=\"https://redirect.github.com/prometheus/common/issues/934\">#934</a></li>\n<li>Synchronize common files from prometheus/prometheus. <a href=\"https://redirect.github.com/prometheus/common/issues/923\">#923</a> <a href=\"https://redirect.github.com/prometheus/common/issues/927\">#927</a> <a href=\"https://redirect.github.com/prometheus/common/issues/930\">#930</a> <a href=\"https://redirect.github.com/prometheus/common/issues/937\">#937</a></li>\n<li>Update GitHub Actions. <a href=\"https://redirect.github.com/prometheus/common/issues/938\">#938</a> <a href=\"https://redirect.github.com/prometheus/common/issues/939\">#939</a> <a href=\"https://redirect.github.com/prometheus/common/issues/940\">#940</a> <a href=\"https://redirect.github.com/prometheus/common/issues/941\">#941</a> <a href=\"https://redirect.github.com/prometheus/common/issues/942\">#942</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/prometheus/common/compare/v0.69.0...v0.70.0\">https://github.com/prometheus/common/compare/v0.69.0...v0.70.0</a></p>\n<h2>v0.69.0 / 2026-06-17</h2>\n<h3>Security / behavior changes</h3>\n<ul>\n<li><strong>config: credentials are no longer forwarded across cross-host redirects.</strong> When <code>FollowRedirects</code> is enabled, the HTTP client now strips <code>Authorization</code>, <code>Cookie</code>, <code>Proxy-Authorization</code> and other sensitive headers, and skips basic-auth, bearer-token and OAuth2 credentials, when a redirect points to a different host. This aligns with Go's <code>net/http</code> behavior. Callers that relied on credentials being sent to a redirect target on another host will need to target that host directly. <a href=\"https://redirect.github.com/prometheus/common/issues/901\">#901</a> <a href=\"https://redirect.github.com/prometheus/common/issues/920\">#920</a> <a href=\"https://redirect.github.com/prometheus/common/issues/921\">#921</a></li>\n<li>config: <code>LoadHTTPConfigFile</code> now resolves relative file paths (e.g. <code>*_file</code> credentials, <code>http_headers</code> files) against the config file's own directory instead of its parent directory. Configs that worked around the old behavior by prefixing paths with the config's directory name must drop that prefix. <a href=\"https://redirect.github.com/prometheus/common/issues/925\">#925</a></li>\n</ul>\n<h3>Bugfixes</h3>\n<ul>\n<li>expfmt: fix nil pointer panic when parsing empty braces <code>{}</code>. <a href=\"https://redirect.github.com/prometheus/common/issues/922\">#922</a></li>\n<li>model: fix <code>Time.UnmarshalJSON</code> for larger negative numbers. <a href=\"https://redirect.github.com/prometheus/common/issues/918\">#918</a></li>\n</ul>\n<h3>Performance</h3>\n<ul>\n<li>model: reduce allocations in <code>Time.UnmarshalJSON</code>. <a href=\"https://redirect.github.com/prometheus/common/issues/918\">#918</a></li>\n</ul>\n<h3>Internal</h3>\n<ul>\n<li>Synchronize common files from prometheus/prometheus. <a href=\"https://redirect.github.com/prometheus/common/issues/917\">#917</a></li>\n<li>Modernize Go. <a href=\"https://redirect.github.com/prometheus/common/issues/919\">#919</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/prometheus/common/compare/v0.68.1...v0.69.0\">https://github.com/prometheus/common/compare/v0.68.1...v0.69.0</a></p>\n<h2>v0.67.2 / 2025-10-28</h2>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/prometheus/common/commit/b63d8c0f100a0788a91445e376ec3b1598e69c99\"><code>b63d8c0</code></a> build(deps): bump golang.org/x/net (<a href=\"https://redirect.github.com/prometheus/common/issues/947\">#947</a>)</li>\n<li><a href=\"https://github.com/prometheus/common/commit/4109c3e862a826f51ae4c1cdb75d391f29724ee3\"><code>4109c3e</code></a> build(deps): bump the codeql group with 4 updates (<a href=\"https://redirect.github.com/prometheus/common/issues/948\">#948</a>)</li>\n<li><a href=\"https://github.com/prometheus/common/commit/5270b6283c393b55810df4fd901c9dfc51d1a7d9\"><code>5270b62</code></a> build(deps): bump actions/setup-go from 6.5.0 to 7.0.0 (<a href=\"https://redirect.github.com/prometheus/common/issues/949\">#949</a>)</li>\n<li><a href=\"https://github.com/prometheus/common/commit/1167ca3c3ca6ea23c903061557f204b70b84f1cd\"><code>1167ca3</code></a> build(deps): bump actions/checkout from 7.0.0 to 7.0.1 (<a href=\"https://redirect.github.com/prometheus/common/issues/950\">#950</a>)</li>\n<li><a href=\"https://github.com/prometheus/common/commit/d28d38298f4e7e7e2977122caca8573a58166192\"><code>d28d382</code></a> Update common Prometheus files (<a href=\"https://redirect.github.com/prometheus/common/issues/946\">#946</a>)</li>\n<li><a href=\"https://github.com/prometheus/common/commit/f91587680202dae36afa84f68e0537cb52c7b00e\"><code>f915876</code></a> Merge pull request <a href=\"https://redirect.github.com/prometheus/common/issues/924\">#924</a> from roidelapluie/roidelapluie/redirect-header-comment</li>\n<li><a href=\"https://github.com/prometheus/common/commit/dfbebd026ac57466d81ff0a1a1598ea3dae85826\"><code>dfbebd0</code></a> Merge pull request <a href=\"https://redirect.github.com/prometheus/common/issues/945\">#945</a> from roidelapluie/roidelapluie/changelog-0.70.0</li>\n<li><a href=\"https://github.com/prometheus/common/commit/c8a00193a337caff496fc1ae0a318e2921377b9e\"><code>c8a0019</code></a> Update CHANGELOG for v0.70.0</li>\n<li><a href=\"https://github.com/prometheus/common/commit/5eff7a827920b6f175ea02b222f7c827a0fe80ad\"><code>5eff7a8</code></a> Merge pull request <a href=\"https://redirect.github.com/prometheus/common/issues/941\">#941</a> from prometheus/dependabot/github_actions/actions/che...</li>\n<li><a href=\"https://github.com/prometheus/common/commit/a23c5b344ad9200c0073133920fe60a9882c9d28\"><code>a23c5b3</code></a> Merge pull request <a href=\"https://redirect.github.com/prometheus/common/issues/939\">#939</a> from prometheus/dependabot/github_actions/ossf/scorec...</li>\n<li>Additional commits viewable in <a href=\"https://github.com/prometheus/common/compare/v0.64.0...v0.70.1\">compare view</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=github.com/prometheus/common&package-manager=go_modules&previous-version=0.64.0&new-version=0.70.1)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop Dependabot creating any more for this major version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop Dependabot creating any more for this minor version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop Dependabot creating any more for this dependency (unless you reopen the PR or upgrade to it yourself)\n\n\n</details>",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-24T18:33:58Z",
+      "mergedAt": null,
+      "additions": 11,
+      "deletions": 9
+    }
+  ],
+  "codeChanges": {
+    "additions": 218,
+    "deletions": 32,
+    "files": 11,
+    "commitCount": 19
+  },
+  "completedItems": [
+    {
+      "title": "alloy-op-evm: regression-test dropped-tx SDM policy-touch rollback",
+      "prNumber": 22427,
+      "type": "tests",
+      "body": "## Overview\n\nAdds a regression test for the SDM producer-policy \"Leak B\" residual and a doc-comment guard on the raw execution path. **Test-only + doc — no production behavior change.**\n\nLeak B: in Produce mode, a dropped state-invalid tx s",
+      "files": [
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs"
+      ]
+    },
+    {
+      "title": "op-deployer: set the default genesis time offset to 3H and enforce a …",
+      "prNumber": 22512,
+      "type": "other",
+      "body": "## Context\r\n`DefaultGenesisTimeOffsetSeconds` drops from 6h to 3h. A new `MinGenesisTimeOffsetSeconds` of 1h is enforced in `PrepareConfig.Check`. Resolves the `TODO(#20916)` that deferred a minimum until the L2 deployment was benchmarked.\r",
+      "files": [
+        "op-deployer/pkg/deployer/flags.go",
+        "op-deployer/pkg/deployer/integration_test/cli/continue_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_boot_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_fixture.go",
+        "op-deployer/pkg/deployer/integration_test/continue_test.go",
+        "op-deployer/pkg/deployer/prepare.go",
+        "op-deployer/pkg/deployer/prepare_test.go",
+        "op-deployer/pkg/deployer/standard/standard.go"
+      ]
+    },
+    {
+      "title": "docs: add node101 to OP Stack RPC directory",
+      "prNumber": 22556,
+      "type": "docs",
+      "body": "**Description**\r\n\r\nAdds node101 to the OP Stack production RPC provider directory in alphabetical placement.\r\n\r\nThe listing includes the OP Stack mainnets currently supported by node101:\r\n\r\n- OP Mainnet\r\n- Base\r\n- Unichain\r\n- World\r\n\r\nNo te",
+      "files": [
+        "docs/public-docs/app-developers/reference/rpc-providers.mdx"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 30.048886673334362,
+      "prScore": 25.048886673334362,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 28.35691447417348,
+      "prScore": 28.35691447417348,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 10.587955074527654,
+      "prScore": 10.387955074527655,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "swiftnodes",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275502250?u=67d8a6266dfbc7500bbf26931126f3d3b620d193&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "grandpig",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/229586679?u=0950039d702d16e946056feb12f56fd82e7ca34f&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 4,
+  "mergedPRs": 3,
+  "newIssues": 0,
+  "closedIssues": 1,
+  "activeContributors": 13
+}
