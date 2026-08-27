@@ -1,0 +1,204 @@
+{
+  "interval": {
+    "intervalStart": "2026-08-26T00:00:00.000Z",
+    "intervalEnd": "2026-08-27T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/infra",
+  "overview": "From 2026-08-26 to 2026-08-27, ethereum-optimism/infra had 1 new PRs (1 merged), 0 new issues, and 7 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ88AAAABBI-IWw",
+      "title": "feat(proxyd): passive transaction UX monitor (tx_monitor)",
+      "author": "zhwrd",
+      "number": 726,
+      "body": "**Description**\n\nAdds a passive transaction-UX monitor to proxyd, gated by a new `[tx_monitor]` config section. When enabled, proxyd observes every successfully forwarded `eth_sendRawTransaction`/`eth_sendRawTransactionConditional` hash and measures how long each real user transaction takes to become visible in a block — and, when `subblocks_ws_url` is set, in the subblocks (flashblocks) preconfirmation stream — emitting Prometheus histograms, or timing entries out.\n\nDesign highlights:\n\n- **Zero hot-path impact.** The only addition to request handling is a nil-check plus a non-blocking buffered-channel send (`select`/`default`); overflow increments a drop counter instead of blocking. Disabled config means a nil monitor and no work at all.\n- **Shared-nothing across replicas.** Each replica tracks only the txs it ingested, polls `eth_getBlockByNumber(…, false)` (hashes only) through its own backend group (or an explicit `block_poll_url`), and holds one WS connection to the subblocks stream. Histograms aggregate across instances in Prometheus.\n- **Not a critical service.** Capped in-memory pending map (default 10k), missed-height walk capped at 32 blocks, WS reconnect with capped backoff, 10 MiB WS read limit so a misbehaving stream cannot OOM proxyd, and clean goroutine shutdown wired into the existing shutdown closure.\n- Subblock frames are decoded from the raw RLP transactions in `diff.transactions` (builder-independent; `metadata` is deliberately ignored). Preconfirmed entries stay pending until block inclusion so the subblock→block gap (eventual consistency) is measured too.\n\nNew metrics (namespace `proxyd`): `txmon_inclusion_latency_seconds{source=block|subblock, backend_group}`, `txmon_subblock_to_block_seconds`, `txmon_timeouts_total`, `txmon_dropped_events_total{reason}`, `txmon_pending`, `txmon_stream_disconnects_total`.\n\n**Tests**\n\n- Unit tests for the pending store (cap, idempotent re-add, match/remove, subblock marking, expiry), subblock frame parsing (real signed txs, garbage-tolerant, malformed JSON), block-result parsing, and the monitor core (block inclusion, subblock-then-block, timeout reaping, non-blocking Observe under overflow, missed-height walk) using a fake clock and fake fetcher.\n- Full package suite and `integration_tests` pass.\n- Live smoke test: proxyd + anvil (1s blocks), one `cast send` through proxyd produced `proxyd_txmon_inclusion_latency_seconds_count{backend_group=\"main\",source=\"block\"} 1` and `proxyd_txmon_pending 0`, with graceful `stopping tx monitor` on shutdown.\n\n**Additional context**\n\nComplements op-ufm (synthetic probes) by passively measuring real user traffic; treats the sequencer/mempool as a black box, so the numbers reflect what users polling through proxyd actually experience. The companion deployment change (rendering `[tx_monitor]` via netchef, auto-wiring the subblocks stream URL) ships separately in infrastructure-services.\n\n**Metadata**\n\n- Fixes #N/A (hackathon project)\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-08-26T23:34:18Z",
+      "mergedAt": null,
+      "additions": 1023,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABBAP45Q",
+      "title": "proxyd: Add fixed-cardinality frontend rate-limit metrics",
+      "author": "zhwrd",
+      "number": 725,
+      "body": "## Description\n\nproxyd counts rate-limited *requests* (`rpc_errors_total{error_code=\"-32016\"}`) but has no signal for how many distinct *addresses* are being limited or how rejections are distributed across them. Getting that today requires debug-level logs or scanning Redis by hand.\n\nThis adds a small in-process tracker that aggregates frontend rate-limit rejections into fixed-cardinality metrics — no per-IP labels:\n\n- **`proxyd_frontend_rate_limited_unique_keys`** (gauge, single series): distinct rate-limit keys (IPs) with at least one rejected request in the last completed tracking window. Per-instance; help text notes that summing across replicas may double-count keys that hit more than one pod.\n- **`proxyd_frontend_rate_limited_requests_per_key`** (histogram, buckets 1–5000): one observation per limited key per window, valued at its rejected-request count. Answers \"one whale or a thousand small abusers\" via `histogram_quantile` / bucket ratios.\n- **`proxyd_frontend_rate_limit_tracker_overflow_total`** (counter): rejections whose keys were dropped by the tracker's 50k distinct-key cap, which bounds memory against spoofed-XFF floods (already-tracked keys keep counting past the cap).\n\n## Implementation\n\n- New `rateLimitTracker` (`rate_limit_tracker.go`): mutex-guarded `map[key]count`, flushed by a ticker every `rate_limit.base_interval` (1m fallback when only method overrides are configured). Flush sets the gauge, observes the histogram per key, and resets the map.\n- Single hook in the `isLimited` closure in `server.go`, so it covers the base limit, per-method override limits, and the treat-as-limited path when a Redis `Take` errors.\n- Created in `NewServer` only when frontend rate limiting is configured; stopped in `Shutdown`. Nil tracker is a safe no-op.\n\n## Testing\n\n- Unit tests for the tracker: flush gauge/histogram values, window reset, cap + overflow counter behavior.\n- Server tests: a rejected request is recorded under its XFF key, allowed requests are not recorded, and a nil tracker does not panic.\n- `go build ./...`, `go vet ./...`, and the full proxyd suite (unit + integration) pass.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-08-25T22:33:26Z",
+      "mergedAt": "2026-08-26T16:59:29Z",
+      "additions": 253,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 253,
+    "deletions": 0,
+    "files": 5,
+    "commitCount": 9
+  },
+  "completedItems": [
+    {
+      "title": "proxyd: Add fixed-cardinality frontend rate-limit metrics",
+      "prNumber": 725,
+      "type": "bugfix",
+      "body": "## Description\n\nproxyd counts rate-limited *requests* (`rpc_errors_total{error_code=\"-32016\"}`) but has no signal for how many distinct *addresses* are being limited or how rejections are distributed across them. Getting that today requires",
+      "files": [
+        "proxyd/metrics.go",
+        "proxyd/rate_limit_tracker.go",
+        "proxyd/rate_limit_tracker_test.go",
+        "proxyd/server.go",
+        "proxyd/server_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 84.7710913381448,
+      "prScore": 84.7710913381448,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 79.88011418676754,
+      "prScore": 79.88011418676754,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 42.468773896576096,
+      "prScore": 42.468773896576096,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 37.05220036103203,
+      "prScore": 37.05220036103203,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 26.558996906208378,
+      "prScore": 21.558996906208378,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 8.119918433002166,
+      "prScore": 7.681918433002165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "riba2534",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/26398978?u=e78945b60b90845e607da6474fdbd27001714c87&v=4",
+      "totalScore": 8.048359623632127,
+      "prScore": 8.048359623632127,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 7,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 1,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 7
+}

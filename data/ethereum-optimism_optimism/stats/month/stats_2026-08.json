@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-01 to 2026-09-01, ethereum-optimism/optimism had 364 new PRs (216 merged), 110 new issues, and 84 active contributors.",
+  "overview": "From 2026-08-01 to 2026-09-01, ethereum-optimism/optimism had 374 new PRs (218 merged), 111 new issues, and 85 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABNcmTcQ",
@@ -70,6 +70,18 @@
   ],
   "topPRs": [
     {
+      "id": "PR_kwDODjvEJM8AAAABBIIrRw",
+      "title": "Silhouette: private interoperable chains (v1, attested)",
+      "author": "opsuperchain",
+      "number": 22665,
+      "body": "## Silhouette: private interoperable chains (v1, attested)\n\nA silhouette chain is a private L2 that participates in an ordinary interop dependency set. Its\ntransactions stay private. L1 carries a signed proof envelope describing the chain's public outline\nand a standard derivation carrier with user transactions removed.\n\nv1 is explicitly operator-attested: the trusted submitter's L1 signature authenticates the claimed\nstate. The wire reserves a proof slot for a future proven mode, but this PR contains no ZK toolchain\nor L1 settlement path.\n\n### Architecture\n\n- **No `op-node` changes.** The final PR diff under `op-node/` is empty.\n- **No custom submitter.** The normal `op-batcher` loads real private blocks, receipts and output\n  roots and retains its normal channel, reorg, txmgr and retry lifecycle. A terminal encoder emits\n  the silhouette proof envelope followed by standard carrier frames for the same block cadence with\n  user transactions removed.\n- **Normal inbox and stock portal.** Both envelope and carrier go to the rollup's normal batch inbox.\n  Deposits remain enabled and are stock-derived; there is no gated portal contract.\n- **Stock derivation.** A stock verifier `op-node` ignores the `KCPB` proof blob as an unknown\n  derivation format, consumes the following standard carrier frames, and runs the ordinary\n  Holocene/interop rewind and deposits-only replacement path.\n- **One verifier-only supernode role.** Silhouette chains cannot be sequenced by a supernode virtual\n  node. Private sequencing is performed by a LightCL op-node backed by the private EL.\n- **Standalone magic EL.** `op-silhouette-el` is an in-memory Engine/eth RPC service. It watches the\n  authenticated proof stream independently, maps stock carrier attributes to proof-committed block\n  hashes and roots, and delegates a stock deposits-only replacement build to the private EL when\n  interop invalidates a proven block.\n- **Normal interop semantics.** The supernode's stock judge validates the private chain's declared\n  imports against independently derived public-chain messages. Invalid blocks are replaced and\n  transitive invalidation propagates across chains.\n\n### What is posted to L1\n\nEach normal batcher submission contains:\n\n1. `KCPB` envelope magic, wire version, public-values length/data, and proof length/data (empty in\n   attested mode).\n2. Batch commitments: previous/new output root, L1 head hash, rollup-config hash, dependency-set\n   hash, export-policy hash, and the block list.\n3. Per block: number, timestamp, real block hash, state root, message-passer storage root, exported\n   logs, imported messages, L1-origin hash/number, and sequence number.\n4. Per exported log: real block log index, log hash, and optional preimage (empty under the default\n   all-hashes policy).\n5. Per imported message: origin, source block/log index/timestamp/chain ID, and payload hash.\n6. Standard compressed derivation channel/frame data carrying each block's parent, epoch, timestamp,\n   stock deposits/L1-info transaction, and an empty user-transaction list.\n\nIt does **not** publish private user transaction bytes or hashes, senders, calldata, receipts,\ncontract state, or full log contents. The ordinary L1 blob transaction still exposes its sender,\ndestination inbox, nonce, fees, commitments and inclusion block.\n\n### Images\n\nBuild these three branch-specific targets:\n\n```sh\ndocker buildx bake op-batcher op-supernode op-silhouette-el\n```\n\n| Image | Difference from a normal interop deployment |\n|---|---|\n| `op-batcher` | Enables the terminal silhouette proof + stripped-carrier encoding. |\n| `op-supernode` | Loads the silhouette verifier manifest and proof observer. It remains verifier-only. |\n| `op-silhouette-el` | New in-memory proof-backed Engine/eth service used as P's verifier EL. |\n\nThe standalone `op-node`, L1/L2 execution clients, and portal contracts are stock. There is no\n`proofbatch-submitter` image.\n\n### Minimal configuration delta\n\nPrivate producer:\n\n```sh\nop-batcher <normal flags> --data-availability-type blobs --silhouette \\\n  --max-pending-tx 1 --target-num-frames 6 \\\n  --silhouette.inbox $NORMAL_BATCH_INBOX --silhouette.wire-version 4 \\\n  --silhouette.rollup-config-hash $ROLLUP_HASH \\\n  --silhouette.dependency-set-hash $DEPSET_HASH\n```\n\nThe producer is otherwise a normal LightCL sequencer + private EL. It uses the stock\n`OptimismPortal`; the silhouette inbox must equal the normal rollup batch inbox.\n\nMagic EL:\n\n```sh\nop-silhouette-el --l1 $L1_RPC --l1.beacon $L1_BEACON \\\n  --supernode $SUPERNODE_RPC --rollup-config rollup-p.json \\\n  --verifier-config verifier-p.json \\\n  --replacement-engine $PRIVATE_ENGINE_AUTH_RPC \\\n  --replacement-engine.jwt-secret jwt.txt --rpc.addr 0.0.0.0 --rpc.port 9545\n```\n\nVerifier supernode:\n\n```sh\nop-supernode <normal interop flags> --silhouette manifest.json \\\n  --vn.<P>.l2 http://op-silhouette-el:9545 \\\n  --vn.<P>.interop.dependency-set depset.json\n```\n\nThe `op-node` VN has no silhouette/private flag: its only unusual input is that its configured EL\nendpoint speaks the proof-backed Engine API. The manifest names P's verifier config; A is absent and\nremains an ordinary chain. The verifier config binds L1 chain ID, trusted submitter, normal inbox,\nrollup/dependency-set hashes, `proofType: \"attested\"`, `wireVersion: 4`, and the anchor.\n\n### Local network and smoke tests\n\n```sh\ngo run ./op-up --silhouette\n# funded transactional RPCs: A http://127.0.0.1:8545, B http://127.0.0.1:8546\n\ngo run ./op-up smoke-interop all\ngo run ./op-up smoke-interop invalid-message --direction both --reorg-timeout 5m\ngo run ./op-up smoke-interop chained-invalid-message --require-cascade --reorg-timeout 5m\n\n# comparison topology\ngo run ./op-up --interop\n```\n\nObserved locally on this revision:\n\n- silhouette `smoke-interop all`: PASS;\n- bidirectional invalid A→B and B→A: both replaced and both chains resumed;\n- strict chained invalidation: invalid P block, direct dependent, and descendant dependent all\n  reorged while the independent control remained;\n- normal sysgo bidirectional invalid smoke: same replacement/resume semantics (lower latency because\n  it does not wait for the proof-batch cadence);\n- focused `TestSilhouetteImportThatIsFalseIsReplaced`: PASS;\n- `op-batcher`, all `op-supernode`, sysgo/presets, smoke utility, and `op-up` unit suites: PASS.\n\nThe serialized full silhouette acceptance package still has one known timeout in\n`TestSilhouetteCrossChainPinsThenAdvances`; the replacement regression and proof-slot refusal tests\npass independently.\n\n### Diff size\n\nAgainst the PR base: approximately **24.3k insertions / 1.45k deletions across 267 files**. Much of\nthe file count is the existing cross-language fixture corpus. The architecture rewrite in the latest\ncommit is **3,487 insertions / 7,004 deletions**: it deletes the custom submitter, sequencing-side\nsilhouette role, custom portal, and op-node hook in favor of the stock paths above.\n\nOperational details and the exact trust statement live in\n`op-supernode/silhouette/docs/RUNNING-V1.md` and `TRUST-MODEL.md`.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-26T20:41:19Z",
+      "mergedAt": null,
+      "additions": 23998,
+      "deletions": 183
+    },
+    {
       "id": "PR_kwDODjvEJM8AAAABAmqe1g",
       "title": "DO NOT MERGE: combined measurement branch for the lokahi interop suites",
       "author": "claude",
@@ -116,25 +128,13 @@
       "mergedAt": "2026-08-06T19:29:59Z",
       "additions": 5046,
       "deletions": 1438
-    },
-    {
-      "id": "PR_kwDODjvEJM74is8y",
-      "title": "op-dispute-mon: monitor ZK dispute games",
-      "author": "wwared",
-      "number": 22123,
-      "body": "Closes #18424.\n\nRelated scope: #18323.\n\n## Why\n\nZK dispute games are supported by the lifecycle scheduler but were invisible to `op-dispute-mon`, whose extraction and downstream monitors assumed fault-game state. This adds native, pinned ZK monitoring without changing contracts, flags, runtime gates, or bond lifecycle behavior.\n\nZK, fault, and SuperPermissioned games now contribute to the existing aggregate `op_dispute_mon_games_agreement` totals. The metric retains its historical `status`, `completion`, `result_correctness`, and `root_agreement` labels and its eight canonical series. Per-type visibility remains available through `op_dispute_mon_games{game_type=...}`.\n\nA canonical ZK child forced to a challenger result by an invalid parent still agrees with the reference root. Its `agree_challenger_ahead` or `agree_challenger_wins` series is therefore classified as `incorrect`, preserving the historical deterministic correctness semantics.\n\n## Testing\n\n- `cd op-dispute-mon && mise exec -- just test`\n- `mise exec -- go test ./op-challenger/game/fault/contracts/... ./op-challenger/game/zk/... ./op-dispute-mon/... ./op-devstack/dsl/disputemon/... -count=1`\n- `RUST_JIT_BUILD=1 mise exec -- go test ./op-acceptance-tests/tests/proofs/zk/... -run ^TestZKDisputeMonitor -count=1 -v`\n- `mise exec -- just lint-go`\n\nThe full `mise exec -- just go-tests` gate was also attempted. The changed packages passed, but the overall local run failed in unrelated setup-dependent packages because `cannon/testdata/bin/hello.64.elf` and `forge-artifacts/artifacts.tzst` were absent and `MAINNET_RPC_URL`/`SEPOLIA_RPC_URL` were unset. `TestSequencerFailover_ConductorRPC` also timed out with `context deadline exceeded` in the full run and package rerun, then passed when retried alone.",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-30T13:37:09Z",
-      "mergedAt": null,
-      "additions": 4988,
-      "deletions": 2803
     }
   ],
   "codeChanges": {
-    "additions": 65681,
-    "deletions": 68182,
-    "files": 1116,
-    "commitCount": 1567
+    "additions": 66065,
+    "deletions": 68296,
+    "files": 1117,
+    "commitCount": 1622
   },
   "completedItems": [
     {
@@ -3516,6 +3516,16 @@
       ]
     },
     {
+      "title": "kona: make proof replay warnings actionable",
+      "prNumber": 22623,
+      "type": "other",
+      "body": "## Summary\r\n\r\nDuring proving, `kona-sp1-proposer` witness generation emits a large number of stale span-batch and missing L1-origin warnings. Proof replay intentionally rewinds L1 to recover complete channels, so expected replay warnings fr",
+      "files": [
+        "rust/kona/crates/protocol/protocol/src/batch/span.rs",
+        "rust/kona/sp1/crates/proposer/src/proving.rs"
+      ]
+    },
+    {
       "title": "Update release docs: op-node v1.19.5, kona-node v1.6.4, op-batcher v1.16.13",
       "prNumber": 22614,
       "type": "other",
@@ -3596,14 +3606,24 @@
       "files": [
         "mise.toml"
       ]
+    },
+    {
+      "title": "kona-gossip: Allowlist gossip subscription topics",
+      "prNumber": 22661,
+      "type": "other",
+      "body": "Kona built the gossipsub behaviour with `libp2p::gossipsub::Behaviour::new`, which takes the default `AllowAllSubscriptionFilter`. libp2p therefore accepted a subscription for any topic a peer announced, and emitted an `Event::Subscribed` f",
+      "files": [
+        "rust/kona/crates/node/gossip/src/behaviour.rs",
+        "rust/kona/crates/node/gossip/src/lib.rs"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "claude",
       "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
-      "totalScore": 2276.578153457802,
-      "prScore": 2051.746153457802,
+      "totalScore": 2344.558926030069,
+      "prScore": 2119.726926030069,
       "issueScore": 14.2,
       "reviewScore": 207,
       "commentScore": 3.6319999999999997,
@@ -3612,10 +3632,10 @@
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 1783.5446685262234,
-      "prScore": 1044.0486685262233,
-      "issueScore": 82.2,
-      "reviewScore": 654,
+      "totalScore": 1829.7374424227994,
+      "prScore": 1083.2414424227993,
+      "issueScore": 84.2,
+      "reviewScore": 659,
       "commentScore": 3.296,
       "summary": "sebastianst: Focused on optimizing the core architecture of the OP Stack, most notably by refactoring the op-node to run the sequencer on its own goroutine (#22241) to address thread contention and starvation issues (#22232). They made significant contributions to the Lagoon upgrade specifications and implementation, including refining the DA footprint for post-exec transactions (#926, #22219) and enhancing the engine controller with direct-call build methods (#22238). Beyond these technical implementations, they maintained high code quality through 55 PR reviews and the creation of 9 issues to track pipeline improvements and decoupling efforts. Their work primarily centered on system performance, sequencer stability, and protocol upgrades, involving substantial modifications to over 500 files."
     },
@@ -3632,8 +3652,8 @@
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 1202.964582913216,
-      "prScore": 930.8905829132159,
+      "totalScore": 1282.8446970999835,
+      "prScore": 1010.7706970999835,
       "issueScore": 46.1,
       "reviewScore": 222.5,
       "commentScore": 3.4739999999999998,
@@ -3642,10 +3662,10 @@
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 932.2420929846586,
+      "totalScore": 937.2420929846586,
       "prScore": 611.6620929846587,
       "issueScore": 18.2,
-      "reviewScore": 300.5,
+      "reviewScore": 305.5,
       "commentScore": 1.88,
       "summary": "wwared: Focused on enhancing the monitoring infrastructure for fault proofs, notably through the normalization of fault bond snapshots and the introduction of typed monitor lanes in the op-dispute-mon component (#22226, #22225). Their work significantly advanced ZK monitoring capabilities, with several open pull requests aimed at enabling end-to-end ZK game forecasting and bond accounting (#22229, #22228, #22227). Beyond these large-scale refactors, they maintained high code quality by providing 18 reviews and proposing a new high-level DSL for metrics usage in acceptance tests (#22207). Their primary focus this month was on dispute monitoring logic and test infrastructure, evidenced by a balanced distribution of code and test modifications across nearly 19,000 lines of changes."
     },
@@ -3662,31 +3682,31 @@
     {
       "username": "falcorocks",
       "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 710.0713314546293,
+      "totalScore": 715.0713314546293,
       "prScore": 510.1713314546293,
       "issueScore": 0,
-      "reviewScore": 199.5,
+      "reviewScore": 204.5,
       "commentScore": 0.4,
       "summary": "falcorocks: Focused on optimizing the CI/CD pipeline and containerization strategy within the optimism repository, notably streamlining the build process by making apko images canonical and disabling redundant docker builds in PR #22257. They further enhanced image utility by integrating essential tools like busybox and apk-tools in PR #22287, while also contributing to code quality through 4 pull request approvals. Their work this month primarily centered on infrastructure and configuration management, resulting in a significant net reduction of 248 lines of code."
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 576.4852200061309,
+      "totalScore": 581.1852200061309,
       "prScore": 406.8452200061309,
       "issueScore": 16,
-      "reviewScore": 152.5,
-      "commentScore": 1.1400000000000001,
+      "reviewScore": 157,
+      "commentScore": 1.34,
       "summary": "Inphi: Focused on strengthening the deployment and verification infrastructure for zero-knowledge components, notably transitioning the SP1 verifier to be OPCM release-owned in ethereum-optimism/optimism #22218. This significant effort involved modifying over 400 files and adding more than 9,000 lines of code to ensure robust ownership and artifact constraints within the Kona ecosystem. Beyond their primary development work, they remained highly active in the peer review process with 9 total reviews and initiated new workstreams for implementing ZK game type deployments. Their activity this month centered on system architecture and deployment tooling, with a strong emphasis on integrating SP1 and Kona components."
     },
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 550.2751203575663,
+      "totalScore": 550.4751203575663,
       "prScore": 356.53512035756626,
       "issueScore": 0,
       "reviewScore": 192,
-      "commentScore": 1.74,
+      "commentScore": 1.94,
       "summary": "nonsense: Focused on enhancing the testing infrastructure and execution logic within the optimism stack, notably merging a significant refactor to isolate refund production behind a test-only fixture in PR #22289. Their work involved substantial code cleanup and structural changes, reflected in the modification of nearly 1,000 files and a net reduction of over 180,000 lines of code. Beyond their own code, they were highly active in the peer review process, providing 24 reviews to ensure quality across various components. Their primary efforts this month centered on bug fixes and expanding test coverage, particularly within the span rejection and data availability reporting logic."
     },
     {
@@ -3712,8 +3732,8 @@
     {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 321.161088661064,
-      "prScore": 287.921088661064,
+      "totalScore": 358.21328902209603,
+      "prScore": 324.973289022096,
       "issueScore": 0,
       "reviewScore": 32.5,
       "commentScore": 0.74,
@@ -3722,12 +3742,22 @@
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 254.56504245717753,
-      "prScore": 81.12504245717751,
+      "totalScore": 281.1240393633859,
+      "prScore": 102.68403936338589,
       "issueScore": 4,
-      "reviewScore": 168.5,
+      "reviewScore": 173.5,
       "commentScore": 0.94,
       "summary": "geoknee: Focused on enhancing testing infrastructure within the ethereum-optimism/optimism repository by identifying and addressing gaps in proof testing. They successfully drove the addition of coverage in `rust/kona/tests/proofs` through the creation and resolution of issue #21344. Additionally, they contributed to the development process by providing two technical reviews on open pull requests, demonstrating a primary focus on software delivery management and test coverage."
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 272.4292849001673,
+      "prScore": 91.58928490016729,
+      "issueScore": 0,
+      "reviewScore": 180.5,
+      "commentScore": 0.33999999999999997,
+      "summary": "sbvegan: Focused on quality assurance and peer feedback this month, contributing two pull request approvals. Their activity centered on reviewing the work of others to ensure code standards were met. Overall, their primary focus was on supporting the development pipeline through the review process."
     },
     {
       "username": "karlfloersch",
@@ -3738,16 +3768,6 @@
       "reviewScore": 33,
       "commentScore": 0.6000000000000001,
       "summary": "karlfloersch: Focused on enhancing the security and reliability of the Optimism network's node and bridge infrastructure, contributing over 1,500 lines of code across several high-impact open pull requests. Their work prioritized critical validation logic within the op-node to ensure data integrity during span batch overlaps (#22215, #22214) and advanced the interoperability layer by reviving the SuperchainTokenBridge (#22259). Additionally, they provided technical oversight through four code reviews and addressed safety concerns in the op-supernode's logging database (#22253). This month’s efforts were primarily centered on bug fixes and testing to strengthen the robustness of cross-chain derivation and token bridging."
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 237.7365110035912,
-      "prScore": 56.896511003591186,
-      "issueScore": 0,
-      "reviewScore": 180.5,
-      "commentScore": 0.33999999999999997,
-      "summary": "sbvegan: Focused on quality assurance and peer feedback this month, contributing two pull request approvals. Their activity centered on reviewing the work of others to ensure code standards were met. Overall, their primary focus was on supporting the development pipeline through the review process."
     },
     {
       "username": "digorithm",
@@ -3792,12 +3812,22 @@
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 183.02990106399534,
+      "totalScore": 183.42990106399535,
       "prScore": 179.83590106399535,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 3.194,
+      "commentScore": 3.594,
       "summary": "mintlify: Focused on maintaining and updating release documentation within the ethereum-optimism/optimism repository, notably ensuring accuracy for future GitHub releases in PR #22206. While their primary code impact involved refining documentation (+64/-9 lines), they were highly active in the peer review process, providing 22 comments on pull requests to support team coordination. Their work this month centered on release management and documentation consistency."
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 171.858639131297,
+      "prScore": 171.858639131297,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "opsuperchain: Focused on expanding data availability options within the ecosystem by initiating work on a Keccak256 alternative DA implementation. They currently have an open pull request in ethereum-optimism/optimism (#22390) that introduces this feature without the requirement of a challenge contract. Their primary focus this month has been on enhancing the op-stack's flexibility regarding data availability layers."
     },
     {
       "username": "op-will",
@@ -3812,11 +3842,11 @@
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 146.62183213478258,
-      "prScore": 143.30983213478257,
+      "totalScore": 154.74175056778475,
+      "prScore": 150.99175056778475,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 3.312,
+      "commentScore": 3.7499999999999996,
       "summary": "opgitgovernance: Focused on maintaining the integrity of the superchain-registry through consistent automated updates, merging two PRs (#1299, #1301) to ensure the repository's codegen remained current. While the code changes were minimal, they maintained a high level of engagement by providing 15 PR comments to facilitate development workflows. Their primary focus this month was exclusively on managing configuration files and supporting automated registry maintenance."
     },
     {
@@ -3828,16 +3858,6 @@
       "reviewScore": 0,
       "commentScore": 0.6379999999999999,
       "summary": "jelias2: Focused on enhancing node observability and configuration within the optimism repository, notably by registering the L2 follow source RPC timeout flag in PR #22297. They also made significant progress on post-replacement lineage instrumentation for both op-node and op-supernode in PR #22209, contributing over 600 lines of new code across 22 files. Their work this month primarily centered on infrastructure and instrumentation, with a secondary emphasis on supporting test coverage."
-    },
-    {
-      "username": "opsuperchain",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
-      "totalScore": 87.0875477931522,
-      "prScore": 87.0875477931522,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": "opsuperchain: Focused on expanding data availability options within the ecosystem by initiating work on a Keccak256 alternative DA implementation. They currently have an open pull request in ethereum-optimism/optimism (#22390) that introduces this feature without the requirement of a challenge contract. Their primary focus this month has been on enhancing the op-stack's flexibility regarding data availability layers."
     },
     {
       "username": "lumoswiz",
@@ -3860,6 +3880,16 @@
       "summary": "raddaslul: Focused on infrastructure maintenance and registry updates, specifically addressing compatibility for op-deployer 0.7.1 and OPCM V2 Registry support in ethereum-optimism/superchain-registry (#1303). Their work this month involved significant code modifications across 31 files, with a heavy emphasis on bugfixes and testing to ensure system stability. They also initiated a chore task for RECA Standard game type registration in ethereum-optimism/superchain-ops (#1514). Overall, their primary focus remained on registry integrity and supporting deployment tooling through targeted bugfix and testing efforts."
     },
     {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 82.616,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 81,
+      "commentScore": 1.6159999999999999,
+      "summary": "wiz-0f98cca50a: Focused this month on providing technical feedback and guidance through the peer review process. While they did not submit direct code changes or pull requests, they contributed to project quality by performing 5 reviews and providing 11 detailed comments on open pull requests. Their primary impact centered on collaborative oversight and code quality maintenance through active participation in developer discussions."
+    },
+    {
       "username": "pauldowman",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
       "totalScore": 82.60335875993155,
@@ -3868,6 +3898,16 @@
       "reviewScore": 5,
       "commentScore": 0,
       "summary": "pauldowman: Focused on project management and environment stability within the ethereum-optimism/optimism repository, notably resolving a toolchain warning via PR #22386. They played a key role in defining technical requirements by creating four high-impact issues related to ZK game monitoring (#18424), op-deployer enhancements (#21429), fast finality mode (#22112), and contract deployment (#22176), all of which were successfully closed. Their activity this month centered on bugfix work and infrastructure coordination to support new protocol features."
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 81.90310956412245,
+      "prScore": 71.90310956412245,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": "zhwrd: Focused on quality assurance and code health this month by providing peer feedback through pull request reviews. They completed 2 code reviews, both resulting in approvals, to support the team's development velocity. Their primary impact was centered on the review process rather than direct code contributions or issue management."
     },
     {
       "username": "palango",
@@ -3888,16 +3928,6 @@
       "reviewScore": 27.5,
       "commentScore": 0.2,
       "summary": "0xarktos: Focused on security and stability within the Optimism ecosystem, specifically addressing findings from the Super ZK Dispute Game internal review. Through PR #22328, they contributed over 370 lines of code and tests to the bedrock contracts, demonstrating a rigorous approach to protocol integrity. Their work this month was entirely dedicated to bugfix efforts, with a primary technical focus on enhancing smart contract reliability and expanding test coverage."
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 73.416,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 72,
-      "commentScore": 1.416,
-      "summary": "wiz-0f98cca50a: Focused this month on providing technical feedback and guidance through the peer review process. While they did not submit direct code changes or pull requests, they contributed to project quality by performing 5 reviews and providing 11 detailed comments on open pull requests. Their primary impact centered on collaborative oversight and code quality maintenance through active participation in developer discussions."
     },
     {
       "username": "Kemperino",
@@ -3950,6 +3980,16 @@
       "summary": "teddyknox: Focused on refining interop recovery mechanisms within the op-supernode, specifically working to reverse-adapt recovery invariants in PR #22281. This ongoing effort involved substantial code and test modifications across 16 files, totaling over 600 lines of changes to ensure system stability. Their work this month was primarily dedicated to critical bugfixes and expanding test coverage to support these architectural adjustments."
     },
     {
+      "username": "ayaanoncrypto",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106945712?u=6de33a8a33c35e343d3f52cccfb1a4ec1222dc95&v=4",
+      "totalScore": 45.39351501117786,
+      "prScore": 45.39351501117786,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "pochenai",
       "avatarUrl": "https://avatars.githubusercontent.com/u/13568446?u=9615286683c19927ad829720ebedaded21472d55&v=4",
       "totalScore": 43.259429637445585,
@@ -3958,16 +3998,6 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "pochenai: Focused on critical bug fixes within the ethereum-optimism/optimism repository, notably resolving an issue where the L1 HTTP poll interval was incorrectly interpreted as nanoseconds in PR #22499. They also addressed technical inaccuracies in the op-alloy component by proposing a fix for the RPC effective gas price formula in PR #22437. Their work this month was exclusively dedicated to bugfix activities, ensuring the precision of core networking and pricing logic."
-    },
-    {
-      "username": "zhwrd",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
-      "totalScore": 39.43433566754634,
-      "prScore": 29.434335667546343,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
-      "summary": "zhwrd: Focused on quality assurance and code health this month by providing peer feedback through pull request reviews. They completed 2 code reviews, both resulting in approvals, to support the team's development velocity. Their primary impact was centered on the review process rather than direct code contributions or issue management."
     },
     {
       "username": "alessandromazza98",
@@ -4108,6 +4138,16 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": "zloglevel: Focused on improving the reliability of the op-conductor component by identifying and addressing a critical synchronization issue. They documented a bug where WebSocket registration could block indefinitely during shutdowns (Issue #22472) and subsequently submitted a fix to prevent this blocking behavior (PR #22473). Their work involved a balanced contribution of 58 lines of code and tests, primarily centered on enhancing the stability of the system's networking and shutdown logic."
+    },
+    {
+      "username": "riba2534",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/26398978?u=e78945b60b90845e607da6474fdbd27001714c87&v=4",
+      "totalScore": 15.100078579849177,
+      "prScore": 15.100078579849177,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": "riba2534: Focused on improving documentation accuracy within the ethereum-optimism/optimism repository. They successfully merged PR #22443, which corrected the NatSpec @return documentation for the readMem function in the bedrock contracts. This contribution highlights a focus on maintaining code clarity and technical precision within the project's smart contract layer."
     },
     {
       "username": "sjonpaulbrown",
@@ -4290,16 +4330,6 @@
       "summary": "swiftnodes: Focused on expanding ecosystem visibility by initiating a contribution to the ethereum-optimism/optimism repository. They submitted a pull request to integrate SwiftNodes into the official RPC provider directory (#22339), facilitating better resource discovery for developers. This work involved targeted documentation updates to ensure accurate service representation within the Optimism network. Their primary focus this month was on documentation and ecosystem alignment."
     },
     {
-      "username": "riba2534",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/26398978?u=e78945b60b90845e607da6474fdbd27001714c87&v=4",
-      "totalScore": 7.05171895621705,
-      "prScore": 7.05171895621705,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": "riba2534: Focused on improving documentation accuracy within the ethereum-optimism/optimism repository. They successfully merged PR #22443, which corrected the NatSpec @return documentation for the readMem function in the bedrock contracts. This contribution highlights a focus on maintaining code clarity and technical precision within the project's smart contract layer."
-    },
-    {
       "username": "hdcesario-op",
       "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
       "totalScore": 7,
@@ -4400,9 +4430,9 @@
       "summary": null
     }
   ],
-  "newPRs": 364,
-  "mergedPRs": 216,
-  "newIssues": 110,
+  "newPRs": 374,
+  "mergedPRs": 218,
+  "newIssues": 111,
   "closedIssues": 74,
-  "activeContributors": 84
+  "activeContributors": 85
 }

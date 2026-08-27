@@ -1,0 +1,260 @@
+{
+  "interval": {
+    "intervalStart": "2026-08-26T00:00:00.000Z",
+    "intervalEnd": "2026-08-27T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-08-26 to 2026-08-27, ethereum-optimism/optimism had 5 new PRs (2 merged), 1 new issues, and 16 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABOaMC1Q",
+      "title": "kona-node: --sequencer.max-safe-lag and --conductor.rpc.timeout are parsed but silently ignored",
+      "author": "sebastianst",
+      "number": 22667,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nkona-node accepts two sequencer CLI flags that have no effect: they are parsed into `SequencerArgs` but never make it into `SequencerConfig`, so an operator setting them gets silent no-ops instead of an error.\n\n| Flag | Env | Declared | Dropped |\n|---|---|---|---|\n| `--sequencer.max-safe-lag` | `KONA_NODE_SEQUENCER_MAX_SAFE_LAG` | [`flags/sequencer.rs#L24-L31`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/bin/node/src/flags/sequencer.rs#L24-L31) | [`SequencerArgs::config()`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/bin/node/src/flags/sequencer.rs#L70-L77) |\n| `--conductor.rpc.timeout` | `KONA_NODE_CONDUCTOR_RPC_TIMEOUT` | [`flags/sequencer.rs#L50-L57`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/bin/node/src/flags/sequencer.rs#L50-L57) | same; [`SequencerConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/crates/node/service/src/actors/sequencer/config.rs#L10-L19) has no timeout field and [`ConductorClient::new_http`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/crates/node/service/src/actors/sequencer/conductor.rs#L50-L53) builds the client without one |\n\n`grep -rn 'max_safe_lag\\|conductor_rpc_timeout' rust/kona` finds no reader outside the flag definitions.\n\n## Impact\n\n- `--conductor.rpc.timeout` defaults to 1s and is documented as a timeout, but the conductor `commit_unsafe_payload` call on the sequencer's seal path ([`sequencer/actor.rs#L197-L204`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/crates/node/service/src/actors/sequencer/actor.rs#L197-L204)) runs with no timeout at all — a slow or hung conductor blocks block production indefinitely.\n- `--sequencer.max-safe-lag` is a silent no-op; the feature itself is tracked in #22266. Until it is implemented, the flag should either be removed or fail loudly.\n\n## Suggested fix\n\n- Thread `conductor_rpc_timeout` into `SequencerConfig` and apply it to the conductor client (or wrap the RPC calls in `tokio::time::timeout`).\n- Either implement `max_safe_lag` (#22266) or drop the flag; do not keep accepting it.\n\nRelated: #22266, #21906.\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-08-26T22:21:15Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABBIIrRw",
+      "title": "Silhouette: private interoperable chains (v1, attested)",
+      "author": "opsuperchain",
+      "number": 22665,
+      "body": "## Silhouette: private interoperable chains (v1, attested)\n\nA silhouette chain is a private L2 that participates in an ordinary interop dependency set. Its\ntransactions stay private. L1 carries a signed proof envelope describing the chain's public outline\nand a standard derivation carrier with user transactions removed.\n\nv1 is explicitly operator-attested: the trusted submitter's L1 signature authenticates the claimed\nstate. The wire reserves a proof slot for a future proven mode, but this PR contains no ZK toolchain\nor L1 settlement path.\n\n### Architecture\n\n- **No `op-node` changes.** The final PR diff under `op-node/` is empty.\n- **No custom submitter.** The normal `op-batcher` loads real private blocks, receipts and output\n  roots and retains its normal channel, reorg, txmgr and retry lifecycle. A terminal encoder emits\n  the silhouette proof envelope followed by standard carrier frames for the same block cadence with\n  user transactions removed.\n- **Normal inbox and stock portal.** Both envelope and carrier go to the rollup's normal batch inbox.\n  Deposits remain enabled and are stock-derived; there is no gated portal contract.\n- **Stock derivation.** A stock verifier `op-node` ignores the `KCPB` proof blob as an unknown\n  derivation format, consumes the following standard carrier frames, and runs the ordinary\n  Holocene/interop rewind and deposits-only replacement path.\n- **One verifier-only supernode role.** Silhouette chains cannot be sequenced by a supernode virtual\n  node. Private sequencing is performed by a LightCL op-node backed by the private EL.\n- **Standalone magic EL.** `op-silhouette-el` is an in-memory Engine/eth RPC service. It watches the\n  authenticated proof stream independently, maps stock carrier attributes to proof-committed block\n  hashes and roots, and delegates a stock deposits-only replacement build to the private EL when\n  interop invalidates a proven block.\n- **Normal interop semantics.** The supernode's stock judge validates the private chain's declared\n  imports against independently derived public-chain messages. Invalid blocks are replaced and\n  transitive invalidation propagates across chains.\n\n### What is posted to L1\n\nEach normal batcher submission contains:\n\n1. `KCPB` envelope magic, wire version, public-values length/data, and proof length/data (empty in\n   attested mode).\n2. Batch commitments: previous/new output root, L1 head hash, rollup-config hash, dependency-set\n   hash, export-policy hash, and the block list.\n3. Per block: number, timestamp, real block hash, state root, message-passer storage root, exported\n   logs, imported messages, L1-origin hash/number, and sequence number.\n4. Per exported log: real block log index, log hash, and optional preimage (empty under the default\n   all-hashes policy).\n5. Per imported message: origin, source block/log index/timestamp/chain ID, and payload hash.\n6. Standard compressed derivation channel/frame data carrying each block's parent, epoch, timestamp,\n   stock deposits/L1-info transaction, and an empty user-transaction list.\n\nIt does **not** publish private user transaction bytes or hashes, senders, calldata, receipts,\ncontract state, or full log contents. The ordinary L1 blob transaction still exposes its sender,\ndestination inbox, nonce, fees, commitments and inclusion block.\n\n### Images\n\nBuild these three branch-specific targets:\n\n```sh\ndocker buildx bake op-batcher op-supernode op-silhouette-el\n```\n\n| Image | Difference from a normal interop deployment |\n|---|---|\n| `op-batcher` | Enables the terminal silhouette proof + stripped-carrier encoding. |\n| `op-supernode` | Loads the silhouette verifier manifest and proof observer. It remains verifier-only. |\n| `op-silhouette-el` | New in-memory proof-backed Engine/eth service used as P's verifier EL. |\n\nThe standalone `op-node`, L1/L2 execution clients, and portal contracts are stock. There is no\n`proofbatch-submitter` image.\n\n### Minimal configuration delta\n\nPrivate producer:\n\n```sh\nop-batcher <normal flags> --data-availability-type blobs --silhouette \\\n  --max-pending-tx 1 --target-num-frames 6 \\\n  --silhouette.inbox $NORMAL_BATCH_INBOX --silhouette.wire-version 4 \\\n  --silhouette.rollup-config-hash $ROLLUP_HASH \\\n  --silhouette.dependency-set-hash $DEPSET_HASH\n```\n\nThe producer is otherwise a normal LightCL sequencer + private EL. It uses the stock\n`OptimismPortal`; the silhouette inbox must equal the normal rollup batch inbox.\n\nMagic EL:\n\n```sh\nop-silhouette-el --l1 $L1_RPC --l1.beacon $L1_BEACON \\\n  --supernode $SUPERNODE_RPC --rollup-config rollup-p.json \\\n  --verifier-config verifier-p.json \\\n  --replacement-engine $PRIVATE_ENGINE_AUTH_RPC \\\n  --replacement-engine.jwt-secret jwt.txt --rpc.addr 0.0.0.0 --rpc.port 9545\n```\n\nVerifier supernode:\n\n```sh\nop-supernode <normal interop flags> --silhouette manifest.json \\\n  --vn.<P>.l2 http://op-silhouette-el:9545 \\\n  --vn.<P>.interop.dependency-set depset.json\n```\n\nThe `op-node` VN has no silhouette/private flag: its only unusual input is that its configured EL\nendpoint speaks the proof-backed Engine API. The manifest names P's verifier config; A is absent and\nremains an ordinary chain. The verifier config binds L1 chain ID, trusted submitter, normal inbox,\nrollup/dependency-set hashes, `proofType: \"attested\"`, `wireVersion: 4`, and the anchor.\n\n### Local network and smoke tests\n\n```sh\ngo run ./op-up --silhouette\n# funded transactional RPCs: A http://127.0.0.1:8545, B http://127.0.0.1:8546\n\ngo run ./op-up smoke-interop all\ngo run ./op-up smoke-interop invalid-message --direction both --reorg-timeout 5m\ngo run ./op-up smoke-interop chained-invalid-message --require-cascade --reorg-timeout 5m\n\n# comparison topology\ngo run ./op-up --interop\n```\n\nObserved locally on this revision:\n\n- silhouette `smoke-interop all`: PASS;\n- bidirectional invalid A→B and B→A: both replaced and both chains resumed;\n- strict chained invalidation: invalid P block, direct dependent, and descendant dependent all\n  reorged while the independent control remained;\n- normal sysgo bidirectional invalid smoke: same replacement/resume semantics (lower latency because\n  it does not wait for the proof-batch cadence);\n- focused `TestSilhouetteImportThatIsFalseIsReplaced`: PASS;\n- `op-batcher`, all `op-supernode`, sysgo/presets, smoke utility, and `op-up` unit suites: PASS.\n\nThe serialized full silhouette acceptance package still has one known timeout in\n`TestSilhouetteCrossChainPinsThenAdvances`; the replacement regression and proof-slot refusal tests\npass independently.\n\n### Diff size\n\nAgainst the PR base: approximately **24.3k insertions / 1.45k deletions across 267 files**. Much of\nthe file count is the existing cross-language fixture corpus. The architecture rewrite in the latest\ncommit is **3,487 insertions / 7,004 deletions**: it deletes the custom submitter, sequencing-side\nsilhouette role, custom portal, and op-node hook in favor of the stock paths above.\n\nOperational details and the exact trust statement live in\n`op-supernode/silhouette/docs/RUNNING-V1.md` and `TRUST-MODEL.md`.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-26T20:41:19Z",
+      "mergedAt": null,
+      "additions": 23998,
+      "deletions": 183
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBIeAHw",
+      "title": "op-reth,kona: implement sequencer-defined fees",
+      "author": "joshklop",
+      "number": 22666,
+      "body": "## Description\n\nImplement Sequencer-Defined Fees (SDF) at Lagoon. The sequencer selects `baseFeePerGas` through a pluggable policy, commits that selection in the trailing `PostExec` transaction, and validators reproduce execution from the committed fee without running producer policy.\n\nThis change:\n\n- extends the unactivated version-1 `PostExec` payload with the selected base fee\n- requires a trailing Lagoon commitment, including for empty refund sets\n- wires fee selection and immutable per-payload caching through op-reth payload building\n- uses selected-fee quotes in txpool, pending execution, and fee-related RPC paths\n- validates Lagoon commitments on Engine API block import\n- reproduces fallback commitments in Kona and preserves them in output artifacts\n- applies selected fees during flashblock replay and reserves block space for the mandatory commitment\n- updates public documentation and acceptance-test expectations\n\nL1 data fees, operator fees, batch formats, and payload-attribute schemas are unchanged.\n\n## Dependencies\n\n- Depends on ethereum-optimism/reth#8. The Rust workspace is pinned to that PR's organization-owned branch revision while it is under review.\n- Specification: ethereum-optimism/specs#934.\n- Premium policy integration: ethereum-optimism/optimism-premium#222.\n\n## Validation\n\nCompleted before opening this draft:\n\n- full Go lint and Optimism Rust lint on the initial series\n- targeted op-reth/Kona tests, including 41 Kona executor tests\n- no-std checks and nightly formatting\n- focused checks for consensus, Kona executor/driver, flashblocks, payload builder, and RPC against the public reth revision\n- regression tests for Engine API commitment validation, Kona fallback transaction persistence, flashblock selected-fee execution, and block-size reservation\n\nFinal review, broader validation after the latest fixes, and CI follow-up are still in progress.\n\n## Review notes\n\nEarlier independent review findings about the Engine API validation path, Kona fallback artifacts, flashblock fees, historical fee history, fill-transaction defaults, and block-size accounting were addressed before this draft was opened.\n\nDismissed findings:\n\n- Cached policy failures are intentional: a payload ID has one immutable policy resolution across retries.\n- A `PostExec` version 2 is unnecessary because version 1 has not activated onchain.\n- Extending op-geth is out of scope because Lagoon follows the op-geth support horizon.\n- No span-batch format change is required; span batches already transport the transaction bytes.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-26T21:40:22Z",
+      "mergedAt": null,
+      "additions": 2088,
+      "deletions": 567
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBCugrA",
+      "title": "contracts: prove withdrawal air gap transition closure",
+      "author": "opsuperchain",
+      "number": 22662,
+      "body": "## Overview\n\nAdds Kontrol proofs for the end-to-end withdrawal authorization timing chain, dispute-game outcome finality, Portal transition closure, and ETHLockbox value accounting.\n\n### Composed air-gap theorem\n\nFor a withdrawal proven at `T_proof` against a game that favorably resolves at `T_resolve`, successful Portal authorization implies:\n\n`T_finalize > T_proof + PROOF_MATURITY_DELAY_SECONDS`\n\nand\n\n`T_finalize > T_resolve + DISPUTE_GAME_FINALITY_DELAY_SECONDS`\n\nBoth inequalities are strict because the production contracts reject their equality boundaries. The proof composes production `OptimismPortal2.checkWithdrawal` and `AnchorStateRegistry.isGameClaimValid` logic.\n\n### One-preparatory-call transition closure\n\nSeven new Kontrol cases execute every current non-finalization state-changing Portal entry path from an attacker contract:\n\n- `depositTransaction`\n- `donateETH`\n- raw ETH `receive()`\n- `initialize`\n- `migrateLiquidity`\n- `migrateToSharedDisputeGame`\n- `proveWithdrawalTransaction`\n\nAfter the preparatory call succeeds or reverts, each case proves that the target withdrawal still has the same proven game and proof timestamp, remains unfinalized, retains the same AnchorStateRegistry and default `l2Sender`, and remains backed by a `CHALLENGER_WINS` game with the same `resolvedAt`.\n\nEach case then executes both production finalization entry points:\n\n- `finalizeWithdrawalTransaction`\n- `finalizeWithdrawalTransactionExternalProof`\n\nBoth must fail, and the finalized bit must remain false. Calls share the same L1 timestamp, so this directly models a prep call plus finalization bundled atomically by an attacker contract.\n\nThe game factory harness implements `gameAtIndex`, allowing the withdrawal-proving path to receive the challenger-backed game before the Portal rejects it.\n\n### ABI and mutability coverage\n\nThe Kontrol job hashes the complete production ABI for the Portal and all five covered game families. CI fails if a new selector appears or if an existing getter changes from view to state-mutating. Raw `receive()` is covered by a dedicated proof.\n\nThis means a new `allowThisWithdrawalToFinalize(bytes32)`-style method cannot silently fall outside the proof inventory: its addition fails the manifest check until the ABI hash and transition proof are reviewed together.\n\n### Supporting invariants\n\n- FaultDisputeGame, PermissionedDisputeGame, SuperFaultDisputeGame, and ZKDisputeGame favorable resolution atomically stores `DEFENDER_WINS` and `resolvedAt = block.timestamp`\n- SuperPermissionedDisputeGame initialization atomically stores `DEFENDER_WINS`, `createdAt = block.timestamp`, and `resolvedAt = createdAt`\n- all five game families preserve a stored `CHALLENGER_WINS` outcome and resolution timestamp through later resolution attempts\n- AnchorStateRegistry validity implies a nonzero favorable resolution timestamp strictly older than its finality delay\n- AnchorStateRegistry never validates a `CHALLENGER_WINS` game at any later symbolic timestamp\n- Portal proof maturity remains independently required even if the registry authorizes a game\n- ETHLockbox unlock debits exactly the requested symbolic value, and unlock/relock restores balances exactly\n\n## Scope and assumptions\n\nThe transition proofs cover exactly one current preparatory Portal call followed by finalization, using canonical calldata and one concrete attacker contract. They do not claim universal coverage of arbitrary-length call sequences or every possible argument tuple. The ABI manifest prevents a newly introduced mutator or mutability change from being accepted without explicit review and proof coverage.\n\nThe theorem also assumes:\n\n- Portal, AnchorStateRegistry, factory, and registered game implementations remain fixed during the interval, or their upgrade/admin keys remain secure\n- clone immutable arguments and existing clone implementation addresses remain fixed\n- L1 `block.timestamp` is the common monotonic clock\n- pause/unpause is a trusted operational control\n- registration, respect, retirement, and blacklist predicates have their valid values for successful authorization\n\nIt does not claim safety if the registry or game code is arbitrarily compromised, and it does not claim global ETHLockbox solvency across every authorized Portal.\n\n## Verification\n\nPinned `runtimeverificationinc/kontrol:ubuntu-jammy-1.0.90`:\n\n- 7/7 new preparatory-call plus finalization proofs passed, 0 failed\n- full production ABI coverage check passed in the pinned container\n- 5 challenger-terminality proofs passed\n- 5 favorable-resolution/current-timestamp proofs passed\n- registry validity and challenger-invalidity proofs passed\n- composed Portal plus registry dual-air-gap theorem passed\n- Portal proof-maturity and registry trust-boundary proofs passed\n- 2 symbolic ETHLockbox accounting proofs passed\n\nRepository checks:\n\n- full multi-version `forge build` passed during branch validation\n- final focused proof build passed\n- `forge fmt --check` passed\n- Forge test-name validation passed\n- unused-import validation passed\n- shell checks passed\n- `git diff --check` passed\n\n## CI note\n\nThe selected op-deployer image build succeeds, then its non-required provenance-attestation step fails because fork-origin PRs are not granted `id-token: write`. Prior commits failed at the identical unrelated attestation step; required checks pass.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-26T07:36:00Z",
+      "mergedAt": null,
+      "additions": 902,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAljeAg",
+      "title": "kona: make proof replay warnings actionable",
+      "author": "Inphi",
+      "number": 22623,
+      "body": "## Summary\r\n\r\nDuring proving, `kona-sp1-proposer` witness generation emits a large number of stale span-batch and missing L1-origin warnings. Proof replay intentionally rewinds L1 to recover complete channels, so expected replay warnings from concurrent range chunks are currently difficult to distinguish from real derivation problems.\r\n\r\nThis change makes those warnings attributable and actionable:\r\n\r\n- Add structured stale-span context, including timestamps, lag, L1 inclusion data, Holocene status, and validity classification.\r\n- Add available safe-head and inclusion context to empty-`l1_origins` warnings.\r\n- Instrument each proof-replay chunk with game, chunk, and guest timestamp context across its full async execution.\r\n- Add terminal per-chunk success and failure logs.\r\n- Preserve existing warning severity and derivation, validity, proof, and concurrency behavior.\r\n\r\nWarnings are intentionally not suppressed or deduplicated. The same replayed batch may appear across fresh transition executions, and no existing local owner safely spans those lifetimes without broader logging or protocol plumbing.\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T18:37:06Z",
+      "mergedAt": "2026-08-26T18:48:36Z",
+      "additions": 340,
+      "deletions": 89
+    },
+    {
+      "id": "PR_kwDODjvEJM71cDUg",
+      "title": "op-acceptance-tests: regression test for supernode invalidated-block re-adoption",
+      "author": "karlfloersch",
+      "number": 21993,
+      "body": "## Description\n\nEnd-to-end regression test for the interop-reorg-2 invalidation livelock (Notion: \"Supernode Rewind Race Condition\", 2026-07-21). Split out from #21951; top of the stack.\n\n> **Stack** (bottom → top): #21991 (gating fix) → #21992 (sequencer-state persistence + harness fixes) → **this PR**.\n\n### What it tests\n\n`TestSupernodeDoesNotReadoptInvalidatedBlock` (light-sequencer preset): an invalid executing message is included on chain B, the sequencer builds ~20 blocks ahead on the invalid branch, and after the supernode invalidates the block and builds its deposits-only replacement, the captured far-ahead descendant of the invalid block is delivered back over unsafe sync — as live-network gossip does when the sequencer does not follow the deny list (the in-test light sequencer heals too fast to model this, so it is stalled and the captured tip re-posted). The test asserts verification durably passes the replacement while the invalid block is **never** re-adopted as canonical — polled every second, so even transient re-adoption fails the test.\n\nWithout the gating fix at the bottom of this stack, this test fails: the delivered descendant triggers an engine sync that re-canonicalizes the denied branch (`invalidated block re-adopted as canonical`). It also needs both harness fixes in the middle of the stack — without real sequencer-state persistence the bootstrap sequencer resurrects mid-test and self-heals the chain, masking the bug; the from-genesis light-sequencer wiring matches production (batcher follows the light CL, not the VN).\n\n### New DSL\n\n- `L2ELNode.AwaitBlockReplaced` — waits until the canonical block at a height has a hash different from the invalidated one (tolerating temporary absence mid-rewind).\n- `Supernode.AwaitValidatedTimestampWithoutReadoption` — waits for verification to pass a timestamp while requiring that the canonical block at the invalidated height never carries the denied hash on any poll.\n\n### Metadata\n\n- Split from #21951\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-23T15:20:29Z",
+      "mergedAt": null,
+      "additions": 135,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 384,
+    "deletions": 114,
+    "files": 4,
+    "commitCount": 45
+  },
+  "completedItems": [
+    {
+      "title": "kona: make proof replay warnings actionable",
+      "prNumber": 22623,
+      "type": "other",
+      "body": "## Summary\r\n\r\nDuring proving, `kona-sp1-proposer` witness generation emits a large number of stale span-batch and missing L1-origin warnings. Proof replay intentionally rewinds L1 to recover complete channels, so expected replay warnings fr",
+      "files": [
+        "rust/kona/crates/protocol/protocol/src/batch/span.rs",
+        "rust/kona/sp1/crates/proposer/src/proving.rs"
+      ]
+    },
+    {
+      "title": "kona-gossip: Allowlist gossip subscription topics",
+      "prNumber": 22661,
+      "type": "other",
+      "body": "Kona built the gossipsub behaviour with `libp2p::gossipsub::Behaviour::new`, which takes the default `AllowAllSubscriptionFilter`. libp2p therefore accepted a subscription for any topic a peer announced, and emitted an `Event::Subscribed` f",
+      "files": [
+        "rust/kona/crates/node/gossip/src/behaviour.rs",
+        "rust/kona/crates/node/gossip/src/lib.rs"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 84.7710913381448,
+      "prScore": 84.7710913381448,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 79.88011418676754,
+      "prScore": 79.88011418676754,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 42.468773896576096,
+      "prScore": 42.468773896576096,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 37.05220036103203,
+      "prScore": 37.05220036103203,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 26.558996906208378,
+      "prScore": 21.558996906208378,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 8.119918433002166,
+      "prScore": 7.681918433002165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "riba2534",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/26398978?u=e78945b60b90845e607da6474fdbd27001714c87&v=4",
+      "totalScore": 8.048359623632127,
+      "prScore": 8.048359623632127,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 7,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 5,
+  "mergedPRs": 2,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 16
+}
