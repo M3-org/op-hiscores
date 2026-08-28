@@ -5,22 +5,68 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/supersim",
-  "overview": "From 2026-08-27 to 2026-08-28, ethereum-optimism/supersim had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-08-27 to 2026-08-28, ethereum-optimism/supersim had 1 new PRs (0 merged), 1 new issues, and 5 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOMMiGhs8AAAABOil-bA",
+      "title": "Automate the OP Stack upgrade cadence",
+      "author": "jefr90",
+      "number": 425,
+      "repository": "ethereum-optimism/supersim",
+      "body": "Before ethereum-optimism/supersim#424, supersim's monorepo pin was 14 months stale: `optimism v1.13.4-0.20250617223244-f273e18a17c6` from June 2025, with the last release cut in August 2025.\n\nCatching up was not a version bump. It surfaced package moves (`op-service/predeploys` to `op-core/predeploys`), a go-ethereum rename (`types.TrieHasher` to `types.ListHasher`), and the deletion of `SuperchainTokenBridge` and `SuperchainERC20` from contracts-bedrock, which removed a predeploy and a documented user workflow. None of that is hard individually; it is expensive because 14 months of it arrived at once.\n\necosystem#1013 asks whether the cadence should be automated so this does not recur. Filing that as its own issue.\n\n### Suggestion\n\nA scheduled job that runs `just install-monorepo <latest-release>` plus `just check-monorepo-versions`, then builds and tests, and opens a PR when it succeeds or an issue when it fails. Even a monthly failing run is useful, since it dates the breakage instead of letting it accumulate silently.\n\n### Blocked on a prerequisite\n\nThis cannot target current releases until ethereum-optimism/optimism is consumable as a Go module again. `op-core/superchain` embeds a gitignored `superchain-configs.zip` that is absent from the published module, so every release after 2026-04-29 fails to build downstream. That is filed separately against the monorepo. Until it is resolved, any automation would pin to `op-node/v1.16.13` and stay there.\n",
+      "createdAt": "2026-08-27T18:17:23Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOMMiGhs8AAAABBOWsGg",
+      "title": "feat: upgrade OP Stack dependency to op-node/v1.16.13",
+      "author": "jefr90",
+      "number": 424,
+      "body": "Part of #1008 via [ecosystem#1013](https://github.com/ethereum-optimism/ecosystem/issues/1013).\n\nMoves supersim from a June 2025 monorepo pin to `op-node/v1.16.13` (`6de21d0f`, 2026-04-21), ten months newer, and regenerates genesis against it. Along the way it fixes two things that were already broken on `main`.\n\n## Version gap\n\n`go.mod` was pinned to `optimism v1.13.4-0.20250617223244-f273e18a17c6` (June 2025); last release `0.1.0-alpha.59` (2025-08-06). Roughly 14 months of drift. Both the Go module and the contracts submodule now sit on `op-node/v1.16.13`, so `just check-monorepo-versions` passes.\n\n## Why not the latest release\n\n`op-node/v1.19.5` cannot be consumed as a Go module today:\n\n```\nop-core/superchain/chain.go:21:12: pattern superchain-configs.zip: no matching files found\n```\n\nMonorepo PR [#20314](https://github.com/ethereum-optimism/optimism/pull/20314) (2026-04-29) added `op-core/superchain`, which `//go:embed`s `superchain-configs.zip`. That zip is **gitignored** and generated locally from the superchain-registry submodule. Verified, not inferred:\n\n- Gitignored at **every** release tag checked (`op-node/v1.17.0`, `v1.18.0`, `v1.19.0`, `v1.19.5`, `op-contracts/v7.0.0`, `v8.0.0-rc.3`); only the `.sha256` is committed.\n- The published module confirms it: `…optimism@v1.19.5/op-core/superchain/` has `superchain-configs.zip.sha256` but **no** zip.\n- `sync-superchain.sh`'s three documented modes all require a superchain-registry checkout, so none is usable by a module consumer.\n\nsupersim reaches it via `genesis/worldgen` → `op-chain-ops/interopgen` → `op-core/superchain`. The monorepo hides this from itself with `just build-superchain-go`, and its container builds carry a melange pipeline whose comment documents this exact error. Neither helps a downstream `go build`.\n\n**Every OP Stack release from 2026-04-29 onward is currently unconsumable as a plain Go dependency.** `op-node/v1.16.13` (2026-04-21) is the newest stable release before it. Fixing that is a monorepo change and needs its own issue.\n\n## Upstream changes absorbed\n\n| Change | Effect |\n|---|---|\n| `op-service/predeploys` → `op-core/predeploys` | import rewrite across 9 files |\n| `types.TrieHasher` → `types.ListHasher` (op-geth) | one-line fix in `interop/indexer_test.go` |\n| `SuperchainTokenBridge` + `SuperchainERC20` deleted ([#19999](https://github.com/ethereum-optimism/optimism/pull/19999)) | see below |\n\n### SuperchainTokenBridge removal is the user-facing change worth reviewing\n\n`v1.16.13` is tagged on the commit that deleted these contracts. `SuperchainTokenBridge` (`0x4200…0028`) is gone from the predeploy set; `NativeAssetLiquidity` (`0x…0029`) was added. So this PR drops the predeploy from `interopPredeploys`, deletes `bindings/superchaintokenbridge.go` and its event logging, removes it from the `build-contracts` / bindings recipes and the genesis deploy script, and replaces the README and docs \"send a SuperchainERC20 from 901 to 902\" walkthrough with a note pointing at `SuperchainETHBridge` and `L2ToL2CrossDomainMessenger`.\n\n`L2NativeSuperchainERC20` (the `0x420beeF…0001` test token) survives by extending **interop-lib's** `SuperchainERC20`, already a submodule here. Its test moves to interop-lib's `IERC7802`, `ISuperchainERC20` and `PredeployAddresses`, and `@solady-v0.0.245` resolves from interop-lib's vendored copy so the token and its test share one `ERC20` type.\n\nNote this makes supersim's dependence on interop-lib go **up**, which matters for [#1009](https://github.com/ethereum-optimism/ecosystem/issues/1009)'s sync-vs-deprecate decision.\n\n## Genesis regenerated\n\n`genesis/generated/` is rebuilt against `v1.16.13`. The diff is exactly what the upstream change predicts: the SuperchainTokenBridge implementation at `c0d3c0d3…0028` disappears and a new predeploy implementation at `…002b` appears. The Uniswap V4 addresses move as a consequence, so `interop/applier.go` is updated to match.\n\nThis required fixing a **pre-existing bug that made `just generate-genesis` fail on `main`**:\n\n`PositionManagerLib.MODIFIED_BYTECODE` was declared as a plain string literal rather than `hex\"...\"`, so Solidity stored the ASCII of its 40,940 hex characters (40,940 bytes) instead of the 20,470 decoded bytes. CREATE2 then executed `\"6101808…\"` as opcodes, which surfaced as `gas uint64 overflow` and aborted with `Create2: Failed on deploy`. A probe confirms the fix: length 40,940 → 20,470, first byte `54` (`'6'`) → `0x61` (PUSH2).\n\nThat this predates the upgrade was established with a control run: on unmodified `main`, with the old pin, the published (HTTP 200) artifacts tarball, and the mise-pinned `forge nightly-e5ec47b8`, generation fails identically.\n\n`TestL2ToL2Transfer` is removed: it drove `sendERC20` on the deleted bridge and can never pass against the regenerated genesis. The two remaining `wait.For` loops are now bounded, so an unmet condition fails in seconds rather than stalling until the 10m package timeout.\n\n## CI fixes (both pre-existing)\n\n**`go-tests` had been red on this repo's CI before this branch.** The same failure appears on PR #423. `runCmd` uses `CombinedOutput`, and mise printed `WARN deprecated [alias]: use [tool_alias] instead` to stderr on every `cast` invocation, so the warning was prepended to each command's output and every string comparison failed. The unbounded `wait.For` loops then hit the 10m timeout. Renaming `[alias]` → `[tool_alias]` removes it at source.\n\n**`go-lint`** broke on this branch: golangci-lint v1.63.4 is built with go1.23 and refuses a go1.24.6 target. Only v2.x is still published, and it drops `-e` and moves `goimports` to formatters, so the config moves into `.golangci.yml`. v1's default exclusion presets are opted back in explicitly, otherwise errcheck re-reports every deferred `Close()` v1 never flagged. v2 folds stylecheck and quickfix into staticcheck, surfacing 12 pre-existing issues, which are fixed rather than suppressed.\n\n## Verification\n\n- `just check-monorepo-versions`, `just build-go`, `go vet ./...` clean\n- `just lint-go`: 0 issues\n- `just test-go`: all 6 packages pass; the root package now completes in ~81s instead of timing out at 600s\n- `just build-contracts` / `just test-contracts`: 33/33 Solidity tests pass\n- `just generate-genesis` completes end to end for the first time\n- A baseline was captured before any change, so none of these are pre-existing failures being papered over\n\n## Remaining, not done here\n\n**No release is cut.** That is the last item on #1013 and may need permissions I do not have.\n\nThree follow-ups are now filed:\n\n1. [ethereum-optimism/optimism#22678](https://github.com/ethereum-optimism/optimism/issues/22678): make `op-core/superchain` consumable by downstream Go modules. This is the one that caps the target version, and it blocks every OP Stack release after 2026-04-29 for any downstream Go consumer, not just supersim.\n2. [ethereum-optimism/optimism#22679](https://github.com/ethereum-optimism/optimism/issues/22679): publish contract artifacts for released commits. `just calculate-artifact-url` 404s for this commit, so genesis was regenerated from a local contracts-bedrock build.\n3. [#425](https://github.com/ethereum-optimism/supersim/issues/425): automate the upgrade cadence, which ecosystem#1013 asks for. Blocked on the first item above.\n",
+      "repository": "ethereum-optimism/supersim",
+      "createdAt": "2026-08-27T15:12:41Z",
+      "mergedAt": null,
+      "additions": 1961,
+      "deletions": 2156
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 3
   },
   "completedItems": [],
   "topContributors": [
+    {
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?v=4",
+      "totalScore": 110.67887903803735,
+      "prScore": 102.14087903803735,
+      "issueScore": 8.1,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
     {
       "username": "claude",
       "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
       "totalScore": 67.98077257226734,
       "prScore": 67.98077257226734,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 67.67616690775222,
+      "prScore": 67.67616690775222,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -37,10 +83,40 @@
       "summary": null
     },
     {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 43.3867738965761,
+      "prScore": 43.3867738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
       "totalScore": 39.1927738965761,
       "prScore": 39.1927738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 38.00886935801071,
+      "prScore": 38.00886935801071,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 36.3217738965761,
+      "prScore": 36.3217738965761,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -57,6 +133,96 @@
       "summary": null
     },
     {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 22.92848572614808,
+      "prScore": 22.92848572614808,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 18.05205020110221,
+      "prScore": 18.05205020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lArtiquel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36863599?v=4",
+      "totalScore": 11.540147601710057,
+      "prScore": 11.540147601710057,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 8.119918433002166,
+      "prScore": 7.681918433002165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 5.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "alejandra090509-collab",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/317736782?u=b6c983ee005ebad4f4a33c9acb33a26b9688ab47&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
       "totalScore": 0.2,
@@ -67,9 +233,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
+  "newPRs": 1,
   "mergedPRs": 0,
-  "newIssues": 0,
+  "newIssues": 1,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 5
 }

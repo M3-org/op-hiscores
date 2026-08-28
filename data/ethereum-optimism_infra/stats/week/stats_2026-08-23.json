@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-08-23 to 2026-08-30, ethereum-optimism/infra had 2 new PRs (1 merged), 0 new issues, and 14 active contributors.",
+  "overview": "From 2026-08-23 to 2026-08-30, ethereum-optimism/infra had 3 new PRs (2 merged), 0 new issues, and 18 active contributors.",
   "topIssues": [],
   "topPRs": [
     {
@@ -16,8 +16,8 @@
       "body": "**Description**\n\nAdds a passive transaction-UX monitor to proxyd, gated by a new `[tx_monitor]` config section. When enabled, proxyd observes every successfully forwarded `eth_sendRawTransaction`/`eth_sendRawTransactionConditional` hash and measures how long each real user transaction takes to become visible in a block — and, when `subblocks_ws_url` is set, in the subblocks (flashblocks) preconfirmation stream — emitting Prometheus histograms, or timing entries out.\n\nDesign highlights:\n\n- **Zero hot-path impact.** The only addition to request handling is a nil-check plus a non-blocking buffered-channel send (`select`/`default`); overflow increments a drop counter instead of blocking. Disabled config means a nil monitor and no work at all.\n- **Shared-nothing across replicas.** Each replica tracks only the txs it ingested, polls `eth_getBlockByNumber(…, false)` (hashes only) through its own backend group (or an explicit `block_poll_url`), and holds one WS connection to the subblocks stream. Histograms aggregate across instances in Prometheus.\n- **Not a critical service.** Capped in-memory pending map (default 10k), missed-height walk capped at 32 blocks, WS reconnect with capped backoff, 10 MiB WS read limit so a misbehaving stream cannot OOM proxyd, and clean goroutine shutdown wired into the existing shutdown closure.\n- Subblock frames are decoded from the raw RLP transactions in `diff.transactions` (builder-independent; `metadata` is deliberately ignored). Preconfirmed entries stay pending until block inclusion so the subblock→block gap (eventual consistency) is measured too.\n\nNew metrics (namespace `proxyd`): `txmon_inclusion_latency_seconds{source=block|subblock, backend_group}`, `txmon_subblock_to_block_seconds`, `txmon_timeouts_total`, `txmon_dropped_events_total{reason}`, `txmon_pending`, `txmon_stream_disconnects_total`.\n\n**Tests**\n\n- Unit tests for the pending store (cap, idempotent re-add, match/remove, subblock marking, expiry), subblock frame parsing (real signed txs, garbage-tolerant, malformed JSON), block-result parsing, and the monitor core (block inclusion, subblock-then-block, timeout reaping, non-blocking Observe under overflow, missed-height walk) using a fake clock and fake fetcher.\n- Full package suite and `integration_tests` pass.\n- Live smoke test: proxyd + anvil (1s blocks), one `cast send` through proxyd produced `proxyd_txmon_inclusion_latency_seconds_count{backend_group=\"main\",source=\"block\"} 1` and `proxyd_txmon_pending 0`, with graceful `stopping tx monitor` on shutdown.\n\n**Additional context**\n\nComplements op-ufm (synthetic probes) by passively measuring real user traffic; treats the sequencer/mempool as a black box, so the numbers reflect what users polling through proxyd actually experience. The companion deployment change (rendering `[tx_monitor]` via netchef, auto-wiring the subblocks stream URL) ships separately in infrastructure-services.\n\n**Metadata**\n\n- Fixes #N/A (hackathon project)\n",
       "repository": "ethereum-optimism/infra",
       "createdAt": "2026-08-26T23:34:18Z",
-      "mergedAt": null,
-      "additions": 1023,
+      "mergedAt": "2026-08-27T14:55:46Z",
+      "additions": 1121,
       "deletions": 0
     },
     {
@@ -31,13 +31,25 @@
       "mergedAt": "2026-08-26T16:59:29Z",
       "additions": 253,
       "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABBQ9SvA",
+      "title": "proxyd: start tx_monitor inclusion clock at request receipt",
+      "author": "zhwrd",
+      "number": 727,
+      "body": "## What\n\nThe `tx_monitor` inclusion-latency clock now starts at **request receipt** instead of at backend-ack (post-forward success).\n\n### Why\n\nThe previous start boundary excluded proxyd-internal handling (rate limiting, validation, batching) and the forward round-trip to the backend — precisely the latency a \"tx UX\" monitor exists to catch. The measured window was really \"backend-ack → this-replica-notices-block,\" not \"submit → inclusion.\"\n\nThe end boundary is intentionally left as poll-observation wall-clock (not the block header timestamp): it reflects when the user can actually perceive inclusion through the same infra, not when the sequencer produced the block.\n\n### Changes\n\n- `TxMonitor.Observe` takes an `at time.Time` (request-arrival), used directly as the ingest timestamp instead of `m.now()`.\n- New `ContextKeyReqReceivedAt` + `GetReqReceivedAt(ctx)` getter (falls back to `time.Now()` when unset, so the start is never zero).\n- **HTTP**: `populateContext` stamps arrival at ingress.\n- **WS**: `clientPump` stamps a per-**message** arrival time and threads it through a per-message ctx (the connection ctx would otherwise yield connection-open time).\n\n### Rejected txns need no eviction\n\nEnrollment stays on the single success hook, so rejects are excluded structurally:\n- Validation rejects return a local response and `continue` before forwarding — never observed.\n- Backend rejects (nonce-too-low, underpriced, ...) come back as JSON-RPC error results, filtered by the existing `!res[i].IsError()` guard.\n\nThe store already dedups on hash and keeps the earliest arrival time, so resubmits preserve the first-seen submission time.\n\n### Not addressed (inherent to a passive v1)\n\nAccepted-then-dropped txns (mempool eviction, same-nonce replacement) still age out as `txmon_timeouts_total` — cannot be popped without receipt polling.\n\n## Tests\n\n- New `TestTxMonitorObserveUsesArrivalTime`, `TestGetReqReceivedAt`; updated `TestTxMonitorObserveNeverBlocks` for the new signature.\n- `go vet ./.`, `go build ./...`, and tx-monitor tests pass.",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-08-27T21:42:17Z",
+      "mergedAt": null,
+      "additions": 57,
+      "deletions": 12
     }
   ],
   "codeChanges": {
-    "additions": 253,
+    "additions": 1374,
     "deletions": 0,
-    "files": 5,
-    "commitCount": 12
+    "files": 19,
+    "commitCount": 19
   },
   "completedItems": [
     {
@@ -51,6 +63,30 @@
         "proxyd/rate_limit_tracker_test.go",
         "proxyd/server.go",
         "proxyd/server_test.go"
+      ]
+    },
+    {
+      "title": "feat(proxyd): passive transaction UX monitor (tx_monitor)",
+      "prNumber": 726,
+      "type": "feature",
+      "body": "**Description**\n\nAdds a passive transaction-UX monitor to proxyd, gated by a new `[tx_monitor]` config section. When enabled, proxyd observes every successfully forwarded `eth_sendRawTransaction`/`eth_sendRawTransactionConditional` hash and",
+      "files": [
+        "proxyd/CHANGELOG.md",
+        "proxyd/README.md",
+        "proxyd/config.go",
+        "proxyd/example.config.toml",
+        "proxyd/go.mod",
+        "proxyd/metrics.go",
+        "proxyd/proxyd.go",
+        "proxyd/server.go",
+        "proxyd/tx_monitor.go",
+        "proxyd/tx_monitor_blocks.go",
+        "proxyd/tx_monitor_blocks_test.go",
+        "proxyd/tx_monitor_store.go",
+        "proxyd/tx_monitor_store_test.go",
+        "proxyd/tx_monitor_subblocks.go",
+        "proxyd/tx_monitor_subblocks_test.go",
+        "proxyd/tx_monitor_test.go"
       ]
     }
   ],
@@ -68,8 +104,48 @@
     {
       "username": "opsuperchain",
       "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
-      "totalScore": 84.7710913381448,
-      "prScore": 84.7710913381448,
+      "totalScore": 128.1578652347209,
+      "prScore": 128.1578652347209,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?v=4",
+      "totalScore": 110.67887903803735,
+      "prScore": 102.14087903803735,
+      "issueScore": 8.1,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 97.72505358108658,
+      "prScore": 92.72505358108658,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 95.70337586337679,
+      "prScore": 95.70337586337679,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 94.83159529027051,
+      "prScore": 94.83159529027051,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -86,22 +162,22 @@
       "summary": null
     },
     {
-      "username": "zhwrd",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
-      "totalScore": 71.90310956412245,
-      "prScore": 71.90310956412245,
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 54.5217738965761,
+      "prScore": 36.3217738965761,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 57.69450650536608,
-      "prScore": 57.69450650536608,
-      "issueScore": 0,
-      "reviewScore": 0,
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 51.1927738965761,
+      "prScore": 39.1927738965761,
+      "issueScore": 2,
+      "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
@@ -116,13 +192,23 @@
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 46.1927738965761,
-      "prScore": 39.1927738965761,
-      "issueScore": 2,
-      "reviewScore": 5,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 46.66689217900675,
+      "prScore": 28.166892179006748,
+      "issueScore": 0,
+      "reviewScore": 18.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 45.729580922772485,
+      "prScore": 44.07558092277248,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.654,
       "summary": null
     },
     {
@@ -132,36 +218,6 @@
       "prScore": 45.39351501117786,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 40.05899690620838,
-      "prScore": 21.558996906208378,
-      "issueScore": 0,
-      "reviewScore": 18.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 37.609662489770315,
-      "prScore": 36.39366248977032,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.2159999999999997,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 30.048886673334362,
-      "prScore": 25.048886673334362,
-      "issueScore": 0,
-      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -178,16 +234,16 @@
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 28.556914474173478,
+      "totalScore": 28.99491447417348,
       "prScore": 28.35691447417348,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 18.2,
       "prScore": 0,
       "issueScore": 0,
@@ -196,13 +252,33 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 10.587955074527654,
-      "prScore": 10.387955074527655,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 18.05205020110221,
+      "prScore": 18.05205020110221,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 15.927955074527654,
+      "prScore": 10.387955074527655,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "lArtiquel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36863599?v=4",
+      "totalScore": 11.540147601710057,
+      "prScore": 11.540147601710057,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -226,6 +302,16 @@
       "summary": null
     },
     {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "pxpn-dev",
       "avatarUrl": "https://avatars.githubusercontent.com/u/222313623?v=4",
       "totalScore": 9.400588722239782,
@@ -233,16 +319,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 9.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -256,13 +332,13 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 5,
+      "username": "alejandra090509-collab",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/317736782?u=b6c983ee005ebad4f4a33c9acb33a26b9688ab47&v=4",
+      "totalScore": 4.7,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -296,9 +372,9 @@
       "summary": null
     }
   ],
-  "newPRs": 2,
-  "mergedPRs": 1,
+  "newPRs": 3,
+  "mergedPRs": 2,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 14
+  "activeContributors": 18
 }

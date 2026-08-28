@@ -5,8 +5,69 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-27 to 2026-08-28, ethereum-optimism/optimism had 5 new PRs (0 merged), 0 new issues, and 11 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-08-27 to 2026-08-28, ethereum-optimism/optimism had 15 new PRs (0 merged), 10 new issues, and 22 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABOjF1dA",
+      "title": "kona-genesis: RollupConfig silently accepts unknown rollup.json keys",
+      "author": "sebastianst",
+      "number": 22682,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nKona's [`RollupConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/rollup.rs#L34-L37) carries no `#[serde(deny_unknown_fields)]`, so any key in a `rollup.json` that kona does not model is silently dropped. [`test_rollup_config_unknown_field`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/rollup.rs#L992-L1048) pins that behaviour as intended.\n\nThe rollup config is the chain's consensus-parameter file. A key kona ignores is a parameter kona does not honour: `kona-node` / `kona-host` boot happily on a config that tells them to derive a chain different from the one the operator configured, and the disagreement only shows up later as a derivation split or a failed proof.\n\n## Why it matters\n\n`rollup.json` is produced by op-deployer from Go's [`rollup.Config`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/types.go#L87-L195) (`DeployConfig.RollupConfig`). Today every key that struct emits is modelled by kona, so nothing is being dropped in practice. The gap is the *next* consensus field: op-node adds it, op-deployer writes it, op-node honours it, and kona-node ignores it and derives a different chain — with no error anywhere.\n\nKona already applies exactly this guard on the *other* rollup-config ingestion path, the superchain-registry one: both [`ChainConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/chain/config.rs#L33-L37) and [`HardForkConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/chain/hardfork.rs#L10-L14) are `deny_unknown_fields`, and [`docs/ai/derivation.md`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/docs/ai/derivation.md#L63-L71) names strict decoding as one of the two guards that make an unwired config field fail loudly. The direct `rollup.json` path — which is what every non-registry chain actually uses — has no such guard.\n\nNote that op-node's [`ParseRollupConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/types.go#L928-L934) is a plain `json.Decoder` and is lenient too, so this is not a kona-vs-op-node divergence today; it is a missing guard on both. Making op-node strict is not free — kona's own serialization emits keys op-node does not model (`granite_channel_timeout`, `superchain_config_address`, `blobs_data`, top-level `da_challenge_address`), so a strict op-node would reject a kona-written config. Kona is the side that can tighten without breaking an existing producer.\n\n## The `flatten` wrinkle\n\n`RollupConfig` flattens `HardForkConfig`:\n\n```rust\n#[cfg_attr(feature = \"serde\", serde(flatten))]\npub hardforks: HardForkConfig,\n```\n\nTwo things follow, both worth recording because serde's own documentation says `deny_unknown_fields` \"is not supported in combination with flatten, neither on the outer struct nor on the flattened field\":\n\n1. `HardForkConfig`'s **own** `deny_unknown_fields` is inert once flattened. `FlatStructAccess` only picks the keys the struct declares and skips the rest, so the inner attribute never fires. That is why the unknown key in the test above is accepted today despite `HardForkConfig` being strict.\n2. `deny_unknown_fields` on the **outer** struct does work, contrary to the doc note. `serde_derive` emits a leftover check after every flattened field has taken its own keys (`collected_deny_unknown_fields` in `serde_derive/src/de/struct_.rs`), so the flattened hardfork keys still parse and anything left over is a hard error. Verified against the pinned `serde_derive` 1.0.228, and present as far back as 1.0.145. The doc note holds only for a flattened catch-all *map*, which swallows everything and leaves nothing to check.\n\nSo no custom `Deserialize` or restructuring is needed, and the serialized `rollup.json` format is untouched.\n\n## Proposed fix\n\n- Add `#[serde(deny_unknown_fields)]` to `RollupConfig`.\n- Flip `test_rollup_config_unknown_field` to assert rejection.\n- Add a fixture test that every key op-node can emit parses, generated from a fully-populated `rollup.Config` by a Go test that fails when the two drift apart.\n\n## Compatibility\n\nA `rollup.json` from a future op-deployer carrying a key kona does not model will fail to load on kona-node / kona-host with `unknown field <key>` instead of booting and quietly ignoring it. That is the intended trade: an operator sees a startup error rather than a chain that derives differently. All 25 keys op-node emits today are modelled, so no config produced by current tooling is affected.\n\n## Related gap (out of scope here)\n\n`BaseFeeConfig` (`chain_op_config`) is not `deny_unknown_fields`, so an unknown key nested inside it is still ignored. `ChainGenesis`, `SystemConfig` and `AltDAConfig` are all strict already.\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-08-27T19:18:33Z",
+      "closedAt": "2026-08-27T20:52:34Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABL1nk0A",
+      "title": "op-supernode: cross-safe wedges after invalid-message replacement while local-safe on one chain stalls",
+      "author": "einar-oplabs",
+      "number": 22325,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Description\n\nDuring recovery from an invalid-message replacement, the supernode's cross-safe head can wedge entirely: in CircleCI build [5418160](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/jobs/5418160) (merge queue, 2026-08-03, `memory-all-opn-op-reth-prague`), cross-safe on **both** chains stayed pinned at block 26 for the remainder of a 259s test run while chain 902's local-safe advanced to 125+ and unsafe sequencing continued to ~128. Surfaced as a failure of `TestSupernodeLightSequencerInteropInvalidMessageReplacement` (`ResendUntilSafe`: \"transaction did not reach the safe chain within the resend budget\") — but the resend budget is not the problem: with cross-safe frozen, no transaction could ever reach the EL's safe label. Split out of #22234, which retains the full flake analysis (its other two occurrences were a test-side read race, fixed by #22321).\n\n## Evidence (log tail, 18:45:05–18:45:25)\n\nState per chain, stable across the whole captured window:\n\n| | chain 901 | chain 902 |\n|---|---|---|\n| local-safe (supernode) | **27** — stalled | **125** — advancing |\n| cross-safe (supernode) | **26** — pinned | **26** — pinned |\n| light CL unsafe | ~128 | ~128 |\n\nThe supernode logs this once per second, for the same block, the entire window (27 hits across both chains in the 20s tail):\n\n```\nengine_controller.go:1250: ERROR [08-03|18:45:05.335] Block must be safe before it can be finalized component=supernode chain_id=901 vn_id=a7bc ref=c7d5bb..1c44dd:27 safe=587d29..87b357:26\nengine_controller.go:1250: ERROR [08-03|18:45:06.338] Block must be safe before it can be finalized component=supernode chain_id=902 vn_id=ed3a ref=6244e8..c88e5c:56 safe=079e41..081150:26\n...\nengine_controller.go:1250: ERROR [08-03|18:45:25.335] Block must be safe before it can be finalized component=supernode chain_id=901 vn_id=a7bc ref=c7d5bb..1c44dd:27 safe=587d29..87b357:26\n```\n\nMeanwhile the light follow-CLs keep force-resetting and re-adopting the frozen upstream view every ~4s (#21119 oscillation), e.g.:\n\n```\nengine_controller.go:1325: INFO [08-03|18:45:23.152] Reset of Engine is completed component=l2cl-sequencer local_unsafe=c7d5bb..1c44dd:27 cross_unsafe=c7d5bb..1c44dd:27 local_safe=c7d5bb..1c44dd:27 cross_safe=587d29..87b357:26\nengine_controller.go:1325: INFO [08-03|18:45:23.205] Reset of Engine is completed component=l2cl-sequencer local_unsafe=ae8666..786002:125 cross_unsafe=ae8666..786002:125 local_safe=ae8666..786002:125 cross_safe=079e41..081150:26\n```\n\nTimeline context: the test's earlier gates all passed — `AwaitValidatedTimestamp` for the replacement, and cross-safe advanced 3 blocks past it (to 26) — and *then* cross-safe stopped for 100+ blocks of subsequent chain activity.\n\n## Reading\n\n- Chain 901's **local-safe derivation stalled at 27** (the invalid message was on chain 902; 901 was the initiating chain). Since cross-safe promotion advances the two chains' frontiers together, 901's stall plausibly pins cross-safe at 26 on both chains, including 902 whose own local-safe is healthy at 125.\n- The recurring `Block must be safe before it can be finalized` error shows the finalization path repeatedly attempting to finalize a block ahead of the cross-safe head — symptom or contributor, unclear.\n- The resent transactions were plain ETH transfers (no interop messages), so cross-validation had no legitimate dependency to wait on at those heights.\n\nOpen questions: why did 901's local-safe stop at 27 — batcher stopped batching 901, derivation wedged post-replacement, or supervisor-side databases inconsistent after the replacement? And is the once-per-second finalization error loop masking or causing the missed promotion?\n\nOnly the last ~20s of the run's logs are captured in the CI step output; a local repro with supervisor debug logging would show when 901's local-safe stopped relative to the replacement.\n\n## Why it matters\n\nIf reproducible outside the test, this is a liveness failure: a chain pair that goes through interop invalid-message replacement stops advancing cross-safe (and therefore safe/finalized) indefinitely, while unsafe sequencing keeps running. #20134 was a similar-looking cross-safe stall with a different trigger (deep L1 reorg) and is closed.\n\n## Related\n\n- #22234 — flake tracking + full analysis of all three test failures\n- #22321 — fixes the other (test-side) failure signature\n- #21119 — light follow path forceReset oscillation (background noise in the same logs)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "createdAt": "2026-08-07T10:47:06Z",
+      "closedAt": "2026-08-27T20:39:07Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABOjBeRw",
+      "title": "kona-node: sequencer stuck in forkchoiceUpdated -38002 loop after derivation force-includes a block off its unsafe chain",
+      "author": "sebastianst",
+      "number": 22681,
+      "repository": "ethereum-optimism/optimism",
+      "body": "A kona-node **sequencer** can be permanently wedged — hot-looping `engine_forkchoiceUpdatedV3` at thousands of calls per second until the process is unusable — whenever the engine reorgs its unsafe head while the sequencer has a block build in flight. Derivation force-inclusion after a batcher outage makes that reorg happen deterministically, so a sequencing-window expiry reliably kills the node.\n\nTwo independent defects combine:\n\n1. `BuildTask` classifies a `-38002 Invalid forkchoice state` response as a **temporary** error, and the task queue retries temporary errors in an unbounded loop with no backoff. The condition is not transient, so the node never leaves the loop and never resets.\n2. `BuildTask` has no staleness guard on the parent it was asked to build on, so it will send the EL a forkchoice state whose `safeBlockHash` is not an ancestor of `headBlockHash` in the first place.\n\nAll references below are against `68b009443f67cf830990e913bcbde8536cb15327`.\n\n## Observed\n\nOn a devnet running a kona-node sequencer + kona-node verifier + batcher (a multi-block PoC branch, #22671 — but nothing in the mechanism is specific to it):\n\n- The batcher submitted batches derivation could not apply.\n- The sequencing window expired, so derivation force-included an empty block at height `N+1` whose parent was the last common block `N`, but whose hash differed from the sequencer's own unsafe block at `N+1`.\n- The node then emitted `engine_forkchoiceUpdatedV3` → `-38002 Invalid forkchoice state` in a hot loop, thousands per second, until it was dead. It never reorged its unsafe chain onto the derived chain and never recovered.\n\n## Mechanism\n\n**Step 1 — derivation reorgs the unsafe chain (this part works).** The derived attributes for `N+1` fail the consolidation check against the sequencer's block at `N+1`, so [`ConsolidateTask`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs#L271-L281) falls back to `build_and_seal`, and the [`InsertTask`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs#L98-L110) that finishes it sets `unsafe_head`, `local_safe_head` and `safe_head` to the derived block. The EL and the engine state both end up on the derived chain.\n\n**Step 2 — the sequencer submits a build against the pre-reorg head.** `SequencerActor::build_unsealed_payload` reads the unsafe head from a watch channel *once*, at [actor.rs#L217](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/service/src/actors/sequencer/actor.rs#L217), then does two pieces of network-bound async work (L1 origin selection, then `prepare_payload_attributes`, which fetches L1 receipts) before [submitting the build at L246](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/service/src/actors/sequencer/actor.rs#L245-L246). The `EngineActor` republishes the unsafe head only at the top of its step loop, [after draining the queue](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/service/src/actors/engine/actor.rs#L224-L231). So the snapshot the sequencer built against is routinely stale by the time the request lands — a window of hundreds of milliseconds, and the step-1 reorg falls squarely inside it.\n\n**Step 3 — the FCU is rejected.** [`BuildTask::start_build`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/build/task.rs#L104-L110) overrides only the head with the attributes' parent and keeps the state's `safe_head`:\n\n```rust\nlet new_forkchoice = state\n    .sync_state\n    .apply_update(EngineSyncStateUpdate { unsafe_head: Some(attributes_envelope.parent), ..Default::default() })\n    .create_forkchoice_state();\n```\n\n`head = <pre-reorg sequencer block>`, `safe = <derived block>`. The derived block is not an ancestor of the pre-reorg head, so the EL answers `-38002`.\n\n**Step 4 — the hot loop.** `-38002` arrives as a JSON-RPC error and is mapped unconditionally to [`EngineBuildError::AttributesInsertionFailed`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/build/task.rs#L132), which carries severity [`Temporary`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/build/error.rs#L62-L68). `EngineTask::execute` retries temporary errors [in a `while let Err(..)` loop whose only pause is `yield_now().await`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/task.rs#L216-L231) — no backoff, no attempt cap. The forkchoice state is a function of engine state that nothing else can change while the queue is draining, so the retry can never succeed. That is the thousands-of-FCUs-per-second symptom.\n\n**Step 5 — total wedge.** The loop lives inside `Engine::drain`, which the `EngineActor` runs *before* receiving its next request, so the actor can no longer process anything — including a `Reset` request. Meanwhile the sequencer is parked in `start_build_block` awaiting a payload id that will never arrive, so it cannot ask for that reset either. Nothing in the process can break the cycle.\n\nNote the asymmetry that makes this a plain bug rather than a design trade-off: the attribute-less forkchoice update in `SynchronizeTask` **does** special-case the same error code, mapping it to [`SynchronizeTaskError::InvalidForkchoiceState`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/task.rs#L125-L135) with severity `Reset`. Only the build path is missing it.\n\n## op-node comparison\n\nop-node guards the same two points, and this is where the fix comes from.\n\n- **Stale parent.** [`EngineController.startBuild`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/engine/build_start.go#L57-L65) refuses a sequencer build whose parent is not the current unsafe head, before any engine call:\n\n  ```go\n  if !attrs.IsDerived() && attrs.Parent.ID() != e.unsafeHead.ID() {\n      e.log.Warn(\"dropping stale sequencer build start\", ...)\n      e.requestForkchoiceUpdate(ctx)   // sequencer restarts on the current unsafe head\n      return nil, ErrStaleBuild\n  }\n  ```\n\n  The `!attrs.IsDerived()` condition matters: a derivation-driven reorg legitimately builds on a parent that differs from the unsafe head.\n\n- **`-38002` from the pre-block-creation FCU.** [`startPayload`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/engine/engine_controller.go#L1476-L1483) classifies it as `BlockInsertPrestateErr` — \"pre-block-creation forkchoice update was inconsistent with engine, need reset to resolve\" — which `startBuild` turns into a [`ResetEvent`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/engine/build_start.go#L104-L109), never a retry.\n\nop-node has also already been bitten by the adjacent oscillation: see the `#21119` comment in [`FollowSource`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/engine/engine_controller.go#L1578-L1590) — \"head on the fork, safe on upstream -> InvalidForkchoiceState -> reset re-selects the fork -> oscillation\" — fixed there with a `forceReset` that lands head and safe in one shot.\n\n## Proposed fix\n\n1. Map `-38002` in `BuildTask::start_build` to a new `EngineBuildError::InvalidForkchoiceState` with severity `Reset`, mirroring `SynchronizeTask` and op-node's `startPayload`.\n2. Give `BuildTask` op-node's stale-parent guard, gated on the existing `BuildSealCoupling` flag that `SealTask` already uses for exactly this distinction (`Atomic` = derivation-driven, parent chosen from engine state, skip the check; `Detached` = external caller working from its own snapshot, check it). Report the rejection to the caller over the result channel instead of leaving it waiting.\n3. Have the sequencer treat a rejected or dropped build as \"re-build on the new head next tick\" rather than a fatal actor error — every `NodeActor::step` error [shuts the whole node down](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/service/src/service/util.rs#L28-L38).\n4. Publish the unsafe head after an engine reset as well, so the sequencer cannot build against a pre-reset snapshot.\n\nWorth considering separately, not covered by the above: the task queue's temporary-error retry has no backoff at all. Any genuinely temporary engine error currently spins the engine as fast as the EL will answer. op-node's equivalent yields to a driver that re-attempts on a timer.\n\n## Repro status\n\nNot reproduced as an automated test. The Rust-side mechanism is covered by unit tests in the fix PR (a `-38002` build must surface as `Reset` and must not be retried; a stale detached build must be rejected without touching the engine; the sequencer must retry rather than die). A full-system repro is blocked on a harness gap:\n\n- **No test anywhere exercises batcher outage → sequencing-window expiry → force-include → sequencer unsafe-chain reorg against a kona-node sequencer.** Not in `op-acceptance-tests/`, not in `rust/kona/tests/node/`, not in Rust.\n- The one test that models the whole loop end-to-end, `TestSequencingWindowExpiry` (`op-acceptance-tests/tests/interop/seqwindow/expiry_test.go`), is bound to `presets.NewTwoL2SupernodeInterop`. Supernode presets never route through `startL2CLForKey`, so they have no `DEVSTACK_L2CL_KIND` branch and cannot start a `KonaNode`.\n- Every op-e2e action test that asserts force-inclusion or post-expiry recovery (`TestL2Verifier_SequenceWindow`, `TestL2Sequencer_SequencerOnlyReorg`, `ExtendedTimeWithoutL1Batches`, `DeepReorg`) drives the in-process Go `L2Sequencer` object directly. There is no engine-API boundary to swap, so they can never target an external CL process. `rust/kona/tests/proofs/sequence_window_expiry_test.go` describes exactly this scenario but its sequencer is op-node — kona only appears there as `kona-host`.\n- `rust/kona/tests/node/` has no derivation-stress package (`node/common`, `node/reorgs`, `node/restart`), and `NewMixedOpKona`/`NewMixedOpKonaForConfig` do not accept deployer options, so that preset cannot set a small `sequencerWindowSize` without a signature change.\n\nThe gap is fillable: `presets.NewMinimal(t, presets.WithDeployerOptions(sysgo.WithSequencingWindow(N)))` is accepted by the minimal preset, `startL2CLForKey` honours `DEVSTACK_L2CL_KIND=kona-node`, and the whole acceptance suite already runs against kona-node in the required `memory-all-kona-op-reth-fusaka` CI job. `dsl.L2Batcher.Stop()/Start()` and `dsl.L2CLNode.SetSequencerRecoverMode` all exist and kona implements `admin_setRecoverMode`. What is missing is the test itself. One risk worth flagging for whoever writes it: kona's derivation is gated behind EL-sync completion, which only completes after a P2P-delivered unsafe payload (see the note at `op-acceptance-tests/tests/sdm/init_test.go`).\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-08-27T19:09:50Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABOjL9Gg",
+      "title": "ops: docker buildx bake op-deployer / cannon cannot be built without a private-registry login",
+      "author": "sebastianst",
+      "number": 22689,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Symptom\n\n```\ndocker buildx bake op-deployer\ndocker buildx bake cannon\n```\n\nfail locally with an authentication error: both targets base on `dhi.io/alpine-base:3.23`, a private hardened registry that requires a `docker login` most contributors do not have.\n\n## Where\n\n[`ops/docker/op-stack-go/Dockerfile`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/ops/docker/op-stack-go/Dockerfile#L288):\n\n```dockerfile\nFROM dhi.io/alpine-base:3.23 AS cannon-target\n```\n\nand [line 363](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/ops/docker/op-stack-go/Dockerfile#L363):\n\n```dockerfile\nFROM dhi.io/alpine-base:3.23 AS op-deployer-target\n```\n\nThese are the only two `dhi.io` references in the whole repo. Every other stage in the file resolves from a public registry — `alpine:3.21` (`builder_foundry`, `musl-libs`), `golang:1.26.5-alpine3.23`, `golang:1.26.5-bookworm`, `rust:1.95`.\n\n## How it got there\n\n`git log -S` pins it to one commit — `10ec3c55bc`, *\"chore(docker): switch op-stack-go runtime base to chainguard/static (#20904)\"*, which moved the shared base from `alpine:3.20` to distroless `chainguard/static`. Two stages genuinely could not live on distroless-static (cannon ships musl-linked multicannon embeds; op-deployer ships a `forge` binary and sets `FORGE_ENV=alpine`), so they had to stay on a real alpine. Instead of getting their own publicly-defaulted ARG they were hardcoded to the private registry. **Both stages built from public `alpine:3.20` before that commit** — this is a regression for local builds.\n\n## The pattern already exists\n\nThe same file already has two publicly-defaulted base ARGs, including one added for exactly this situation — a stage with different runtime needs:\n\nhttps://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/ops/docker/op-stack-go/Dockerfile#L8-L15\n\n`TARGET_BASE_IMAGE` is used by fourteen targets and `CHALLENGER_TARGET_BASE_IMAGE` by one.\n\n## Fix assessment\n\nAdd a third ARG beside them and point both stages at it:\n\n```dockerfile\n# cannon ships musl-linked multicannon embeds and op-deployer ships forge, so\n# neither can run on the distroless-static TARGET_BASE_IMAGE.\nARG ALPINE_TARGET_BASE_IMAGE=alpine:3.23\n```\n\n**~5 lines in one file** (3 added near line 15, 2 modified). Optionally +8 lines to declare the variable in `docker-bake.hcl` and add it to the `cannon` / `op-deployer` `args` maps — but an ad-hoc `--set '*.args.ALPINE_TARGET_BASE_IMAGE=…'` covers the override case without the HCL churn.\n\n**Does the public base lack anything?** No:\n\n* Neither stage runs `apk add` after its `FROM`, so there is no package-availability question (contrast `op-challenger-target`, which does and therefore genuinely depends on its base's apk repos).\n* `USER 0` on both stages becomes a harmless no-op — plain alpine already runs as root; DHI images default to non-root, which is why those lines are there. They stay correct either way.\n* op-deployer makes outbound HTTPS RPC calls and installs no certs itself, relying on the base bundle; alpine's minirootfs ships `ca-certificates-bundle`. Both stages ran on public `alpine:3.20` for months until #20904, so runtime parity is established historically.\n* `3.20 → 3.23` is the only genuinely new variable, and it matches the alpine the Go builder stage already uses (`golang:1.26.5-alpine3.23`), so the musl the cannon embeds were linked against lines up.\n\n**Risk: low, and lower than it looks.** These bake targets no longer build any production image. `cd560bfbfe` (*\"ci: make apko images canonical, disable docker builds (#22257)\"*) deleted `.github/workflows/build-images.yaml`; production cannon and op-deployer images now come from apko/melange (`melange/op-deployer.yaml`, `melange/multicannon.yaml`). There is no `docker login`, no `dhi` reference and no `buildx bake` invocation anywhere in `.circleci/` or `.github/` — the only remaining callers are the developer recipes in the root `justfile`, none of which pass a `*_BASE_IMAGE` arg. So the hardening requirement is satisfied by the apko pipeline, and defaulting the new ARG publicly while leaving it overridable costs nothing.\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-08-27T19:31:23Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABOjLvmQ",
+      "title": "op-reth: --all-features test/lint runs exit(1) on hosts without an invariant TSC (tracy)",
+      "author": "sebastianst",
+      "number": 22688,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Symptom\n\nOn a host whose CPU lacks an invariant TSC, running the op-reth CLI tests with all features exits before any test runs:\n\n```\nCPU doesn't support invariant TSC.\nDefine TRACY_NO_INVARIANT_CHECK=1 to ignore this error, *if you know what you are doing*.\n```\n\nSetting `TRACY_NO_INVARIANT_CHECK=1` makes it go away. Nothing in the repo sets it — the string appears nowhere in `.circleci/`, `.github/`, `mise.toml`, `rust/justfile`, `rust/.cargo/config.toml`, `rust/.config/nextest.toml` or `docs/ai/rust-dev.md`.\n\n## Precondition — it is an `--all-features` problem\n\n`tracy` is *not* a default feature: `rust/op-reth/crates/cli/Cargo.toml` has `default = []` and [`tracy = [\"reth-tracing/tracy\", \"reth-node-core/tracy\"]`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/op-reth/crates/cli/Cargo.toml#L116). `cargo tree -p reth-optimism-cli -i tracy-client-sys` reports the package is not in the graph at all; adding `--all-features` resolves it via `reth-tracing` → `tracy-client 0.18.4` → `tracy-client-sys 0.28.0`.\n\nThat matters, because `--all-features` is exactly what every repo-standard recipe uses — [`just test-unit`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/justfile#L99-L100), `just test-docs`, `just lint-clippy`. So the issue is not \"the `-p reth-optimism-cli` tests\", it is \"any `--all-features` build on such a host\".\n\nThe workspace does not enable `tracy-client/manual-lifetime`, so Tracy initialises **before `main`** in every binary that links it — including test binaries that never touch tracy. The check itself is in the vendored C profiler (`tracy-client-sys-0.28.0/tracy/client/TracyProfiler.cpp`, `CheckHardwareSupportsInvariantTSC`), and its failure path ends in `exit(1)`, not `abort()`. Two details: the env var must literally *start with* `'1'`, and the guard is skipped entirely when the C lib is built with `TRACY_TIMER_FALLBACK`, which we do not do.\n\n## Fix assessment\n\n**(a) `[env]` in `rust/.cargo/config.toml` — recommended.** Three lines:\n\n```toml\n[env]\nTRACY_NO_INVARIANT_CHECK = \"1\"\n```\n\nThe file currently has only `[alias]` and two Windows `[target.*]` blocks, so this is additive. Verified empirically with a throwaway crate that both **`cargo test` and `cargo nextest`** pick it up — nextest reads it from *Cargo's* config, so `rust/.config/nextest.toml` is not the lever. Cargo `[env]` entries are non-forced by default, so an explicit `TRACY_NO_INVARIANT_CHECK=0` in the shell still wins and anyone who genuinely wants the guard keeps it. Cost: on an affected host, a real tracy profiling run now produces garbage timestamps instead of refusing to start — narrow, and worth a one-line `why` comment next to the setting.\n\n**(b) Make tracy non-default / not enabled in tests — not viable cheaply.** Cargo's `--all-features` has no exclusion mechanism (the denylist idea belongs to the separate `cargo-all-features` tool, which this repo does not use). The alternatives are dropping the `tracy` feature from `rust/op-reth/crates/cli/Cargo.toml` and `rust/op-reth/bin/Cargo.toml` — removing a real capability — or replacing `--all-features` with explicit feature lists in every recipe, which is high-churn and drifts. Forcing `tracy-client/manual-lifetime` would require an in-tree crate to depend on `tracy-client` purely to unify the feature on, and would change semantics for genuine profiling users.\n\n**(c) Document it in [`docs/ai/rust-dev.md`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/docs/ai/rust-dev.md#L58-L72).** 2–4 lines under \"Running Tests\". Not sufficient alone — a fresh clone on an affected host hits the wall before reading docs — but worth doing alongside (a) so the setting is discoverable and its rationale recorded.\n\n**Verdict: (a) + (c).** ~3 lines of config, ~3 lines of docs, no build-graph change.\n\nUnrelated finding while tracing this: `rust/Cargo.toml` declares `tracy-client = \"0.18.4\"` in `[workspace.dependencies]` but no in-tree crate references it (`tracy-client.workspace = true` appears nowhere) — `reth-tracing` resolves its own copy. Probably a leftover from a reth shared-dependency sync; worth a glance at the next `update-reth`.\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-08-27T19:30:56Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDODjvEJM8AAAABBKD3cg",
@@ -17,8 +78,44 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-08-27T04:00:29Z",
       "mergedAt": null,
-      "additions": 3343,
-      "deletions": 149
+      "additions": 8083,
+      "deletions": 600
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBPSNzQ",
+      "title": "contracts-bedrock: throttle ERC20 and ETH withdrawals",
+      "author": "Inphi",
+      "number": 22676,
+      "body": "## Summary\r\n\r\nAdds development-gated withdrawal throttling for whitelisted ERC20s and ETH using percentage-based token buckets.\r\n\r\n- Supports `L1StandardBridge`, `OptimismPortal2`, and shared `ETHLockbox` custody.\r\n- Uses live escrow balances, lazy exact fractional refill, and revert-on-exhaustion.\r\n- Adds owner configuration/refresh APIs and monitoring events.\r\n- Configures throttles through OPCM instructions behind `WITHDRAWAL_THROTTLE`.\r\n- Centralizes accounting in a reusable two-slot packed `WithdrawalThrottle.State`.\r\n- Conservatively saturates capacities above `uint128.max`.\r\n\r\nCold-path benchmarks measure throttle overhead at approximately 17.3k gas for ERC20 finalization and 14.9k gas for ETH finalization.\r\n\r\n## Testing\r\n\r\nAdded coverage for refill precision, overflow boundaries, reconfiguration, live-stock changes, shared-lockbox behavior, OPCM configuration, storage writes, and cold-path gas benchmarks.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T17:23:43Z",
+      "mergedAt": null,
+      "additions": 4217,
+      "deletions": 51
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBRFP4w",
+      "title": "contracts: prototype L1-certified event relay",
+      "author": "opsuperchain",
+      "number": 22693,
+      "body": "## Overview\n\nThis draft prototypes an L1-mediated, censorship-resistant slow path for L2 events and interop messages.\n\nA source `CrossL2Inbox` asks a consensus `LocalLogOracle` precompile to verify a recent local log, then exports the certificate through the existing `L2ToL1MessagePasser`. After ordinary withdrawal proving/finalization, `L1EventRegistry` records the certificate and can force-deposit it into any destination portal authorized by the same `ETHLockbox`. The destination inbox caches it and can either expose generic event validation or execute a certified `SentMessage` in the same deposit.\n\nThe event must be exported within seven days. Once registered on L1, the certificate is durable and can be relayed after ordinary interop expiry.\n\n## Security decisions\n\n- L1 derives the source chain from the calling portal and authenticates `portal.l2Sender()` as the canonical `CrossL2Inbox`; source identity is never trusted from calldata.\n- Source and destination portals must both be current members of the registry immutable `ETHLockbox` cluster.\n- Destination imports authenticate the L1 registry through standard L1-to-L2 address aliasing.\n- Certified execution emits `ExecutingCertifiedMessage`, not `ExecutingMessage`, so ordinary interop expiry/dependency hazard rules are not accidentally applied.\n- Certificates bind the full existing `Identifier` and exact payload hash. Messenger replay protection remains authoritative.\n\n## Included\n\n- `ILocalLogOracle` execution-client boundary and reserved system address\n- source export and destination certificate cache in `CrossL2Inbox`\n- immutable `L1EventRegistry` with portal/lockbox/source-chain authentication\n- generic `relayEvent` and one-deposit `relayMessage` paths\n- ABI, storage-layout, and semver snapshots\n- focused L1/L2 unit tests\n- design note: `packages/contracts-bedrock/specs/event-certificates.md`\n\n## Draft blockers / follow-ups\n\n- Specify and implement deterministic historical receipt access in op-geth, op-reth, Kona, and fault-proof re-execution. An optional archival database lookup is not consensus-safe; the final design needs a state-committed history structure or explicit witnesses anchored to consensus state.\n- Define precompile gas, receipt encoding, pruning, reorg, and exact boundary semantics.\n- Update interop clients to classify `ExecutingCertifiedMessage` as L1-certified rather than an ordinary executing-message dependency.\n- Add genesis/NUT/deployment/standard-validator wiring for the registry and inbox configuration.\n- Add forced-deposit and withdrawal-finalization end-to-end coverage.\n- For ETH bridge recovery, separately enforce a unique transfer ID and one terminal outcome across relay and refund paths. Event presence alone does not prove non-execution.\n- Consider batched exports before production use.\n\n## Verification\n\n- `mise x -- just build` (passes; one pre-existing payable-fallback warning in `L2ContractsManager.t.sol`)\n- `mise x -- just test-dev --match-path test/L2/CrossL2Inbox.t.sol` — 18 passed\n- `mise x -- just test-dev --match-path test/L1/L1EventRegistry.t.sol` — 7 passed\n- clean default-profile source build, interface check, snapshot generation, formatting, pragma, unused-import, spacer, reinitializer, semver, and test-structure checks pass\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T22:05:09Z",
+      "mergedAt": null,
+      "additions": 1559,
+      "deletions": 24
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBPCUcw",
+      "title": "contracts-bedrock: add UnorderedExecutionModule for nonceless Safe execution",
+      "author": "maurelian",
+      "number": 22675,
+      "body": "## Summary\n\nAdds `UnorderedExecutionModule`, a Safe module enabling nonceless (hash-once) execution for superchain-ops tasks: owners sign the Safe's own transaction hash computed with a per-task hash-once value (keccak of a unique string pinned in the task config) in the nonce slot instead of the sequential nonce. Signatures stay valid regardless of task ordering, so reordering pending tasks never forces re-signing.\n\nDesign points:\n- Replay protection is a per-`(safe, hashOnce)` consumed-once mapping; hash-once values must exceed `type(uint128).max` so they can never collide with a real nonce.\n- No cancellation/expiry mechanism: cancel by consuming the hash-once value with a no-op, or rotate the task's `hashOnceInput`.\n- No ordering support (no dependency chaining): tasks that need ordering use the existing nonce flow.\n- Signature verification uses the Safe's `checkSignatures`, so approveHash, EIP-1271 and EOA signatures all work; the EIP-712 encoding is built locally so Safe 1.5.0 (which removed `encodeTransactionData`) is supported alongside 1.3.0/1.4.1.\n- Approver addresses are exposed via `signers()` in transient storage for future module guards (liveness); nothing but the replay mapping persists.\n\nDeployed and source-verified on Sepolia at `0xADcbCff796a47D468fE8C0252FBe8d856d4e63D7`, enabled on Safe 1.5.0 and 1.4.1 instances, and exercised end-to-end (single and nested safes) by superchain-ops test tasks — see companion superchain-ops PR.\n\nPart of the San Diego hackathon nonceless (hash-once) Safe execution project.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T16:47:02Z",
+      "mergedAt": null,
+      "additions": 1381,
+      "deletions": 0
     },
     {
       "id": "PR_kwDODjvEJM8AAAABBJqayQ",
@@ -29,59 +126,43 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-08-27T02:22:47Z",
       "mergedAt": null,
-      "additions": 1091,
-      "deletions": 23
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABBJMw6Q",
-      "title": "op-alt-da!: remove Alt-DA support",
-      "author": "sbvegan",
-      "number": 22668,
-      "body": "Removes Alt-DA runtime, deployment, contracts, packaging, tests, and active documentation. Legacy configurations now fail closed, and retired docs URLs redirect to supported Ethereum DA guidance.\r\n\r\nBREAKING CHANGE: Alt-DA chains must migrate batch submission to Ethereum calldata or blobs before upgrading.\r\n\r\nTests: Go/Rust/Solidity lint and targeted tests; docs and CI validators.",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-27T00:28:38Z",
-      "mergedAt": null,
-      "additions": 703,
-      "deletions": 10200
-    },
-    {
-      "id": "PR_kwDODjvEJM71cDC-",
-      "title": "op-devstack: faithful sequencer-state persistence for supernode invalidation testing",
-      "author": "karlfloersch",
-      "number": 21992,
-      "body": "## Description\n\nMakes supernode VN sequencer-state behavior faithful to production — in the VN factory itself and in the devstack harness — so the invalidation acceptance tests exercise real recovery behavior. Split out from #21951.\n\n> **Stack** (bottom → top): #21991 (gating fix) → **this PR** → #21993 (acceptance-test repro).\n\n### Why\n\nThe supernode invalidation acceptance tests were silently self-healing, so they could not catch real recovery bugs — including the unsafe-sync re-adoption livelock fixed in #21991. The masking mechanism, spelled out:\n\n1. **Old topology**: a light CL in ELSync mode cannot produce block 1 (#21164), so the light-sequencer tests bootstrapped the chain by having the **supernode VN sequence first**, then hand off to the light CL. After the handoff the VN was stopped via admin RPC and was supposed to stay a passive follower forever.\n2. **But \"stopped\" never survived a restart**: the devstack VN config used no-op config persistence, and the VN factory never called `LoadPersisted` anyway — so the stop existed only in the running process.\n3. **Invalidation recovery restarts every VN** (op-node graceful shutdown — which dutifully persists `sequencer.stopped=true`… into the no-op store).\n4. **The restarted VN boots from its static config** — sequencer enabled, not stopped — and the retired bootstrap sequencer comes back to life. At that moment the chain has **two active sequencers simultaneously**: the light CL (the intended one) and the resurrected VN.\n5. **The resurrected VN immediately builds valid blocks on the supernode's own post-invalidation state** (the deposits-only replacement branch), so the chain visibly \"recovers\" within seconds — regardless of whether invalidation recovery actually works. Any assertion of the form \"chain healthy after invalidation\" passed vacuously; the re-adoption livelock was invisible.\n\nThis PR closes every link in that chain: the factory honors persisted state (commit 1), devstack persists it for real (commit 3), the tests explicitly play the operator when sequencing *should* resume (commit 5), and the bootstrap-handoff topology is removed outright in favor of production wiring (commits 6–7). Separately, the old bootstrap wiring contained a latent recovery livelock of its own (see commit 7).\n\n### Commits\n\n1. **`op-supernode: honor persisted sequencer state in VN factory`** — the one production change in this PR. The VN factory builds its op-node config programmatically and bypasses the op-node CLI entrypoint (`op-node/service.go`), which is where `cfg.LoadPersisted` applies persisted sequencer state — so VNs silently ignored it, and a VN restart re-enabled sequencing that an operator (`admin_stopSequencer`) or an invalidation rewind had stopped. Now the factory calls `LoadPersisted`, matching op-node restart semantics: an operator stop survives restarts; re-enabling requires an explicit `admin_startSequencer`. No-op unless the VN is sequencer-enabled with active config persistence and a recorded state.\n2. **`op-supernode: document sequencing disabled after invalidation rewind`** — comment-only. The rewind restarts every VN through op-node's graceful shutdown, which persists `sequencer.stopped=true`; with the commit above, restarted VNs honor that state, so a supernode that was actively sequencing exits invalidation recovery with sequencing disabled until an explicit operator/conductor start — intentional: internal restarts must not silently resurrect a sequencer.\n3. **`op-devstack: use real config persistence for supernode VNs`** — persisted sequencer state (stopped/started) now survives VN restarts in tests the same way it does in production.\n4. **`op-devstack: fix goimports formatting in supernode runtime`** — formatting only.\n5. **`op-acceptance-tests: re-enable sequencing after invalidation rewind`** — the invalidation rewind leaves every VN with sequencing disabled (now that persisted state is honored). The virtual-sequencer tests play the operator: once the reset is detected, re-enable sequencing on both chains via admin RPC. The helper is guarded by `SequencerActive`, so light-sequencer topologies — whose sequencing CLs never restart — are untouched. No assertions added, removed, or weakened.\n6. **`op-devstack: sequence light CLs from genesis with CLSync`** — an ELSync CL cannot produce block 1: it only leaves `willStartEL` on the first network payload, which as sole sequencer it is itself supposed to produce (#21164). Light sequencer CLs now boot with CLSync when sequencing from genesis; VN-bootstrap mode keeps ELSync for the pre-handoff sync from the VN, so the `follow_l2` bootstrap tests are unaffected.\n7. **`op-acceptance-tests: start light sequencers from genesis`** — the light invalid-message test drops the VN-sequencer bootstrap + handoff entirely: light CLs sequence from genesis with the batcher following them, matching production wiring (batchers point at the light sequencer nodes, not the supernode). This also removes a recovery livelock latent in the old bootstrap wiring: a batcher pinned to the supernode VN starves during invalidation recovery — its frozen view produces no new batches, so finality can never advance past the denied height.\n\n### Tests\n\nExisting invalidation suite validated against the full stack: `TestSupernodeInteropInvalidMessageReplacement`, `TestSupernodeLightSequencerInteropInvalidMessageReplacement`, `TestSupernodeInteropRPCGatedDuringReorg`, `TestSupernodeResyncSchedulesAtActivation_PreActivation`.\n\n### Metadata\n\n- Split from #21951\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-07-23T15:20:20Z",
-      "mergedAt": null,
-      "additions": 369,
-      "deletions": 24
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABBJhO5w",
-      "title": "contracts-bedrock: add permissionless deleteProvenWithdrawal to OptimismPortal2",
-      "author": "claude",
-      "number": 22669,
-      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Adrian Sutton, Matt Solomon** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BTT5DGHA4/p1787791642391549?thread_ts=1787791642.391549&cid=C0BTT5DGHA4)_\n\n**Before:** A withdrawal proven against a dispute game that later resolved `CHALLENGER_WINS`, or that was blacklisted, stays in `provenWithdrawals` forever. The record can never finalize, but nothing can clear it, so the portal accumulates dead state and monitoring gets no on-chain signal that a proof has been abandoned.\n\n**After:** `deleteProvenWithdrawal(bytes32 _withdrawalHash, address _proofSubmitter)` lets anyone delete such a record and emits `WithdrawalProofDeleted`. No access control is needed: both conditions are permanent and independently verifiable on-chain, so the caller has no discretion and can only remove state that was already unusable. Retired and non-respected games are deliberately out of scope.\n\n**How:** The function loads the proof, reverts `OptimismPortal_Unproven` if it was never submitted, requires the recorded game to be `CHALLENGER_WINS` or blacklisted in the `AnchorStateRegistry`, then deletes the entry. It leaves `finalizedWithdrawals` untouched so replay protection still holds, and leaves the append-only `proofSubmitters` entry in place — that stale entry now points at a zeroed record, which `checkWithdrawal` already rejects as unproven. Semver bumped to 5.9.0.\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_018RJoiNdC7PjVnJjPANKt2p)_",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-27T01:47:15Z",
-      "mergedAt": null,
-      "additions": 190,
-      "deletions": 4
+      "additions": 986,
+      "deletions": 61
     }
   ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 10
+    "commitCount": 48
   },
   "completedItems": [],
   "topContributors": [
+    {
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?v=4",
+      "totalScore": 110.67887903803735,
+      "prScore": 102.14087903803735,
+      "issueScore": 8.1,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
     {
       "username": "claude",
       "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
       "totalScore": 67.98077257226734,
       "prScore": 67.98077257226734,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 67.67616690775222,
+      "prScore": 67.67616690775222,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -98,10 +179,40 @@
       "summary": null
     },
     {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 43.3867738965761,
+      "prScore": 43.3867738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
       "totalScore": 39.1927738965761,
       "prScore": 39.1927738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 38.00886935801071,
+      "prScore": 38.00886935801071,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 36.3217738965761,
+      "prScore": 36.3217738965761,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -118,6 +229,96 @@
       "summary": null
     },
     {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 22.92848572614808,
+      "prScore": 22.92848572614808,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 18.05205020110221,
+      "prScore": 18.05205020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lArtiquel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36863599?v=4",
+      "totalScore": 11.540147601710057,
+      "prScore": 11.540147601710057,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 8.119918433002166,
+      "prScore": 7.681918433002165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 5.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "alejandra090509-collab",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/317736782?u=b6c983ee005ebad4f4a33c9acb33a26b9688ab47&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
       "totalScore": 0.2,
@@ -128,9 +329,9 @@
       "summary": null
     }
   ],
-  "newPRs": 5,
+  "newPRs": 15,
   "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 11
+  "newIssues": 10,
+  "closedIssues": 2,
+  "activeContributors": 22
 }

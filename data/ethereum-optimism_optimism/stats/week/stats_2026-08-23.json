@@ -5,8 +5,32 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-23 to 2026-08-30, ethereum-optimism/optimism had 21 new PRs (9 merged), 2 new issues, and 34 active contributors.",
+  "overview": "From 2026-08-23 to 2026-08-30, ethereum-optimism/optimism had 32 new PRs (9 merged), 12 new issues, and 39 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABOjF1dA",
+      "title": "kona-genesis: RollupConfig silently accepts unknown rollup.json keys",
+      "author": "sebastianst",
+      "number": 22682,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nKona's [`RollupConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/rollup.rs#L34-L37) carries no `#[serde(deny_unknown_fields)]`, so any key in a `rollup.json` that kona does not model is silently dropped. [`test_rollup_config_unknown_field`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/rollup.rs#L992-L1048) pins that behaviour as intended.\n\nThe rollup config is the chain's consensus-parameter file. A key kona ignores is a parameter kona does not honour: `kona-node` / `kona-host` boot happily on a config that tells them to derive a chain different from the one the operator configured, and the disagreement only shows up later as a derivation split or a failed proof.\n\n## Why it matters\n\n`rollup.json` is produced by op-deployer from Go's [`rollup.Config`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/types.go#L87-L195) (`DeployConfig.RollupConfig`). Today every key that struct emits is modelled by kona, so nothing is being dropped in practice. The gap is the *next* consensus field: op-node adds it, op-deployer writes it, op-node honours it, and kona-node ignores it and derives a different chain — with no error anywhere.\n\nKona already applies exactly this guard on the *other* rollup-config ingestion path, the superchain-registry one: both [`ChainConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/chain/config.rs#L33-L37) and [`HardForkConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/chain/hardfork.rs#L10-L14) are `deny_unknown_fields`, and [`docs/ai/derivation.md`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/docs/ai/derivation.md#L63-L71) names strict decoding as one of the two guards that make an unwired config field fail loudly. The direct `rollup.json` path — which is what every non-registry chain actually uses — has no such guard.\n\nNote that op-node's [`ParseRollupConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/types.go#L928-L934) is a plain `json.Decoder` and is lenient too, so this is not a kona-vs-op-node divergence today; it is a missing guard on both. Making op-node strict is not free — kona's own serialization emits keys op-node does not model (`granite_channel_timeout`, `superchain_config_address`, `blobs_data`, top-level `da_challenge_address`), so a strict op-node would reject a kona-written config. Kona is the side that can tighten without breaking an existing producer.\n\n## The `flatten` wrinkle\n\n`RollupConfig` flattens `HardForkConfig`:\n\n```rust\n#[cfg_attr(feature = \"serde\", serde(flatten))]\npub hardforks: HardForkConfig,\n```\n\nTwo things follow, both worth recording because serde's own documentation says `deny_unknown_fields` \"is not supported in combination with flatten, neither on the outer struct nor on the flattened field\":\n\n1. `HardForkConfig`'s **own** `deny_unknown_fields` is inert once flattened. `FlatStructAccess` only picks the keys the struct declares and skips the rest, so the inner attribute never fires. That is why the unknown key in the test above is accepted today despite `HardForkConfig` being strict.\n2. `deny_unknown_fields` on the **outer** struct does work, contrary to the doc note. `serde_derive` emits a leftover check after every flattened field has taken its own keys (`collected_deny_unknown_fields` in `serde_derive/src/de/struct_.rs`), so the flattened hardfork keys still parse and anything left over is a hard error. Verified against the pinned `serde_derive` 1.0.228, and present as far back as 1.0.145. The doc note holds only for a flattened catch-all *map*, which swallows everything and leaves nothing to check.\n\nSo no custom `Deserialize` or restructuring is needed, and the serialized `rollup.json` format is untouched.\n\n## Proposed fix\n\n- Add `#[serde(deny_unknown_fields)]` to `RollupConfig`.\n- Flip `test_rollup_config_unknown_field` to assert rejection.\n- Add a fixture test that every key op-node can emit parses, generated from a fully-populated `rollup.Config` by a Go test that fails when the two drift apart.\n\n## Compatibility\n\nA `rollup.json` from a future op-deployer carrying a key kona does not model will fail to load on kona-node / kona-host with `unknown field <key>` instead of booting and quietly ignoring it. That is the intended trade: an operator sees a startup error rather than a chain that derives differently. All 25 keys op-node emits today are modelled, so no config produced by current tooling is affected.\n\n## Related gap (out of scope here)\n\n`BaseFeeConfig` (`chain_op_config`) is not `deny_unknown_fields`, so an unknown key nested inside it is still ignored. `ChainGenesis`, `SystemConfig` and `AltDAConfig` are all strict already.\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-08-27T19:18:33Z",
+      "closedAt": "2026-08-27T20:52:34Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABL1nk0A",
+      "title": "op-supernode: cross-safe wedges after invalid-message replacement while local-safe on one chain stalls",
+      "author": "einar-oplabs",
+      "number": 22325,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Description\n\nDuring recovery from an invalid-message replacement, the supernode's cross-safe head can wedge entirely: in CircleCI build [5418160](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/jobs/5418160) (merge queue, 2026-08-03, `memory-all-opn-op-reth-prague`), cross-safe on **both** chains stayed pinned at block 26 for the remainder of a 259s test run while chain 902's local-safe advanced to 125+ and unsafe sequencing continued to ~128. Surfaced as a failure of `TestSupernodeLightSequencerInteropInvalidMessageReplacement` (`ResendUntilSafe`: \"transaction did not reach the safe chain within the resend budget\") — but the resend budget is not the problem: with cross-safe frozen, no transaction could ever reach the EL's safe label. Split out of #22234, which retains the full flake analysis (its other two occurrences were a test-side read race, fixed by #22321).\n\n## Evidence (log tail, 18:45:05–18:45:25)\n\nState per chain, stable across the whole captured window:\n\n| | chain 901 | chain 902 |\n|---|---|---|\n| local-safe (supernode) | **27** — stalled | **125** — advancing |\n| cross-safe (supernode) | **26** — pinned | **26** — pinned |\n| light CL unsafe | ~128 | ~128 |\n\nThe supernode logs this once per second, for the same block, the entire window (27 hits across both chains in the 20s tail):\n\n```\nengine_controller.go:1250: ERROR [08-03|18:45:05.335] Block must be safe before it can be finalized component=supernode chain_id=901 vn_id=a7bc ref=c7d5bb..1c44dd:27 safe=587d29..87b357:26\nengine_controller.go:1250: ERROR [08-03|18:45:06.338] Block must be safe before it can be finalized component=supernode chain_id=902 vn_id=ed3a ref=6244e8..c88e5c:56 safe=079e41..081150:26\n...\nengine_controller.go:1250: ERROR [08-03|18:45:25.335] Block must be safe before it can be finalized component=supernode chain_id=901 vn_id=a7bc ref=c7d5bb..1c44dd:27 safe=587d29..87b357:26\n```\n\nMeanwhile the light follow-CLs keep force-resetting and re-adopting the frozen upstream view every ~4s (#21119 oscillation), e.g.:\n\n```\nengine_controller.go:1325: INFO [08-03|18:45:23.152] Reset of Engine is completed component=l2cl-sequencer local_unsafe=c7d5bb..1c44dd:27 cross_unsafe=c7d5bb..1c44dd:27 local_safe=c7d5bb..1c44dd:27 cross_safe=587d29..87b357:26\nengine_controller.go:1325: INFO [08-03|18:45:23.205] Reset of Engine is completed component=l2cl-sequencer local_unsafe=ae8666..786002:125 cross_unsafe=ae8666..786002:125 local_safe=ae8666..786002:125 cross_safe=079e41..081150:26\n```\n\nTimeline context: the test's earlier gates all passed — `AwaitValidatedTimestamp` for the replacement, and cross-safe advanced 3 blocks past it (to 26) — and *then* cross-safe stopped for 100+ blocks of subsequent chain activity.\n\n## Reading\n\n- Chain 901's **local-safe derivation stalled at 27** (the invalid message was on chain 902; 901 was the initiating chain). Since cross-safe promotion advances the two chains' frontiers together, 901's stall plausibly pins cross-safe at 26 on both chains, including 902 whose own local-safe is healthy at 125.\n- The recurring `Block must be safe before it can be finalized` error shows the finalization path repeatedly attempting to finalize a block ahead of the cross-safe head — symptom or contributor, unclear.\n- The resent transactions were plain ETH transfers (no interop messages), so cross-validation had no legitimate dependency to wait on at those heights.\n\nOpen questions: why did 901's local-safe stop at 27 — batcher stopped batching 901, derivation wedged post-replacement, or supervisor-side databases inconsistent after the replacement? And is the once-per-second finalization error loop masking or causing the missed promotion?\n\nOnly the last ~20s of the run's logs are captured in the CI step output; a local repro with supervisor debug logging would show when 901's local-safe stopped relative to the replacement.\n\n## Why it matters\n\nIf reproducible outside the test, this is a liveness failure: a chain pair that goes through interop invalid-message replacement stops advancing cross-safe (and therefore safe/finalized) indefinitely, while unsafe sequencing keeps running. #20134 was a similar-looking cross-safe stall with a different trigger (deep L1 reorg) and is closed.\n\n## Related\n\n- #22234 — flake tracking + full analysis of all three test failures\n- #22321 — fixes the other (test-side) failure signature\n- #21119 — light follow path forceReset oscillation (background noise in the same logs)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "createdAt": "2026-08-07T10:47:06Z",
+      "closedAt": "2026-08-27T20:39:07Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
     {
       "id": "I_kwDODjvEJM8AAAABN5BxfQ",
       "title": "l1-watcher: a transient L1 RPC failure on one chain kills the whole node",
@@ -15,6 +39,18 @@
       "repository": "ethereum-optimism/optimism",
       "body": "In the kona-node L1 watcher, one chain's failure is fatal to the whole node. When a chain's `eth_getLogs` request for system config logs fails — a transient L1 RPC error is enough — or a chain's derivation channel is closed, `L1WatcherActor::step` (`rust/kona/crates/node/service/src/actors/l1_watcher/actor.rs`) returns `Err`. The actor runner at `rust/kona/crates/node/service/src/service/util.rs:33` treats any actor error as fatal: it cancels every actor, and the host exits.\n\nThis predates the multi-chain watcher change in #22567 — a single-chain kona-node dies the same way when its L1 RPC hiccups, and transient L1 failures should never kill the node. At N > 1 chains served by one watcher the blast radius grows: one chain's transient L1 error stops every other chain in the host.\n\nFrom the review discussion on #22567 (https://github.com/ethereum-optimism/optimism/pull/22567#discussion_r3838547816):\n\n> Indeed this seems like a bug in even the current kona-node because transient L1 failures should never kill the node. We should log an issue for this and then create a follow up PR to fix it properly.\n\nA follow-up PR will add per-chain fault handling: transient RPC errors retried or skipped rather than propagated as fatal, and per-chain isolation so one chain's failure does not stop the others.\n\nPart of #22531.\n\n---\n_Generated by [Claude Code](https://claude.ai/code)_\n",
       "createdAt": "2026-08-23T13:45:37Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABOjBeRw",
+      "title": "kona-node: sequencer stuck in forkchoiceUpdated -38002 loop after derivation force-includes a block off its unsafe chain",
+      "author": "sebastianst",
+      "number": 22681,
+      "repository": "ethereum-optimism/optimism",
+      "body": "A kona-node **sequencer** can be permanently wedged — hot-looping `engine_forkchoiceUpdatedV3` at thousands of calls per second until the process is unusable — whenever the engine reorgs its unsafe head while the sequencer has a block build in flight. Derivation force-inclusion after a batcher outage makes that reorg happen deterministically, so a sequencing-window expiry reliably kills the node.\n\nTwo independent defects combine:\n\n1. `BuildTask` classifies a `-38002 Invalid forkchoice state` response as a **temporary** error, and the task queue retries temporary errors in an unbounded loop with no backoff. The condition is not transient, so the node never leaves the loop and never resets.\n2. `BuildTask` has no staleness guard on the parent it was asked to build on, so it will send the EL a forkchoice state whose `safeBlockHash` is not an ancestor of `headBlockHash` in the first place.\n\nAll references below are against `68b009443f67cf830990e913bcbde8536cb15327`.\n\n## Observed\n\nOn a devnet running a kona-node sequencer + kona-node verifier + batcher (a multi-block PoC branch, #22671 — but nothing in the mechanism is specific to it):\n\n- The batcher submitted batches derivation could not apply.\n- The sequencing window expired, so derivation force-included an empty block at height `N+1` whose parent was the last common block `N`, but whose hash differed from the sequencer's own unsafe block at `N+1`.\n- The node then emitted `engine_forkchoiceUpdatedV3` → `-38002 Invalid forkchoice state` in a hot loop, thousands per second, until it was dead. It never reorged its unsafe chain onto the derived chain and never recovered.\n\n## Mechanism\n\n**Step 1 — derivation reorgs the unsafe chain (this part works).** The derived attributes for `N+1` fail the consolidation check against the sequencer's block at `N+1`, so [`ConsolidateTask`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs#L271-L281) falls back to `build_and_seal`, and the [`InsertTask`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs#L98-L110) that finishes it sets `unsafe_head`, `local_safe_head` and `safe_head` to the derived block. The EL and the engine state both end up on the derived chain.\n\n**Step 2 — the sequencer submits a build against the pre-reorg head.** `SequencerActor::build_unsealed_payload` reads the unsafe head from a watch channel *once*, at [actor.rs#L217](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/service/src/actors/sequencer/actor.rs#L217), then does two pieces of network-bound async work (L1 origin selection, then `prepare_payload_attributes`, which fetches L1 receipts) before [submitting the build at L246](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/service/src/actors/sequencer/actor.rs#L245-L246). The `EngineActor` republishes the unsafe head only at the top of its step loop, [after draining the queue](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/service/src/actors/engine/actor.rs#L224-L231). So the snapshot the sequencer built against is routinely stale by the time the request lands — a window of hundreds of milliseconds, and the step-1 reorg falls squarely inside it.\n\n**Step 3 — the FCU is rejected.** [`BuildTask::start_build`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/build/task.rs#L104-L110) overrides only the head with the attributes' parent and keeps the state's `safe_head`:\n\n```rust\nlet new_forkchoice = state\n    .sync_state\n    .apply_update(EngineSyncStateUpdate { unsafe_head: Some(attributes_envelope.parent), ..Default::default() })\n    .create_forkchoice_state();\n```\n\n`head = <pre-reorg sequencer block>`, `safe = <derived block>`. The derived block is not an ancestor of the pre-reorg head, so the EL answers `-38002`.\n\n**Step 4 — the hot loop.** `-38002` arrives as a JSON-RPC error and is mapped unconditionally to [`EngineBuildError::AttributesInsertionFailed`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/build/task.rs#L132), which carries severity [`Temporary`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/build/error.rs#L62-L68). `EngineTask::execute` retries temporary errors [in a `while let Err(..)` loop whose only pause is `yield_now().await`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/task.rs#L216-L231) — no backoff, no attempt cap. The forkchoice state is a function of engine state that nothing else can change while the queue is draining, so the retry can never succeed. That is the thousands-of-FCUs-per-second symptom.\n\n**Step 5 — total wedge.** The loop lives inside `Engine::drain`, which the `EngineActor` runs *before* receiving its next request, so the actor can no longer process anything — including a `Reset` request. Meanwhile the sequencer is parked in `start_build_block` awaiting a payload id that will never arrive, so it cannot ask for that reset either. Nothing in the process can break the cycle.\n\nNote the asymmetry that makes this a plain bug rather than a design trade-off: the attribute-less forkchoice update in `SynchronizeTask` **does** special-case the same error code, mapping it to [`SynchronizeTaskError::InvalidForkchoiceState`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/task.rs#L125-L135) with severity `Reset`. Only the build path is missing it.\n\n## op-node comparison\n\nop-node guards the same two points, and this is where the fix comes from.\n\n- **Stale parent.** [`EngineController.startBuild`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/engine/build_start.go#L57-L65) refuses a sequencer build whose parent is not the current unsafe head, before any engine call:\n\n  ```go\n  if !attrs.IsDerived() && attrs.Parent.ID() != e.unsafeHead.ID() {\n      e.log.Warn(\"dropping stale sequencer build start\", ...)\n      e.requestForkchoiceUpdate(ctx)   // sequencer restarts on the current unsafe head\n      return nil, ErrStaleBuild\n  }\n  ```\n\n  The `!attrs.IsDerived()` condition matters: a derivation-driven reorg legitimately builds on a parent that differs from the unsafe head.\n\n- **`-38002` from the pre-block-creation FCU.** [`startPayload`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/engine/engine_controller.go#L1476-L1483) classifies it as `BlockInsertPrestateErr` — \"pre-block-creation forkchoice update was inconsistent with engine, need reset to resolve\" — which `startBuild` turns into a [`ResetEvent`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/engine/build_start.go#L104-L109), never a retry.\n\nop-node has also already been bitten by the adjacent oscillation: see the `#21119` comment in [`FollowSource`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/engine/engine_controller.go#L1578-L1590) — \"head on the fork, safe on upstream -> InvalidForkchoiceState -> reset re-selects the fork -> oscillation\" — fixed there with a `forceReset` that lands head and safe in one shot.\n\n## Proposed fix\n\n1. Map `-38002` in `BuildTask::start_build` to a new `EngineBuildError::InvalidForkchoiceState` with severity `Reset`, mirroring `SynchronizeTask` and op-node's `startPayload`.\n2. Give `BuildTask` op-node's stale-parent guard, gated on the existing `BuildSealCoupling` flag that `SealTask` already uses for exactly this distinction (`Atomic` = derivation-driven, parent chosen from engine state, skip the check; `Detached` = external caller working from its own snapshot, check it). Report the rejection to the caller over the result channel instead of leaving it waiting.\n3. Have the sequencer treat a rejected or dropped build as \"re-build on the new head next tick\" rather than a fatal actor error — every `NodeActor::step` error [shuts the whole node down](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/node/service/src/service/util.rs#L28-L38).\n4. Publish the unsafe head after an engine reset as well, so the sequencer cannot build against a pre-reset snapshot.\n\nWorth considering separately, not covered by the above: the task queue's temporary-error retry has no backoff at all. Any genuinely temporary engine error currently spins the engine as fast as the EL will answer. op-node's equivalent yields to a driver that re-attempts on a timer.\n\n## Repro status\n\nNot reproduced as an automated test. The Rust-side mechanism is covered by unit tests in the fix PR (a `-38002` build must surface as `Reset` and must not be retried; a stale detached build must be rejected without touching the engine; the sequencer must retry rather than die). A full-system repro is blocked on a harness gap:\n\n- **No test anywhere exercises batcher outage → sequencing-window expiry → force-include → sequencer unsafe-chain reorg against a kona-node sequencer.** Not in `op-acceptance-tests/`, not in `rust/kona/tests/node/`, not in Rust.\n- The one test that models the whole loop end-to-end, `TestSequencingWindowExpiry` (`op-acceptance-tests/tests/interop/seqwindow/expiry_test.go`), is bound to `presets.NewTwoL2SupernodeInterop`. Supernode presets never route through `startL2CLForKey`, so they have no `DEVSTACK_L2CL_KIND` branch and cannot start a `KonaNode`.\n- Every op-e2e action test that asserts force-inclusion or post-expiry recovery (`TestL2Verifier_SequenceWindow`, `TestL2Sequencer_SequencerOnlyReorg`, `ExtendedTimeWithoutL1Batches`, `DeepReorg`) drives the in-process Go `L2Sequencer` object directly. There is no engine-API boundary to swap, so they can never target an external CL process. `rust/kona/tests/proofs/sequence_window_expiry_test.go` describes exactly this scenario but its sequencer is op-node — kona only appears there as `kona-host`.\n- `rust/kona/tests/node/` has no derivation-stress package (`node/common`, `node/reorgs`, `node/restart`), and `NewMixedOpKona`/`NewMixedOpKonaForConfig` do not accept deployer options, so that preset cannot set a small `sequencerWindowSize` without a signature change.\n\nThe gap is fillable: `presets.NewMinimal(t, presets.WithDeployerOptions(sysgo.WithSequencingWindow(N)))` is accepted by the minimal preset, `startL2CLForKey` honours `DEVSTACK_L2CL_KIND=kona-node`, and the whole acceptance suite already runs against kona-node in the required `memory-all-kona-op-reth-fusaka` CI job. `dsl.L2Batcher.Stop()/Start()` and `dsl.L2CLNode.SetSequencerRecoverMode` all exist and kona implements `admin_setRecoverMode`. What is missing is the test itself. One risk worth flagging for whoever writes it: kona's derivation is gated behind EL-sync completion, which only completes after a P2P-delivered unsafe payload (see the note at `op-acceptance-tests/tests/sdm/init_test.go`).\n\n🤖 *Co-created with Claude Fable 5*\n",
+      "createdAt": "2026-08-27T19:09:50Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 1
@@ -30,18 +66,6 @@
       "closedAt": "2026-08-24T16:57:43Z",
       "state": "CLOSED",
       "commentCount": 0
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABOaMC1Q",
-      "title": "kona-node: --sequencer.max-safe-lag and --conductor.rpc.timeout are parsed but silently ignored",
-      "author": "sebastianst",
-      "number": 22667,
-      "repository": "ethereum-optimism/optimism",
-      "body": "## Summary\n\nkona-node accepts two sequencer CLI flags that have no effect: they are parsed into `SequencerArgs` but never make it into `SequencerConfig`, so an operator setting them gets silent no-ops instead of an error.\n\n| Flag | Env | Declared | Dropped |\n|---|---|---|---|\n| `--sequencer.max-safe-lag` | `KONA_NODE_SEQUENCER_MAX_SAFE_LAG` | [`flags/sequencer.rs#L24-L31`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/bin/node/src/flags/sequencer.rs#L24-L31) | [`SequencerArgs::config()`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/bin/node/src/flags/sequencer.rs#L70-L77) |\n| `--conductor.rpc.timeout` | `KONA_NODE_CONDUCTOR_RPC_TIMEOUT` | [`flags/sequencer.rs#L50-L57`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/bin/node/src/flags/sequencer.rs#L50-L57) | same; [`SequencerConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/crates/node/service/src/actors/sequencer/config.rs#L10-L19) has no timeout field and [`ConductorClient::new_http`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/crates/node/service/src/actors/sequencer/conductor.rs#L50-L53) builds the client without one |\n\n`grep -rn 'max_safe_lag\\|conductor_rpc_timeout' rust/kona` finds no reader outside the flag definitions.\n\n## Impact\n\n- `--conductor.rpc.timeout` defaults to 1s and is documented as a timeout, but the conductor `commit_unsafe_payload` call on the sequencer's seal path ([`sequencer/actor.rs#L197-L204`](https://github.com/ethereum-optimism/optimism/blob/68b009443f/rust/kona/crates/node/service/src/actors/sequencer/actor.rs#L197-L204)) runs with no timeout at all — a slow or hung conductor blocks block production indefinitely.\n- `--sequencer.max-safe-lag` is a silent no-op; the feature itself is tracked in #22266. Until it is implemented, the flag should either be removed or fail loudly.\n\n## Suggested fix\n\n- Thread `conductor_rpc_timeout` into `SequencerConfig` and apply it to the conductor client (or wrap the RPC calls in `tokio::time::timeout`).\n- Either implement `max_safe_lag` (#22266) or drop the flag; do not keep accepting it.\n\nRelated: #22266, #21906.\n\n🤖 *Co-created with Claude Fable 5*\n",
-      "createdAt": "2026-08-26T22:21:15Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 0
     }
   ],
   "topPRs": [
@@ -54,8 +78,8 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-08-26T20:41:19Z",
       "mergedAt": null,
-      "additions": 23998,
-      "deletions": 183
+      "additions": 117287,
+      "deletions": 316
     },
     {
       "id": "PR_kwDODjvEJM8AAAABBKD3cg",
@@ -66,8 +90,20 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-08-27T04:00:29Z",
       "mergedAt": null,
-      "additions": 3343,
-      "deletions": 149
+      "additions": 8083,
+      "deletions": 600
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBPSNzQ",
+      "title": "contracts-bedrock: throttle ERC20 and ETH withdrawals",
+      "author": "Inphi",
+      "number": 22676,
+      "body": "## Summary\r\n\r\nAdds development-gated withdrawal throttling for whitelisted ERC20s and ETH using percentage-based token buckets.\r\n\r\n- Supports `L1StandardBridge`, `OptimismPortal2`, and shared `ETHLockbox` custody.\r\n- Uses live escrow balances, lazy exact fractional refill, and revert-on-exhaustion.\r\n- Adds owner configuration/refresh APIs and monitoring events.\r\n- Configures throttles through OPCM instructions behind `WITHDRAWAL_THROTTLE`.\r\n- Centralizes accounting in a reusable two-slot packed `WithdrawalThrottle.State`.\r\n- Conservatively saturates capacities above `uint128.max`.\r\n\r\nCold-path benchmarks measure throttle overhead at approximately 17.3k gas for ERC20 finalization and 14.9k gas for ETH finalization.\r\n\r\n## Testing\r\n\r\nAdded coverage for refill precision, overflow boundaries, reconfiguration, live-stock changes, shared-lockbox behavior, OPCM configuration, storage writes, and cold-path gas benchmarks.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T17:23:43Z",
+      "mergedAt": null,
+      "additions": 4217,
+      "deletions": 51
     },
     {
       "id": "PR_kwDODjvEJM8AAAABBIeAHw",
@@ -82,35 +118,23 @@
       "deletions": 567
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABArRu7Q",
-      "title": "kona-engine: mirror op-node sync regimes to fix the sync-tester verifier livelock",
-      "author": "claude",
-      "number": 22651,
-      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\nFixes the livelock behind all five failing `sync_tester` acceptance tests (`op-acceptance-tests/tests/supernode/sync_tester/`) by mirroring op-node's behaviour, per the governing rule for lokahi. Part of #22537.\n\n## Before\n\nAll five tests timed out at ~720s in a single livelock, spamming >50MB of paired warnings (`sync_tester.go:185` \"Requested block is ahead of sync tester state\" / kona \"Failed to fetch unsafe l2 block for consolidation\") at ~5k attempts/s:\n\n1. Kona adopted gossiped tips the EL answered SYNCING for regardless of sync phase (`insert/task.rs`, `synchronize/task.rs:94-98`), so the unsafe head named blocks the EL could not serve.\n2. Consolidation's fetch of such a block surfaced as `FailedToFetchUnsafeL2Block` → **Temporary** (`consolidate/error.rs`), retried forever with no realignment and no pacing (`tasks/task.rs` retried with only a `yield_now`).\n3. On a cold restart, nothing ever put a forkchoice update on the wire until gossip did, so against a reset sync-tester session (CLSync, sequencer far ahead) EL sync never \"finished\" and derivation never started at all.\n\n## After — per gap, with the op-node behaviour being mirrored\n\n**G1 — consolidation fetch miss → op-node's stall/reset split** (`kona-engine`, commit 1)\n- Rust: `consolidate/task.rs` + `consolidate/error.rs`: a miss is now `AwaitingELSyncUnsafeL2Block` (Temporary) while `!el_sync_finished`, and `MissingUnsafeL2Block` (Reset — walkback realigns the unsafe head, then the gate flips to force-building) after. Not-found-shaped RPC error responses fold into the miss.\n- Go: `op-node/rollup/attributes/attributes.go:204-221` (NotFound → EL-sync stall vs `rollup.ResetEvent`), `:222-227` (other errors Temporary), `:185-193` (post-reset force-build gate), `op-service/eth/errors.go:10-27` (`MaybeAsNotFoundErr` hardening). The string set is a documented **superset** of op-node's (bare `\"not found\"` included): kona adopts optimistic heads and so fetches ahead of the EL where op-node's payload queue never would, and the sync tester answers that miss with a bare `not found` error (`sync_tester.go:183-187`).\n\n**G2 — REVISED after CI (commit 2 shipped a gate, commit 6 removed it): the gossip EL-sync channel stays open past the initial sync**\n- The first version refused SYNCING unsafe heads once `el_sync_finished` was set, mirroring op-node's CL-sync regime. CI proved that wrong for kona: op-node's CL-sync mode has reqresp sync and an unsafe payload queue to catch up with; kona has neither, so adopting the gossiped tip and pointing the EL at it is its *only* unsafe-chain catch-up channel — and a verifier that falls behind (restart, dropped peer) re-enters it after the initial sync. The gate stranded such verifiers forever: `rust-e2e-restart` `TestSequencerRestart`, `rust-e2e-simple-kona` `TestSyncUnsafeBecomesSafe`, and the 7 kona CL-sync acceptance tests (`TestUnsafeChainNotStalling_*`, `TestCLELDivergence`, `TestGlamsterdamP2PUnsafeBlockBecomesSafe`) all failed on the new drop log.\n- Final behaviour: op-node's EL-sync regime in both phases (`engine_controller.go:587-594`, `sync_deriver.go:102-115`) — unchanged from develop. The sync-tester livelock is instead broken where op-node breaks it: at G1's consolidation fetch-miss reset, which realigns the unsafe head with the EL and flips the gate to force-building (`attributes.go:185-193, 204-221`).\n\n**G3 — paced temporary retries** (`kona-engine`, commit 3)\n- Rust: `tasks/task.rs`: exponential backoff (100ms base, 10s cap) instead of a bare `yield_now` in the Temporary retry loop.\n- Go: `op-node/rollup/driver/step_scheduling_deriver.go:97-109` + `op-service/retry/strategies.go:49-55` (`retry.Exponential()`, capped at 10s).\n\n**Startup — op-node's initial reset** (`kona-node-service` + `kona-engine`, commit 4)\n- Rust: `chain_controller/controller.rs`: the controller's first step runs the walkback reset — but only against an EL that reports a **finalized block**, op-node's own EL-sync discriminator (\"the engine has no finalized block until its initial snap-sync completes\", `engine_controller.go:597-624`; EL sync is only entered \"if there is no finalized block\", `:29`). A fresh EL (no finalized label — every real EL in the short-lived e2e/acceptance suites, where nothing finalizes) is left to the gossip bootstrap exactly as on develop; the sync-tester EL always serves its finalized label, so the probe runs there, derivation starts at once, and the cold-restart CLSync deadlock is gone. The probe's FCU doubles as the EL-sync marker (VALID → derivation starts; SYNCING → bootstrap unchanged), and a walkback the EL cannot serve falls back to the gossip bootstrap rather than failing startup. `task_queue/core.rs`: `Engine::reset` now retries RPC-level walkback failures with backoff instead of returning them — which previously killed the requesting actor (and the node) when the EL was merely unavailable at startup (`ResetForkchoiceError(\"An RPC error occurred: client error (SendRequest)\")`, the `startup_resync` `ConnectsAfterELUnavailableAtStartup` failure).\n- Go: `op-node/rollup/derive/pipeline.go:181-190, 224` (`initialReset` at startup in every sync mode), `op-node/rollup/engine/engine_controller.go:1423-1432` (reset request → `FindL2Heads` walkback; a failure re-emits the reset event rather than dying), `op-node/rollup/driver/sync_deriver.go:225-230`.\n\nNote: the devstack deliberately passes no sync mode to lokahi (`op-devstack/sysgo/multichain_supernode_runtime.go:711-714`), so kona keeps its modeless design. The regime selection is now behavioural rather than keyed on `el_sync_finished`: an EL with no finalized block gets the gossip EL-sync bootstrap (op-node's EL-sync mode), one with chain state gets the startup walkback probe (op-node's startup `initialReset`), and either way the unsafe-gossip channel stays open — a non-syncing EL (the sync tester's CL-sync sessions) converges through consolidation-miss resets plus derivation force-builds instead of livelocking. Expected trade: against such an EL the node performs a walkback reset per missed-gossip stretch (bounded by the paced retries and cheap re-derivation from the last safe head) — the honest cost of modelessness; an explicit sync-mode flag remains the follow-up if that churn matters in practice.\n\n## Round 2: the receipts wedge (after the fixes above)\n\nWith the engine-layer fixes in, CI (job 5518771) showed the old livelock and reset churn gone and derivation healthy — but all five tests still timed out on their first `CheckAll`, because **interop verification could not parse the sync-tester's receipts**, so cross-safe never left 0 (and with interop active, the DSL-visible safe/finalized heads only move on cross-safe promotions):\n\n- The sync tester served `eth_getBlockReceipts` by round-tripping the upstream EL's response through geth's consensus `types.Receipt` (`op-sync-tester/synctester/frontend/eth.go:34-35` via `backend/el_reader.go:72-73`), a type with no `from`/`to` fields — silently stripping fields the execution-apis spec requires and every real EL serves.\n- alloy's `TransactionReceipt` requires `from` (alloy-rpc-types-eth-1.8.3 `receipt.rs:64`), so lokahi's verifier failed deserialization on the first block's receipts, the error classified transient (`rust/lokahi/src/interop/chain.rs` → `ChainError::Unreachable`), retried every ~2s for the full 720s budget.\n- The Go stack never noticed: op-node/op-supervisor decode receipts into the same lossy geth type (`op-service/sources/receipts_rpc.go:96`), which is why the op-node twins of these tests pass against the same sync-tester EL in the same job.\n\nTwo commits:\n\n1. **`op-sync-tester`: raw receipts passthrough** (primary) — `eth_getBlockReceipts` now relays the raw payload from the read-only EL, exactly like the existing `GetBlockByNumberJSON`/`GetBlockByHashJSON` accessors; the session ahead-of-state gate reads only `blockNumber` out of the raw JSON. The regression test pins that `from`/`to` survive through both the backend and the RPC frontend. This makes the harness faithful to real ELs for every client.\n2. **`lokahi`: lenient receipt read in the verifier** (hardening) — `block_logs` only consumes logs, so it now fetches `eth_getBlockReceipts` into a logs-only local type instead of alloy's full typed receipt. This mirrors the Go stack's posture (op-geth's `Receipt` has no `from` at all): a receipt shape the Go verifier accepts must not wedge this one. The unit test deserializes the CI-captured geth-shaped receipt (no `from`) and extracts its logs.\n\n## Round 3: two more harness-vs-spec and mirroring gaps (after the receipts fix)\n\nWith the receipts fix in (job 5519251), `AdvancesViaSyncTester` passes; the four remaining failures split into two root causes:\n\n**Activation pair — Lagoon upgrade-gas strip asymmetry (`kona-protocol`).** Both attribute builders add only the NUT bundle's gas to a single-chain Interop activation block (kona `stateful.rs` `upgrade_gas_for_activation(false)`; op-node `interop_activation_transactions.go:37-61`), but kona's `to_system_config` stripped the *multi-chain* amount (bundle + 150k setFeature/ETHLiquidity wrappers) back out — reconstructing a gas limit 150k below the real one, so every attribute set built from the activation block onward was rejected with `-38003 gaslimit mismatch: attr=59850000, header=60000000` and the build task retried at the queue head forever. op-node strips `UpgradeGas(forks.Lagoon)` = bundle-only (`payload_util.go:62-80`, `upgrade_transaction.go:158-168`); kona now does the same. Fail-first test round-trips a single-chain activation block back to the steady-state limit.\n\n**FromCold pair — sync-tester `engine_getPayload` responses were not spec-shaped (`op-sync-tester`).** The tester served its stored `eth.ExecutionPayloadEnvelope` (gossip shape: executionPayload + parentBeaconBlockRoot only) from every getPayload version. The spec requires `blockValue` (V2+), `blobsBundle`/`shouldOverrideBuilder`/`parentBeaconBlockRoot` (V3+), `executionRequests` (V4+); Go clients decode into the same lossy type and never noticed, but kona (getPayloadV5 → `OpExecutionPayloadEnvelopeV4`) hard-fails on the missing `blockValue` — so after a cold restart (session reset to Latest:0, every block force-built) sealing block 1 retried forever and nothing ever advanced. Same class as the receipts bug; same style of fix: the RPC frontend now wraps the stored envelope into the per-version spec response (blockValue 0, empty-but-present blobs bundle, empty executionRequests), payload untouched, Go clients unaffected. The `requested=62` / `BlockRetrievalFailed` spam was a symptom: the interop verifier's persisted DB polling a pre-restart block until the chain catches up. Fail-first frontend test pins the per-version field sets and non-null arrays.\n\nRound-3 verification: `cargo nextest -p kona-protocol` (256) and `-p kona-derive` (206) green including the new round-trip tests; `go test ./op-sync-tester/...` green including the new getPayload shape test; clippy/fmt clean on the touched crates.\n\n## Verification\n\n- Round 2: `go test ./op-sync-tester/...` green (incl. the new from/to passthrough regression test); `cargo nextest -p lokahi` green (incl. the captured-receipt leniency test).\n- Fail-first unit tests in every touched area: consolidate miss split and not-found mapping (bare `\"not found\"` included), SYNCING FCU/insert adoption in both EL-sync phases (pinning the catch-up channel the CI regression removed), temporary-retry backoff timing, `Engine::reset` walkback retry, controller startup probe (probe, finalized-gated skip, and walkback-failure fallback).\n- `cargo nextest run -p kona-engine -p kona-node-service -p lokahi`: 391 passed.\n- `cargo clippy -p kona-engine -p kona-node-service -p lokahi -p kona-node --all-features --all-targets`: clean.\n- Nightly `cargo fmt --all -- --check`: clean. Docs lint (rustdoc `-D warnings`) for the touched crates: clean.\n- Not run here (please run in CI / locally): the `sync_tester` acceptance suite itself — building its full dependency set exceeded this environment's disk budget.\n- Repo review agents (`rust-code-reviewer`): not run — this worker session cannot spawn the repo's review agents; flagged per the contribution guide instead of skipping silently.\n",
+      "id": "PR_kwDODjvEJM8AAAABBRFP4w",
+      "title": "contracts: prototype L1-certified event relay",
+      "author": "opsuperchain",
+      "number": 22693,
+      "body": "## Overview\n\nThis draft prototypes an L1-mediated, censorship-resistant slow path for L2 events and interop messages.\n\nA source `CrossL2Inbox` asks a consensus `LocalLogOracle` precompile to verify a recent local log, then exports the certificate through the existing `L2ToL1MessagePasser`. After ordinary withdrawal proving/finalization, `L1EventRegistry` records the certificate and can force-deposit it into any destination portal authorized by the same `ETHLockbox`. The destination inbox caches it and can either expose generic event validation or execute a certified `SentMessage` in the same deposit.\n\nThe event must be exported within seven days. Once registered on L1, the certificate is durable and can be relayed after ordinary interop expiry.\n\n## Security decisions\n\n- L1 derives the source chain from the calling portal and authenticates `portal.l2Sender()` as the canonical `CrossL2Inbox`; source identity is never trusted from calldata.\n- Source and destination portals must both be current members of the registry immutable `ETHLockbox` cluster.\n- Destination imports authenticate the L1 registry through standard L1-to-L2 address aliasing.\n- Certified execution emits `ExecutingCertifiedMessage`, not `ExecutingMessage`, so ordinary interop expiry/dependency hazard rules are not accidentally applied.\n- Certificates bind the full existing `Identifier` and exact payload hash. Messenger replay protection remains authoritative.\n\n## Included\n\n- `ILocalLogOracle` execution-client boundary and reserved system address\n- source export and destination certificate cache in `CrossL2Inbox`\n- immutable `L1EventRegistry` with portal/lockbox/source-chain authentication\n- generic `relayEvent` and one-deposit `relayMessage` paths\n- ABI, storage-layout, and semver snapshots\n- focused L1/L2 unit tests\n- design note: `packages/contracts-bedrock/specs/event-certificates.md`\n\n## Draft blockers / follow-ups\n\n- Specify and implement deterministic historical receipt access in op-geth, op-reth, Kona, and fault-proof re-execution. An optional archival database lookup is not consensus-safe; the final design needs a state-committed history structure or explicit witnesses anchored to consensus state.\n- Define precompile gas, receipt encoding, pruning, reorg, and exact boundary semantics.\n- Update interop clients to classify `ExecutingCertifiedMessage` as L1-certified rather than an ordinary executing-message dependency.\n- Add genesis/NUT/deployment/standard-validator wiring for the registry and inbox configuration.\n- Add forced-deposit and withdrawal-finalization end-to-end coverage.\n- For ETH bridge recovery, separately enforce a unique transfer ID and one terminal outcome across relay and refund paths. Event presence alone does not prove non-execution.\n- Consider batched exports before production use.\n\n## Verification\n\n- `mise x -- just build` (passes; one pre-existing payable-fallback warning in `L2ContractsManager.t.sol`)\n- `mise x -- just test-dev --match-path test/L2/CrossL2Inbox.t.sol` — 18 passed\n- `mise x -- just test-dev --match-path test/L1/L1EventRegistry.t.sol` — 7 passed\n- clean default-profile source build, interface check, snapshot generation, formatting, pragma, unused-import, spacer, reinitializer, semver, and test-structure checks pass\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-23T00:40:14Z",
+      "createdAt": "2026-08-27T22:05:09Z",
       "mergedAt": null,
-      "additions": 1382,
-      "deletions": 71
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABBJqayQ",
-      "title": "op-challenger: delete withdrawal proofs invalidated by challenger wins",
-      "author": "claude",
-      "number": 22670,
-      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Adrian Sutton** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BTT5DGHA4/p1787791642391549?thread_ts=1787791642.391549&cid=C0BTT5DGHA4)_\n\nStacks on #22669.\n\n**Before:** #22669 makes `deleteProvenWithdrawal` permissionless once the game a withdrawal was proven against resolves as `CHALLENGER_WINS`, but nothing calls it. Those proofs can never finalize, yet they stay in `provenWithdrawals` and keep counting toward `numProofSubmitters`, so anything reading the portal still sees a live proof against an invalid game.\n\n**After:** op-challenger deletes them automatically. The feature is off unless `--optimism-portal-address` is set; when it is, the challenger logs once at startup and clears invalidated proofs on every L1 head, alongside bond claiming.\n\n**How:** A new `game/withdrawals` scheduler runs beside the bond claimer and gets the same games list. For each game that resolved `CHALLENGER_WINS` it filters `WithdrawalProvenExtension1` logs from the game's `l1Head` block, batch-reads `provenWithdrawals` for the pairs it finds, and sends a delete for each one still recorded against that game. Deleted rows read back with a zero timestamp, which makes this idempotent; an in-memory per-game cursor keeps later heads to the new blocks only.\n\n**For reviewers:** anyone can prove many cheap withdrawals against a game the challenger will win, making the challenger pay unrewarded gas to delete them all — hence off unless the portal address is set, and capped at 100 deletes per game per head. Unit tests only, no e2e or action-test coverage.\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_018RJoiNdC7PjVnJjPANKt2p)_",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-27T02:22:47Z",
-      "mergedAt": null,
-      "additions": 1091,
-      "deletions": 23
+      "additions": 1559,
+      "deletions": 24
     }
   ],
   "codeChanges": {
     "additions": 2469,
     "deletions": 528,
     "files": 32,
-    "commitCount": 107
+    "commitCount": 148
   },
   "completedItems": [
     {
@@ -232,8 +256,48 @@
     {
       "username": "opsuperchain",
       "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
-      "totalScore": 84.7710913381448,
-      "prScore": 84.7710913381448,
+      "totalScore": 128.1578652347209,
+      "prScore": 128.1578652347209,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?v=4",
+      "totalScore": 110.67887903803735,
+      "prScore": 102.14087903803735,
+      "issueScore": 8.1,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 97.72505358108658,
+      "prScore": 92.72505358108658,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 95.70337586337679,
+      "prScore": 95.70337586337679,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 94.83159529027051,
+      "prScore": 94.83159529027051,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -250,22 +314,22 @@
       "summary": null
     },
     {
-      "username": "zhwrd",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
-      "totalScore": 71.90310956412245,
-      "prScore": 71.90310956412245,
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 54.5217738965761,
+      "prScore": 36.3217738965761,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 57.69450650536608,
-      "prScore": 57.69450650536608,
-      "issueScore": 0,
-      "reviewScore": 0,
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 51.1927738965761,
+      "prScore": 39.1927738965761,
+      "issueScore": 2,
+      "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
@@ -280,13 +344,23 @@
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 46.1927738965761,
-      "prScore": 39.1927738965761,
-      "issueScore": 2,
-      "reviewScore": 5,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 46.66689217900675,
+      "prScore": 28.166892179006748,
+      "issueScore": 0,
+      "reviewScore": 18.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 45.729580922772485,
+      "prScore": 44.07558092277248,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.654,
       "summary": null
     },
     {
@@ -296,36 +370,6 @@
       "prScore": 45.39351501117786,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 40.05899690620838,
-      "prScore": 21.558996906208378,
-      "issueScore": 0,
-      "reviewScore": 18.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 37.609662489770315,
-      "prScore": 36.39366248977032,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.2159999999999997,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 30.048886673334362,
-      "prScore": 25.048886673334362,
-      "issueScore": 0,
-      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -342,16 +386,16 @@
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 28.556914474173478,
+      "totalScore": 28.99491447417348,
       "prScore": 28.35691447417348,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 18.2,
       "prScore": 0,
       "issueScore": 0,
@@ -360,13 +404,33 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 10.587955074527654,
-      "prScore": 10.387955074527655,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 18.05205020110221,
+      "prScore": 18.05205020110221,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 15.927955074527654,
+      "prScore": 10.387955074527655,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "lArtiquel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36863599?v=4",
+      "totalScore": 11.540147601710057,
+      "prScore": 11.540147601710057,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -390,6 +454,16 @@
       "summary": null
     },
     {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "pxpn-dev",
       "avatarUrl": "https://avatars.githubusercontent.com/u/222313623?v=4",
       "totalScore": 9.400588722239782,
@@ -397,16 +471,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 9.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -420,13 +484,13 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 5,
+      "username": "alejandra090509-collab",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/317736782?u=b6c983ee005ebad4f4a33c9acb33a26b9688ab47&v=4",
+      "totalScore": 4.7,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -460,9 +524,9 @@
       "summary": null
     }
   ],
-  "newPRs": 21,
+  "newPRs": 32,
   "mergedPRs": 9,
-  "newIssues": 2,
-  "closedIssues": 1,
-  "activeContributors": 34
+  "newIssues": 12,
+  "closedIssues": 3,
+  "activeContributors": 39
 }
