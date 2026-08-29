@@ -5,9 +5,82 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-28 to 2026-08-29, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 6 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-08-28 to 2026-08-29, ethereum-optimism/optimism had 3 new PRs (3 merged), 3 new issues, and 14 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABOrjTpA",
+      "title": "Plataberget test deployment",
+      "author": "maurelian",
+      "number": 22696,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Description**\n\n- Bootstrap the OPCM and deploy a new L1 chain to the Plataberget (Glamsterdam) testnet.\n- Test a deposit, and withdrawal path\n",
+      "createdAt": "2026-08-28T16:21:51Z",
+      "closedAt": "2026-08-28T20:35:56Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABOspZ7w",
+      "title": "Monorepo changes for Glamsterdam Defense",
+      "author": "maurelian",
+      "number": 22698,
+      "repository": "ethereum-optimism/optimism",
+      "body": "1. Update to a newer foundry version supporting Amsterdam, AND the vm.skip fix we need. The version must include https://github.com/foundry-rs/foundry/commit/374db17b41777bca2a007283fc01a9c9fffc6861, so v1.8.1 or newer.\n2. Update CI and justfile to ensure that L1 test runs against Amsterdam, but L2 run against Fusaka.\n3. Verify and ensure that the EIP-7825 limit is enforced in tests. \n4. Modify contracts and/or tests to pass with new foundry and EVM changes.",
+      "createdAt": "2026-08-28T18:51:45Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABCEvR5Q",
+      "title": "Spin up devnet",
+      "author": "joshklop",
+      "number": 20691,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Details TBD--will likely follow similar pattern to the Fusaka devnet last year.",
+      "createdAt": "2026-05-13T02:20:37Z",
+      "closedAt": "2026-08-28T20:42:51Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABOtzGyg",
+      "title": "kona-sp1-proposer: investigate and share preimage cache across witness runs",
+      "author": "Inphi",
+      "number": 22699,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWitness generation currently creates a fresh in-memory `InteropHost` preimage cache for every range and consolidation pass. With multiple span chunks, fetched L1/L2 preimages may therefore be fetched repeatedly.\n\nI noticed that witness gen takes quite some time for a 60s span. And I suspect that it's partly due to the fact that every prove chunk refetches common preimages from RPCs. But let's quantify this more precisely: First measure the potential reuse, then introduce a shared cache if the results show meaningful benefit.\n\n## Tasks\n\n- Generate witnesses for representative consecutive spans and compare their preimage keys.\n- Record how many preimages and how many bytes are common between the spans.\n- If the overlap is meaningful, reuse a shared content-addressed preimage cache across witness-generation invocations.\n- Keep per-span local boot inputs isolated.\n- Add a focused test proving that common preimages are reused without changing generated witnesses or outputs.",
+      "createdAt": "2026-08-28T21:43:36Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABAUkNfw",
+      "title": "kona-node: Record and serve the safe head history",
+      "author": "ajsutton",
+      "number": 22514,
+      "body": "Stacked on #21522 — review that first; this diff is the integration only.\n\nWires `kona-safedb` into kona-node so the safe head history is both recorded and served.\n\n**Recording.** The derivation actor records the safe head against the pipeline's L1 origin when the engine confirms it, and trims the record on pipeline reset and at EL-sync completion. The origin is read at confirmation rather than carried from where the attributes were derived: the state machine blocks derivation between `NewAttributesDerived` and `NewAttributesConfirmed`, so the pipeline cannot have advanced in between. Recording the safe head's own `l1_origin` would be wrong — a span batch can place a block's origin well before the L1 block whose data completed its derivation — so the actor test asserts against a fixture where the two differ.\n\n**Failure handling.** When enabled the database is consensus-critical, and a gap does not surface as an error: `safe_head_at_l1` answers with the highest entry at or below the requested L1 block, so a missing entry is served as an *older safe head* rather than reported, and op-challenger would act on that. Writes are therefore retried with backoff, and once retries are exhausted the actor fails, which by `NodeActor`'s contract stops the node. Continuing past a failed write is never an option; reporting the database unavailable would not help either, since a restart would resume serving the gap with no memory of it.\n\n**Serving.** `optimism_safeHeadAtL1Block` was a `MethodNotFound` stub, on the grounds that post-interop nothing needed a per-L1-block safe head record. op-node has since built on safedb in the other direction (`superroot_api.go`, `sync_deriver.go`, both via `L1AtSafeHead`), so the endpoint is now served from the database. It takes a block number, as op-node does; tags needing chain context to resolve are rejected.\n\n**Enabling.** Off unless `--safedb.path` is set, mirroring op-node. Without it the node uses `DisabledDatabase` and the endpoint reports `MethodNotFound` as before, so default behaviour is unchanged.\n\n## Known gap — do not enable alongside EL sync yet\n\nEL sync advances the safe head without derivation, so no entry is recorded for the range it skips. `safe_head_reset` at the synced head does not help: it only truncates entries whose recorded safe head is at or above the synced head, and after an EL sync the recorded tip is *below* it, so nothing is truncated. Derivation then resumes from the synced head (`actors/engine/actor.rs:97`) and recording restarts ahead of the gap. A later query landing in that range returns the pre-sync entry — an older safe head, served as though correct.\n\nThis is what #21111 solves on the Go side, by resuming derivation from the safedb tip so the skipped range is re-derived and re-recorded. Porting it needs driver-level orchestration kona structures differently, so it is not in this PR. Until it is resolved, `--safedb.path` should not be used on a node that EL-syncs. Options discussed: port the resume logic, clear the database on EL sync (loses history but can never serve a wrong answer), or refuse to start when both are configured.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-19T18:33:12Z",
+      "mergedAt": null,
+      "additions": 1420,
+      "deletions": 9
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBXCY_A",
+      "title": "Update release docs: add proxyd v4.31.0 and v4.32.0",
+      "author": "mintlify",
+      "number": 22695,
+      "body": "## Summary\nSync releases/ with the latest GitHub releases; proxyd was the only tracked component with new releases.\n\n## Changes\n- Prepend proxyd v4.32.0 (Aug 27, tagged Latest/Stable) and v4.31.0 (Aug 26, Stable) to `releases/proxyd.mdx`; demote v4.30.0 to Stable\n- Update the proxyd card in `releases/index.mdx` to v4.32.0\n- Verified all other 12 tracked components (op-node, kona-node, op-reth, op-batcher, op-proposer, op-challenger, op-contracts, op-conductor, kona-client, kona-host, op-deployer, op-acceptor) already show their newest release",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-28T16:09:21Z",
+      "mergedAt": "2026-08-28T19:17:40Z",
+      "additions": 27,
+      "deletions": 3
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABBRtaeA",
       "title": "Update op-geth to v1.101702.3-rc.7",
@@ -16,19 +89,123 @@
       "body": "Towards https://github.com/ethereum-optimism/cloud-security/issues/324",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-08-28T00:26:17Z",
-      "mergedAt": null,
+      "mergedAt": "2026-08-28T07:42:28Z",
       "additions": 3,
       "deletions": 7
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAJiQVA",
+      "title": "security: Update module github.com/pion/stun/v2 to v3 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 22464,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [github.com/pion/stun/v2](https://redirect.github.com/pion/stun) | `v2.0.0` → `v3.0.0` | ![age](https://developer.mend.io/api/mc/badges/age/go/github.com%2fpion%2fstun%2fv2/v3.0.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/go/github.com%2fpion%2fstun%2fv2/v2.0.0/v3.0.0?slim=true) |\n\n---\n\n### Pion STUN vulnerable to remote denial of service via panic while parsing a malformed XOR-MAPPED-ADDRESS attribute\n[CVE-2026-54909](https://nvd.nist.gov/vuln/detail/CVE-2026-54909) / [GHSA-34rh-wp3j-6cxc](https://redirect.github.com/advisories/GHSA-34rh-wp3j-6cxc)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Impact\nRemote denial of service via panic while parsing a malformed XOR-MAPPED-ADDRESS attribute\n\n##### Patches\nUpgrade to v3.1.5 or later. This version includes this patch [https://github.com/pion/stun/pull/278](https://redirect.github.com/pion/stun/pull/278) which fixes the issue.\n\n##### Workarounds\nNo work around; please upgrade to v3.1.5 or a newer version.\n\n#### Severity\n- CVSS Score: 5.3 / 10 (Medium)\n- Vector String: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L`\n\n#### References\n- [https://github.com/pion/stun/security/advisories/GHSA-34rh-wp3j-6cxc](https://redirect.github.com/pion/stun/security/advisories/GHSA-34rh-wp3j-6cxc)\n- [https://github.com/pion/stun/pull/278](https://redirect.github.com/pion/stun/pull/278)\n- [https://github.com/pion/stun/commit/fa9f074a33a8059c76c960b1fbee39f308002423](https://redirect.github.com/pion/stun/commit/fa9f074a33a8059c76c960b1fbee39f308002423)\n- [https://github.com/pion/stun](https://redirect.github.com/pion/stun)\n- [https://github.com/pion/stun/releases/tag/v3.1.3](https://redirect.github.com/pion/stun/releases/tag/v3.1.3)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-34rh-wp3j-6cxc) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>pion/stun (github.com/pion/stun/v2)</summary>\n\n### [`v3.0.0`](https://redirect.github.com/pion/stun/compare/v2.0.0...v3.0.0)\n\n[Compare Source](https://redirect.github.com/pion/stun/compare/v2.0.0...v3.0.0)\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoiZGV2ZWxvcCIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-18T13:18:11Z",
+      "mergedAt": null,
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBXrvbg",
+      "title": "mise: Update bun to 1.4.0",
+      "author": "ajsutton",
+      "number": 22697,
+      "body": "Bun 1.2.5 cannot parse bundles that use recent JavaScript syntax. Any tool that runs under the repo-pinned bun fails with a parse error inside this repository.\n\nThe only in-repo bun consumer is `.circleci/scripts/test-schedule-triggers.js`. I ran it locally under bun 1.4.0. It works.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-28T17:54:41Z",
+      "mergedAt": "2026-08-28T18:57:46Z",
+      "additions": 1,
+      "deletions": 1
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 31,
+    "deletions": 11,
+    "files": 5,
+    "commitCount": 7
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "Update op-geth to v1.101702.3-rc.7",
+      "prNumber": 22694,
+      "type": "other",
+      "body": "Towards https://github.com/ethereum-optimism/cloud-security/issues/324",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "mise: Update bun to 1.4.0",
+      "prNumber": 22697,
+      "type": "other",
+      "body": "Bun 1.2.5 cannot parse bundles that use recent JavaScript syntax. Any tool that runs under the repo-pinned bun fails with a parse error inside this repository.\n\nThe only in-repo bun consumer is `.circleci/scripts/test-schedule-triggers.js`.",
+      "files": [
+        "mise.toml"
+      ]
+    },
+    {
+      "title": "Update release docs: add proxyd v4.31.0 and v4.32.0",
+      "prNumber": 22695,
+      "type": "other",
+      "body": "## Summary\nSync releases/ with the latest GitHub releases; proxyd was the only tracked component with new releases.\n\n## Changes\n- Prepend proxyd v4.32.0 (Aug 27, tagged Latest/Stable) and v4.31.0 (Aug 26, Stable) to `releases/proxyd.mdx`; d",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/proxyd.mdx"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 62.442082309573905,
+      "prScore": 62.2420823095739,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 25.277987204485143,
+      "prScore": 25.077987204485144,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 19,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 11.238000000000001,
+      "prScore": 0,
+      "issueScore": 6.3,
+      "reviewScore": 4.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 8.119918433002166,
+      "prScore": 7.681918433002165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
@@ -48,11 +225,51 @@
       "reviewScore": 5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pxpn-dev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/222313623?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 6
+  "newPRs": 3,
+  "mergedPRs": 3,
+  "newIssues": 3,
+  "closedIssues": 2,
+  "activeContributors": 14
 }

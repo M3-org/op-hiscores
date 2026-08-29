@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-23 to 2026-08-30, ethereum-optimism/optimism had 32 new PRs (9 merged), 12 new issues, and 39 active contributors.",
+  "overview": "From 2026-08-23 to 2026-08-30, ethereum-optimism/optimism had 35 new PRs (12 merged), 15 new issues, and 42 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABOjF1dA",
@@ -16,6 +16,18 @@
       "body": "## Summary\n\nKona's [`RollupConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/rollup.rs#L34-L37) carries no `#[serde(deny_unknown_fields)]`, so any key in a `rollup.json` that kona does not model is silently dropped. [`test_rollup_config_unknown_field`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/rollup.rs#L992-L1048) pins that behaviour as intended.\n\nThe rollup config is the chain's consensus-parameter file. A key kona ignores is a parameter kona does not honour: `kona-node` / `kona-host` boot happily on a config that tells them to derive a chain different from the one the operator configured, and the disagreement only shows up later as a derivation split or a failed proof.\n\n## Why it matters\n\n`rollup.json` is produced by op-deployer from Go's [`rollup.Config`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/types.go#L87-L195) (`DeployConfig.RollupConfig`). Today every key that struct emits is modelled by kona, so nothing is being dropped in practice. The gap is the *next* consensus field: op-node adds it, op-deployer writes it, op-node honours it, and kona-node ignores it and derives a different chain — with no error anywhere.\n\nKona already applies exactly this guard on the *other* rollup-config ingestion path, the superchain-registry one: both [`ChainConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/chain/config.rs#L33-L37) and [`HardForkConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/kona/crates/protocol/genesis/src/chain/hardfork.rs#L10-L14) are `deny_unknown_fields`, and [`docs/ai/derivation.md`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/docs/ai/derivation.md#L63-L71) names strict decoding as one of the two guards that make an unwired config field fail loudly. The direct `rollup.json` path — which is what every non-registry chain actually uses — has no such guard.\n\nNote that op-node's [`ParseRollupConfig`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/op-node/rollup/types.go#L928-L934) is a plain `json.Decoder` and is lenient too, so this is not a kona-vs-op-node divergence today; it is a missing guard on both. Making op-node strict is not free — kona's own serialization emits keys op-node does not model (`granite_channel_timeout`, `superchain_config_address`, `blobs_data`, top-level `da_challenge_address`), so a strict op-node would reject a kona-written config. Kona is the side that can tighten without breaking an existing producer.\n\n## The `flatten` wrinkle\n\n`RollupConfig` flattens `HardForkConfig`:\n\n```rust\n#[cfg_attr(feature = \"serde\", serde(flatten))]\npub hardforks: HardForkConfig,\n```\n\nTwo things follow, both worth recording because serde's own documentation says `deny_unknown_fields` \"is not supported in combination with flatten, neither on the outer struct nor on the flattened field\":\n\n1. `HardForkConfig`'s **own** `deny_unknown_fields` is inert once flattened. `FlatStructAccess` only picks the keys the struct declares and skips the rest, so the inner attribute never fires. That is why the unknown key in the test above is accepted today despite `HardForkConfig` being strict.\n2. `deny_unknown_fields` on the **outer** struct does work, contrary to the doc note. `serde_derive` emits a leftover check after every flattened field has taken its own keys (`collected_deny_unknown_fields` in `serde_derive/src/de/struct_.rs`), so the flattened hardfork keys still parse and anything left over is a hard error. Verified against the pinned `serde_derive` 1.0.228, and present as far back as 1.0.145. The doc note holds only for a flattened catch-all *map*, which swallows everything and leaves nothing to check.\n\nSo no custom `Deserialize` or restructuring is needed, and the serialized `rollup.json` format is untouched.\n\n## Proposed fix\n\n- Add `#[serde(deny_unknown_fields)]` to `RollupConfig`.\n- Flip `test_rollup_config_unknown_field` to assert rejection.\n- Add a fixture test that every key op-node can emit parses, generated from a fully-populated `rollup.Config` by a Go test that fails when the two drift apart.\n\n## Compatibility\n\nA `rollup.json` from a future op-deployer carrying a key kona does not model will fail to load on kona-node / kona-host with `unknown field <key>` instead of booting and quietly ignoring it. That is the intended trade: an operator sees a startup error rather than a chain that derives differently. All 25 keys op-node emits today are modelled, so no config produced by current tooling is affected.\n\n## Related gap (out of scope here)\n\n`BaseFeeConfig` (`chain_op_config`) is not `deny_unknown_fields`, so an unknown key nested inside it is still ignored. `ChainGenesis`, `SystemConfig` and `AltDAConfig` are all strict already.\n\n🤖 *Co-created with Claude Fable 5*\n",
       "createdAt": "2026-08-27T19:18:33Z",
       "closedAt": "2026-08-27T20:52:34Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABOrjTpA",
+      "title": "Plataberget test deployment",
+      "author": "maurelian",
+      "number": 22696,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Description**\n\n- Bootstrap the OPCM and deploy a new L1 chain to the Plataberget (Glamsterdam) testnet.\n- Test a deposit, and withdrawal path\n",
+      "createdAt": "2026-08-28T16:21:51Z",
+      "closedAt": "2026-08-28T20:35:56Z",
       "state": "CLOSED",
       "commentCount": 2
     },
@@ -54,18 +66,6 @@
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABC3faEw",
-      "title": "[PCD] Default-`X` benchmarking",
-      "author": "0xOneTony",
-      "number": 20916,
-      "repository": "ethereum-optimism/optimism",
-      "body": "`X` (the offset between the chosen L1 anchor's timestamp and the committed L2 `genesis_time`) must be large enough that `genesis_time` is still in the future when `OPCM.deploy()` is mined; otherwise `op-node` will produce empty filler blocks at L2 block time to fill the gap. Measure end-to-end runtime of the off-chain portion of the pipeline (anchor selection through prestate generation) against a real prestate builder, repeated enough times to get a stable result. Propose a default `X`.",
-      "createdAt": "2026-05-20T14:34:05Z",
-      "closedAt": "2026-08-24T16:57:43Z",
-      "state": "CLOSED",
-      "commentCount": 0
     }
   ],
   "topPRs": [
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 2469,
-    "deletions": 528,
-    "files": 32,
-    "commitCount": 148
+    "additions": 2500,
+    "deletions": 539,
+    "files": 36,
+    "commitCount": 157
   },
   "completedItems": [
     {
@@ -240,6 +240,35 @@
         "rust/kona/crates/node/gossip/src/behaviour.rs",
         "rust/kona/crates/node/gossip/src/lib.rs"
       ]
+    },
+    {
+      "title": "Update op-geth to v1.101702.3-rc.7",
+      "prNumber": 22694,
+      "type": "other",
+      "body": "Towards https://github.com/ethereum-optimism/cloud-security/issues/324",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "mise: Update bun to 1.4.0",
+      "prNumber": 22697,
+      "type": "other",
+      "body": "Bun 1.2.5 cannot parse bundles that use recent JavaScript syntax. Any tool that runs under the repo-pinned bun fails with a parse error inside this repository.\n\nThe only in-repo bun consumer is `.circleci/scripts/test-schedule-triggers.js`.",
+      "files": [
+        "mise.toml"
+      ]
+    },
+    {
+      "title": "Update release docs: add proxyd v4.31.0 and v4.32.0",
+      "prNumber": 22695,
+      "type": "other",
+      "body": "## Summary\nSync releases/ with the latest GitHub releases; proxyd was the only tracked component with new releases.\n\n## Changes\n- Prepend proxyd v4.32.0 (Aug 27, tagged Latest/Stable) and v4.31.0 (Aug 26, Stable) to `releases/proxyd.mdx`; d",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/proxyd.mdx"
+      ]
     }
   ],
   "topContributors": [
@@ -276,11 +305,21 @@
     {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 97.72505358108658,
+      "totalScore": 108.96305358108658,
       "prScore": 92.72505358108658,
+      "issueScore": 6.3,
+      "reviewScore": 9.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 97.62373560817252,
+      "prScore": 60.78373560817253,
       "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
+      "reviewScore": 36.5,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -304,23 +343,53 @@
       "summary": null
     },
     {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 91.92557042311022,
+      "prScore": 77.22557042311021,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 79.88011418676754,
+      "totalScore": 84.88011418676754,
       "prScore": 79.88011418676754,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 54.5217738965761,
+      "totalScore": 56.5217738965761,
       "prScore": 36.3217738965761,
-      "issueScore": 0,
+      "issueScore": 2,
       "reviewScore": 18,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 53.849499355774654,
+      "prScore": 51.75749935577465,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 2.0919999999999996,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 53.6927738965761,
+      "prScore": 34.6927738965761,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -334,52 +403,12 @@
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 48.6927738965761,
-      "prScore": 34.6927738965761,
-      "issueScore": 0,
-      "reviewScore": 14,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 46.66689217900675,
-      "prScore": 28.166892179006748,
-      "issueScore": 0,
-      "reviewScore": 18.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 45.729580922772485,
-      "prScore": 44.07558092277248,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.654,
-      "summary": null
-    },
-    {
       "username": "ayaanoncrypto",
       "avatarUrl": "https://avatars.githubusercontent.com/u/106945712?u=6de33a8a33c35e343d3f52cccfb1a4ec1222dc95&v=4",
       "totalScore": 45.39351501117786,
       "prScore": 45.39351501117786,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 29.48348811353631,
-      "prScore": 14.98348811353631,
-      "issueScore": 0,
-      "reviewScore": 14.5,
       "commentScore": 0,
       "summary": null
     },
@@ -391,6 +420,26 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 25.67798720448514,
+      "prScore": 25.077987204485144,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.6000000000000001,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 24,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 24,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -466,11 +515,11 @@
     {
       "username": "pxpn-dev",
       "avatarUrl": "https://avatars.githubusercontent.com/u/222313623?v=4",
-      "totalScore": 9.400588722239782,
+      "totalScore": 9.600588722239781,
       "prScore": 9.400588722239782,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -494,16 +543,6 @@
       "summary": null
     },
     {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 0.4,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.4,
-      "summary": null
-    },
-    {
       "username": "swiftnodes",
       "avatarUrl": "https://avatars.githubusercontent.com/u/275502250?u=67d8a6266dfbc7500bbf26931126f3d3b620d193&v=4",
       "totalScore": 0.2,
@@ -524,9 +563,9 @@
       "summary": null
     }
   ],
-  "newPRs": 32,
-  "mergedPRs": 9,
-  "newIssues": 12,
-  "closedIssues": 3,
-  "activeContributors": 39
+  "newPRs": 35,
+  "mergedPRs": 12,
+  "newIssues": 15,
+  "closedIssues": 5,
+  "activeContributors": 42
 }
