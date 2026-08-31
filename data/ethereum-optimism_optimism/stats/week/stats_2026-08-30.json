@@ -5,9 +5,82 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-08-30 to 2026-09-06, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 1 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-08-30 to 2026-09-06, ethereum-optimism/optimism had 2 new PRs (0 merged), 2 new issues, and 8 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABO5982w",
+      "title": "op-deployer: standard.go contract tags should not carry -rc.N suffixes",
+      "author": "maurelian",
+      "number": 22704,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Several `ContractsV*Tag` constants in `op-deployer/pkg/deployer/standard/standard.go` pin release-candidate tags rather than finalized releases (currently v1.8.0-rc.4, v4.0.0-rc.7, v6.0.0-rc.2, v7.0.0-rc.4, and now v8.0.0-rc.3). Once a contracts release is finalized, the constant should be updated to the final `op-contracts/vX.Y.Z` tag, which also requires the corresponding entries in the superchain-registry standard-versions files.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-08-31T00:44:59Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABO2ewew",
+      "title": "linter/bigint: suggested fix emits an unbound qualifier when op-service/bigs is aliased or dot-imported",
+      "author": "kyle4814",
+      "number": 22702,
+      "repository": "ethereum-optimism/optimism",
+      "body": "### Summary\n\nThe `bigint` custom linter's suggested fix decides two things separately that\nhave to agree:\n\n- **whether** to add the `op-service/bigs` import — `fileHasImport()` matches on the import **path**\n- **what identifier** to qualify the rewritten call with — `buildStrictCall()` hardcodes `\"bigs.\"`\n\nWhen a file already imports `op-service/bigs` under any name other than `bigs`,\nthe import edit is suppressed (path matches) *and* the emitted call references\nan identifier that isn't bound. `golangci-lint --fix` then rewrites the file\ninto code that doesn't compile.\n\nObserved on `develop` at `2258ea57`.\n\n### Reproduction\n\nAdd a testdata package containing a file that imports the package under an\nalias, then run the analyzer with suggested fixes applied:\n\n```go\npackage a\n\nimport (\n\t\"math/big\"\n\n\tmybigs \"github.com/ethereum-optimism/optimism/op-service/bigs\"\n)\n\nvar _ = mybigs.Uint64Strict\n\nfunc aliased() {\n\tx := new(big.Int)\n\t_ = x.Uint64()\n}\n```\n\n`analysistest.RunWithSuggestedFixes` produces:\n\n```go\nimport (\n\t\"math/big\"\n\n\tmybigs \"github.com/ethereum-optimism/optimism/op-service/bigs\"\n)\n...\n\t_ = bigs.Uint64Strict(x)   // undefined: bigs\n```\n\nThe dot-import form (`. \"…/bigs\"`) fails the same way — the fix emits a\n`bigs.` qualifier where the call should be unqualified. A blank import (`_`)\nbinds no identifier at all, so it also needs a usable import added.\n\n### Why this isn't currently caught\n\n`linter/analyzers/bigint/bigint_test.go` uses `analysistest.Run`, which checks\ndiagnostics only and never applies the suggested fixes. The whole fix path —\n`buildStrictCall`, `fileHasImport`, `importEdit`, and the one-shot\n`addImportEdit` logic — has no test coverage today.\n\n### Impact\n\nLatent, not currently triggered. Across `develop` at `2258ea57` I count 188\nplain imports of `op-service/bigs`, zero named aliases, zero dot imports, and\none blank import (`op-service/testutils/depguard/depguard_test.go`) which\ncontains no `.Uint64()` calls. So no file in the tree today would be broken by\n`--fix`; the defect would surface the first time someone aliases that import in\na file containing a flagged call.\n\n### Suggested direction\n\nResolve the package's actual local binding in the file and use it for both\ndecisions, rather than deciding the import and the qualifier independently:\nalias → use the alias; dot import → unqualified call; blank import → treat as\nabsent so a usable import is added.\n\nI have a patch along those lines plus `RunWithSuggestedFixes` golden tests\ncovering the plain, aliased and dot-import forms, if that would be useful — happy\nto open a PR.\n",
+      "createdAt": "2026-08-30T10:42:17Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM71_3s_",
+      "title": "devfeatures: remove SUPER_ROOT_GAMES_MIGRATION dev feature flag",
+      "author": "mds1",
+      "number": 22016,
+      "body": "## Summary\n\nStacked on #21689, which made the flag default-on via a short-circuit in the `isDevFeatureEnabled` predicates. With both predicates hardcoded true, every branch on the flag is a constant, so this PR removes the flag entirely:\n\n- Remove the `SUPER_ROOT_GAMES_MIGRATION` / `SuperRootGamesMigrationFlag` constants and the short-circuits from `DevFeatures.sol` and `op-core/devfeatures`, restoring the plain bitwise-AND predicate on both sides. The retired bit value is documented in the `DevFeatures.sol` natspec so it isn't accidentally reused.\n- Flatten every conditional to the enabled side: `OPContractsManagerV2` (`_isPermittedInstruction`, `_assertValidFullConfig`), `OPContractsManagerStandardValidator` (`isSuperMode` now always derived from the ASR's respected game type), `Deploy.s.sol` (drops the now-unreachable `getDeployInputV2`), `DeployImplementations.s.sol`, `DeployOPChain.s.sol` (drops `isSuperRoot` state + helper), `VerifyOPCM.s.sol`, `ForkL1Live.s.sol`.\n- Remove the test-only env plumbing (`Config.devFeatureSuperRootGamesMigration()`, `FeatureFlags.sol` wiring) and the `WithDevFeatureEnabled` calls in op-devstack / op-acceptance-tests.\n- Delete tests that were permanently skipped under the default-on flag (incl. the legacy standard-mode `OPContractsManagerStandardValidator_TestInit` hierarchy). The ZK gating tests (`ZKDG-NOSHAPE` / feature-enabled-no-impl) from that hierarchy are ported onto the surviving super-mode fixture since that validator branch is live in super mode.\n- Semver bumps for the three contracts whose bytecode changes vs the base branch: `OPContractsManagerV2` 7.2.3, `OPContractsManagerStandardValidator` 2.12.1, `L2DevFeatureFlags` 1.3.1. semver-lock and the NUT bundle regenerated accordingly (bundle deltas: L2DevFeatureFlags initcode, L2ContractsManager constructor arg, upgradePredeploys target address).\n- Update `docs/ai/devfeatures.md`.\n\nCloses #21662.\n\n## Test plan\n\n- `just pr` in `packages/contracts-bedrock`: all checks pass. (Locally, `semver-diff` can't resolve a merge base against `develop` in a shallow clone; verified manually that all three changed semver-lock entries carry version bumps vs this PR's base branch.)\n- Full `just test-dev`: 2233 passed, 0 failed, 141 skipped.\n- `go test ./op-core/devfeatures/...` passes; `go build` on op-devstack/sysgo and the touched op-acceptance-tests packages; gofmt/vet clean.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-24T19:00:23Z",
+      "mergedAt": null,
+      "additions": 420,
+      "deletions": 2871
+    },
+    {
+      "id": "PR_kwDODjvEJM70l_4W",
+      "title": "contracts-bedrock: clarify feature release lifecycle",
+      "author": "mds1",
+      "number": 21942,
+      "body": "Clarifies the smart contract release process agreed during the July 21 Network Upgrades Weekly:\n\n- Require development feature flags to be removed on `develop` before audit, while production-supported `SystemConfig` system features may remain configurable.\n- Audit the release candidate's exact commit, reuse it for the final tag when no fixes are required, and create proposal branches lazily.\n- Make contract verification failures release blockers and remove the unconditional assumption that `op-deployer` releases from a proposal branch.\n- Fix the versioning policy's release-process links.\n\nValidation:\n\n- `git diff --check`\n- `mdbook build packages/contracts-bedrock/book` (passes with the existing `mdbook-mermaid` version warning)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-21T22:22:21Z",
+      "mergedAt": null,
+      "additions": 35,
+      "deletions": 8
+    },
+    {
+      "id": "PR_kwDODjvEJM71UcV9",
+      "title": "docs: add SolidRPC to RPC directory",
+      "author": "DamianFigiel",
+      "number": 21988,
+      "body": "**Description**\r\n\r\nAdds SolidRPC to the OP Stack production RPC provider directory.\r\n\r\nThe listing includes the OP Stack networks currently supported by SolidRPC:\r\n\r\n- Mainnets: OP Mainnet, Base, Ink, Unichain, World Chain, Lisk, and Zora\r\n- Testnets: OP Sepolia, Base Sepolia, Lisk Sepolia, Unichain Sepolia, and Zora Sepolia\r\n\r\n**Tests**\r\n\r\nDocumentation-only change.\r\n\r\n- Verified the listed networks against the current SolidRPC network catalog\r\n- Ran `git diff --check`\r\n\r\n**Additional context**\r\n\r\n- Website: https://solidrpc.io\r\n- Documentation: https://solidrpc.io/docs\r\n- Supported networks: https://solidrpc.io/docs/networks\r\n- Pricing: https://solidrpc.io/docs/pricing\r\n\r\nSolidRPC provides authenticated EVM JSON-RPC endpoints over HTTPS with full and archive access where available.\r\n\r\n**Metadata**\r\n\r\nNo related issue.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-23T10:35:05Z",
+      "mergedAt": null,
+      "additions": 8,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBgCamA",
+      "title": "op-deployer: update SCR dep and CurrentTag for op-contracts/v8.0.0-rc.3",
+      "author": "maurelian",
+      "number": 22703,
+      "body": "Bumps `github.com/ethereum-optimism/superchain-registry/validation` to the commit that adds the `op-contracts/v8.0.0-rc.3` standard versions (ethereum-optimism/superchain-registry#1321), and sets `CurrentTag` to `op-contracts/v8.0.0-rc.3`.\n\nPrep for the op-deployer v8 RC release.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-30T11:53:18Z",
+      "mergedAt": null,
+      "additions": 5,
+      "deletions": 4
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABBeRSLg",
       "title": "ci: bump rust nightly pin to nightly-2026-08-29",
@@ -25,16 +98,16 @@
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 1
+    "commitCount": 3
   },
   "completedItems": [],
   "topContributors": [
     {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 9.483200115693561,
+      "totalScore": 11.483200115693561,
       "prScore": 9.483200115693561,
-      "issueScore": 0,
+      "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -48,11 +121,31 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "kyle4814",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/201341677?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 1,
+  "newPRs": 2,
   "mergedPRs": 0,
-  "newIssues": 0,
+  "newIssues": 2,
   "closedIssues": 0,
-  "activeContributors": 1
+  "activeContributors": 8
 }
