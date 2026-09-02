@@ -5,20 +5,466 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-01 to 2026-09-02, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 1 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-09-01 to 2026-09-02, ethereum-optimism/optimism had 10 new PRs (9 merged), 2 new issues, and 26 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABMK8SrA",
+      "title": "Re-Deploy Lightnode across the Staging",
+      "author": "jelias2",
+      "number": 22352,
+      "repository": "ethereum-optimism/optimism",
+      "body": "# Description\n* Staging should be majority lightnode based as a way to bake and validate light nodes to preprare for interop",
+      "createdAt": "2026-08-10T15:32:06Z",
+      "closedAt": "2026-09-01T15:17:42Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABNvUR5w",
+      "title": "Game-proving retries discard completed proofs and regenerate all witnesses",
+      "author": "Inphi",
+      "number": 22622,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe proposer does not checkpoint progress while proving a multi-chunk game. If any chunk fails,\nthe entire game-proving attempt fails and all successful chunk results held in memory are\ndiscarded. The defense scheduler then retries the unresolved game from the beginning, regenerating\nthe same witnesses and requesting the same SPN proofs again.\n\nThis can discard proofs that SPN has already fulfilled and charged for. It also repeats expensive\nlocal witness generation and can prevent a defense from making progress when one transient or\npersistent error occurs late in the range.\n\nThis is related to, but distinct from, https://github.com/ethereum-optimism/optimism/issues/22621. This issue also affects chunks whose proofs were fully fulfilled,\ndownloaded, and validated before a different chunk failed.\n\n## Current behavior\n\nEach game is split into chunks. A chunk generates and validates its local outputs and, when using\nthe network provider, obtains both a range proof and a consolidation proof. Successful\n`ChunkResult` values remain only in memory while the proposer waits for every chunk:\n\n```rust\nlet results: Vec<ChunkResult> = futures::stream::iter(tasks)\n    .buffer_unordered(max_concurrent)\n    .try_collect()\n    .await?;\n```\n\n`try_collect()` returns immediately when any chunk produces an error. Previously completed\n`ChunkResult` values are dropped along with any other in-flight futures. The caller reports the\ngame-proving task as failed.\n\nBecause the disputed game still requires a defense, the scheduler starts another game-proving\ntask. The new task has no record of completed chunks or fulfilled proof IDs, so it:\n\n1. derives the game span again;\n2. regenerates witnesses for every chunk;\n3. resubmits proof requests for work that may already have been fulfilled; and\n4. discards everything again if any chunk in the new attempt fails.\n\nThere is no durable per-game progress record, completed-chunk cache, or proof-artifact recovery\npath.\n\n## Impact\n\n- Fulfilled and paid-for SPN proofs can be unused.\n- Identical proof work can be requested and charged more than once.\n- Local witness generation repeatedly consumes CPU and memory.\n- A failure in one chunk invalidates progress made by every other chunk.\n- Persistent submission failures can create an unbounded retry loop that recomputes identical\n  witnesses without advancing the defense.\n- Repeated full retries increase the risk of missing the dispute-game response window.\n\nThe cost grows with the split count and with how late in an attempt the first failure occurs.\n\n## Example failure sequence\n\n1. A game is divided into multiple chunks.\n2. Several chunks finish witness generation and receive both required proofs from SPN.\n3. A later chunk encounters a transient RPC, submission, balance, or proving error.\n4. `try_collect()` returns that error and drops all completed chunk results.\n5. The game-proving task exits without producing the aggregation proof or submitting the defense.\n6. The scheduler retries the same game from scratch.\n7. Already-completed witnesses and proofs are regenerated and requested again.\n\n## Expected behavior\n\nSuccessful chunk work should survive an unrelated chunk failure. A retry should resume from the\nincomplete or failed chunks and reuse completed results after validating that they belong to the\nsame immutable proving inputs.\n\nAt minimum, an in-process retry should not regenerate fulfilled chunks. Ideally, progress should\nalso survive proposer restarts.\n\n## Suggested regression test\n\nUse a mock witness generator and proof provider with at least two chunks:\n\n- Chunk A completes and returns both proofs.\n- Chunk B returns an error after A has completed.\n- Invoke the same game-proving operation again.\n\nAssert that chunk A's witnesses and proof requests are not generated a second time, while chunk B\nis retried. Also assert that changing any input that affects proof validity invalidates the cached\nresult.\n\n## Possible fix direction\n\nRepresent game-proving progress explicitly instead of keeping it solely in the `try_collect()`\ncall. Record each completed chunk and each submitted proof request against a stable attempt\nidentity containing the inputs required to determine safe reuse, such as the game claim, prestate\nor verifying keys, chunk boundaries, and relevant chain inputs.\n\nOn retry, validate the recorded identity, restore completed chunks, recover or poll submitted\nproof IDs, and schedule only missing work. Before returning an attempt-level error, retain or\nexplicitly clean up all externally submitted requests.\n\nChanging fail-fast collection alone may prevent immediate cancellation of sibling futures, but it\ndoes not provide recovery after the task exits or the process restarts. The proof-request lifecycle\nand completed-chunk lifecycle need explicit ownership.\n",
+      "createdAt": "2026-08-21T18:22:40Z",
+      "closedAt": "2026-09-01T19:27:29Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABCRL8Xw",
+      "title": "Migration paths",
+      "author": "ashitakah",
+      "number": 20757,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Scope\n\nImplement and test all three in-scope migration paths via `OPCMv2.upgrade()`.\n\nCommon mechanics across all paths:\n1. Deploy new super-root ZKDG impl, register in `OPContractsManagerContainer.Implementations`\n2. `setImplementation(GameTypes.SUPER_ZK_DISPUTE_GAME, newImpl, gameArgs)` (3-arg overload)\n3. `setImplementation(sourceGameType, address(0), \"\")`\n4. `setRespectedGameType(SUPER_ZK_DISPUTE_GAME)` on ASR\n5. Add `SUPER_ZK_DISPUTE_GAME` to `isSuperGame()` if not already shipped\n\n## Sub-issues\n\n- Path A: SFDG → super-root ZKDG (isolated chain)\n- Path B: SPDG → super-root ZKDG (isolated chain)\n- Path C: SFDG → super-root ZKDG (interop set)\n\n## Weekly Updates\n\n**[YYYY-MM-DD]** <latest update>",
+      "createdAt": "2026-05-14T15:38:35Z",
+      "closedAt": "2026-09-01T16:24:37Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPPZoWA",
+      "title": "contracts-bedrock: MIG-SASR-RGT accepts super game types the migration validator never validates",
+      "author": "ajsutton",
+      "number": 22731,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Filed on behalf of @ajsutton, from review feedback by @wwared on ethereum-optimism/optimism#22471.\n\n## Problem\n\n`OPContractsManagerMigrationValidator.MIG-SASR-RGT` accepts any game type that satisfies `GameTypes.isSuperGame`:\n\nhttps://github.com/ethereum-optimism/optimism/blob/develop/packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrationValidator.sol#L128-L132\n\n`isSuperGame` returns true for `SUPER_CANNON`, `SUPER_PERMISSIONED`, `SUPER_ASTERISC_KONA`, `SUPER_CANNON_KONA` and `ZK_DISPUTE_GAME`, but the migration validator only requires and validates `SUPER_PERMISSIONED` and `SUPER_CANNON_KONA` (`MIG-DGF-10` / `MIG-DGF-20`), and it requires `SUPER_CANNON` to be unregistered (`MIG-DGF-60`).\n\nSo a migrated chain can respect a game type that has no registered implementation and still pass migration validation. The respected game type gates withdrawal finalization, so the result is a chain that validates clean while withdrawals cannot finalize.\n\n`SUPER_CANNON` is the clearest case: `MIG-DGF-60` asserts it is *not* registered, yet `MIG-SASR-RGT` accepts it as the respected type.\n\n## Why it is filed separately\n\nethereum-optimism/optimism#22471 added the equivalent assertion to the standard validator (`ASR-RGT`), which now restricts the respected type to the set the selected branch validates. That PR deliberately did not touch the migration validator: the two validators now disagree, and closing the gap needs a design decision plus its own semver bump and tests.\n\n## The naive fix is not correct\n\nRestricting the check to exactly `SUPER_PERMISSIONED` and `SUPER_CANNON_KONA` would reject a ZK-respecting migrated chain. `OPContractsManagerMigrationValidator.sol` has no `ZK_DISPUTE_GAME` references at all, and nothing in the migration path asserts ZK is absent, so a migrated chain can legitimately register and respect a ZK game. That is the mirror of the bug @wwared caught in `ASR-RGT` during review.\n\nPick one:\n\n1. Allow ZK under the same two conditions the standard validator uses — the `ZK_DISPUTE_GAME` dev feature is enabled *and* the factory registers an implementation. See `isRespectedGameTypeValidated` in `OPContractsManagerStandardValidator.sol` for the reference implementation.\n2. Decide ZK is out of scope post-migration and additionally assert `gameImpls(ZK_DISPUTE_GAME) == 0`, alongside the existing `MIG-DGF-60` treatment of `SUPER_CANNON`.\n\nOption 1 keeps the two validators consistent and is what I would expect to want.\n\n## Work required\n\n- Tighten the `MIG-SASR-RGT` condition per the decision above.\n- Bump the `OPContractsManagerMigrationValidator` semver and regenerate `snapshots/semver-lock.json`.\n- Add coverage for the `SUPER_CANNON` case. Current coverage at `packages/contracts-bedrock/test/L1/opcm/OPContractsManagerMigrationValidator.t.sol:753` only exercises a non-super type, so the gap is untested today.\n\n## Related\n\n- ethereum-optimism/optimism#22471 — added `ASR-RGT` to the standard validator; review thread that raised this.\n- ethereum-optimism/optimism#21529 — ZK dev feature removal, relevant to whichever option is chosen.\n",
+      "createdAt": "2026-09-01T23:07:39Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPMeowA",
+      "title": "proposer: Support restarts without losing in-flight proofs",
+      "author": "pauldowman",
+      "number": 22726,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Currently `kona-sp1-proposer` tracks in-flight proof requests in memory, but if it's restarted it loses track of in-flight proofs which wastes time and money. \n\nThis issue tracks future work to make this durable across proposer restarts. (Check if disk is good enough or if it's ephemeral).",
+      "createdAt": "2026-09-01T17:11:08Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABB0A7aA",
+      "title": "private-interop: derive public projection from one genesis",
+      "author": "karlfloersch",
+      "number": 22729,
+      "body": "## Summary\n\nThis carries forward the private interop implementation from #22720, but replaces the draft's two-role/two-deployer genesis flow with one source of truth:\n\n- op-deployer emits one private-chain genesis and rollup config; there is no public/rendering deployer role\n- `ProjectGenesisFrom(privateChainGenesis)` is a pure, deterministic local transform with independent Go and Rust implementations and a shared cross-language golden vector\n- op-reth accepts the same private genesis and applies the projection before database initialization with `--rollup.private[=true]`; the private EL consumes it unchanged\n- op-batcher and op-supernode detect `private_interop` from the private rollup config, load the local private genesis, and derive the public projection automatically\n- the projected state restores stock ETH semantics, installs the replay/claim predeploys, removes private-only liquidity/mint machinery, and clears only the private-chain feature bit\n- private interop derives an L1 resource configuration with `maxResourceLimit = 0`, closing deposits through the stock portal rather than a custom L1 contract\n- old role flags, compatibility paths, configurable projection predeploy addresses, and the second op-deployer run are deleted\n\nThe remainder of #22720 is retained: claim/replay contracts and codec, deterministic batch construction, claim-follow routing, interop-filter integration, devstack/op-up wiring, and acceptance coverage.\n\n## Deployment shape\n\n1. Run op-deployer once with the chain's `privateInterop` stanza and custom gas token configuration.\n2. Give the emitted genesis to the private op-reth normally.\n3. Give that same genesis to the public-projection op-reth with `--rollup.private=true`.\n4. Give the private genesis path to op-batcher and op-supernode; their private-interop paths activate from the rollup marker and derive the matching projection locally.\n5. Give the private LightCL the ordinary private-chain genesis/config. It follows the supernode's `/claimed` route as in #22720.\n\nNo projection step performs a network call. The embedded implementation bytecode is checked against the current contracts artifacts in the op-deployer integration test.\n\n## Verification\n\n- `go test ./op-private-interop/...`\n- `go test ./op-batcher/batcher ./op-batcher/flags`\n- `go test ./op-supernode/cmd ./op-supernode/supernode/...`\n- `go test ./op-interop-filter/... ./op-node/rollup`\n- focused op-deployer private-interop integration, pipeline, and state tests\n- `go test ./op-devstack/sysgo -run '^$'`\n- `cargo test -p reth-optimism-chainspec private_interop` (4/4)\n- `cargo test -p reth-optimism-node private` (1/1)\n- `just lint` in contracts-bedrock\n- messenger Solidity suite (24/24)\n\nThe broad op-deployer pipeline package also ran locally; its only failures were nine live-Sepolia tests that require `SEPOLIA_RPC_URL`. The focused private-interop tests pass.\n\n## Review note\n\nA manual deletion/configuration review was completed, including a differential comparison against the retired two-deployer genesis path. Automated sub-agent review was unavailable in this harness.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-01T21:50:59Z",
+      "mergedAt": null,
+      "additions": 19062,
+      "deletions": 215
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBsZ1nQ",
+      "title": "feat: add private interop cleanroom implementation",
+      "author": "opsuperchain",
+      "number": 22720,
+      "body": "## Summary\n\n- add the private-interop private/rendering chain pair, contracts, deterministic rendering codec, builder, and claim-follow path\n- integrate the pair with op-deployer, op-batcher, op-supernode, op-interop-filter, devstack, and op-up\n- add private-pair-aware interop smoke coverage and a design document\n- harden the implementation after adversarial review: structurally close deposits, bind rendering inputs and emitters, cap amplification, remove the separate operator key/premine, disable the stock ETH path, and make rendering execution fully zero-fee\n\n## `op-up --private-interop` topology\n\n```text\n                         L1 EL + beacon node\n                          ^              |\n                          | batches      | derives\n         +----------------+---+      +---v-----------------+\n         |                    |      |                     |\n   normal A batcher    private-interop batcher       shared supernode\n         ^                    ^                      public view: {A, B-render}\n         |                    |                         |          |\n A sequencer op-node   B private op-node               |          |\n         |                    |                         |          |\n A sequencer op-reth   B private op-reth         A verifier   B rendering\n   public chain 901    private chain 902           op-reth       op-reth\n                              ^                                     |\n                              +------ `/902/claimed` ----------------+\n```\n\n- Chain A is an ordinary public OP chain with a stock batcher and proposer.\n- Chain B has two different histories sharing chain ID 902: the sequenced, user-facing custom-gas-token private chain and a public, derived-only rendering with no sequencer or mempool.\n- The private-interop batcher reads private B blocks, converts exported logs into claim/replay transactions, checks the rendering parent, and posts an ordinary channel to L1.\n- The shared supernode derives and judges `{A, B-render}` using the stock message database and cross-safety logic. It has no private-chain access and does not know that B is a rendering.\n- The only private-interop addition in the supernode is the `/902/claimed` follow endpoint. It reconstructs the committed private-B safe block reference from public rendering claims for the private op-node; it does not alter judging.\n- Private B and rendering B are never P2P-peered: they deliberately have the same chain ID but different genesis hashes and block contents.\n- `--smoke` runs `interopsmoke` in the same process so private receipt positions can be resolved to their canonical public rendering positions.\n\n## Verification\n\n- `go test ./op-batcher/batcher ./op-chain-ops/interopsmoke/... ./op-deployer/pkg/deployer/state ./op-interop-filter/filter ./op-private-interop/... ./op-supernode/supernode/chain_container -count=1`\n- focused op-deployer private-interop genesis/rollup integration tests\n- 49/49 private-interop Solidity tests\n- 24/24 L2-to-L2 messenger Solidity tests\n- 15/15 L2 genesis Solidity tests\n- `op-up --private-interop --smoke`: chain identity, native transfers, valid messages in both directions, rendered private-chain message resolution, and invalid-message reorg all pass\n\n## Notes\n\nThis is intentionally a draft for design and security review. The stock Superchain ETH bridge smoke case is skipped on the custom-gas-token private half; that path is closed by design and `NativeMintBridge` is the sanctioned liquidity path.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-01T04:06:39Z",
+      "mergedAt": null,
+      "additions": 18896,
+      "deletions": 215
+    },
+    {
+      "id": "PR_kwDODjvEJM73q2nQ",
+      "title": "contracts: revive SuperchainTokenBridge + add SuperchainERC20Factory (wrap/unwrap)",
+      "author": "opsuperchain",
+      "number": 22087,
+      "body": "# Description\n\nThis PR revives the `SuperchainTokenBridge` and adds a new `SuperchainERC20Factory` that lets any existing ERC20 be wrapped into a `SuperchainERC20` and moved across the Superchain.\n\n## Commit 1: revive the SuperchainTokenBridge\n\n`SuperchainTokenBridge`, `SuperchainERC20`, and `IERC7802` were removed in #19999 (and #20141) as unused interop contracts. This commit restores them from history at their original semvers and predeploy slot (`0x4200...0028`), adapted to the predeploy machinery that has landed since (`Predeploys.getAllRecords()` registry, `L2ContractsManager` deploy/upgrade flow, gate assertions in `L2Genesis`). The bridge is gated behind interop exactly like `SuperchainETHBridge`/`ETHLiquidity`. The legacy `OptimismSuperchainERC20` lane (beacon, factory, `L2StandardBridgeInterop`) is intentionally not revived; the new factory below replaces it.\n\n## Commit 2: SuperchainERC20Factory\n\nA minimal wrap/unwrap factory, added as an interop-gated predeploy at `0x4200...0026` (the slot freed by the old `OptimismSuperchainERC20Factory`):\n\n- `deploy(chainId, token, name, symbol, decimals)` deploys a `SuperchainWrappedERC20` via CREATE2 with `salt = keccak256(chainId, token)`. The wrapped token's constructor takes no arguments (metadata is read back from the factory during construction), so its initcode is constant and **the wrapped token address is identical on every chain**, derived purely from the `[chain_id, address]` identity of the original token.\n- On the original token's chain, metadata is read from the token itself (falling back to caller-supplied values for tokens without the metadata extension). On remote chains the deployer supplies it — or, better, uses propagation:\n- `propagate(token, toChainId)` sends the canonical wrapped metadata from the token's home chain to the factory on another chain via the `L2ToL2CrossDomainMessenger` (the factory is the same predeploy address everywhere, mirroring `SuperchainTokenBridge.sendERC20`/`relayERC20`). `relayDeploy` on the destination requires the messenger, the factory itself as cross-domain sender, and **message source chain == the token's claimed home chain**, so remote chains get authentic metadata without trusting any caller.\n- `wrap(token, amount)` escrows original tokens in the factory and mints the wrapped token 1:1 (mints the actually-received amount, so fee-on-transfer tokens can't inflate supply beyond backing). Only possible on the token's home chain.\n- `unwrap(token, amount)` burns wrapped tokens and releases escrow.\n- The wrapped token is a standard `SuperchainERC20`: `crosschainMint`/`crosschainBurn` are gated to the `SuperchainTokenBridge`, so once deployed on two chains, `sendERC20`/`relayERC20` move it between them. Escrow on the home chain always equals global wrapped supply.\n\n## Notes for reviewers\n\n- The revive commit restores the bridge byte-for-byte where possible; the only source adaptations are the solady import path (the versioned `@solady-v0.0.245` remapping no longer exists; the vendored solady is v0.0.158) and registration in the new predeploy registry.\n- `L2ContractsManager` semver bumped 1.13.0 → 1.14.0.\n- Rebasing tokens are not supported by the wrap/unwrap escrow (negative rebases can strand late unwrappers), same caveat as any escrow wrapper.\n\n## Tests\n\n- Restored `SuperchainTokenBridge` and `SuperchainERC20` unit tests.\n- New suites for the factory (deterministic addresses, home/remote metadata, propagate/relayDeploy auth + source-chain checks, wrap/unwrap, fee-on-transfer, escrow accounting) and the wrapped token (factory/bridge mint-burn gating, ERC7802 interface).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-28T21:16:59Z",
+      "mergedAt": null,
+      "additions": 3004,
+      "deletions": 22
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBpI69w",
+      "title": "kona-sp1: retain proving progress across retries",
+      "author": "digorithm",
+      "number": 22717,
+      "body": "Closes https://github.com/ethereum-optimism/optimism/issues/22622\n\nGame-proving retries currently discard completed chunks when another chunk\nfails. They can also lose a returned SPN request ID after a polling error, which\nallows the next attempt to buy the same proof again.\n\nThis PR keeps per-game proving progress in memory. A retry:\n\n- skips completed chunks;\n- polls SPN requests by their existing IDs; and\n- reuses a fulfilled aggregation proof after a failed L1 submission.\n\nCached work is reused only when the game inputs, verifying keys, chunk\nboundaries, and synthesized inputs match. The proposer clears the cache after a\nsuccessful L1 `prove` transaction.\n\n## Tradeoffs\n\nProgress is process-local. A proposer restart loses the cache and may repeat\nproof work. Disk persistence can be added separately.\n\nThe SP1 SDK may submit a request and then return an error before exposing its\nID. The proposer cannot recover a request ID it never receives.\n\n## Review focus\n\n- `RequestState` and `complete_request` own request IDs and state transitions.\n- `AttemptIdentity` prevents stale work from being reused.\n- `run_chunk_attempts_with_progress` skips completed chunks while preserving\n  bounded concurrency.\n- `prover/spn.rs` owns SPN polling, cancellation, and timeout handling.\n\n## Testing\n\n- `mise exec -- cargo nextest run --package kona-sp1-proposer --all-features`\n- `mise exec -- cargo clippy --package kona-sp1-proposer --all-features --all-targets --locked --no-deps -- -D warnings`\n- `mise exec -- just fmt-check`",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-31T18:39:16Z",
+      "mergedAt": "2026-09-01T19:27:28Z",
+      "additions": 2262,
+      "deletions": 782
+    },
+    {
+      "id": "PR_kwDODjvEJM73vSXT",
+      "title": "contracts-bedrock: Resolve shared contract pause state via ETHLockbox",
+      "author": "ajsutton",
+      "number": 22095,
+      "body": "Fixes #22093.\n\nThe shared `ETHLockbox`, `AnchorStateRegistry` and `DelayedWETH` of an interop set each stored a pointer to **chain 0's `SystemConfig`** — a per-chain contract — and used it for `paused()`, `guardian()` and `superchainConfig()`. That makes one member the governance root of the whole set, and it makes per-chain `upgrade()` non-idempotent: `_upgradeChain` re-initialises all three with `_cts.systemConfig`, so upgrading chain N silently repoints the set at chain N, and the validator's `_asr.systemConfig() == _sysCfg` predicate can only hold for one member at a time. That is a direct obstacle to the \"all chains always upgrade the shared components\" resolution in #21731.\n\nEach contract now points at an `IPauseSource` — `paused()` / `guardian()` / `superchainConfig()` — whose scope matches its own:\n\n- `ETHLockbox` holds the `SuperchainConfig` directly, `paused()` keys on `address(this)`, and it gains a `guardian()` passthrough. This also collapses the old 4-hop pause lookup (lockbox → systemConfig → portal → its own address → superchainConfig) to one call on the `unlockETH` path.\n- `AnchorStateRegistry` and `DelayedWETH` hold an `IPauseSource`: the shared `ETHLockbox` when the chain uses one, otherwise the chain's own `SystemConfig`. Both satisfy the interface, so chains without a lockbox keep exactly today's behaviour.\n- `migrate()` now also repoints the reused chain-0 `DelayedWETH` at the shared lockbox, and `setInteropDisputeGames()` re-derives the pause source from the portal's lockbox, so a set migrated by an older release is fixed up there.\n- The validator checks become `_asr.pauseSource() == expectedPauseSource(sysCfg)`, which is true for every member of a migrated set simultaneously.\n\n`ETHLockbox` 1.3.1 → 2.0.0, `AnchorStateRegistry` 3.9.0 → 4.0.0 and `DelayedWETH` 1.5.1 → 2.0.0 are **major** bumps: the `systemConfig()` getter is gone, and `initialize` keeps its selector (`ISystemConfig`, `ISuperchainConfig` and `IPauseSource` all encode as `address`) while the meaning of its first argument changes. Anything calling these initializers must be updated deliberately.\n\nStorage-layout neutral: the field is a plain 20-byte address slot in all three contracts, so only the label and type change in `snapshots/storageLayout`.\n\nTwo migration-validator tests gained extra expected error codes: with the lockbox missing or `ETH_LOCKBOX` disabled, the pause-source checks now also fire. That is intended — a shared registry pointing at a lockbox the chain does not acknowledge is a real misconfiguration.\n\nNot addressed here: the shared proxies are still administered by chain 0's `ProxyAdmin`, tracked in #21731.\n\n## Test plan\n\n- `just test-dev` green in three configurations: default, `DEV_FEATURE__OPTIMISM_PORTAL_INTEROP` + `DEV_FEATURE__ZK_DISPUTE_GAME`, and `SYS_FEATURE__CUSTOM_GAS_TOKEN`.\n- New `test_migrate_sharedContractsUseLockboxAsPauseSource_succeeds` asserts that after `migrate()` the shared ASR and DelayedWETH point at the shared lockbox, that both chains resolve that same lockbox, and that pausing it pauses both chains at once.\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-29T01:28:59Z",
+      "mergedAt": null,
+      "additions": 319,
+      "deletions": 182
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 2804,
+    "deletions": 903,
+    "files": 40,
+    "commitCount": 71
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 1
+  "completedItems": [
+    {
+      "title": "CODEOWNERS,public-docs: add monorepo-reviewers as co-owner of public docs",
+      "prNumber": 22581,
+      "type": "other",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787259598889479)_\n\n**Before:** `/docs/public-docs/` was owned solely by `@ethereum-optimism/solutions`, so ev",
+      "files": [
+        ".github/CODEOWNERS",
+        "docs/public-docs/scripts/gen-deploy-config/README.md",
+        "docs/public-docs/scripts/gen-flags/README.md",
+        "docs/public-docs/scripts/gen-op-reth-cli/README.md"
+      ]
+    },
+    {
+      "title": "claude,docs: Add create-pr skill and consolidate PR guidance",
+      "prNumber": 22608,
+      "type": "other",
+      "body": "PR guidance was in three files, and none of them said what a PR description must contain.\nAn agent had to read `AGENTS.md`, `docs/ai/dev-workflow.md` and\n`docs/handbook/pr-guidelines.md` to open a PR, then wrote a description that repeated ",
+      "files": [
+        ".claude/skills/create-pr/SKILL.md",
+        ".claude/skills/watch-reviews/SKILL.md",
+        "AGENTS.md",
+        "docs/ai/dev-workflow.md",
+        "docs/handbook/pr-guidelines.md"
+      ]
+    },
+    {
+      "title": "op-service: move PathFlag to a leaf package so oppprof is importable downstream",
+      "prNumber": 22700,
+      "type": "other",
+      "body": "## What\n\nMoves `PathFlag` out of `op-service/flags` into a new leaf package `op-service/cliflags`, and adds a `depguard` test that keeps the consumer-facing half of `op-service` free of the superchain config bundle.\n\nA rename, a two-line im",
+      "files": [
+        "op-service/cliflags/pathflag.go",
+        "op-service/deps_test.go",
+        "op-service/oppprof/cli.go",
+        "op-service/testutils/depguard/depguard.go",
+        "op-service/testutils/depguard/depguard_test.go"
+      ]
+    },
+    {
+      "title": "kona-sp1: retain proving progress across retries",
+      "prNumber": 22717,
+      "type": "other",
+      "body": "Closes https://github.com/ethereum-optimism/optimism/issues/22622\n\nGame-proving retries currently discard completed chunks when another chunk\nfails. They can also lose a returned SPN request ID after a polling error, which\nallows the next a",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/crates/proposer/src/ports.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/prover.rs",
+        "rust/kona/sp1/crates/proposer/src/prover/spn.rs",
+        "rust/kona/sp1/crates/proposer/src/proving.rs",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/src/config.rs",
+        "rust/kona/sp1/crates/proposer/src/metrics.rs"
+      ]
+    },
+    {
+      "title": "op-batcher,op-node: drop the batcher's registry edge; build the display map without parsing configs",
+      "prNumber": 22712,
+      "type": "other",
+      "body": "Cuts op-batcher's last edge into the `superchain-configs.zip` bundle and stops parsing every embedded chain config at op-node init. Stacked on #22709.\n\n- **op-batcher**: the batcher imported `op-node/chaincfg` only to name the chain in its ",
+      "files": [
+        "op-batcher/batcher/service.go",
+        "op-core/superchain/deps_test.go",
+        "op-core/superchain/strict_decode_test.go",
+        "op-node/chaincfg/chains.go",
+        "op-node/rollup/types.go",
+        "op-node/rollup/types_test.go"
+      ]
+    },
+    {
+      "title": "docs: add SolidRPC to RPC directory",
+      "prNumber": 22710,
+      "type": "docs",
+      "body": "**Description**\n\nAdds SolidRPC to the OP Stack production RPC provider directory.\n\nThe listing includes the OP Stack networks currently supported by SolidRPC:\n\n- Mainnets: OP Mainnet, Base, Ink, Unichain, World Chain, Lisk, and Zora\n- Testn",
+      "files": [
+        "docs/public-docs/app-developers/reference/rpc-providers.mdx"
+      ]
+    },
+    {
+      "title": "op-challenger: fix interop vm runner picking an unusable game L1 head",
+      "prNumber": 22727,
+      "type": "bugfix",
+      "body": "The vm runner's interop (`super-cannon-kona`) game inputs took the game L1 head from the node's `CurrentL1`, then handed it to a trace provider that only serves claims when `CurrentL1` is strictly *above* the game L1 head. Every run therefo",
+      "files": [
+        "op-challenger/runner/game_inputs.go",
+        "op-challenger/runner/game_inputs_test.go",
+        "op-challenger/runner/runner.go"
+      ]
+    },
+    {
+      "title": "ci: bump circleci-utils orb to 1.0.31 (stale-PR close-timing fix)",
+      "prNumber": 22723,
+      "type": "bugfix",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Matt Solomon** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1785529743297099?thread_ts=1785529743.297099&cid=C0BHEH8TG91)_\n\n**Before:** `scheduled-stale-check` runs the o",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
+      "title": "ci: bump apko factory pin to restore version stamping (#22426)",
+      "prNumber": 22722,
+      "type": "other",
+      "body": "Cherry pick of 30f5d5836c onto the v8.0.0 proposal branch",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 63.343760332396585,
+      "prScore": 33.40576033239658,
+      "issueScore": 2,
+      "reviewScore": 27.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/81847?u=577eaff0520b33aadc0f9fb6d11f5cdb2dd9486e&v=4",
+      "totalScore": 59.651489106683265,
+      "prScore": 59.45148910668326,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 42.8827738965761,
+      "prScore": 42.8827738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 39.93222459886074,
+      "prScore": 37.73222459886074,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 37.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 37,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 33.360977756962114,
+      "prScore": 33.360977756962114,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 25.76961228866811,
+      "prScore": 21.26961228866811,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 23.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 19,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 17.632718606542507,
+      "prScore": 17.432718606542508,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 10.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 8.155647914993239,
+      "prScore": 7.717647914993238,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Flotapponnier",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/160007691?u=cdb85b770f1f62a4443e52b978dc907ee60d1049&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "DamianFigiel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/68967763?u=6078a283b999cfb58ed7fafe94c2cb28b5ec88cc&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 10,
+  "mergedPRs": 9,
+  "newIssues": 2,
+  "closedIssues": 3,
+  "activeContributors": 26
 }
