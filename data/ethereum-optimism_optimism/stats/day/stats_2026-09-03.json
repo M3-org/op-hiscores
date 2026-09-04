@@ -5,41 +5,168 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-03 to 2026-09-04, ethereum-optimism/optimism had 1 new PRs (1 merged), 0 new issues, and 4 active contributors.",
-  "topIssues": [],
-  "topPRs": [
+  "overview": "From 2026-09-03 to 2026-09-04, ethereum-optimism/optimism had 17 new PRs (9 merged), 10 new issues, and 36 active contributors.",
+  "topIssues": [
     {
-      "id": "PR_kwDODjvEJM8AAAABB6rdjw",
-      "title": "op-challenger: record a stuck VM run as a timeout, not a setup failure",
-      "author": "OptimismBot",
-      "number": 22738,
-      "body": "## Description\n\nA stuck VM run in the challenger runner was being recorded as a *setup* failure instead of a VM failure ([thread](https://github.com/ethereum-optimism/optimism/pull/22732)-adjacent report from @ajsutton: \"this is getting stuck but being reported as a setup failure\").\n\nRoot cause: `runOnce` mapped a timeout to `ErrVMTimeout` only when `errors.Is(err, context.DeadlineExceeded)`. That never matches in practice. The VM timeout cancels the run's context, `RunCmd` sets `cmd.Cancel` to kill the VM's whole process group, and `Cmd.Wait` prefers the process's own exit error — so `cmd.Run()` returns an `*exec.ExitError` (\"signal: killed\") and the context error is discarded. Exit code is `-1`, not `2`, so it isn't `ErrVMPanic` either, and it falls through to the catch-all `else if err != nil` in `recordError` → `RecordSetupFailure`.\n\nThat misclassification is why nobody got paged. `challenger-runner-vm-failure` fires on any increase in `vm_failures_total[1h]`; `challenger-runner-setup-failure` needs `consecutive_setup_failures_current > 10` sustained for 30m. With the default 3h `--vm-timeout`, 11 consecutive stuck runs is ~33h before the alert window even opens.\n\n## Changes\n\n- Classify on the context's deadline state (`errors.Is(ctx.Err(), context.DeadlineExceeded)`) rather than the identity of the returned error. The original error is joined in so it still appears in logs and `ErrorIs` checks.\n- Apply the same check to `traceProviderCreator`, not just `provider.Get` — a hang fetching the prestate was also being counted as a setup failure.\n- `runner_test.go`'s `slowTraceProvider` returned `ctx.Err()` directly, which no real provider does; that is why the old check looked covered. It now returns the error a killed VM actually produces, plus tests for the provider-creation timeout and for a non-timeout failure still being reported as-is.\n\n## Tests\n\nUnit tests in `op-challenger/runner/runner_test.go`. I could not run `go test` in this sandbox (no Go toolchain, ~1Gi disk), so CI is the first real execution of these tests.\n\n## Additional context\n\nNot changed here, but worth a follow-up: `challenger-runner-setup-failure` in `ethereum-optimism/k8s` (`grafana-cloud/terraform-rules/challenger.yaml`) is far less sensitive than the VM-failure alert, so genuine setup failures still take ~a day of 3h runs to notify.\n\n## Metadata\n\nPrompted by: @pauldowman\n",
+      "id": "I_kwDODjvEJM8AAAABPbBOgA",
+      "title": "Deploy 3 Chain Benchmarking Regression Testing on Interop Staging Networks",
+      "author": "jelias2",
+      "number": 22745,
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-02T15:00:47Z",
-      "mergedAt": "2026-09-03T01:00:40Z",
-      "additions": 71,
-      "deletions": 3
+      "body": "# Description\nDeploy Interop Benchmarking similar to what was developed and deployed on interop-bench-4 by gunou to provide consistent benchmarks against interop staging environments",
+      "createdAt": "2026-09-02T22:30:43Z",
+      "closedAt": "2026-09-03T18:21:45Z",
+      "state": "CLOSED",
+      "commentCount": 1
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABB-43Jw",
-      "title": "docs: Correct the Kona interop prestate type",
-      "author": "ajsutton",
-      "number": 22746,
-      "body": "The merge tutorial points operators at the op-program `interop` prestate instead of the Kona interop prestate required by `SUPER_CANNON_KONA`. This correction directs operators to `cannon64-kona-interop` and prevents incorrect migration input selection.",
+      "id": "I_kwDODjvEJM8AAAABPkem6g",
+      "title": "Staging Interop Environment",
+      "author": "jelias2",
+      "number": 22763,
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-03T00:49:22Z",
+      "body": "# Description \nPlace holder issue to track sub issues of Interop Staging Environment Setup\n",
+      "createdAt": "2026-09-03T18:03:38Z",
+      "closedAt": "2026-09-03T18:04:33Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPgRlAg",
+      "title": "opgeth-decoupling: own the log layer — op-service/log becomes the monorepo logging API",
+      "author": "sebastianst",
+      "number": 22752,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of #21745 (§15 of the [op-geth decoupling doc](https://github.com/ethereum-optimism/optimism/blob/1657fbe391d3f37785a6a3609422ee79fe86d9fa/docs/ai/opgeth-decoupling.md#L416-L436)). **Blocks #20266.**\n\n`op-service/log` becomes the monorepo's logging API: no monorepo Go file imports `go-ethereum/log`. This is better layering regardless of the decoupling — the fork's `Logger.SetContext`/`WriteCtx`/`LogAttrs`/`Trace…ErrorContext` extensions are just what forces it.\n\n## Scope (measured at 1657fbe)\n\n- **697** monorepo Go files import `github.com/ethereum/go-ethereum/log` — op-node 121, op-service 82, op-challenger 71, op-e2e 65, op-dispute-mon 48, op-test-sequencer 42, op-devstack 37, op-chain-ops 36, op-deployer 33, op-supernode 27, op-batcher 21, op-conductor 20, and a long tail. (`superchain-registry/` is a submodule with its own Go module — out of scope, flagged to that team.)\n- **63** of those import *both* `geth/log` and `oplog`, so they need symbol-level dedup, not a blind import rewrite.\n- Only ~13 files use the fork's context extensions at all: [`op-service/testlog`](https://github.com/ethereum-optimism/optimism/blob/1657fbe391d3f37785a6a3609422ee79fe86d9fa/op-service/testlog/testlog.go), [`op-service/log/logfilter`](https://github.com/ethereum-optimism/optimism/tree/1657fbe391d3f37785a6a3609422ee79fe86d9fa/op-service/log/logfilter), `op-service/tls/tlsinfo.go`, `op-devstack/devtest`, plus a handful of call sites. Phase 2 is therefore small; phase 1 is the bulk.\n\n## PRs\n\n1. **`op-service/log`: add the `oplog` logger surface.** `type Logger = log.Logger` (alias) plus re-exports of the package-level API actually in use: `New`, `NewLogger`, `Root`, `SetDefault`, `With`, `Info/Warn/Error/Debug/Trace/Crit`, the `Level*`/`Lvl*` constants, `LevelFromString`, `FromLegacyLevel`, `DiscardHandler`, `NewTerminalHandler[WithLevel]`, `JSONHandler`, `LogfmtHandlerWithLevel`, `Handler`. Migrate `op-service` itself as the first consumer.\n2. **Tree-wide sweep + gate.** Rewrite the remaining ~615 files to `oplog`, dedup the 63 dual-import files, and add a lint/CI gate (golangci `depguard`, or a grep check) that fails any new `go-ethereum/log` import. Pure rename while the alias holds — zero behaviour change; build + test is the gate. Land fast to avoid rebase churn against everything in flight.\n3. **Flip the alias to an owned interface** *(at cutover)*. Replace the alias with an interface — upstream's method set plus the context methods — over an `slog`-backed implementation. Do **not** copy upstream's LGPL `log` package; the context-extension logic is OP-authored and ports over. Our interface is a superset of upstream's, so an `oplog.Logger` still satisfies `log.Logger` wherever we hand one into geth code (e.g. the in-process L1 geth in op-e2e).\n\nPRs 1–2 land now and are independent of the rest of the epic. PR 3 lands with or just before the go.mod flip.\n\n## Acceptance criteria\n\n- No monorepo Go file imports `go-ethereum/log`, enforced by a CI/lint gate.\n- `op-service/log/logfilter` and `op-service/testlog` build on the owned API with unchanged behaviour.\n- After PR 3, `op-service/log` has no `go-ethereum/log` dependency, and an `oplog.Logger` is still accepted by geth APIs taking `log.Logger`.\n\n🤖 *Co-created with Claude Opus 5 (1M context)*\n",
+      "createdAt": "2026-09-03T10:33:21Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPdIBVA",
+      "title": "[SECURITY] Optimism L2 - Security Assessment Findings",
+      "author": "group3vigil",
+      "number": 22748,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## [SECURITY] Optimism L2 - Security Assessment Findings\n\n**Report Date**: 2026-09-03  \n**Team**: AegisVale Security Research (VIAIE QuantCore)  \n**Target**: Optimism (ethereum-optimism/optimism)  \n\n---\n\n### Executive Summary\n\nWe have conducted a security assessment of the Optimism L2 protocol, focusing on the Bedrock contract architecture.\n\n### Areas of Concern\n\n| # | Severity | Component | Issue | Status |\n|---|----------|-----------|-------|--------|\n| 1 | Medium | L2 Output Oracle | Output root submission timing | Pending |\n| 2 | Medium | Sequencer | Sequencer centralization risk | Pending |\n| 3 | Low | Bridge | L1-L2 message passing edge cases | Pending |\n\n### Request for Full Disclosure\n\nWe request a secure channel for detailed technical disclosure.\n\n**Contact**: VIAIE QuantCore Team  \n**GPG Key**: Available upon request  \n\n---\n*Submitted by VIAIE QuantCore via OpenClaw*",
+      "createdAt": "2026-09-03T04:12:33Z",
+      "closedAt": "2026-09-03T04:16:26Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPm2VNA",
+      "title": "contracts-bedrock: audit prep for OPCMMigrator",
+      "author": "0xOneTony",
+      "number": 22772,
+      "repository": "ethereum-optimism/optimism",
+      "body": "### Audit prep for the the interop migration path and lockbox changes\n\n`ETHLockbox` becomes the pause identifier and is deployed on every chain through `upgrade()`, `SystemConfig`, `AnchorStateRegistry` and `DelayedWETH` resolve pause and guardian through it, and `OPContractsManagerMigrator` and its validator are hardened. All of it needs an external audit before the upgrade ships.\n\n- Define dates.\n- Define the scope as the diff of every changed contract.\n- Prepare the briefing: architecture before and after, invariants, known issues and their status, test coverage, out of scope.\n- Triage the findings and agree on a status for each.",
+      "createdAt": "2026-09-03T23:08:22Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABASml-A",
+      "title": "kona-sp1: extract observable proposer cycle",
+      "author": "Inphi",
+      "number": 22503,
+      "body": "## Summary\r\n\r\n- Extract a crate-private proposer cycle while preserving the immediate first poll and configured production cadence.\r\n- Separate work planning from spawning so each cycle can capture deterministic semantic diagnostics before workers start.\r\n- Add typed task identities and completion results with one shared finalization path for production reaping and scenario settlement.\r\n- Add test-only controls for direct ticks, exact task settlement, watchdog timeouts, and task-bound named barriers.\r\n\r\n## Why\r\n\r\nThis is the next change in a series that makes the kona-sp1-proposer deterministically scenario-testable. Building on #22483, it makes one complete proposer cycle directly drivable and observable without changing proposer policy, production polling behavior, or the real asynchronous workers.\r\n\r\n## Design notes\r\n\r\nThe snapshot is captured after completed tasks are reaped and new work is selected, but before new workers are spawned. Workers may finish immediately, so this boundary keeps observations deterministic while production still spawns the selected work in the same poll.\r\n\r\nTask operation, class, target, and deduplication identity are represented separately because they answer different questions: proposal and reconciliation share one creation slot, proving is deduplicated per game, and resolution and claim sweeps are independent singletons.\r\n\r\nScenario controls are compiled only for tests. Exact settlement uses the same finalization path as production reaping, while named barriers and a watchdog make asynchronous tests deterministic without sleeps or a second task-lifecycle implementation\r\n\r\n## Reviewer Consideration\r\n\r\nSome tests call `sync_state()`, directly arrange the cached proposer state, and then invoke `cycle()`. These tests intentionally characterize post-sync orchestration, but they do not verify that the arranged state would be produced through the normal synchronization path.\r\n\r\nA follow-up will introduce a stateful fake environment that scripts external inputs and drives these histories through normal ticks, covering the complete `sync -> reap -> plan -> snapshot -> spawn` sequence.\r\n\r\n\r\nPart of https://github.com/ethereum-optimism/optimism/issues/22171",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-19T14:02:42Z",
+      "mergedAt": "2026-09-03T21:22:25Z",
+      "additions": 2044,
+      "deletions": 490
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCEux6w",
+      "title": "op-devstack: support external L2 consensus-client slots",
+      "author": "teddyknox",
+      "number": 22757,
+      "body": "op-devstack currently makes alternate L2 consensus-client testing depend on a downstream fork because stock CL construction is embedded in its runtimes. This adds a product-neutral factory contract for single-chain and mixed-client slots while preserving existing behavior when no factory is configured.\n\nSupplying a factory intentionally opts into EL-first, sequencer-first CL selection so verifier source endpoints exist before a slot is selected; unsupported partial fallback from an external source to Kona fails closed. This is the first PR in the stack for #22756; follow-ups add the no-supernode two-L2 topology and staged startup API.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-03T14:58:25Z",
       "mergedAt": null,
-      "additions": 1,
-      "deletions": 1
+      "additions": 888,
+      "deletions": 366
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCD2VQw",
+      "title": "contracts-bedrock,op-deployer: retire legacy dispute games for new deployments",
+      "author": "lumoswiz",
+      "number": 22754,
+      "body": "**Description**\r\n\r\nMakes super-root dispute games mandatory for new OP chain deployments. Removes the `SUPER_ROOT_GAMES_MIGRATION` flag and legacy initial deployment paths across contracts, `op-deployer`, and fresh devstack configurations. Existing legacy games remain supported.\r\n\r\n`op-deployer` now prepares every chain with a SuperV1 anchor over the full dependency set, validates anchors before broadcast, and defaults an unset `respectedGameType` to `SUPER_PERMISSIONED`.\r\n\r\nThe batch upgrade gas test now covers 14 chains instead of 15 to remain below the EIP-7825 gas limit.\r\n\r\n**Tests**\r\n\r\n- `just pr`\r\n- `just lint-go`\r\n- Focused `op-deployer` and `op-core/devfeatures` tests\r\n\r\n**Context**\r\n\r\nPorts the intent of #22016 to the current code. Changes to `op-challenger` defaults remain tracked in #22571.\r\n\r\nPart of #22571\r\nCloses #21662",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-03T13:08:41Z",
+      "mergedAt": null,
+      "additions": 845,
+      "deletions": 2890
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCFNYPQ",
+      "title": "contracts-bedrock: pause identifier resolution",
+      "author": "0xOneTony",
+      "number": 22760,
+      "body": "**Description**\r\n\r\nMakes `ETHLockbox` the pause identifier for every OP chain, regardless of whether interop or a custom gas token is enabled.\r\nPreviously, pause resolution depended on chain configuration. This created multiple pause patterns and made shared contracts sensitive to which chain performed an upgrade.\r\n\r\nAfter this change, all chains enable an `ETHLockbox`. `OptimismPortal`, `SystemConfig`, `AnchorStateRegistry`, and `DelayedWETH` resolve pause state and guardian through that lockbox.\r\n\r\nChanges\r\n- Updates `ETHLockbox` to resolve global and scoped pauses through its `SuperchainConfig`.\r\n- Stores an `IETHLockbox` reference directly in `AnchorStateRegistry` and `DelayedWETH`.\r\n- Updates OPCMv2 to deploy or reuse, initialize, authorize, and enable an `ETHLockbox` for every chain.\r\n- Migrates legacy portal-held ETH when first enabling the lockbox.\r\n- Preserves existing lockbox bindings when upgrading members of an interop set.\r\n- Prevents `ETH_LOCKBOX` from being disabled after activation.\r\n- Extends deployment, migration, and standard validation for the universal lockbox configuration.\r\n- Updates contract snapshots and tests.\r\nCustom gas token chains use `ETHLockbox` as their pause identifier but do not use it for gas-token custody. Their portal balances are not migrated into the lockbox.\r\n\r\nSafety considerations\r\n- The lockbox address is the scoped pause identifier in `SuperchainConfig`.\r\n- An active legacy Portal-scoped pause prevents activation from changing the pause identifier.\r\n- A global pause remains active throughout the transition.\r\n- Legacy ETH liquidity is migrated only on first activation.\r\n- Repeated upgrades do not migrate liquidity again.\r\n- Shared dispute contracts retain their shared lockbox and `SuperchainConfig` bindings.\r\n- Validators require a nonzero lockbox with the expected implementation, proxy admin, `SuperchainConfig`, and Portal authorization.\r\n\r\nCloses https://github.com/ethereum-optimism/optimism/issues/22093 , https://github.com/ethereum-optimism/optimism/issues/22770",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-03T16:00:40Z",
+      "mergedAt": null,
+      "additions": 729,
+      "deletions": 538
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABB6NzAQ",
+      "title": "public-docs: drop unused wallet connector dependency subtree",
+      "author": "falcorocks",
+      "number": 22736,
+      "body": "## Summary\n\n- Bumps `@eth-optimism/actions-sdk` in `docs/public-docs` from `^0.4.0` to `^0.8.1`.\n- Since `actions-sdk` 0.8.0, the wallet connector peer dependencies (`@dynamic-labs/*`, `@privy-io/*`, `@turnkey/*`) are marked optional, so pnpm no longer auto-installs them. The entire unused subtree (~545 packages) leaves `pnpm-lock.yaml`.\n- Updates the two component source paths in `scripts/generate-actions-components.ts` that moved in the 0.8.x package layout (`WalletLendNamespace`, `WalletSwapNamespace`).\n- Regenerates the committed Actions SDK snippets under `snippets/actions/` against 0.8.1.\n\n## Security impact\n\nResolves the High severity Dependabot alert for `bigint-buffer` (GHSA-3gc7-fjrx-p6mg, buffer overflow in `toBigIntLE()`). No patched release of `bigint-buffer` exists; it entered the lockfile only through this unused wallet connector subtree, so removing the subtree is the only clean remediation.\n\n## Validation\n\n- `pnpm install` and `tsx scripts/generate-actions-components.ts` run cleanly against 0.8.1; all four component snippets regenerate.\n- `pnpm-lock.yaml` after the change: zero `bigint-buffer` entries; the only remaining `@dynamic-labs`/`@privy-io`/`@turnkey` mentions are peer dependency declarations inside the `actions-sdk` package entry, with no resolved packages.\n- The `socket.io-parser` and `sharp` overrides are unchanged; both packages left the dependency graph entirely with the removed subtree.\n- Note: `viem` resolves to 2.33.3 (previously 2.41.2) because `actions-sdk` 0.8.1 pins its `viem` peer to `>=2.33.0 <2.34.0`; `ox` follows `viem`. All other retained packages stay at the same or newer versions.\n\nPart of https://github.com/ethereum-optimism/cloud-security/issues/282\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-02T14:08:42Z",
+      "mergedAt": "2026-09-03T07:43:45Z",
+      "additions": 568,
+      "deletions": 8555
     }
   ],
   "codeChanges": {
-    "additions": 71,
-    "deletions": 3,
-    "files": 2,
-    "commitCount": 7
+    "additions": 2809,
+    "deletions": 9095,
+    "files": 21,
+    "commitCount": 94
   },
   "completedItems": [
+    {
+      "title": "kona-sp1: extract observable proposer cycle",
+      "prNumber": 22503,
+      "type": "other",
+      "body": "## Summary\r\n\r\n- Extract a crate-private proposer cycle while preserving the immediate first poll and configured production cadence.\r\n- Separate work planning from spawning so each cycle can capture deterministic semantic diagnostics before ",
+      "files": [
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/mod.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs"
+      ]
+    },
+    {
+      "title": "kona-genesis: Add the genesis offset to the block number from a timestamp",
+      "prNumber": 22732,
+      "type": "other",
+      "body": "`RollupConfig::block_number_from_timestamp` returned the count of L2 blocks elapsed since L2 genesis, not the absolute L2 block number. It was therefore wrong by `genesis.l2.number` on every chain migrated from a legacy chain. Its only call",
+      "files": [
+        "rust/kona/crates/protocol/genesis/src/rollup.rs"
+      ]
+    },
+    {
+      "title": "docs: Correct the Kona interop prestate type",
+      "prNumber": 22746,
+      "type": "docs",
+      "body": "The merge tutorial points operators at the op-program `interop` prestate instead of the Kona interop prestate required by `SUPER_CANNON_KONA`. This correction directs operators to `cannon64-kona-interop` and prevents incorrect migration inp",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx"
+      ]
+    },
     {
       "title": "op-challenger: record a stuck VM run as a timeout, not a setup failure",
       "prNumber": 22738,
@@ -49,9 +176,205 @@
         "op-challenger/runner/runner.go",
         "op-challenger/runner/runner_test.go"
       ]
+    },
+    {
+      "title": "public-docs: drop unused wallet connector dependency subtree",
+      "prNumber": 22736,
+      "type": "other",
+      "body": "## Summary\n\n- Bumps `@eth-optimism/actions-sdk` in `docs/public-docs` from `^0.4.0` to `^0.8.1`.\n- Since `actions-sdk` 0.8.0, the wallet connector peer dependencies (`@dynamic-labs/*`, `@privy-io/*`, `@turnkey/*`) are marked optional, so pn",
+      "files": [
+        "docs/public-docs/package.json",
+        "docs/public-docs/pnpm-lock.yaml",
+        "docs/public-docs/scripts/generate-actions-components.ts",
+        "docs/public-docs/snippets/actions/wallet-lend-namespace.mdx",
+        "docs/public-docs/snippets/actions/wallet-namespace.mdx",
+        "docs/public-docs/snippets/actions/wallet-swap-namespace.mdx",
+        "docs/public-docs/snippets/actions/wallet.mdx"
+      ]
+    },
+    {
+      "title": "kona-sp1: make proposer task IDs nonzero",
+      "prNumber": 22769,
+      "type": "other",
+      "body": "## Summary\r\n\r\n- Replace the proposer’s `u64` task ID alias with a `TaskId(NonZeroU64)` newtype.\r\n- Centralize task ID allocation and prevent counter wraparound through zero.\r\n- Update scenario helpers and tests to use the strongly typed ID.",
+      "files": [
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/mod.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs"
+      ]
+    },
+    {
+      "title": "kona-sp1-proposer: raise range split ceiling to 128",
+      "prNumber": 22762,
+      "type": "other",
+      "body": "The inherited 16-chunk ceiling is an application guard rather than a protocol or SP1 limit, and it prevents operators from experimenting with smaller proof ranges. This raises the configurable ceiling to 128 while preserving the default at ",
+      "files": [
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/src/config.rs"
+      ]
+    },
+    {
+      "title": "docs: update flashblocks spec links to subblocks",
+      "prNumber": 22755,
+      "type": "docs",
+      "body": "## Summary\n\n- Update public documentation links from the retired Flashblocks specification to the canonical Subblocks specification.\n- Point RPC guidance to the new `#json-rpc` section.\n- Preserve the planned 200 ms rollout timing while rem",
+      "files": [
+        "docs/public-docs/app-developers/guides/transactions/integrating-subblocks.mdx",
+        "docs/public-docs/notices/subblocks.mdx"
+      ]
+    },
+    {
+      "title": "security: Update module golang.org/x/crypto to v0.56.0 [SECURITY]",
+      "prNumber": 22750,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [golang.org/x/crypto](https://pkg.go.de",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 113.55584777376585,
+      "prScore": 113.55584777376585,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 78.31691425856522,
+      "prScore": 37.31691425856523,
+      "issueScore": 0,
+      "reviewScore": 41,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 75.99769635680104,
+      "prScore": 73.99769635680104,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 67.4725923224407,
+      "prScore": 42.47259232244071,
+      "issueScore": 2,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 56.6757738965761,
+      "prScore": 39.6757738965761,
+      "issueScore": 8,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 36.780873864173316,
+      "prScore": 26.780873864173312,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jdodinh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/43282168?u=9822a3c0838e8f7748c9aeb882ddce64bfcc9bed&v=4",
+      "totalScore": 36.23343100503877,
+      "prScore": 36.033431005038764,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 36.078773896576095,
+      "prScore": 36.078773896576095,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 35.56459866160058,
+      "prScore": 35.56459866160058,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 23.853949357461534,
+      "prScore": 8.415949357461537,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 23.304224577336218,
+      "prScore": 23.304224577336218,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 20.480823715925272,
+      "prScore": 20.042823715925273,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 12,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "shopcrazy852-del",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/318289851?u=e9d7647e5f60115d10b8efc05655663127119764&v=4",
+      "totalScore": 10.617651256490317,
+      "prScore": 10.617651256490317,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
@@ -61,11 +384,101 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 4.4399999999999995,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 4.3,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "group3vigil",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/308133151?v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 1,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 4
+  "newPRs": 17,
+  "mergedPRs": 9,
+  "newIssues": 10,
+  "closedIssues": 3,
+  "activeContributors": 36
 }

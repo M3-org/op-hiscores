@@ -5,17 +5,249 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-09-03 to 2026-09-04, ethereum-optimism/infra had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-09-03 to 2026-09-04, ethereum-optimism/infra had 3 new PRs (2 merged), 0 new issues, and 16 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ88AAAABCAlf-g",
+      "title": "security: Update dependency qs to v6.16.0 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 733,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [qs](https://redirect.github.com/ljharb/qs) | [`6.15.2` → `6.16.0`](https://renovatebot.com/diffs/npm/qs/6.15.2/6.16.0) | ![age](https://developer.mend.io/api/mc/badges/age/npm/qs/6.16.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/npm/qs/6.15.2/6.16.0?slim=true) |\n\n---\n\n### qs: Denial of Service via Attacker Controlled isBuffer\n[CVE-2026-82417](https://nvd.nist.gov/vuln/detail/CVE-2026-82417) / [GHSA-4mjr-xmp4-gh2g](https://redirect.github.com/advisories/GHSA-4mjr-xmp4-gh2g)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\n`qs.stringify()` calls `utils.isBuffer()` on every value it serializes, and `utils.isBuffer()` invokes `obj.constructor.isBuffer(obj)` without checking that it is callable. A value whose own `constructor.isBuffer` is a non-function makes `qs` call a non-callable and throw `TypeError`. Such a value is produced **by `qs.parse` itself** from an untrusted query string when `plainObjects: true` or `allowPrototypes: true` is set, so a pure-`qs` `parse` → `stringify` round-trip — no `JSON.parse` — turns an unauthenticated query string into an uncaught throw.\n\nAn attacker-controlled `parse` input reaches the host application's availability asset — via `qs`'s own recommended `plainObjects` mitigation — and triggers an uncaught exception during a `parse` → `stringify` round-trip.\n\n##### Details\n`utils.isBuffer` runs at `lib/stringify.js:127` for every serialized value:\n\n```js\nif (isNonNullishPrimitive(obj) || utils.isBuffer(obj)) { ... }\n```\n\n`utils.isBuffer` (`lib/utils.js:327-333`) invokes `obj.constructor.isBuffer` without verifying it is callable:\n\n```js\nvar isBuffer = function isBuffer(obj) {\n    if (!obj || typeof obj !== 'object') { return false; }\n    return !!(obj.constructor && obj.constructor.isBuffer && obj.constructor.isBuffer(obj));\n};\n```\n\n`constructor` and `isBuffer` are ordinary keys. `qs.parse` with `plainObjects: true` or `allowPrototypes: true` keeps them as own properties, so the parsed value carries a non-function `constructor.isBuffer`; `stringify` then calls a non-callable and throws `TypeError`. By contrast `utils.isRegExp` uses a brand check (`Object.prototype.toString`); the missing guard here is an internal inconsistency, not a platform limitation.\n\n##### Trust Boundary Note\n\n`qs.stringify` alone treats its input as caller-constructed, so serializing a hostile object could be argued outside its contract. This report does not depend on that framing: the malicious shape is produced by **`qs.parse`, whose input is untrusted by design**. `qs.parse` normally strips a `constructor` key via its prototype guard, but with the documented options `plainObjects: true` or `allowPrototypes: true` the key survives and lands as an own property. Feeding the parsed object back into `qs.stringify` — the standard round-trip in gateways and request-forwarders — then hits the unchecked call. \n\n##### PoC\n`poc02c_isBuffer_qs_only_roundtrip.js` — pure-`qs` chain, no `JSON.parse`; an untrusted query string alone reaches the throw:\n\n```js\n'use strict';\nvar qs = require('qs');\n\nvar untrustedQueryString = 'x%5Bconstructor%5D%5BisBuffer%5D=y'; // x[constructor][isBuffer]=y\n\nvar parsed = qs.parse(untrustedQueryString, { plainObjects: true });\nconsole.log('[parse] kept constructor key:', JSON.stringify(parsed));\n\ntry {\n    qs.stringify(parsed);\n    console.log('[stringify] no throw (unexpected)');\n} catch (e) {\n    console.log('[stringify] DoS reproduced ->', e.constructor.name + ':', e.message);\n}\n```\n\n`poc02_isBuffer.js` — the minimal defect:\n\n```js\n'use strict';\nvar qs = require('qs');\ntry {\n    qs.stringify(JSON.parse('{\"a\":{\"constructor\":{\"isBuffer\":\"x\"}}}'));\n} catch (e) {\n    console.log('[A] DoS reproduced ->', e.constructor.name + ':', e.message);\n}\n```\n\n`poc02b_isBuffer_async_crash.js` — worker death in an async sink:\n\n```js\n'use strict';\nvar qs = require('qs');\n\nfunction handleRequestAsync(clientJsonBody) {\n    try {\n        setImmediate(function () {                 // async continuation, outside the try\n            qs.stringify(JSON.parse(clientJsonBody)); // throws here, uncaught\n        });\n        console.log('[handler] returned 200 synchronously; async work scheduled');\n    } catch (e) {\n        console.log('[handler] caught synchronously (will NOT happen):', e.message);\n    }\n}\nprocess.on('exit', function (code) {\n    console.log('[proc] process exiting with code:', code);\n});\nhandleRequestAsync('{\"filters\":{\"constructor\":{\"isBuffer\":\"x\"}}}');\n```\n\n##### Execution Steps\n\n```bash\ncd poc\nnpm install qs@6.15.3\nnode poc02c_isBuffer_qs_only_roundtrip.js  # pure qs parse->stringify -> TypeError\nnode poc02_isBuffer.js                      # minimal defect -> TypeError inside stringify\nnode poc02b_isBuffer_async_crash.js         # async sink -> uncaught throw -> exit code 1\n```\n\n##### Reproduction Evidence\n\n`poc02c_isBuffer_qs_only_roundtrip.js` :\n\n```\n[parse] kept constructor key: {\"x\":{\"constructor\":{\"isBuffer\":\"y\"}}}\n[stringify] DoS reproduced -> TypeError: obj.constructor.isBuffer is not a function\n```\n\n`poc02_isBuffer.js`:\n\n```\n[A] DoS reproduced -> TypeError: obj.constructor.isBuffer is not a function\n```\n\n`poc02b_isBuffer_async_crash.js` :\n\n```\n[handler] returned 200 synchronously; async work scheduled\n[proc] process exiting with code: 1\nTypeError: obj.constructor.isBuffer is not a function\n    at Object.isBuffer (.../qs/lib/utils.js:332:78)\n    at stringify (.../qs/lib/stringify.js:127:45)\n=== EXIT CODE: 1 ===\n```\n\nThe pure-`qs` round-trip shows the malicious shape originates from `qs.parse` of an untrusted query string, with no `JSON.parse`. The synchronous `try/catch` in the async case does not catch the throw; the process exits with code 1, denying service to all requests on that worker.\n\n##### Impact\n\nAn unauthenticated request degrades any endpoint that re-serializes deserialized client data with `qs.stringify`. The primary impact is a per-request failure: the handler throws and the framework returns HTTP 500. Where the call sits in an unguarded async continuation, the throw escapes and the worker process exits, denying service to all requests it was handling, which means a higher impact that depends on the application's error handling, not on `qs`.\n\n##### Recommended Fix\n\nReplace the duck-type with a brand check mirroring `utils.isRegExp`:\n\n```js\nvar isBuffer = function isBuffer(obj) {\n    if (!obj || typeof obj !== 'object') { return false; }\n    if (typeof Buffer !== 'undefined' && typeof Buffer.isBuffer === 'function') {\n        return Buffer.isBuffer(obj);\n    }\n    return Object.prototype.toString.call(obj) === '[object Uint8Array]';\n};\n```\n\nIf duck-typing must remain, require `typeof obj.constructor.isBuffer === 'function'` before invoking and wrap the call in `try/catch`.\n\n#### Severity\n- CVSS Score: 6.3 / 10 (Medium)\n- Vector String: `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N`\n\n#### References\n- [https://github.com/ljharb/qs/security/advisories/GHSA-4mjr-xmp4-gh2g](https://redirect.github.com/ljharb/qs/security/advisories/GHSA-4mjr-xmp4-gh2g)\n- [https://nvd.nist.gov/vuln/detail/CVE-2026-82417](https://nvd.nist.gov/vuln/detail/CVE-2026-82417)\n- [https://github.com/ljharb/qs/commit/e83d321ffafb38cf210683ac31714fce6ce1c6c6](https://redirect.github.com/ljharb/qs/commit/e83d321ffafb38cf210683ac31714fce6ce1c6c6)\n- [https://github.com/ljharb/qs](https://redirect.github.com/ljharb/qs)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-4mjr-xmp4-gh2g) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### qs array-limit bypass via bracket-key comma parsing\n[CVE-2026-82562](https://nvd.nist.gov/vuln/detail/CVE-2026-82562) / [GHSA-x5fp-wj9c-mxmx](https://redirect.github.com/advisories/GHSA-x5fp-wj9c-mxmx)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\n`qs` `v6.15.3` allows bracket-key input to bypass `arrayLimit` and `throwOnLimitExceeded` when `comma: true`. The input `a[]=1,2,3,4` succeeds with `arrayLimit: 3`, while the equivalent plain-key input is rejected.\n\nAffected version tested:\n\n```text\nqs v6.15.3\ncommit 18d085e919dae70c8f1b200ab99323058edab2c2\n```\n\n##### Details\n\n`parseArrayValue()` enforces the comma limit only for flat values. The `a[]` form is marked non-flat, so its comma-separated value is wrapped after parsing and the inner array is not checked. A single parameter can therefore materialize arbitrarily large arrays.\n\n##### PoC\n\n```js\nconst qs = require('qs')\nconst options = { comma: true, arrayLimit: 3, throwOnLimitExceeded: true }\n\nconst result = qs.parse('a[]=1,2,3,4', options)\nconsole.log(result.a[0].length) // 4; expected RangeError\n\nconst big = qs.parse('a[]=' + '1,'.repeat(1000000) + '1', { comma: true, arrayLimit: 20 })\nconsole.log(big.a[0].length) // 1000001\n```\n\nOn `v6.15.3`, the first input parses successfully and the second creates an array with 1,000,001 elements. The equivalent `a=1,2,3,4` input throws `RangeError` as expected.\n\n##### Impact\n\nAn attacker who can supply a query string or form body can bypass configured array limits and force excessive memory allocation, causing denial of service. The limit must be applied after comma splitting and before the resulting array is wrapped.\n\n#### Severity\n- CVSS Score: 6.3 / 10 (Medium)\n- Vector String: `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N`\n\n#### References\n- [https://github.com/ljharb/qs/security/advisories/GHSA-w7fw-mjwx-w883](https://redirect.github.com/ljharb/qs/security/advisories/GHSA-w7fw-mjwx-w883)\n- [https://github.com/ljharb/qs/security/advisories/GHSA-x5fp-wj9c-mxmx](https://redirect.github.com/ljharb/qs/security/advisories/GHSA-x5fp-wj9c-mxmx)\n- [https://nvd.nist.gov/vuln/detail/CVE-2026-82562](https://nvd.nist.gov/vuln/detail/CVE-2026-82562)\n- [https://github.com/ljharb/qs/commit/8859c37470e11b42b547b275e4e9bd0bc8cc5464](https://redirect.github.com/ljharb/qs/commit/8859c37470e11b42b547b275e4e9bd0bc8cc5464)\n- [https://github.com/ljharb/qs](https://redirect.github.com/ljharb/qs)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-x5fp-wj9c-mxmx) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>ljharb/qs (qs)</summary>\n\n### [`v6.16.0`](https://redirect.github.com/ljharb/qs/blob/HEAD/CHANGELOG.md#6160)\n\n[Compare Source](https://redirect.github.com/ljharb/qs/compare/v6.15.3...v6.16.0)\n\n- \\[New] `stringify`: add a `depth` option to bound recursion depth (default `Infinity`)\n- \\[Fix] stringify: serialize Date values when a filter is provided\n- \\[Fix] `parse`: enforce `arrayLimit` on comma groups under `[]=` when `throwOnLimitExceeded` is set\n- \\[Fix] `parse`: flatten a collection appended to an overflowed array ([#&#8203;571](https://redirect.github.com/ljharb/qs/issues/571))\n- \\[Fix] `utils`: `isBuffer`: do not invoke a non-callable `constructor.isBuffer`\n- \\[Fix] `stringify`: do not let `allowEmptyArrays` skip cycle detection (or drop own keys) on an empty array with own properties\n- \\[Fix] `stringify`: encode dots in a top-level key with a primitive value when encodeDotInKeys is set ([#&#8203;562](https://redirect.github.com/ljharb/qs/issues/562))\n- \\[Docs] threat model: clarify `stringify` deep-nesting DoS is caller-bounded\n- \\[Docs] clarify `arrayLimit` is a representation threshold, not an element-count cap\n- \\[Tests] `parse`: remove a test that pinned `[]=` comma groups escaping `arrayLimit`\n- \\[Tests] `stringify`: pin current `encodeDotInKeys` separator-dot behavior\n- \\[Dev Deps] update `@ljharb/eslint-config`, `eslint`\n- \\[Dev Deps] update `eslint`, `evalmd`\n\n### [`v6.15.3`](https://redirect.github.com/ljharb/qs/blob/HEAD/CHANGELOG.md#6153)\n\n[Compare Source](https://redirect.github.com/ljharb/qs/compare/v6.15.2...v6.15.3)\n\n- \\[Fix] `parse`: enforce `throwOnLimitExceeded` for cumulative array growth via `combine`/`merge`\n- \\[Fix] `utils`: respect encoding of surrogate pairs across chunks ([#&#8203;559](https://redirect.github.com/ljharb/qs/issues/559))\n- \\[Robustness] `parse`: throw the `arrayLimit` error before splitting oversized comma values\n- \\[Robustness] `utils.merge` / `utils.assign`: avoid invoking `__proto__` setter when copying own properties\n- \\[Robustness] `utils`: enforce `arrayLimit` consistently across `merge`'s array paths\n- \\[Perf] `utils`: make `compact` O(n) via a side-channel visited-set instead of `Array.indexOf`\n- \\[Deps] update `side-channel`\n- \\[Dev Deps] update `eslint`, `mock-property`, `tape`\n- \\[Tests] `parse`: characterize current lenient handling of unbalanced bracket keys ([#&#8203;558](https://redirect.github.com/ljharb/qs/issues/558))\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-09-03T06:14:32Z",
+      "mergedAt": "2026-09-03T08:53:43Z",
+      "additions": 27,
+      "deletions": 7
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABCAl5Cg",
+      "title": "security: Update module golang.org/x/crypto to v0.56.0 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 734,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [golang.org/x/crypto](https://pkg.go.dev/golang.org/x/crypto) | [`v0.55.0` → `v0.56.0`](https://cs.opensource.google/go/x/crypto/+/refs/tags/v0.55.0...refs/tags/v0.56.0) | ![age](https://developer.mend.io/api/mc/badges/age/go/golang.org%2fx%2fcrypto/v0.56.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/go/golang.org%2fx%2fcrypto/v0.55.0/v0.56.0?slim=true) |\n\n---\n\n### Prevent DoS on deadlocked undecided channel in golang.org/x/crypto/ssh\n[CVE-2026-78662](https://nvd.nist.gov/vuln/detail/CVE-2026-78662) / [GO-2026-6354](https://pkg.go.dev/vuln/GO-2026-6354)\n\n<details>\n<summary>More information</summary>\n\n#### Details\nPreviously, a channel registered in the mux's chanList is not usable until it is established. A malicious peer was able flood the channel's incomingRequests, deadlocking the entire connection.\n\nNow, we add an atomic established state, set when a channel becomes usable. Until such a time, handlePacket drops every packet other than the open confirmation/failure, without blocking and without tearing down the connection.\n\n#### Severity\nUnknown\n\n#### References\n- [https://go.dev/issue/81316](https://go.dev/issue/81316)\n- [https://go.dev/cl/826504](https://go.dev/cl/826504)\n- [https://groups.google.com/g/golang-announce/c/1y3fb2np35U](https://groups.google.com/g/golang-announce/c/1y3fb2np35U)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GO-2026-6354) and the [Go Vulnerability Database](https://redirect.github.com/golang/vulndb) ([CC-BY 4.0](https://redirect.github.com/golang/vulndb#license)).\n</details>\n\n---\n\n### Prevent DoS on deadlocked established channel in golang.org/x/crypto/ssh\n[CVE-2026-56855](https://nvd.nist.gov/vuln/detail/CVE-2026-56855) / [GO-2026-6355](https://pkg.go.dev/vuln/GO-2026-6355)\n\n<details>\n<summary>More information</summary>\n\n#### Details\nPreviously, after a channel has been established, a malicious peer could send crafted messages that would deadlock the entire connection.\n\nNow, we handle all RFC 4254 channel messages; global requests are handled explicitly. Then, treat all other messages as a protocol error and tear the connection down instead of buffering and blocking.\n\n#### Severity\nUnknown\n\n#### References\n- [https://go.dev/issue/81317](https://go.dev/issue/81317)\n- [https://go.dev/cl/826524](https://go.dev/cl/826524)\n- [https://groups.google.com/g/golang-announce/c/1y3fb2np35U](https://groups.google.com/g/golang-announce/c/1y3fb2np35U)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GO-2026-6355) and the [Go Vulnerability Database](https://redirect.github.com/golang/vulndb) ([CC-BY 4.0](https://redirect.github.com/golang/vulndb#license)).\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-09-03T06:15:25Z",
+      "mergedAt": "2026-09-03T08:53:38Z",
+      "additions": 18,
+      "deletions": 18
+    },
+    {
+      "id": "PR_kwDOL-xLQ875lHas",
+      "title": "security: Update module github.com/pion/stun/v2 to v3 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 705,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [github.com/pion/stun/v2](https://redirect.github.com/pion/stun) | `v2.0.0` → `v3.0.0` | ![age](https://developer.mend.io/api/mc/badges/age/go/github.com%2fpion%2fstun%2fv2/v3.0.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/go/github.com%2fpion%2fstun%2fv2/v2.0.0/v3.0.0?slim=true) |\n\n---\n\n### Pion STUN vulnerable to remote denial of service via panic while parsing a malformed XOR-MAPPED-ADDRESS attribute\n[CVE-2026-54909](https://nvd.nist.gov/vuln/detail/CVE-2026-54909) / [GHSA-34rh-wp3j-6cxc](https://redirect.github.com/advisories/GHSA-34rh-wp3j-6cxc)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Impact\nRemote denial of service via panic while parsing a malformed XOR-MAPPED-ADDRESS attribute\n\n##### Patches\nUpgrade to v3.1.5 or later. This version includes this patch [https://github.com/pion/stun/pull/278](https://redirect.github.com/pion/stun/pull/278) which fixes the issue.\n\n##### Workarounds\nNo work around; please upgrade to v3.1.5 or a newer version.\n\n#### Severity\n- CVSS Score: 5.3 / 10 (Medium)\n- Vector String: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L`\n\n#### References\n- [https://github.com/pion/stun/security/advisories/GHSA-34rh-wp3j-6cxc](https://redirect.github.com/pion/stun/security/advisories/GHSA-34rh-wp3j-6cxc)\n- [https://github.com/pion/stun/pull/278](https://redirect.github.com/pion/stun/pull/278)\n- [https://github.com/pion/stun/commit/fa9f074a33a8059c76c960b1fbee39f308002423](https://redirect.github.com/pion/stun/commit/fa9f074a33a8059c76c960b1fbee39f308002423)\n- [https://github.com/pion/stun](https://redirect.github.com/pion/stun)\n- [https://github.com/pion/stun/releases/tag/v3.1.3](https://redirect.github.com/pion/stun/releases/tag/v3.1.3)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-34rh-wp3j-6cxc) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>pion/stun (github.com/pion/stun/v2)</summary>\n\n### [`v3.0.0`](https://redirect.github.com/pion/stun/compare/v2.0.0...v3.0.0)\n\n[Compare Source](https://redirect.github.com/pion/stun/compare/v2.0.0...v3.0.0)\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-08-02T06:58:08Z",
+      "mergedAt": null,
+      "additions": 15,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ875lHWQ",
+      "title": "security: Update module github.com/pion/dtls/v2 to v3 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 704,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [github.com/pion/dtls/v2](https://redirect.github.com/pion/dtls) | `v2.2.12` → `v3.0.0` | ![age](https://developer.mend.io/api/mc/badges/age/go/github.com%2fpion%2fdtls%2fv2/v3.0.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/go/github.com%2fpion%2fdtls%2fv2/v2.2.12/v3.0.0?slim=true) |\n\n---\n\n### Pion DTLS's usage of random nonce generation with AES GCM ciphers risks leaking the authentication key\n[CVE-2026-26014](https://nvd.nist.gov/vuln/detail/CVE-2026-26014) / [GHSA-9f3f-wv7r-qc8r](https://redirect.github.com/advisories/GHSA-9f3f-wv7r-qc8r) / [GO-2026-4479](https://pkg.go.dev/vuln/GO-2026-4479)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Impact\nPion DTLS versions v1.0.0 through v3.0.10 use random nonce generation with AES GCM ciphers, which makes it easier for remote attackers to obtain the authentication key and spoof data by leveraging the reuse of a nonce in a session and a \"forbidden attack\". \n\n##### Patches\nUpgrade to v3.1.1 or later. This version includes PR #&#8203;796, which uses the 64-bit sequence number to populate the `nonce_explicit` part of the GCM nonce. This is according to best practice outlined in [RFC 9325 section 7.2.1](https://www.rfc-editor.org/rfc/rfc9325#section-7.2.1). \n\nv3.0.11 is a backport patch supporting Go v1.21\n\n##### Workarounds\nThere are no workarounds without upgrading to version v3.0.11, v3.1.1 or later.\n\n##### References\nCommit fixing the bug: https://github.com/pion/dtls/commit/61762dee8217991882c5eb79856b9e7a73ee349f\nCommit fixing the bug (backport): 90e241c\nPull request: #&#8203;796\n\n#### Severity\n- CVSS Score: 5.9 / 10 (Medium)\n- Vector String: `CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N`\n\n#### References\n- [https://github.com/pion/dtls/security/advisories/GHSA-9f3f-wv7r-qc8r](https://redirect.github.com/pion/dtls/security/advisories/GHSA-9f3f-wv7r-qc8r)\n- [https://nvd.nist.gov/vuln/detail/CVE-2026-26014](https://nvd.nist.gov/vuln/detail/CVE-2026-26014)\n- [https://github.com/pion/dtls/pull/796](https://redirect.github.com/pion/dtls/pull/796)\n- [https://github.com/pion/dtls/commit/61762dee8217991882c5eb79856b9e7a73ee349f](https://redirect.github.com/pion/dtls/commit/61762dee8217991882c5eb79856b9e7a73ee349f)\n- [https://github.com/pion/dtls/commit/90e241cfec2985715efdd3d005972847462a67d6](https://redirect.github.com/pion/dtls/commit/90e241cfec2985715efdd3d005972847462a67d6)\n- [https://github.com/pion/dtls](https://redirect.github.com/pion/dtls)\n- [https://github.com/pion/dtls/releases/tag/v3.0.11](https://redirect.github.com/pion/dtls/releases/tag/v3.0.11)\n- [https://github.com/pion/dtls/releases/tag/v3.1.1](https://redirect.github.com/pion/dtls/releases/tag/v3.1.1)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-9f3f-wv7r-qc8r) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>pion/dtls (github.com/pion/dtls/v2)</summary>\n\n### [`v3.0.0`](https://redirect.github.com/pion/dtls/releases/tag/v3.0.0)\n\n[Compare Source](https://redirect.github.com/pion/dtls/compare/v2.2.12...v3.0.0)\n\nPion DTLS v3.0.0 is now available. Pion DTLS is a Go implementation of [DTLS](https://en.wikipedia.org/wiki/Datagram_Transport_Layer_Security). It allows for secure communication over UDP. It is commonly used for VPNs, WebRTC and other real-time protocols.\n\nThis release includes 115 commits from 17 authors. This release added [Connection Identifiers](https://datatracker.ietf.org/doc/rfc9146/), concurrent handshaking when Accepting inbound connections, Censorship Circumvention and better resilience against packet loss during handshaking.\n\nA special thank you to [kevmo314](https://redirect.github.com/kevmo314) and [hasheddan](https://redirect.github.com/hasheddan) for all their hard work on making this release happen.\n\nThis release contains breaking changes. Please read the following carefully, the breakage can't be caught at compile time. Each change will have a linked commit. Looking at `examples/` in the linked commit should show what code you need to change in your application.\n\n##### Breaking Changes\n\nBefore `/v2` Pion DTLS would handshake on Server or Client creation. This design caused the `Accept` implementation to be blocking. A new connection couldn't be accept until the previous one had finished.\nThis design also doesn't match the `crypto/tls` implementation in stdlib. This mismatch would cause frustration/confusion for users.\n\nNow the handshaking only occurs when `Read`,`Write` or `Handshake` is called. In most cases users shouldn't notice a difference.\nIf you do want a Handshake performed without a `Read` or `Write` this is the change needed.\n\n##### Before\n\n```go\n  dtlsConn, err := dtls.Client(dtlsEndpoint, dtlsConfig)\n  if err != nil {\n    // handle error\n  }\n\n  // Perform logic from negotiated SRTP Profile\n  srtpProfile, ok := dtlsConn.SelectedSRTPProtectionProfile()\n```\n\n##### After\n\n```go\n  dtlsConn, err = dtls.Client(dtlsEndpoint, dtlsEndpoint.RemoteAddr(), dtlsConfig)\n  if err != nil {\n    // handle error\n  }\n\n  err = dtlsConn.Handshake()\n  if err != nil {\n    // Explicitly perform handshake\n  }\n\n  // Perform logic from negotiated SRTP Profile\n  srtpProfile, ok := dtlsConn.SelectedSRTPProtectionProfile()\n\n```\n\nThis change was made in [e4064683](https://redirect.github.com/pion/dtls/commit/e4064683d277f946e5d1a4b359ca4e552c23131c)\n\n##### New Features\n\n##### Connection IDs\n\nConnection IDs is a new feature added to the DTLS protocol itself. This change allows for clients to change IPs/Ports during a session. This allows for devices to roam (like phones) or for low power devices to shut down and reconnect without losing their DTLS session!\n\nConnection ID generation is pluggable via the dtls.Config structure, and a random CID generator with a static size is provided for convenience. A [new example](https://redirect.github.com/pion/dtls/blob/master/examples/dial/cid/main.go) has been added to demonstrate this functionality.\n\nFor those interested in digging deeper into the full set of changes, the majority of work was done in [#&#8203;570](https://redirect.github.com/pion/dtls/pull/570).\n\n##### Censorship Circumvention\n\nSoftware that is used to circumvent censorship like [snowflake](https://snowflake.torproject.org/) uses Pion. To block this (and other) software goverments have looked for patterns and differences in Pion DTLS and [blocked it](https://www.wired.com/story/tor-browser-russia-blocks/).\n\nThis new release contains hooks that allows users to randomize and circumvent these blocks. Users can modify ClientHello, ServerHello and CertificateRequest. Users can also smuggle information in a ServerHello/ClientHello RandomBytes.\n\nYou can see them all here [here](https://redirect.github.com/pion/dtls/blob/master/config.go#L196-L214)\n\n##### Changelog\n\nThe complete log between v2.2.7 and v3.0.0:\n\n- [`0a8d838`](https://redirect.github.com/pion/dtls/commit/0a8d838) Prepare /v3\n- [`b6fd38e`](https://redirect.github.com/pion/dtls/commit/b6fd38e) Update module github.com/pion/transport/v3 to v3.0.5\n- [`e406468`](https://redirect.github.com/pion/dtls/commit/e406468) Perform handshake on first read/write\n- [`6178064`](https://redirect.github.com/pion/dtls/commit/6178064) Mark NULL and AES256CM SRTP ciphers as supported\n- [`bc3159a`](https://redirect.github.com/pion/dtls/commit/bc3159a) Added DTLS-SRTP IDs for NULL and AES256CM ciphers\n- [`d013d0c`](https://redirect.github.com/pion/dtls/commit/d013d0c) On Read Retransmit send FSM to SENDING\n- [`ec76652`](https://redirect.github.com/pion/dtls/commit/ec76652) Retransmit last flight when in finished\n- [`602dc71`](https://redirect.github.com/pion/dtls/commit/602dc71) Make localConnectionID thread safe\n- [`0a1b73a`](https://redirect.github.com/pion/dtls/commit/0a1b73a) Respect disableRetransmitBackoff\n- [`a6d9640`](https://redirect.github.com/pion/dtls/commit/a6d9640) Add OnConnectionAttempt to Config\n- [`48d6748`](https://redirect.github.com/pion/dtls/commit/48d6748) Implement retransmit backoff according to 4.2.4.1\n- [`45e16a0`](https://redirect.github.com/pion/dtls/commit/45e16a0) Update module golang.org/x/net to v0.26.0\n- [`a5d1fac`](https://redirect.github.com/pion/dtls/commit/a5d1fac) Flight3: respect curves configuration\n- [`61b3466`](https://redirect.github.com/pion/dtls/commit/61b3466) Add ability to select cert based on ch rand bytes\n- [`eddca22`](https://redirect.github.com/pion/dtls/commit/eddca22) Update module golang.org/x/crypto to v0.24.0\n- [`edc7ad0`](https://redirect.github.com/pion/dtls/commit/edc7ad0) Limit size of encrypted packet queue\n- [`fbbdf66`](https://redirect.github.com/pion/dtls/commit/fbbdf66) Update module golang.org/x/net to v0.25.0\n- [`efd6737`](https://redirect.github.com/pion/dtls/commit/efd6737) Add test for PSK and Identity\n- [`cb62aac`](https://redirect.github.com/pion/dtls/commit/cb62aac) Fix typo in test\n- [`494c1a3`](https://redirect.github.com/pion/dtls/commit/494c1a3) Remove testify dependency\n- [`adec94a`](https://redirect.github.com/pion/dtls/commit/adec94a) Update golang Docker tag to v1.22\n- [`8738ce1`](https://redirect.github.com/pion/dtls/commit/8738ce1) Add handshake hooking\n- [`2c36d63`](https://redirect.github.com/pion/dtls/commit/2c36d63) Update module golang.org/x/net to v0.24.0\n- [`d606c79`](https://redirect.github.com/pion/dtls/commit/d606c79) Update module golang.org/x/crypto to v0.22.0\n- [`f6f666e`](https://redirect.github.com/pion/dtls/commit/f6f666e) Update module golang.org/x/net to v0.23.0 \\[SECURITY]\n- [`e008bc4`](https://redirect.github.com/pion/dtls/commit/e008bc4) Update CI configs to v0.11.12\n- [`3e667b0`](https://redirect.github.com/pion/dtls/commit/3e667b0) Update go.mod version to 1.19\n- [`ae51db9`](https://redirect.github.com/pion/dtls/commit/ae51db9) Update CI configs to v0.11.7\n- [`8244c45`](https://redirect.github.com/pion/dtls/commit/8244c45) Update CI configs to v0.11.4\n- [`0ad9cfd`](https://redirect.github.com/pion/dtls/commit/0ad9cfd) Update module github.com/pion/transport/v3 to v3.0.2\n- [`8a93e0e`](https://redirect.github.com/pion/dtls/commit/8a93e0e) Fix TestErrorsTemporary\n- [`38e39e4`](https://redirect.github.com/pion/dtls/commit/38e39e4) Update module golang.org/x/net to v0.22.0\n- [`a245727`](https://redirect.github.com/pion/dtls/commit/a245727) Update module golang.org/x/crypto to v0.21.0\n- [`5e95b5c`](https://redirect.github.com/pion/dtls/commit/5e95b5c) Update module github.com/stretchr/testify to v1.9.0\n- [`35a00d3`](https://redirect.github.com/pion/dtls/commit/35a00d3) Fix linter errors\n- [`96b8c29`](https://redirect.github.com/pion/dtls/commit/96b8c29) Fix linter errors\n- [`2597464`](https://redirect.github.com/pion/dtls/commit/2597464) Update module golang.org/x/net to v0.20.0\n- [`42b6772`](https://redirect.github.com/pion/dtls/commit/42b6772) Update module golang.org/x/crypto to v0.18.0\n- [`bb54a30`](https://redirect.github.com/pion/dtls/commit/bb54a30) If not found in the cache return nil\n- [`3427819`](https://redirect.github.com/pion/dtls/commit/3427819) Format code\n- [`798b32a`](https://redirect.github.com/pion/dtls/commit/798b32a) Fix flight1parse processing exception\n- [`ba72fba`](https://redirect.github.com/pion/dtls/commit/ba72fba) Update CI configs to v0.11.3\n- [`520d84c`](https://redirect.github.com/pion/dtls/commit/520d84c) Update CI configs to v0.11.0\n- [`cfa868c`](https://redirect.github.com/pion/dtls/commit/cfa868c) Remove 'AUTHORS.txt' from README.md\n- [`b4a403c`](https://redirect.github.com/pion/dtls/commit/b4a403c) Remove 'Generate Authors' workflow\n- [`9ffd96c`](https://redirect.github.com/pion/dtls/commit/9ffd96c) Drop invalid record silently during handshake\n- [`3e8a7d7`](https://redirect.github.com/pion/dtls/commit/3e8a7d7) Update module golang.org/x/crypto to v0.17.0 \\[SECURITY]\n- [`dc751e3`](https://redirect.github.com/pion/dtls/commit/dc751e3) Update module golang.org/x/net to v0.19.0\n- [`3f3d833`](https://redirect.github.com/pion/dtls/commit/3f3d833) Update module golang.org/x/crypto to v0.16.0\n- [`a8f7062`](https://redirect.github.com/pion/dtls/commit/a8f7062) Use atomic to avoid stale SRTP protection profile\n- [`9cc3df9`](https://redirect.github.com/pion/dtls/commit/9cc3df9) Respect Algorithm value in CertificateRequest\n- [`7faf25f`](https://redirect.github.com/pion/dtls/commit/7faf25f) Update module golang.org/x/net to v0.17.0 \\[SECURITY]\n- [`c864545`](https://redirect.github.com/pion/dtls/commit/c864545) Update module golang.org/x/net to v0.15.0\n- [`28431d9`](https://redirect.github.com/pion/dtls/commit/28431d9) Export CipherSuiteID in connection State\n- [`8401874`](https://redirect.github.com/pion/dtls/commit/8401874) Update module golang.org/x/crypto to v0.13.0\n- [`744e27a`](https://redirect.github.com/pion/dtls/commit/744e27a) Update actions/checkout action to v4\n- [`2b584af`](https://redirect.github.com/pion/dtls/commit/2b584af) Specifying underlying type of conn ID atomic.Value\n- [`70caf30`](https://redirect.github.com/pion/dtls/commit/70caf30) Use atomic.Value to maintain Go 1.13 compatibility\n- [`60064c6`](https://redirect.github.com/pion/dtls/commit/60064c6) Update module github.com/pion/transport/v3 to v3.0.1\n- [`ef50d6b`](https://redirect.github.com/pion/dtls/commit/ef50d6b) Update AUTHORS.txt\n- [`7e5003a`](https://redirect.github.com/pion/dtls/commit/7e5003a) Update AUTHORS.txt\n- [`dbc7fd9`](https://redirect.github.com/pion/dtls/commit/dbc7fd9) Update module github.com/pion/transport/v3 to v3.0.0\n- [`a681f67`](https://redirect.github.com/pion/dtls/commit/a681f67) Correctly identify client and server with PSK ID\n- [`e85f106`](https://redirect.github.com/pion/dtls/commit/e85f106) Update module github.com/pion/transport/v2 to v2.2.2\n- [`7bf18f8`](https://redirect.github.com/pion/dtls/commit/7bf18f8) Update module golang.org/x/net to v0.14.0\n- [`609e5be`](https://redirect.github.com/pion/dtls/commit/609e5be) Clear CIDs on potential session resumption\n- [`e142ee1`](https://redirect.github.com/pion/dtls/commit/e142ee1) Serialize CIDs in state\n- [`37fbc04`](https://redirect.github.com/pion/dtls/commit/37fbc04) Add CID send only client example\n- [`6df50a6`](https://redirect.github.com/pion/dtls/commit/6df50a6) Add CID listener example\n- [`f5875c1`](https://redirect.github.com/pion/dtls/commit/f5875c1) Set UDP routing if CID is enabled\n- [`e663309`](https://redirect.github.com/pion/dtls/commit/e663309) Add CID routing unit tests\n- [`9db84b5`](https://redirect.github.com/pion/dtls/commit/9db84b5) Add CID based datagram routing\n- [`a8998af`](https://redirect.github.com/pion/dtls/commit/a8998af) Add UDP net.PacketListener unit tests\n- [`71db42b`](https://redirect.github.com/pion/dtls/commit/71db42b) Introduce UDP net.PacketListener\n- [`3afeb7d`](https://redirect.github.com/pion/dtls/commit/3afeb7d) Add PacketBuffer unit tests\n- [`eb305b1`](https://redirect.github.com/pion/dtls/commit/eb305b1) Introduce net PacketBuffer\n- [`703da0c`](https://redirect.github.com/pion/dtls/commit/703da0c) Consume net package in tests\n- [`4f53ce1`](https://redirect.github.com/pion/dtls/commit/4f53ce1) Introduce net package\n- [`f1d8b0a`](https://redirect.github.com/pion/dtls/commit/f1d8b0a) Wrap Alerts when CID is negotiated\n- [`3082313`](https://redirect.github.com/pion/dtls/commit/3082313) Convert nil CIDs to empty byte slice\n- [`83b1254`](https://redirect.github.com/pion/dtls/commit/83b1254) Fix name of cipher suite initialization function\n- [`818feb8`](https://redirect.github.com/pion/dtls/commit/818feb8) Set timeout to 10 minutes on e2e workflow\n- [`d29c6f0`](https://redirect.github.com/pion/dtls/commit/d29c6f0) Add basic connection ID generators\n- [`2f2bc8d`](https://redirect.github.com/pion/dtls/commit/2f2bc8d) Add e2e CID tests\n- [`ee04141`](https://redirect.github.com/pion/dtls/commit/ee04141) Update tests to wrap net.Conn\n- [`f960a37`](https://redirect.github.com/pion/dtls/commit/f960a37) Wrap net.Conn in DTLS listener\n- [`afb61f1`](https://redirect.github.com/pion/dtls/commit/afb61f1) Update DTLS Conn to use PacketConn and CID\n- [`d082911`](https://redirect.github.com/pion/dtls/commit/d082911) Add Conn to PacketConn utility\n- [`e5420de`](https://redirect.github.com/pion/dtls/commit/e5420de) Update handshaker to handle CID extension\n- [`8922879`](https://redirect.github.com/pion/dtls/commit/8922879) Update ciphersuites to support CIDs\n- [`8ba47cb`](https://redirect.github.com/pion/dtls/commit/8ba47cb) Implement AEAD additional data with CID\n- [`27fd131`](https://redirect.github.com/pion/dtls/commit/27fd131) Add local and remote CID to state\n- [`9a37bfd`](https://redirect.github.com/pion/dtls/commit/9a37bfd) Implement AddUint48 utility\n- [`1ce6f27`](https://redirect.github.com/pion/dtls/commit/1ce6f27) Add CID content type\n- [`6af61b1`](https://redirect.github.com/pion/dtls/commit/6af61b1) Allow packets to specify CID wrapped\n- [`b7b1e44`](https://redirect.github.com/pion/dtls/commit/b7b1e44) Add support for CID related generators\n- [`2005135`](https://redirect.github.com/pion/dtls/commit/2005135) Add support for parsing CID records\n- [`9e4a4e7`](https://redirect.github.com/pion/dtls/commit/9e4a4e7) Add DTLS connection ID extension\n- [`e9b3ce0`](https://redirect.github.com/pion/dtls/commit/e9b3ce0) Update pion/transport to latest\n- [`a1d270f`](https://redirect.github.com/pion/dtls/commit/a1d270f) Update module golang.org/x/crypto to v0.12.0\n- [`a6eca6c`](https://redirect.github.com/pion/dtls/commit/a6eca6c) Update CI configs to v0.10.11\n- [`eb34e7d`](https://redirect.github.com/pion/dtls/commit/eb34e7d) Update module golang.org/x/net to v0.13.0\n- [`c9eb5f2`](https://redirect.github.com/pion/dtls/commit/c9eb5f2) Update module golang.org/x/net to v0.12.0\n- [`b033847`](https://redirect.github.com/pion/dtls/commit/b033847) Clean up unneccessary nested logic\n- [`7307f62`](https://redirect.github.com/pion/dtls/commit/7307f62) Fix return of nil alertErrors\n- [`b905606`](https://redirect.github.com/pion/dtls/commit/b905606) Add unmarshal unit tests for extensions\n- [`0736d45`](https://redirect.github.com/pion/dtls/commit/0736d45) Fix parsing supported EC point formats\n- [`93704b3`](https://redirect.github.com/pion/dtls/commit/93704b3) Add Daniel Mangum to AUTHORS.txt\n- [`cabe5b8`](https://redirect.github.com/pion/dtls/commit/cabe5b8) Enable Supported Signature Algorithms\n- [`265bf11`](https://redirect.github.com/pion/dtls/commit/265bf11) Enable Elliptic Curve Supported Point Formats\n- [`d7303d0`](https://redirect.github.com/pion/dtls/commit/d7303d0) Wait for OpenSSL server shutdown in e2e test\n- [`159122f`](https://redirect.github.com/pion/dtls/commit/159122f) Update e2e Go image to 1.20\n- [`8a11cf2`](https://redirect.github.com/pion/dtls/commit/8a11cf2) Remove extraneous error checks in handshaker\n- [`4fc3d8f`](https://redirect.github.com/pion/dtls/commit/4fc3d8f) Update module golang.org/x/net to v0.11.0\n- [`4b76abf`](https://redirect.github.com/pion/dtls/commit/4b76abf) Update module golang.org/x/crypto to v0.10.0\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-08-02T06:58:00Z",
+      "mergedAt": null,
+      "additions": 10,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABCB-ilg",
+      "title": "ci: automerge renovate security PRs and run hourly",
+      "author": "falcorocks",
+      "number": 735,
+      "body": "## Summary\n\n- enable automerge for Renovate security PRs via the local config override; the shared preset is CVE-only, so this applies exclusively to vulnerability fixes with green required checks\n- move the Renovate schedule from daily to hourly (staggered minute per repository)\n- `rebaseWhen: behind-base-branch` so stale fix branches refresh themselves instead of waiting on manual rebases\n\n## Context\n\nSame configuration already running in other Project Zero repositories; this closes the advisory-to-fix loop from up to a day to about an hour, with no change for regular version updates (which remain disabled).",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-09-03T09:20:52Z",
+      "mergedAt": null,
+      "additions": 10,
+      "deletions": 2
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 45,
+    "deletions": 25,
+    "files": 14,
+    "commitCount": 10
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "security: Update module golang.org/x/crypto to v0.56.0 [SECURITY]",
+      "prNumber": 734,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [golang.org/x/crypto](https://pkg.go.de",
+      "files": [
+        "op-conductor-mon/go.mod",
+        "op-conductor-mon/go.sum",
+        "op-signer/go.mod",
+        "op-signer/go.sum",
+        "op-txproxy/go.mod",
+        "op-txproxy/go.sum",
+        "op-ufm/go.mod",
+        "op-ufm/go.sum",
+        "peer-mgmt-service/go.mod",
+        "peer-mgmt-service/go.sum",
+        "proxyd/go.mod",
+        "proxyd/go.sum"
+      ]
+    },
+    {
+      "title": "security: Update dependency qs to v6.16.0 [SECURITY]",
+      "prNumber": 733,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [qs](https://redirect.github.com/ljharb",
+      "files": [
+        "replica-healthcheck/package.json",
+        "replica-healthcheck/yarn.lock"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 113.55584777376585,
+      "prScore": 113.55584777376585,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 78.31691425856522,
+      "prScore": 37.31691425856523,
+      "issueScore": 0,
+      "reviewScore": 41,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 75.99769635680104,
+      "prScore": 73.99769635680104,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 67.4725923224407,
+      "prScore": 42.47259232244071,
+      "issueScore": 2,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 56.6757738965761,
+      "prScore": 39.6757738965761,
+      "issueScore": 8,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 36.780873864173316,
+      "prScore": 26.780873864173312,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jdodinh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/43282168?u=9822a3c0838e8f7748c9aeb882ddce64bfcc9bed&v=4",
+      "totalScore": 36.23343100503877,
+      "prScore": 36.033431005038764,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 36.078773896576095,
+      "prScore": 36.078773896576095,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 35.56459866160058,
+      "prScore": 35.56459866160058,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 23.853949357461534,
+      "prScore": 8.415949357461537,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 23.304224577336218,
+      "prScore": 23.304224577336218,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 20.480823715925272,
+      "prScore": 20.042823715925273,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 12,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "shopcrazy852-del",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/318289851?u=e9d7647e5f60115d10b8efc05655663127119764&v=4",
+      "totalScore": 10.617651256490317,
+      "prScore": 10.617651256490317,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
@@ -25,11 +257,101 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 4.4399999999999995,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 4.3,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "group3vigil",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/308133151?v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 3,
+  "mergedPRs": 2,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 16
 }

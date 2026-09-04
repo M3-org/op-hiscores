@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-09-01 to 2026-10-01, ethereum-optimism/infra had 3 new PRs (2 merged), 0 new issues, and 17 active contributors.",
+  "overview": "From 2026-09-01 to 2026-10-01, ethereum-optimism/infra had 6 new PRs (4 merged), 0 new issues, and 22 active contributors.",
   "topIssues": [],
   "topPRs": [
     {
@@ -17,8 +17,8 @@
       "repository": "ethereum-optimism/infra",
       "createdAt": "2026-09-02T15:02:47Z",
       "mergedAt": null,
-      "additions": 179,
-      "deletions": 363
+      "additions": 181,
+      "deletions": 401
     },
     {
       "id": "PR_kwDOL-xLQ88AAAABB2nTUg",
@@ -33,23 +33,47 @@
       "deletions": 44
     },
     {
-      "id": "PR_kwDOL-xLQ88AAAABB4Estw",
-      "title": "fix(deps): bump browserslist to 4.28.7",
-      "author": "falcorocks",
-      "number": 731,
-      "body": "## Summary\n\nAdds a `browserslist: ^4.28.7` entry to the existing `resolutions` field in `replica-healthcheck/package.json` and regenerates `replica-healthcheck/yarn.lock` with yarn classic. browserslist is a transitive dependency; the lockfile previously contained two entries (4.28.8 and 4.24.4), which now consolidate to a single 4.28.8 resolution.\n\n## Security impact\n\nResolves the High Dependabot alert GHSA-73wf-gq98-2v4g (alert 375) against browserslist in `replica-healthcheck/yarn.lock`. First patched version is 4.28.7. The two grpc alerts are addressed separately.\n\n## Validation\n\n- `grep` confirms no browserslist entry below 4.28.7 remains in `replica-healthcheck/yarn.lock`.\n- The lockfile diff contains no version downgrades: the only version change is browserslist 4.24.4 -> 4.28.8; remaining hunks are range-key consolidation with unchanged resolved versions.\n- `yarn install` completes successfully with the updated lockfile.\n\nPart of https://github.com/ethereum-optimism/cloud-security/issues/280",
+      "id": "PR_kwDOL-xLQ88AAAABCAlf-g",
+      "title": "security: Update dependency qs to v6.16.0 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 733,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [qs](https://redirect.github.com/ljharb/qs) | [`6.15.2` → `6.16.0`](https://renovatebot.com/diffs/npm/qs/6.15.2/6.16.0) | ![age](https://developer.mend.io/api/mc/badges/age/npm/qs/6.16.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/npm/qs/6.15.2/6.16.0?slim=true) |\n\n---\n\n### qs: Denial of Service via Attacker Controlled isBuffer\n[CVE-2026-82417](https://nvd.nist.gov/vuln/detail/CVE-2026-82417) / [GHSA-4mjr-xmp4-gh2g](https://redirect.github.com/advisories/GHSA-4mjr-xmp4-gh2g)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\n`qs.stringify()` calls `utils.isBuffer()` on every value it serializes, and `utils.isBuffer()` invokes `obj.constructor.isBuffer(obj)` without checking that it is callable. A value whose own `constructor.isBuffer` is a non-function makes `qs` call a non-callable and throw `TypeError`. Such a value is produced **by `qs.parse` itself** from an untrusted query string when `plainObjects: true` or `allowPrototypes: true` is set, so a pure-`qs` `parse` → `stringify` round-trip — no `JSON.parse` — turns an unauthenticated query string into an uncaught throw.\n\nAn attacker-controlled `parse` input reaches the host application's availability asset — via `qs`'s own recommended `plainObjects` mitigation — and triggers an uncaught exception during a `parse` → `stringify` round-trip.\n\n##### Details\n`utils.isBuffer` runs at `lib/stringify.js:127` for every serialized value:\n\n```js\nif (isNonNullishPrimitive(obj) || utils.isBuffer(obj)) { ... }\n```\n\n`utils.isBuffer` (`lib/utils.js:327-333`) invokes `obj.constructor.isBuffer` without verifying it is callable:\n\n```js\nvar isBuffer = function isBuffer(obj) {\n    if (!obj || typeof obj !== 'object') { return false; }\n    return !!(obj.constructor && obj.constructor.isBuffer && obj.constructor.isBuffer(obj));\n};\n```\n\n`constructor` and `isBuffer` are ordinary keys. `qs.parse` with `plainObjects: true` or `allowPrototypes: true` keeps them as own properties, so the parsed value carries a non-function `constructor.isBuffer`; `stringify` then calls a non-callable and throws `TypeError`. By contrast `utils.isRegExp` uses a brand check (`Object.prototype.toString`); the missing guard here is an internal inconsistency, not a platform limitation.\n\n##### Trust Boundary Note\n\n`qs.stringify` alone treats its input as caller-constructed, so serializing a hostile object could be argued outside its contract. This report does not depend on that framing: the malicious shape is produced by **`qs.parse`, whose input is untrusted by design**. `qs.parse` normally strips a `constructor` key via its prototype guard, but with the documented options `plainObjects: true` or `allowPrototypes: true` the key survives and lands as an own property. Feeding the parsed object back into `qs.stringify` — the standard round-trip in gateways and request-forwarders — then hits the unchecked call. \n\n##### PoC\n`poc02c_isBuffer_qs_only_roundtrip.js` — pure-`qs` chain, no `JSON.parse`; an untrusted query string alone reaches the throw:\n\n```js\n'use strict';\nvar qs = require('qs');\n\nvar untrustedQueryString = 'x%5Bconstructor%5D%5BisBuffer%5D=y'; // x[constructor][isBuffer]=y\n\nvar parsed = qs.parse(untrustedQueryString, { plainObjects: true });\nconsole.log('[parse] kept constructor key:', JSON.stringify(parsed));\n\ntry {\n    qs.stringify(parsed);\n    console.log('[stringify] no throw (unexpected)');\n} catch (e) {\n    console.log('[stringify] DoS reproduced ->', e.constructor.name + ':', e.message);\n}\n```\n\n`poc02_isBuffer.js` — the minimal defect:\n\n```js\n'use strict';\nvar qs = require('qs');\ntry {\n    qs.stringify(JSON.parse('{\"a\":{\"constructor\":{\"isBuffer\":\"x\"}}}'));\n} catch (e) {\n    console.log('[A] DoS reproduced ->', e.constructor.name + ':', e.message);\n}\n```\n\n`poc02b_isBuffer_async_crash.js` — worker death in an async sink:\n\n```js\n'use strict';\nvar qs = require('qs');\n\nfunction handleRequestAsync(clientJsonBody) {\n    try {\n        setImmediate(function () {                 // async continuation, outside the try\n            qs.stringify(JSON.parse(clientJsonBody)); // throws here, uncaught\n        });\n        console.log('[handler] returned 200 synchronously; async work scheduled');\n    } catch (e) {\n        console.log('[handler] caught synchronously (will NOT happen):', e.message);\n    }\n}\nprocess.on('exit', function (code) {\n    console.log('[proc] process exiting with code:', code);\n});\nhandleRequestAsync('{\"filters\":{\"constructor\":{\"isBuffer\":\"x\"}}}');\n```\n\n##### Execution Steps\n\n```bash\ncd poc\nnpm install qs@6.15.3\nnode poc02c_isBuffer_qs_only_roundtrip.js  # pure qs parse->stringify -> TypeError\nnode poc02_isBuffer.js                      # minimal defect -> TypeError inside stringify\nnode poc02b_isBuffer_async_crash.js         # async sink -> uncaught throw -> exit code 1\n```\n\n##### Reproduction Evidence\n\n`poc02c_isBuffer_qs_only_roundtrip.js` :\n\n```\n[parse] kept constructor key: {\"x\":{\"constructor\":{\"isBuffer\":\"y\"}}}\n[stringify] DoS reproduced -> TypeError: obj.constructor.isBuffer is not a function\n```\n\n`poc02_isBuffer.js`:\n\n```\n[A] DoS reproduced -> TypeError: obj.constructor.isBuffer is not a function\n```\n\n`poc02b_isBuffer_async_crash.js` :\n\n```\n[handler] returned 200 synchronously; async work scheduled\n[proc] process exiting with code: 1\nTypeError: obj.constructor.isBuffer is not a function\n    at Object.isBuffer (.../qs/lib/utils.js:332:78)\n    at stringify (.../qs/lib/stringify.js:127:45)\n=== EXIT CODE: 1 ===\n```\n\nThe pure-`qs` round-trip shows the malicious shape originates from `qs.parse` of an untrusted query string, with no `JSON.parse`. The synchronous `try/catch` in the async case does not catch the throw; the process exits with code 1, denying service to all requests on that worker.\n\n##### Impact\n\nAn unauthenticated request degrades any endpoint that re-serializes deserialized client data with `qs.stringify`. The primary impact is a per-request failure: the handler throws and the framework returns HTTP 500. Where the call sits in an unguarded async continuation, the throw escapes and the worker process exits, denying service to all requests it was handling, which means a higher impact that depends on the application's error handling, not on `qs`.\n\n##### Recommended Fix\n\nReplace the duck-type with a brand check mirroring `utils.isRegExp`:\n\n```js\nvar isBuffer = function isBuffer(obj) {\n    if (!obj || typeof obj !== 'object') { return false; }\n    if (typeof Buffer !== 'undefined' && typeof Buffer.isBuffer === 'function') {\n        return Buffer.isBuffer(obj);\n    }\n    return Object.prototype.toString.call(obj) === '[object Uint8Array]';\n};\n```\n\nIf duck-typing must remain, require `typeof obj.constructor.isBuffer === 'function'` before invoking and wrap the call in `try/catch`.\n\n#### Severity\n- CVSS Score: 6.3 / 10 (Medium)\n- Vector String: `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N`\n\n#### References\n- [https://github.com/ljharb/qs/security/advisories/GHSA-4mjr-xmp4-gh2g](https://redirect.github.com/ljharb/qs/security/advisories/GHSA-4mjr-xmp4-gh2g)\n- [https://nvd.nist.gov/vuln/detail/CVE-2026-82417](https://nvd.nist.gov/vuln/detail/CVE-2026-82417)\n- [https://github.com/ljharb/qs/commit/e83d321ffafb38cf210683ac31714fce6ce1c6c6](https://redirect.github.com/ljharb/qs/commit/e83d321ffafb38cf210683ac31714fce6ce1c6c6)\n- [https://github.com/ljharb/qs](https://redirect.github.com/ljharb/qs)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-4mjr-xmp4-gh2g) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### qs array-limit bypass via bracket-key comma parsing\n[CVE-2026-82562](https://nvd.nist.gov/vuln/detail/CVE-2026-82562) / [GHSA-x5fp-wj9c-mxmx](https://redirect.github.com/advisories/GHSA-x5fp-wj9c-mxmx)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\n`qs` `v6.15.3` allows bracket-key input to bypass `arrayLimit` and `throwOnLimitExceeded` when `comma: true`. The input `a[]=1,2,3,4` succeeds with `arrayLimit: 3`, while the equivalent plain-key input is rejected.\n\nAffected version tested:\n\n```text\nqs v6.15.3\ncommit 18d085e919dae70c8f1b200ab99323058edab2c2\n```\n\n##### Details\n\n`parseArrayValue()` enforces the comma limit only for flat values. The `a[]` form is marked non-flat, so its comma-separated value is wrapped after parsing and the inner array is not checked. A single parameter can therefore materialize arbitrarily large arrays.\n\n##### PoC\n\n```js\nconst qs = require('qs')\nconst options = { comma: true, arrayLimit: 3, throwOnLimitExceeded: true }\n\nconst result = qs.parse('a[]=1,2,3,4', options)\nconsole.log(result.a[0].length) // 4; expected RangeError\n\nconst big = qs.parse('a[]=' + '1,'.repeat(1000000) + '1', { comma: true, arrayLimit: 20 })\nconsole.log(big.a[0].length) // 1000001\n```\n\nOn `v6.15.3`, the first input parses successfully and the second creates an array with 1,000,001 elements. The equivalent `a=1,2,3,4` input throws `RangeError` as expected.\n\n##### Impact\n\nAn attacker who can supply a query string or form body can bypass configured array limits and force excessive memory allocation, causing denial of service. The limit must be applied after comma splitting and before the resulting array is wrapped.\n\n#### Severity\n- CVSS Score: 6.3 / 10 (Medium)\n- Vector String: `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N`\n\n#### References\n- [https://github.com/ljharb/qs/security/advisories/GHSA-w7fw-mjwx-w883](https://redirect.github.com/ljharb/qs/security/advisories/GHSA-w7fw-mjwx-w883)\n- [https://github.com/ljharb/qs/security/advisories/GHSA-x5fp-wj9c-mxmx](https://redirect.github.com/ljharb/qs/security/advisories/GHSA-x5fp-wj9c-mxmx)\n- [https://nvd.nist.gov/vuln/detail/CVE-2026-82562](https://nvd.nist.gov/vuln/detail/CVE-2026-82562)\n- [https://github.com/ljharb/qs/commit/8859c37470e11b42b547b275e4e9bd0bc8cc5464](https://redirect.github.com/ljharb/qs/commit/8859c37470e11b42b547b275e4e9bd0bc8cc5464)\n- [https://github.com/ljharb/qs](https://redirect.github.com/ljharb/qs)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-x5fp-wj9c-mxmx) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>ljharb/qs (qs)</summary>\n\n### [`v6.16.0`](https://redirect.github.com/ljharb/qs/blob/HEAD/CHANGELOG.md#6160)\n\n[Compare Source](https://redirect.github.com/ljharb/qs/compare/v6.15.3...v6.16.0)\n\n- \\[New] `stringify`: add a `depth` option to bound recursion depth (default `Infinity`)\n- \\[Fix] stringify: serialize Date values when a filter is provided\n- \\[Fix] `parse`: enforce `arrayLimit` on comma groups under `[]=` when `throwOnLimitExceeded` is set\n- \\[Fix] `parse`: flatten a collection appended to an overflowed array ([#&#8203;571](https://redirect.github.com/ljharb/qs/issues/571))\n- \\[Fix] `utils`: `isBuffer`: do not invoke a non-callable `constructor.isBuffer`\n- \\[Fix] `stringify`: do not let `allowEmptyArrays` skip cycle detection (or drop own keys) on an empty array with own properties\n- \\[Fix] `stringify`: encode dots in a top-level key with a primitive value when encodeDotInKeys is set ([#&#8203;562](https://redirect.github.com/ljharb/qs/issues/562))\n- \\[Docs] threat model: clarify `stringify` deep-nesting DoS is caller-bounded\n- \\[Docs] clarify `arrayLimit` is a representation threshold, not an element-count cap\n- \\[Tests] `parse`: remove a test that pinned `[]=` comma groups escaping `arrayLimit`\n- \\[Tests] `stringify`: pin current `encodeDotInKeys` separator-dot behavior\n- \\[Dev Deps] update `@ljharb/eslint-config`, `eslint`\n- \\[Dev Deps] update `eslint`, `evalmd`\n\n### [`v6.15.3`](https://redirect.github.com/ljharb/qs/blob/HEAD/CHANGELOG.md#6153)\n\n[Compare Source](https://redirect.github.com/ljharb/qs/compare/v6.15.2...v6.15.3)\n\n- \\[Fix] `parse`: enforce `throwOnLimitExceeded` for cumulative array growth via `combine`/`merge`\n- \\[Fix] `utils`: respect encoding of surrogate pairs across chunks ([#&#8203;559](https://redirect.github.com/ljharb/qs/issues/559))\n- \\[Robustness] `parse`: throw the `arrayLimit` error before splitting oversized comma values\n- \\[Robustness] `utils.merge` / `utils.assign`: avoid invoking `__proto__` setter when copying own properties\n- \\[Robustness] `utils`: enforce `arrayLimit` consistently across `merge`'s array paths\n- \\[Perf] `utils`: make `compact` O(n) via a side-channel visited-set instead of `Array.indexOf`\n- \\[Deps] update `side-channel`\n- \\[Dev Deps] update `eslint`, `mock-property`, `tape`\n- \\[Tests] `parse`: characterize current lenient handling of unbalanced bracket keys ([#&#8203;558](https://redirect.github.com/ljharb/qs/issues/558))\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
       "repository": "ethereum-optimism/infra",
-      "createdAt": "2026-09-02T09:47:41Z",
-      "mergedAt": "2026-09-02T10:23:03Z",
-      "additions": 6,
-      "deletions": 15
+      "createdAt": "2026-09-03T06:14:32Z",
+      "mergedAt": "2026-09-03T08:53:43Z",
+      "additions": 27,
+      "deletions": 7
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABCAl5Cg",
+      "title": "security: Update module golang.org/x/crypto to v0.56.0 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 734,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [golang.org/x/crypto](https://pkg.go.dev/golang.org/x/crypto) | [`v0.55.0` → `v0.56.0`](https://cs.opensource.google/go/x/crypto/+/refs/tags/v0.55.0...refs/tags/v0.56.0) | ![age](https://developer.mend.io/api/mc/badges/age/go/golang.org%2fx%2fcrypto/v0.56.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/go/golang.org%2fx%2fcrypto/v0.55.0/v0.56.0?slim=true) |\n\n---\n\n### Prevent DoS on deadlocked undecided channel in golang.org/x/crypto/ssh\n[CVE-2026-78662](https://nvd.nist.gov/vuln/detail/CVE-2026-78662) / [GO-2026-6354](https://pkg.go.dev/vuln/GO-2026-6354)\n\n<details>\n<summary>More information</summary>\n\n#### Details\nPreviously, a channel registered in the mux's chanList is not usable until it is established. A malicious peer was able flood the channel's incomingRequests, deadlocking the entire connection.\n\nNow, we add an atomic established state, set when a channel becomes usable. Until such a time, handlePacket drops every packet other than the open confirmation/failure, without blocking and without tearing down the connection.\n\n#### Severity\nUnknown\n\n#### References\n- [https://go.dev/issue/81316](https://go.dev/issue/81316)\n- [https://go.dev/cl/826504](https://go.dev/cl/826504)\n- [https://groups.google.com/g/golang-announce/c/1y3fb2np35U](https://groups.google.com/g/golang-announce/c/1y3fb2np35U)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GO-2026-6354) and the [Go Vulnerability Database](https://redirect.github.com/golang/vulndb) ([CC-BY 4.0](https://redirect.github.com/golang/vulndb#license)).\n</details>\n\n---\n\n### Prevent DoS on deadlocked established channel in golang.org/x/crypto/ssh\n[CVE-2026-56855](https://nvd.nist.gov/vuln/detail/CVE-2026-56855) / [GO-2026-6355](https://pkg.go.dev/vuln/GO-2026-6355)\n\n<details>\n<summary>More information</summary>\n\n#### Details\nPreviously, after a channel has been established, a malicious peer could send crafted messages that would deadlock the entire connection.\n\nNow, we handle all RFC 4254 channel messages; global requests are handled explicitly. Then, treat all other messages as a protocol error and tear the connection down instead of buffering and blocking.\n\n#### Severity\nUnknown\n\n#### References\n- [https://go.dev/issue/81317](https://go.dev/issue/81317)\n- [https://go.dev/cl/826524](https://go.dev/cl/826524)\n- [https://groups.google.com/g/golang-announce/c/1y3fb2np35U](https://groups.google.com/g/golang-announce/c/1y3fb2np35U)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GO-2026-6355) and the [Go Vulnerability Database](https://redirect.github.com/golang/vulndb) ([CC-BY 4.0](https://redirect.github.com/golang/vulndb#license)).\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-09-03T06:15:25Z",
+      "mergedAt": "2026-09-03T08:53:38Z",
+      "additions": 18,
+      "deletions": 18
+    },
+    {
+      "id": "PR_kwDOL-xLQ875lHas",
+      "title": "security: Update module github.com/pion/stun/v2 to v3 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 705,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [github.com/pion/stun/v2](https://redirect.github.com/pion/stun) | `v2.0.0` → `v3.0.0` | ![age](https://developer.mend.io/api/mc/badges/age/go/github.com%2fpion%2fstun%2fv2/v3.0.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/go/github.com%2fpion%2fstun%2fv2/v2.0.0/v3.0.0?slim=true) |\n\n---\n\n### Pion STUN vulnerable to remote denial of service via panic while parsing a malformed XOR-MAPPED-ADDRESS attribute\n[CVE-2026-54909](https://nvd.nist.gov/vuln/detail/CVE-2026-54909) / [GHSA-34rh-wp3j-6cxc](https://redirect.github.com/advisories/GHSA-34rh-wp3j-6cxc)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Impact\nRemote denial of service via panic while parsing a malformed XOR-MAPPED-ADDRESS attribute\n\n##### Patches\nUpgrade to v3.1.5 or later. This version includes this patch [https://github.com/pion/stun/pull/278](https://redirect.github.com/pion/stun/pull/278) which fixes the issue.\n\n##### Workarounds\nNo work around; please upgrade to v3.1.5 or a newer version.\n\n#### Severity\n- CVSS Score: 5.3 / 10 (Medium)\n- Vector String: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L`\n\n#### References\n- [https://github.com/pion/stun/security/advisories/GHSA-34rh-wp3j-6cxc](https://redirect.github.com/pion/stun/security/advisories/GHSA-34rh-wp3j-6cxc)\n- [https://github.com/pion/stun/pull/278](https://redirect.github.com/pion/stun/pull/278)\n- [https://github.com/pion/stun/commit/fa9f074a33a8059c76c960b1fbee39f308002423](https://redirect.github.com/pion/stun/commit/fa9f074a33a8059c76c960b1fbee39f308002423)\n- [https://github.com/pion/stun](https://redirect.github.com/pion/stun)\n- [https://github.com/pion/stun/releases/tag/v3.1.3](https://redirect.github.com/pion/stun/releases/tag/v3.1.3)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-34rh-wp3j-6cxc) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>pion/stun (github.com/pion/stun/v2)</summary>\n\n### [`v3.0.0`](https://redirect.github.com/pion/stun/compare/v2.0.0...v3.0.0)\n\n[Compare Source](https://redirect.github.com/pion/stun/compare/v2.0.0...v3.0.0)\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Disabled by config. Please merge this manually once you are satisfied.\n\n♻ **Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-08-02T06:58:08Z",
+      "mergedAt": null,
+      "additions": 15,
+      "deletions": 0
     }
   ],
   "codeChanges": {
-    "additions": 50,
-    "deletions": 59,
-    "files": 7,
-    "commitCount": 9
+    "additions": 95,
+    "deletions": 84,
+    "files": 15,
+    "commitCount": 19
   },
   "completedItems": [
     {
@@ -74,9 +98,49 @@
         "op-ufm/go.mod",
         "op-ufm/go.sum"
       ]
+    },
+    {
+      "title": "security: Update module golang.org/x/crypto to v0.56.0 [SECURITY]",
+      "prNumber": 734,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [golang.org/x/crypto](https://pkg.go.de",
+      "files": [
+        "op-conductor-mon/go.mod",
+        "op-conductor-mon/go.sum",
+        "op-signer/go.mod",
+        "op-signer/go.sum",
+        "op-txproxy/go.mod",
+        "op-txproxy/go.sum",
+        "op-ufm/go.mod",
+        "op-ufm/go.sum",
+        "peer-mgmt-service/go.mod",
+        "peer-mgmt-service/go.sum",
+        "proxyd/go.mod",
+        "proxyd/go.sum"
+      ]
+    },
+    {
+      "title": "security: Update dependency qs to v6.16.0 [SECURITY]",
+      "prNumber": 733,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [qs](https://redirect.github.com/ljharb",
+      "files": [
+        "replica-healthcheck/package.json",
+        "replica-healthcheck/yarn.lock"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 171.12121512727344,
+      "prScore": 135.24521512727344,
+      "issueScore": 0,
+      "reviewScore": 35,
+      "commentScore": 0.8759999999999999,
+      "summary": null
+    },
     {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
@@ -88,13 +152,43 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 147.2672657698119,
-      "prScore": 126.8292657698119,
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 154.9774386980962,
+      "prScore": 154.7774386980962,
       "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0.43799999999999994,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 119.54147025337714,
+      "prScore": 117.54147025337714,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 115.02847770934605,
+      "prScore": 66.02847770934605,
+      "issueScore": 0,
+      "reviewScore": 49,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 109.08652654723333,
+      "prScore": 58.58652654723333,
+      "issueScore": 0,
+      "reviewScore": 50.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -128,43 +222,63 @@
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 78.24760384517273,
-      "prScore": 39.24760384517274,
-      "issueScore": 0,
-      "reviewScore": 39,
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 77.49682326046133,
+      "prScore": 73.29682326046131,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 67.4725923224407,
+      "prScore": 42.47259232244071,
+      "issueScore": 2,
+      "reviewScore": 23,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "mds1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 60.021606672028106,
+      "totalScore": 64.5216066720281,
       "prScore": 7.021606672028108,
       "issueScore": 0,
-      "reviewScore": 53,
+      "reviewScore": 57.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 56.6757738965761,
+      "prScore": 39.6757738965761,
+      "issueScore": 8,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 55.98426092901029,
+      "prScore": 54.90826092901029,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.0759999999999998,
       "summary": null
     },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 47.68000000000001,
+      "totalScore": 52.88,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 47,
-      "commentScore": 0.6799999999999999,
-      "summary": null
-    },
-    {
-      "username": "teddyknox",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
-      "totalScore": 43.5437738965761,
-      "prScore": 43.5437738965761,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "reviewScore": 52,
+      "commentScore": 0.8799999999999999,
       "summary": null
     },
     {
@@ -188,33 +302,23 @@
       "summary": null
     },
     {
-      "username": "pauldowman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 41.93222459886074,
-      "prScore": 37.73222459886074,
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 40.078773896576095,
+      "prScore": 36.078773896576095,
       "issueScore": 4,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "oplabs-renovate",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 41.42159092433035,
-      "prScore": 41.22159092433035,
+      "username": "jdodinh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/43282168?u=9822a3c0838e8f7748c9aeb882ddce64bfcc9bed&v=4",
+      "totalScore": 36.23343100503877,
+      "prScore": 36.033431005038764,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 35.503437213085014,
-      "prScore": 34.865437213085016,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -238,33 +342,33 @@
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 30.76961228866811,
-      "prScore": 21.26961228866811,
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 31,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 29,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 27.804224577336218,
+      "prScore": 23.304224577336218,
       "issueScore": 0,
-      "reviewScore": 9.5,
+      "reviewScore": 4.5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 20.2,
+      "totalScore": 24.5,
       "prScore": 0,
-      "issueScore": 0,
+      "issueScore": 4.1,
       "reviewScore": 20,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 19,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 19,
-      "commentScore": 0,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -278,6 +382,46 @@
       "summary": null
     },
     {
+      "username": "shopcrazy852-del",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/318289851?u=e9d7647e5f60115d10b8efc05655663127119764&v=4",
+      "totalScore": 10.617651256490317,
+      "prScore": 10.617651256490317,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 6.4399999999999995,
+      "prScore": 0,
+      "issueScore": 6.1,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "jefr90",
       "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?v=4",
       "totalScore": 5,
@@ -288,8 +432,8 @@
       "summary": null
     },
     {
-      "username": "hdcesario-op",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -308,8 +452,8 @@
       "summary": null
     },
     {
-      "username": "bitwiseguy",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
       "totalScore": 4.5,
       "prScore": 0,
       "issueScore": 0,
@@ -318,21 +462,11 @@
       "summary": null
     },
     {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "username": "group3vigil",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/308133151?v=4",
       "totalScore": 4,
       "prScore": 0,
       "issueScore": 4,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 2,
-      "prScore": 0,
-      "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -358,9 +492,9 @@
       "summary": null
     }
   ],
-  "newPRs": 3,
-  "mergedPRs": 2,
+  "newPRs": 6,
+  "mergedPRs": 4,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 17
+  "activeContributors": 22
 }
