@@ -5,29 +5,162 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-04 to 2026-09-05, ethereum-optimism/optimism had 0 new PRs (1 merged), 0 new issues, and 2 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-09-04 to 2026-09-05, ethereum-optimism/optimism had 14 new PRs (9 merged), 1 new issues, and 32 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABNm-3Ug",
+      "title": "op-deployer: support setting `initBond` separately from `challengerBond`",
+      "author": "pauldowman",
+      "number": 22584,
+      "repository": "ethereum-optimism/optimism",
+      "body": "op-deployer uses the same value for `initBond` as `challengerBond` we need to set these independently via netchef.",
+      "createdAt": "2026-08-20T21:59:42Z",
+      "closedAt": "2026-09-04T20:23:31Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPtlDnA",
+      "title": "kona-sp1-proposer: stop extending descendants of dynamically blacklisted games",
+      "author": "wwared",
+      "number": 22784,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe proposer checks only the selected immediate parent for blacklist/retirement standing before creating a game. A previously cached ancestor may become blacklisted while an unblacklisted descendant remains canonical. The proposer can then continue extending that descendant even though it deliberately refuses to defend the blacklisted ancestor.\n\nIf the ancestor later resolves `CHALLENGER_WINS`, every subsequently bonded descendant is invalidated.\n\n## Observed failure\n\nThis occurred on the `zk-proofs-1` devnet:\n\n- Game 11 was challenged and then explicitly blacklisted.\n- Games 12–14 already existed when game 11 was blacklisted.\n- Game 15 was created from game 14 after the blacklist, and the proposer continued extending that branch through game 107.\n- The proposer correctly skipped defense of game 11 because it was blacklisted.\n- When game 11's prove deadline expired, it resolved `CHALLENGER_WINS`, invalidating the full descendant branch.\n\nBlacklisting transaction: `0x5733c3653b1ba3b01146d7f25afaead159b025487ca346d9b046e5e97b9f98b4` on Sepolia.\n\n## Current behavior\n\n`spawn_game_creation_task` freshly checks `isGameBlacklisted` and `isGameRetired` only for the selected immediate parent. If that parent is disallowed, it removes the parent's cached subtree and defers creation.\n\nHowever:\n\n- Cached games do not have blacklist/retirement standing refreshed as part of normal discovery.\n- `select_canonical_head` does not evaluate standing across a game's ancestry.\n- Blacklisting marks one game address only; existing descendants remain individually unblacklisted.\n- An unblacklisted descendant of a blacklisted ancestor can therefore remain canonical and be extended.\n\nRetirement is less exposed in the common case because advancing `retirementTimestamp` retires every already-created game, including the branch tip. The complete ancestry invariant should nevertheless cover both blacklist and retirement standing.\n\n## Recommended behavior fix\n\n1. Periodically refresh blacklist/retirement standing for cached parent-eligible games. Refreshing only `GameStatus` is insufficient because blacklisting does not change game status.\n2. Compute parent eligibility across the entire ancestry:\n\n   ```text\n   eligible(game) =\n       game standing allowed\n       AND parent eligible\n       AND parent not CHALLENGER_WINS\n   ```\n\n3. When an ancestor becomes blacklisted or retired:\n   - Immediately quarantine its entire subtree from canonical-head selection and creation.\n   - Clear proof-generation progress for games the proposer will no longer defend.\n   - Recompute the canonical head from another branch or the anchor.\n4. Keep lifecycle tracking separate from parent eligibility. Simply deleting games from the only cache risks losing resolution, refund, and bond-claim work.\n5. Immediately before submitting `create()`, freshly recheck the selected game's complete ancestry to cover a blacklist occurring after the prior sync.\n\nThe ancestry-standing check should use the registry relevant to each game's lifecycle/defense policy. The existing latest-state check against the currently registered registry should remain as the separate immediate-parent contract-admissibility guard.\n\n## Component ownership\n\nThe primary fix belongs in `kona-sp1-proposer`: challenger behavior cannot prevent the proposer from bonding additional games on a doomed branch.\n\nethereum-optimism/optimism#21445 is complementary defense-in-depth: `op-challenger` should challenge children whose ancestry is locally invalid so proposer bonds have a recipient. It does not replace parent-eligibility enforcement in the proposer.\n\n## Acceptance criteria\n\n- A game is parent-eligible only when its complete known ancestry is parent-eligible.\n- A newly blacklisted ancestor quarantines all descendants from canonical-head selection on the next sync.\n- A retired ancestor receives equivalent handling.\n- An alternate valid branch or anchor is selected when available.\n- Resolution, refund, and bond lifecycle tracking survives removal from the parent-eligible DAG.\n- A latest-state ancestry check runs before `create()` submission.\n- Regression coverage includes:\n  - Cache a root and descendants.\n  - Blacklist the root after discovery.\n  - Verify the descendant tip is not selected or extended.\n  - Verify an alternate branch or anchor is selected.\n  - Verify lifecycle tracking remains intact.\n\n## Related issues and changes\n\n- ethereum-optimism/optimism#22116 covers descendants of pending/unknown ancestors. That state must remain pending and retryable; blacklist/retirement requires active subtree quarantine after an onchain state change.\n- ethereum-optimism/optimism#22086 and ethereum-optimism/optimism#22097 added the current immediate-parent blacklist/retirement guard.\n- ethereum-optimism/optimism#21445 covers complementary `op-challenger` behavior.\n- ethereum-optimism/optimism#22589 covers invalid anchor states, not dynamic ancestor standing.",
+      "createdAt": "2026-09-04T14:36:31Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABCHmC8g",
-      "title": "justfile: refactor `release-notes` to add `release-paths` which can be used by scripts and skills",
-      "author": "pauldowman",
-      "number": 22767,
-      "body": "## Description\r\n\r\n`just release-notes <component>` held an inline `case` mapping each component to git-cliff `--include-path` args. The proofs release tooling had duplication of this list. \r\n\r\nThis extracts the list into a `release-paths <component>` recipe, so it is defined once, here, next to the code it describes. `release-notes` reads it; so does the external tooling, which stops keeping a copy.\r\n\r\nOutput is one `<label><TAB><path>` pair per line. Consecutive lines sharing a label are a group — a set of paths that ship as one unit, such as a bundled binary's dependency closure or the shared Go infrastructure. A consumer that sections its output groups by label; one that only needs the path set reads column 2. Both views come from one stream, so a component's paths and their grouping cannot disagree.\r\n\r\n### Behavior changes\r\n\r\n| component | change |\r\n|---|---|\r\n| op-node, op-batcher, op-proposer, op-supernode, op-reth, op-deployer, op-contracts | **none** |\r\n| **op-dispute-mon** | now supported — previously fell through to the error branch, and its release notes were assembled by hand |\r\n| **op-challenger** | gains `cannon/` and kona-host's dependency closure |\r\n| **`kona-*`** | gains `rust/op-revm/` |\r\n\r\nop-challenger's is the substantive fix. Its image ships three binaries — `op-challenger`, `cannon`, and `kona-host` built from the in-repo `rust/` workspace (see the `op-challenger-target` stage in `ops/docker/op-stack-go/Dockerfile`) — but only the first was in its include paths. A kona-host-only fix has no `op-challenger/` diff and so could never appear in its release notes, while still changing what operators run. #22732 was exactly that shape: a genesis-offset bug that hung every interop VM-runner run against OP Mainnet. For `v1.9.3..v1.9.4` the notes go from 66 PRs to 111.\r\n\r\nThe `kona-*` arms stay deliberately wide (all of `rust/kona/`) so this PR does not narrow kona's own notes; the precise per-binary closure is used only where it is needed, for op-challenger's bundled kona-host.\r\n\r\n## Tests\r\n\r\n- For every component that existed before, the reconstructed `--include-path` args are character-for-character identical to the old `case` output.\r\n- `just release-notes op-node v1.19.3 v1.19.4` is byte-identical to `develop`.\r\n- `just release-notes op-dispute-mon v1.5.2 v1.5.3` now produces notes instead of an error.\r\n- An unknown component exits non-zero and lists the valid ones.\r\n\r\n## Additional context\r\n\r\nThe external consumer is the `proofs-release-rc` / `proofs-release-finalize` tooling, which reads this recipe rather than keeping its own list, and drops both its op-dispute-mon workaround and the per-release step that reconciled the two lists by hand.\r\n",
+      "id": "PR_kwDODjvEJM8AAAABCQkfDg",
+      "title": "kona-sp1-proposer: enforce complete parent ancestry",
+      "author": "wwared",
+      "number": 22787,
+      "body": "## Summary\n\n- separate parent eligibility from retained game lifecycle state and quarantine the complete known descendant closure when any ancestor becomes blacklisted, retired, or terminally invalid\n- refresh pinned standing, exclude incomplete cached ancestry, and recheck a consistent latest lineage snapshot immediately before creation and proof submission\n- preserve directly disallowed creator refunds through resolution, distribution-mode selection, DelayedWETH unlock, payout, and final lifecycle eviction\n- retain structural parents while cached, pending, active, in-flight, unseen, or future contract-valid descendants can still depend on them\n\nCloses #22784.\n\n## Test plan\n\n- red/green: `dynamic_disallowed_ancestor_marks_descendants_parent_ineligible_without_lifecycle_loss` failed on the baseline because subtree invalidation removed lifecycle records, then passed with the fix\n- targeted ancestry, submission-race, refund, parent-retention, anchor-rotation, reverse-discovery, incomplete-lineage, and stale-identity regressions\n- `mise exec -- cargo nextest run --release --package kona-sp1-proposer --all-features` (192 passed)\n- `mise exec -- just f`\n- `mise exec -- just l`\n- `mise exec -- just lint-go`\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-03T21:32:48Z",
-      "mergedAt": "2026-09-04T00:07:03Z",
-      "additions": 90,
-      "deletions": 40
+      "createdAt": "2026-09-04T20:53:28Z",
+      "mergedAt": null,
+      "additions": 2762,
+      "deletions": 593
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCL9asw",
+      "title": "op-alloy,op-reth,kona: reject non-canonical transaction encodings",
+      "author": "nonsense",
+      "number": 22778,
+      "body": "Deposit and PostExec are EIP-2718 typed transactions with no untyped wire form. Reject fallback decoding of their bare RLP bodies so a missing 0x7E or 0x7D type byte cannot bypass derivation's leading-byte transaction gates.\r\n\r\nThe generated envelope decoder at the pinned Alloy version also accepts bare EIP-2930, EIP-1559, and EIP-7702 bodies, as well as a 0x00-tagged legacy transaction.\r\n\r\nDecode PostExec through its RLP-body helper after typed dispatch has consumed the type byte. Keep attribute transaction counting independent of decoding and compatible with no_std builds.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-04T10:57:24Z",
+      "mergedAt": "2026-09-04T12:09:08Z",
+      "additions": 534,
+      "deletions": 86
+    },
+    {
+      "id": "PR_kwDODjvEJM79MReg",
+      "title": "op-chain-ops: extend interop smoke to N chains",
+      "author": "jelias2",
+      "number": 22362,
+      "body": "## Summary\n\nExtend interop-smoke from a fixed two-chain tool into an N-chain smoke suite with repeatable, unambiguous flow output.\n\n## What changed\n\n- Accept two or more repeated --l2-rpc values and validate that every configured chain has a unique chain ID.\n- Run bridge, transfer, valid-message, and invalid-message coverage across the configured chain set.\n- Add --iterations, defaulting to 1, to repeat the selected flow; non-positive values fail validation.\n- Add --direction to target a specific invalid-message pair such as A->B.\n- Report where each message landed:\n  - initiating message on the source chain\n  - executing message on the destination chain\n- Extend the shared bridge result to retain both the source send receipt and destination relay receipt.\n- Keep the existing bridge summary output and add the explicit landing records alongside it.\n- Remove local planning artifacts and the package test file from the branch.\n\n## Why\n\nN-chain interop devnets need one smoke command that exercises every ordered chain pair and makes source-versus-destination message placement clear in logs.\n\n## Validation\n\n- GOTMPDIR=/private/tmp GOCACHE=/private/tmp/go-build-cache go test ./op-chain-ops/interopsmoke ./op-chain-ops/interopbridge ./op-chain-ops/cmd/interop-smoke\n- Final tree compiles successfully; the package test file is intentionally removed, so the final command reports no test files.\n- The focused interopsmoke tests passed before their intentional removal.\n\n## Scope and safety\n\nThis is an offline CLI and logging change. It does not deploy, apply, or modify live infrastructure.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-10T19:58:38Z",
+      "mergedAt": null,
+      "additions": 298,
+      "deletions": 222
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBHTkEQ",
+      "title": "docs: correct stale statuses in the op-geth decoupling doc and add downstream-repo section",
+      "author": "geoknee",
+      "number": 22664,
+      "body": "## What\n\nTwo things to `docs/ai/opgeth-decoupling.md`:\n\n1. **Corrects sections marked open whose work has landed** — §§1, 3, 4, 5, 10, 11, 14, 15 and the matching summary-table rows.\n2. **Adds §20, on downstream repos** that hold their own op-geth `replace` and inherit the fork's dependency graph.\n\nNo code changes.\n\n## Why\n\nCame out of [cloud-security#324](https://github.com/ethereum-optimism/cloud-security/issues/324) (Pion CVEs reaching six repos through op-geth). Working out which of those repos could decouple meant reading this doc as the map — and several sections still described work that had since landed, which made the remaining blockers much harder to locate than they should have been.\n\n## Corrections\n\nEvery claim was re-verified against `develop` before editing:\n\n| § | Doc said | Actually |\n|---|---|---|\n| 1 | swaps open (#20269, #20263) | both closed; production sites swapped, only test/testutils uses remain (ride §13) |\n| 3 | wiring open | `txinclude`'s `EL.TransactionReceipt` already returns `*optypes.Receipt` |\n| 4 | op-batcher site rides §11 | already calls `opfees.NewRollupCostData` |\n| 5 | swaps + `HardforkConfig` open (#20270) | closed; `ChainOpConfig` is `*opparams.OptimismConfig`, `BlockAsPayload`/`BlockAsPayloadEnv` take `HardforkConfig` |\n| 10 | \"just needs the `HardforkConfig` change\" | landed |\n| 11 | open (#20264) | closed; `InfoAndUserTxsBy*`/`InfoAndDepositsBy*`/`InfoAndFirstDepositBy*` all ship |\n| 14 | open (#21281, #21282) | #21282 closed |\n| 15 | `SetBlobTxSidecar`, `LogForStorage`, `InteropCrossL2InboxAddress` in `op-core/interop/messages` listed as open | first two have zero occurrences; `messages` no longer reads the third |\n\n§5 also gains a note that the `*params.ChainConfig` uses left in op-node are **L1** chain configs — legitimately upstream types that stay — since that reads like unfinished work otherwise.\n\n## The part worth reviewing carefully\n\nAn upstream-build spike (drop the `replace`, pin upstream v1.17.5, remove the scaffolding the code itself annotates as cutover-deletions) shows `op-core/{types,params,predeploys}` and `op-service/{eth,signer,log}` all compile against upstream go-ethereum today. What still fails is `op-service/{metrics,client,rpc}` on the RPC recorder hooks, and `op-service/testlog` on the log context methods.\n\nSo **§15 is now the gating item**, not the op-core extraction. The two §15 rows in the summary table are marked accordingly. If that reading is wrong I would rather hear it now, because §20 leans on it.\n\n## §20 — downstream repos\n\nNew section, since these repos are outside the doc's stated scope but their blockers are ours. It records the three-way split (never coupled / decoupled now / blocked on §15), the four repos with coupling of their own, and three findings:\n\n- A downstream repo **cannot point at op-core ahead of us** — the packages holding the transition scaffolding (§2, §3, §5) don't compile against upstream by design, so a consumer needing OP types waits for the cutover regardless.\n- **Dropping op-geth does not by itself clear the Pion findings** — after moving to upstream v1.17.5 the graph still resolves STUN v3.1.2 / DTLS v3.1.2 (below the patched floors) plus v2-era Pion via **libp2p**, an inbound path independent of geth. Relevant to the decision #324 is asking Protocol to make.\n- **A fork pin masks upstream advisories.** Dropping `gke-notifier`'s replace surfaced six high-severity DoS advisories against upstream go-ethereum v1.10.26 that were invisible while the pseudo-versioned op-geth fork stood in for it. The module was always running that vintage — the replace was hiding the advisories, not protecting against it. Worth knowing as a general hazard of fork pins, and the reason that module is *not* listed as decoupled.\n\nThe companion change dropping op-geth from the two unblocked modules is [infrastructure-services#1352](https://github.com/ethereum-optimism/infrastructure-services/pull/1352).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-26T18:29:12Z",
+      "mergedAt": "2026-09-04T10:07:24Z",
+      "additions": 159,
+      "deletions": 47
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCNHW6A",
+      "title": "docs: use Accordion instead of Expandable for collapsible sections",
+      "author": "pcw109550",
+      "number": 22781,
+      "body": "## Description\r\n\r\nMintlify's `<Expandable>` component is built for nested object fields in API reference pages and prepends \"Show\" / \"Hide\" to its title. The docs used it for FAQs, prerequisite blocks, flag references, and sample payloads, so on the live site toggles rendered as:\r\n\r\n```\r\nShow How often are subblocks produced?\r\nShow What is double-spending?\r\nShow --l1-eth-rpc\r\n```\r\n\r\nThis PR switches every `<Expandable>` in `docs/public-docs` to `<Accordion>`, the component Mintlify recommends for general collapsible content and the one `governance/gov-faq.mdx` already uses. The header now shows the bare title with a chevron. The Subblocks FAQ additionally wraps each subsection in an `<AccordionGroup>` so the questions stack in one panel.\r\n\r\nContent and links are unchanged. Every converted tag carried only a `title` attribute, and the diff is the tag rename plus indentation on the Subblocks page.\r\n\r\n## Tests\r\n\r\nVerified against the live site: the deployed `op-stack/features/subblocks` page emits `Show <question>` for all seven FAQ entries, while the deployed `governance/gov-faq` page (Accordion) renders titles with no prefix. Grep confirms no `Expandable` remains under `docs/public-docs`. The Mintlify preview on this PR should show the new headers.\r\n\r\n## Additional context\r\n\r\nReview agents: the diff touches only `.mdx` files, so none of the repo review agents (Go, Rust, CI config, deletion, StandardValidator, reth) match. No general code review was run; the change is a mechanical component swap with no prose edits.\r\n\r\nPrev(from https://docs.optimism.io/op-stack/features/subblocks): \r\n<img width=\"842\" height=\"328\" alt=\"image\" src=\"https://github.com/user-attachments/assets/d55c2f23-32fb-4dc1-8fc6-3b6585c939b5\" />\r\n\r\nAfter:\r\n<img width=\"753\" height=\"285\" alt=\"image\" src=\"https://github.com/user-attachments/assets/0dd5056b-bb98-4441-973a-bf60039390dd\" />\r\n\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-04T13:29:51Z",
+      "mergedAt": null,
+      "additions": 129,
+      "deletions": 125
     }
   ],
   "codeChanges": {
-    "additions": 90,
-    "deletions": 40,
-    "files": 1,
-    "commitCount": 1
+    "additions": 961,
+    "deletions": 3407,
+    "files": 79,
+    "commitCount": 41
   },
   "completedItems": [
+    {
+      "title": "kona-sp1: remove output-root proving programs",
+      "prNumber": 22393,
+      "type": "other",
+      "body": "## Summary\n\nKona SP1 ships the super-root proving path: super-range child proofs and super-aggregation. Remove the obsolete output-root-only range and aggregation implementation and its test plumbing.\n\nDeleted components:\n\n- Output-root ran",
+      "files": [
+        "op-devstack/shared/rustbin/kona_host_native.go",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/justfile",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/client/Cargo.toml",
+        "rust/kona/sp1/crates/client/src/lib.rs",
+        "rust/kona/sp1/crates/client/src/range.rs",
+        "rust/kona/sp1/crates/client/src/types.rs",
+        "rust/kona/sp1/crates/client/src/witness/preimage_store.rs",
+        "rust/kona/sp1/crates/elfs/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/host/Cargo.toml",
+        "rust/kona/sp1/crates/ethereum/host/src/host.rs",
+        "rust/kona/sp1/crates/ethereum/host/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/host/src/witness_generator.rs",
+        "rust/kona/sp1/crates/host/Cargo.toml",
+        "rust/kona/sp1/crates/host/src/constants.rs",
+        "rust/kona/sp1/crates/host/src/contract.rs",
+        "rust/kona/sp1/crates/host/src/fetcher.rs",
+        "rust/kona/sp1/crates/host/src/host.rs",
+        "rust/kona/sp1/crates/host/src/lib.rs",
+        "rust/kona/sp1/crates/host/src/stats.rs",
+        "rust/kona/sp1/crates/host/src/witness_generation/mod.rs",
+        "rust/kona/sp1/crates/host/src/witness_generation/traits.rs",
+        "rust/kona/sp1/crates/range-executor/Cargo.toml",
+        "rust/kona/sp1/crates/range-executor/src/main.rs",
+        "rust/kona/sp1/crates/range-vkeys/build.rs",
+        "rust/kona/sp1/crates/range-vkeys/src/lib.rs",
+        "rust/kona/sp1/justfile",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/aggregation/Cargo.toml",
+        "rust/kona/sp1/programs/aggregation/src/main.rs",
+        "rust/kona/sp1/programs/range/Cargo.toml",
+        "rust/kona/sp1/programs/range/README.md",
+        "rust/kona/sp1/programs/range/src/main.rs",
+        "rust/kona/tests/justfile",
+        "rust/kona/tests/proofs/helpers/env.go",
+        "rust/kona/tests/proofs/helpers/fixture.go",
+        "rust/kona/tests/proofs/helpers/runner.go",
+        "rust/kona/tests/proofs/helpers/sp1.go",
+        "rust/kona/tests/proofs/sp1_simple_program_test.go",
+        "docs/ai/fault-proofs.md"
+      ]
+    },
+    {
+      "title": "docs: correct stale statuses in the op-geth decoupling doc and add downstream-repo section",
+      "prNumber": 22664,
+      "type": "docs",
+      "body": "## What\n\nTwo things to `docs/ai/opgeth-decoupling.md`:\n\n1. **Corrects sections marked open whose work has landed** — §§1, 3, 4, 5, 10, 11, 14, 15 and the matching summary-table rows.\n2. **Adds §20, on downstream repos** that hold their own ",
+      "files": [
+        "docs/ai/opgeth-decoupling.md"
+      ]
+    },
     {
       "title": "justfile: refactor `release-notes` to add `release-paths` which can be used by scripts and skills",
       "prNumber": 22767,
@@ -36,12 +169,329 @@
       "files": [
         "justfile"
       ]
+    },
+    {
+      "title": "op-service,op-node: move three test helpers out of production packages",
+      "prNumber": 22783,
+      "type": "tests",
+      "body": "Follow-up to #22780 (now merged) — same class of problem, three more instances.\n\nNote on the diff: this branch was cut before #22780 merged, so it still carries that commit and GitHub diffs it against the pre-merge base — #22780'''s four fi",
+      "files": [
+        "op-acceptance-tests/tests/interop/message/interop_mon_test.go",
+        "op-batcher/batcher/driver_test.go",
+        "op-batcher/metrics/metrics_test.go",
+        "op-dispute-mon/mon/mixed_game_integration_test.go",
+        "op-e2e/actions/helpers/fake_publish.go",
+        "op-e2e/actions/helpers/l2_verifier.go",
+        "op-faucet/metrics/metrics_test.go",
+        "op-node/benchmarks/batchbuilding_test.go",
+        "op-node/rollup/attributes/testutils_test.go",
+        "op-node/rollup/deps_test.go",
+        "op-node/rollup/derive/batch_test_utils_test.go",
+        "op-node/rollup/derive/test/random.go",
+        "op-proposer/metrics/metrics_test.go",
+        "op-service/metrics/test/checker.go",
+        "op-sync-tester/metrics/metrics_test.go"
+      ]
+    },
+    {
+      "title": "docs: remove -rc from op-contracts/v8.0.0 on subsequent release",
+      "prNumber": 22782,
+      "type": "docs",
+      "body": "This is follow up on the contracts release checklist.",
+      "files": [
+        "docs/security-reviews/README.md"
+      ]
+    },
+    {
+      "title": "op-node: keep op-service/testutils out of the derive production build",
+      "prNumber": 22780,
+      "type": "tests",
+      "body": "`op-node/rollup/derive/batch_test_utils.go` holds a test-only helper but is not named `_test.go`, so it compiles as production code. Its `op-service/testutils` import therefore enters the build closure of **everything importing `op-node/rol",
+      "files": [
+        "op-node/benchmarks/batchbuilding_test.go",
+        "op-node/rollup/deps_test.go",
+        "op-node/rollup/derive/batch_test_utils_test.go",
+        "op-node/rollup/derive/test/random.go"
+      ]
+    },
+    {
+      "title": "gitignore: ignore all rust target* dirs",
+      "prNumber": 22779,
+      "type": "other",
+      "body": "- remove duplicate entry\r\n- ignore all `target*` dirs",
+      "files": [
+        ".gitignore"
+      ]
+    },
+    {
+      "title": "op-alloy,op-reth,kona: reject non-canonical transaction encodings",
+      "prNumber": 22778,
+      "type": "other",
+      "body": "Deposit and PostExec are EIP-2718 typed transactions with no untyped wire form. Reject fallback decoding of their bare RLP bodies so a missing 0x7E or 0x7D type byte cannot bypass derivation's leading-byte transaction gates.\r\n\r\nThe generate",
+      "files": [
+        "rust/kona/crates/node/engine/src/attributes.rs",
+        "rust/kona/crates/protocol/protocol/src/attributes.rs",
+        "rust/op-alloy/crates/consensus/src/lib.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/transaction/canonical.rs",
+        "rust/op-alloy/crates/consensus/src/transaction/deposit.rs",
+        "rust/op-alloy/crates/consensus/src/transaction/envelope.rs",
+        "rust/op-alloy/crates/consensus/src/transaction/mod.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/attributes.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/flashblock/payload.rs",
+        "rust/op-reth/crates/cli/src/ovm_file_codec.rs",
+        "rust/op-reth/crates/flashblocks/src/service.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/primitives/src/transaction/signed.rs"
+      ]
+    },
+    {
+      "title": "ci,contracts-bedrock: fail fast on unreachable apt indexes and drop the lcov dependency",
+      "prNumber": 22775,
+      "type": "other",
+      "body": "<!-- ccr-slack-attribution -->\n_Requested via [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1788517349953649)_\n\n**Before:** when the Ubuntu archive is unreachable, `apt-get update` prints the failed index fetches as `W:`",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/scripts/apt-install.sh",
+        "packages/contracts-bedrock/justfile"
+      ]
     }
   ],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 1,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 2
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 130.42347388530789,
+      "prScore": 110.08347388530788,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 53.89965540966739,
+      "prScore": 53.89965540966739,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 47.99039268822571,
+      "prScore": 33.79039268822571,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 42.364317725792134,
+      "prScore": 42.364317725792134,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 39.917836866004336,
+      "prScore": 24.71783686600433,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 38.39369975222456,
+      "prScore": 38.39369975222456,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/81847?u=577eaff0520b33aadc0f9fb6d11f5cdb2dd9486e&v=4",
+      "totalScore": 33.89187763949107,
+      "prScore": 33.45387763949107,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 21.93488694828805,
+      "prScore": 19.93488694828805,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 18.590557636844245,
+      "prScore": 8.590557636844245,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 18.36671860654251,
+      "prScore": 18.02671860654251,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 16.817601974320528,
+      "prScore": 16.61760197432053,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pucedoteth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/119044801?u=f6ede7c2820c5b95aa33d4db98fd680beb07df84&v=4",
+      "totalScore": 15.975333185232472,
+      "prScore": 15.975333185232472,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 15.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ogenev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/39865181?u=c1987712b39ea9352a386f98e518462b15ae3a55&v=4",
+      "totalScore": 13.973865577872143,
+      "prScore": 13.973865577872143,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "op-owner-falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/218228085?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    }
+  ],
+  "newPRs": 14,
+  "mergedPRs": 9,
+  "newIssues": 1,
+  "closedIssues": 1,
+  "activeContributors": 32
 }
