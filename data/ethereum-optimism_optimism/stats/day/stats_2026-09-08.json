@@ -1,0 +1,93 @@
+{
+  "interval": {
+    "intervalStart": "2026-09-08T00:00:00.000Z",
+    "intervalEnd": "2026-09-09T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-09-08 to 2026-09-09, ethereum-optimism/optimism had 2 new PRs (1 merged), 0 new issues, and 3 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABClzssw",
+      "title": "contracts-bedrock: Improve OPCMv2 migration flow and harden validator checks",
+      "author": "0xiamflux",
+      "number": 22807,
+      "body": "## Context\r\n\r\n`OPCM.migrate()` is an irreversible operation that moves independent chains onto a shared ETHLockbox, DisputeGameFactory and AnchorStateRegistry, sweeps every chain's ETH into the shared lockbox, and invalidates all outstanding withdrawal proofs. `OPContractsManagerMigrationValidator` is meant to prove afterwards that this landed correctly.\r\n\r\n**Three main gaps**\r\n\r\n`migrate()` could run twice. A second call drains the first shared lockbox into a new one and clears every game implementation from the shared factory, breaking every chain in the set. \r\n\r\nIt accepted chains from any release. A chain one release behind came out with its portal, `SystemConfig` and dispute contracts upgraded, while its bridges and messengers stayed the same. `upgrade()` refuses that while `migrate()` performed it silently.\r\n\r\nThe validator's per-chain clearing checks were behind a condition that cannot hold after a successful migration, so they never ran.\r\n\r\n## Changes\r\n\r\n**Migrator**\r\n\r\n- Reject chains that already have `Features.INTEROP` enabled. `migrate()` is the only thing in that sets that flag on L1, so it means\r\n  migration already ran.\r\n- Require every chain to be on this OPCM's release. `isPermittedMigrateSequence` accepts the same OPCM, or a replacement OPCM for the\r\n  same release. It refuses next-major, because that would allow upgrades through the migrate function.\r\n- Enforce the `SuperchainConfig` version floor that `_apply` already enforced.\r\n- Grant proxy-deployment permission by name for the replacing the blanket ALL grant.\r\n\r\n**Validator**\r\n\r\n- Run the legacy-clearing checks unconditionally, taking each chain's pre-migration factory as input.\r\n- Assert migration by checking anchor root, respected game type, init bonds, expected shared addresses, portal and retired-lockbox balances, and stale pauses on retired identifiers.\r\n\r\n**Shared**\r\n\r\n- One canonical list of the game types migration clears, in `GameTypes`.\r\n- One encoder for `SystemConfig.initialize`, in `OPContractsManagerUtilsCaller`.\r\n- Both sequence predicates moved into OPContractsManagerUtils. Keeping them inline pushed OPCMv2 past EIP-170.\r\n\r\n**Test Plan**\r\n\r\n- Every new guard proved by negative control.\r\n- The re-entry guard was proved against real corruption first. Before the fix, a second migration one second later succeeded, wiped the shared factory's `SUPER_PERMISSIONED` implementation, and drained the shared lockbox to zero.\r\n- size-check passes. OPCMv2 runtime is 24,553 with 23 bytes of margin.\r\n- lint, snapshots, unused-imports and test-validation clean.\r\n\r\nCloses #22771 ",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-08T00:25:55Z",
+      "mergedAt": null,
+      "additions": 1265,
+      "deletions": 258
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCmAxSA",
+      "title": "contracts-bedrock: restore VerifyOPCM StandardValidator ref checks, fix the profile mismatch",
+      "author": "OptimismBot",
+      "number": 22808,
+      "body": "Restores #22786 (reverted in #22806) and fixes the CI failure it caused.\n\n### Commits\n\n1. `776b4fc` — cherry-pick of #22786, unchanged.\n2. `f021625` — the fix.\n\n### Why it failed\n\n`contracts-bedrock-tests-develop` failed on develop ([job 5547680](https://circleci.com/gh/ethereum-optimism/optimism/5547680)) with:\n\n```\nEncountered 2 failing tests in test/scripts/VerifyOPCM.t.sol:VerifyOPCM_Run_Test\n[FAIL: VerifyOPCM_Failed()] test_run_corruptedValidatorDependencies_reverts()\n[FAIL: VerifyOPCM_Failed()] test_run_succeeds()\n```\n\nThe new `BYTECODE:` checks compare the deployed `standardValidatorUtils` / `migrationValidator` code against `forge-artifacts/<Name>.sol/<Name>.json` — the default compiler profile's artifact.\n\nBut `DeployImplementations` deployed both through the qualified `\"File.sol:Contract\"` identifier. `DeployUtils.getCode` explicitly passes those straight to `vm.getCode` rather than resolving the artifact path, and both contracts are pulled into the `validator` profile's compilation graph by `src/L1/OPContractsManagerStandardValidator.sol` (`optimizer_runs = 200`). So they're emitted twice — 200 runs and the default 999999 — and `vm.getCode` can resolve to either. Deploy the 200-run build, verify against the 999999-run artifact, mismatch.\n\nThis is the same failure mode and the same fix as #19323.\n\n### Why PR CI was green on #22786\n\nPR runs use `test_profile: liteci`; only develop runs `test_profile: ci`. Under `liteci` every compiler profile is `optimizer = false, optimizer_runs = 0`, so the two builds are byte-identical and the ambiguity is invisible.\n\n**That also means CI on this PR will not exercise the fix.** No PR-triggered job runs `VerifyOPCM.t.sol` under the `ci` profile. It has to be checked locally, or on develop after merge.\n\n### Testing the failing job locally\n\nFrom `packages/contracts-bedrock`, reproduce the develop-only job by forcing the `ci` profile:\n\n```bash\n# Fails on 776b4fc (the cherry-pick alone), passes with f021625.\nFOUNDRY_PROFILE=ci forge test --match-path 'test/scripts/VerifyOPCM.t.sol' -vv\n```\n\nThe first build is slow — `optimizer_runs = 999999` across the whole tree. Dropping `FOUNDRY_PROFILE=ci` (or using `liteci`) reproduces the green PR run instead, which is the whole point: the bug only appears when the profiles disagree.\n\nTo confirm the two artifacts actually diverge:\n\n```bash\nFOUNDRY_PROFILE=ci forge build\njq -r '.deployedBytecode.object | length' forge-artifacts/StandardValidatorUtils.sol/StandardValidatorUtils*.json\n```\n\nPrompted by: maurelian",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-08T01:05:07Z",
+      "mergedAt": null,
+      "additions": 107,
+      "deletions": 10
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABClNiaw",
+      "title": "Revert \"contracts-bedrock: verify StandardValidator sub-contract references in VerifyOPCM (#22786)\"",
+      "author": "OptimismBot",
+      "number": 22806,
+      "body": "Reverts #22786 (squash-merged as 2f3e36102b007f9edb3dc4af773ac3d7eeac8b2d, which is currently `develop` HEAD).\n\nRestores `VerifyOPCM.s.sol` and `VerifyOPCM.t.sol` to their pre-#22786 contents. No other commits have touched either file since, so this is a clean revert.\n\nRequested after the CircleCI failure reported on `develop`.\n\nPrompted by: maurelian\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-07T22:34:18Z",
+      "mergedAt": "2026-09-08T01:00:00Z",
+      "additions": 8,
+      "deletions": 100
+    }
+  ],
+  "codeChanges": {
+    "additions": 8,
+    "deletions": 100,
+    "files": 2,
+    "commitCount": 12
+  },
+  "completedItems": [
+    {
+      "title": "Revert \"contracts-bedrock: verify StandardValidator sub-contract references in VerifyOPCM (#22786)\"",
+      "prNumber": 22806,
+      "type": "other",
+      "body": "Reverts #22786 (squash-merged as 2f3e36102b007f9edb3dc4af773ac3d7eeac8b2d, which is currently `develop` HEAD).\n\nRestores `VerifyOPCM.s.sol` and `VerifyOPCM.t.sol` to their pre-#22786 contents. No other commits have touched either file since",
+      "files": [
+        "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
+        "packages/contracts-bedrock/test/scripts/VerifyOPCM.t.sol"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 41.328773896576095,
+      "prScore": 41.328773896576095,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 23.7550269366985,
+      "prScore": 23.7550269366985,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 1,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 3
+}

@@ -5,8 +5,20 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-01 to 2026-10-01, ethereum-optimism/optimism had 61 new PRs (37 merged), 16 new issues, and 55 active contributors.",
+  "overview": "From 2026-09-01 to 2026-10-01, ethereum-optimism/optimism had 71 new PRs (42 merged), 17 new issues, and 55 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABBxmGaQ",
+      "title": "checkSpanBatch does not enforce activation-block user-tx rule that checkSingularBatch enforces",
+      "author": "trasnake87",
+      "number": 20625,
+      "repository": "ethereum-optimism/optimism",
+      "body": "\n`op-node/rollup/derive/batches.go` enforces the activation-block \"no user transactions\" rule (per spec [optimism/specs#791](https://github.com/ethereum-optimism/specs/pull/791) and issue #17704) for singular batches but not for span batches. The same activation block, encoded as a span batch, is accepted.\n\n### Where\n\n`checkSingularBatch` (batches.go around L137) drops the batch:\n\n```go\nif (cfg.IsJovianActivationBlock(batch.Timestamp) ||\n    cfg.IsKarstActivationBlock(batch.Timestamp) ||\n    cfg.IsInteropActivationBlock(batch.Timestamp)) &&\n    len(batch.Transactions) > 0 {\n    log.Warn(\"dropping batch with user transactions in fork activation block\")\n    return BatchDrop\n}\n```\n\n`checkSpanBatch` (batches.go L308–L445) validates timestamps, sequencer drift, deposit/SetCode tx exclusion per block, but never checks `IsJovianActivationBlock` / `IsKarstActivationBlock` / `IsInteropActivationBlock` against `batch.GetBlockTransactions(i)`.\n\nHistory: PR #14797 added the rule for Isthmus (singular only, closed), PR #17984 added it for Jovian (singular only, merged), PR #19250 added Karst to the same condition (singular only, merged). PR #19150 separately added the SetCode check to span (`fix(op-node): add SetCodeTxType check to span batch validation`) — same kind of singular/span asymmetry, fixed in isolation. The activation-block rule appears to have been missed across all three iterations.\n\n### Reproduction\n\nA short unit test against `CheckBatch` builds the same activation-block user transaction twice — singular returns `BatchDrop`, span returns `BatchAccept`:\n\n```go\npackage derive\n\nimport (\n    \"context\"\n    \"math/big\"\n    \"math/rand\"\n    \"testing\"\n\n    \"github.com/ethereum-optimism/optimism/op-core/forks\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup\"\n    \"github.com/ethereum-optimism/optimism/op-service/eth\"\n    \"github.com/ethereum-optimism/optimism/op-service/testutils\"\n    \"github.com/ethereum/go-ethereum/common/hexutil\"\n    \"github.com/ethereum/go-ethereum/core/types\"\n    \"github.com/ethereum/go-ethereum/log\"\n    \"github.com/stretchr/testify/require\"\n)\n\nfunc TestSpanBatchActivationBlockUserTx(t *testing.T) {\n    rng := rand.New(rand.NewSource(0x51a75))\n    chainID := big.NewInt(10)\n    signer := types.NewLondonSigner(chainID)\n    tx := testutils.RandomTx(rng, big.NewInt(1_000_000_000), signer)\n    txData, err := tx.MarshalBinary()\n    require.NoError(t, err)\n\n    for _, fork := range []forks.Name{forks.Jovian, forks.Karst, forks.Interop} {\n        t.Run(string(fork), func(t *testing.T) {\n            l1A := eth.L1BlockRef{Hash: testutils.RandomHash(rng), Number: 100, Time: 1_000}\n            l2Safe := eth.L2BlockRef{\n                Hash: testutils.RandomHash(rng), Number: 200, Time: l1A.Time,\n                L1Origin: l1A.ID(), ParentHash: testutils.RandomHash(rng),\n            }\n            cfg := &rollup.Config{\n                Genesis:           rollup.Genesis{L2Time: l2Safe.Time},\n                BlockTime:         2,\n                SeqWindowSize:     4,\n                MaxSequencerDrift: 30,\n            }\n            activationTime := l2Safe.Time + cfg.BlockTime\n            cfg.ActivateAt(fork, activationTime)\n\n            singular := &SingularBatch{\n                ParentHash: l2Safe.Hash, EpochNum: rollup.Epoch(l1A.Number),\n                EpochHash: l1A.Hash, Timestamp: activationTime,\n                Transactions: []hexutil.Bytes{txData},\n            }\n            singularValidity := CheckBatch(context.Background(), cfg, log.New(),\n                []eth.L1BlockRef{l1A}, l2Safe,\n                &BatchWithL1InclusionBlock{L1InclusionBlock: l1A, Batch: singular}, nil)\n            require.Equal(t, BatchValidity(BatchDrop), singularValidity)\n\n            span := initializedSpanBatch([]*SingularBatch{{\n                ParentHash: l2Safe.Hash, EpochNum: rollup.Epoch(l1A.Number),\n                EpochHash: l1A.Hash, Timestamp: activationTime,\n                Transactions: []hexutil.Bytes{txData},\n            }}, cfg.Genesis.L2Time, chainID)\n\n            spanValidity := CheckBatch(context.Background(), cfg, log.New(),\n                []eth.L1BlockRef{l1A}, l2Safe,\n                &BatchWithL1InclusionBlock{L1InclusionBlock: l1A, Batch: span}, nil)\n            require.Equal(t, BatchValidity(BatchAccept), spanValidity,\n                \"span batches bypass activation-block user tx filtering\")\n        })\n    }\n}\n```\n\n`go test ./op-node/rollup/derive -run TestSpanBatchActivationBlockUserTx -v` passes for jovian, karst, and interop on `develop` (verified at `be742e31a`).\n\n### Suggested fix\n\nApply the same condition inside `checkSpanBatch`'s per-block loop, before the per-tx validation:\n\n```go\nif (cfg.IsJovianActivationBlock(blockTimestamp) ||\n    cfg.IsKarstActivationBlock(blockTimestamp) ||\n    cfg.IsInteropActivationBlock(blockTimestamp)) &&\n    len(batch.GetBlockTransactions(i)) > 0 {\n    log.Warn(\"dropping span batch with user transactions in fork activation block\")\n    return BatchDrop\n}\n```\n\nFor symmetry with `checkSingularBatch` and consistency with the spec rule.\n\n### Notes\n\nThe action test `TestActivationBlockTxOmission` added in #17984 uses `helpers.NewBatcherCfg()` which produces span batches by default (Delta+ fork, `ForceSubmitSingularBatch=false` → `useSpanChannelOut=true`). I have not run that test against current `develop`; if it currently passes, there is an additional path catching this that I have missed.\n",
+      "createdAt": "2026-05-09T23:09:36Z",
+      "closedAt": "2026-09-07T02:02:37Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
     {
       "id": "I_kwDODjvEJM8AAAABMK8SrA",
       "title": "Re-Deploy Lightnode across the Staging",
@@ -53,18 +65,6 @@
       "createdAt": "2026-09-03T18:03:38Z",
       "closedAt": "2026-09-03T18:04:33Z",
       "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABPgRlAg",
-      "title": "opgeth-decoupling: own the log layer — op-service/log becomes the monorepo logging API",
-      "author": "sebastianst",
-      "number": 22752,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Part of #21745 (§15 of the [op-geth decoupling doc](https://github.com/ethereum-optimism/optimism/blob/1657fbe391d3f37785a6a3609422ee79fe86d9fa/docs/ai/opgeth-decoupling.md#L416-L436)). **Blocks #20266.**\n\n`op-service/log` becomes the monorepo's logging API: no monorepo Go file imports `go-ethereum/log`. This is better layering regardless of the decoupling — the fork's `Logger.SetContext`/`WriteCtx`/`LogAttrs`/`Trace…ErrorContext` extensions are just what forces it.\n\n## Scope (measured at 1657fbe)\n\n- **697** monorepo Go files import `github.com/ethereum/go-ethereum/log` — op-node 121, op-service 82, op-challenger 71, op-e2e 65, op-dispute-mon 48, op-test-sequencer 42, op-devstack 37, op-chain-ops 36, op-deployer 33, op-supernode 27, op-batcher 21, op-conductor 20, and a long tail. (`superchain-registry/` is a submodule with its own Go module — out of scope, flagged to that team.)\n- **63** of those import *both* `geth/log` and `oplog`, so they need symbol-level dedup, not a blind import rewrite.\n- Only ~13 files use the fork's context extensions at all: [`op-service/testlog`](https://github.com/ethereum-optimism/optimism/blob/1657fbe391d3f37785a6a3609422ee79fe86d9fa/op-service/testlog/testlog.go), [`op-service/log/logfilter`](https://github.com/ethereum-optimism/optimism/tree/1657fbe391d3f37785a6a3609422ee79fe86d9fa/op-service/log/logfilter), `op-service/tls/tlsinfo.go`, `op-devstack/devtest`, plus a handful of call sites. Phase 2 is therefore small; phase 1 is the bulk.\n\n## PRs\n\n1. **`op-service/log`: add the `oplog` logger surface.** `type Logger = log.Logger` (alias) plus re-exports of the package-level API actually in use: `New`, `NewLogger`, `Root`, `SetDefault`, `With`, `Info/Warn/Error/Debug/Trace/Crit`, the `Level*`/`Lvl*` constants, `LevelFromString`, `FromLegacyLevel`, `DiscardHandler`, `NewTerminalHandler[WithLevel]`, `JSONHandler`, `LogfmtHandlerWithLevel`, `Handler`. Migrate `op-service` itself as the first consumer.\n2. **Tree-wide sweep + gate.** Rewrite the remaining ~615 files to `oplog`, dedup the 63 dual-import files, and add a lint/CI gate (golangci `depguard`, or a grep check) that fails any new `go-ethereum/log` import. Pure rename while the alias holds — zero behaviour change; build + test is the gate. Land fast to avoid rebase churn against everything in flight.\n3. **Flip the alias to an owned interface** *(at cutover)*. Replace the alias with an interface — upstream's method set plus the context methods — over an `slog`-backed implementation. Do **not** copy upstream's LGPL `log` package; the context-extension logic is OP-authored and ports over. Our interface is a superset of upstream's, so an `oplog.Logger` still satisfies `log.Logger` wherever we hand one into geth code (e.g. the in-process L1 geth in op-e2e).\n\nPRs 1–2 land now and are independent of the rest of the epic. PR 3 lands with or just before the go.mod flip.\n\n## Acceptance criteria\n\n- No monorepo Go file imports `go-ethereum/log`, enforced by a CI/lint gate.\n- `op-service/log/logfilter` and `op-service/testlog` build on the owned API with unchanged behaviour.\n- After PR 3, `op-service/log` has no `go-ethereum/log` dependency, and an `oplog.Logger` is still accepted by geth APIs taking `log.Logger`.\n\n🤖 *Co-created with Claude Opus 5 (1M context)*\n",
-      "createdAt": "2026-09-03T10:33:21Z",
-      "closedAt": null,
-      "state": "OPEN",
       "commentCount": 1
     }
   ],
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 8700,
-    "deletions": 14867,
-    "files": 178,
-    "commitCount": 285
+    "additions": 9162,
+    "deletions": 15182,
+    "files": 203,
+    "commitCount": 336
   },
   "completedItems": [
     {
@@ -235,6 +235,19 @@
         "rust/kona/sp1/crates/proposer/src/proposer.rs",
         "rust/kona/sp1/crates/proposer/src/proposer/scenario/mod.rs",
         "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs"
+      ]
+    },
+    {
+      "title": "op-reth: add chain head gas and base fee metrics",
+      "prNumber": 22587,
+      "type": "other",
+      "body": "## Description\n\nop-geth exposes gas and fee attributes of the canonical head as `chain_head_basefee`, `chain_head_gas_used` and `chain_head_blob_gas_used` (plus `*_hist` histograms). op-reth had no equivalent, so operators migrating off op-",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/head_metrics.rs",
+        "rust/op-reth/crates/node/src/lib.rs",
+        "rust/op-reth/crates/node/src/node.rs"
       ]
     },
     {
@@ -573,6 +586,17 @@
       ]
     },
     {
+      "title": "contracts-bedrock: verify StandardValidator sub-contract references in VerifyOPCM",
+      "prNumber": 22786,
+      "type": "other",
+      "body": "`VerifyOPCM` marked two `OPContractsManagerStandardValidator` getters as `SKIP`:\r\n\r\n```solidity\r\nvalidatorGetterChecks[\"standardValidatorUtils\"] = \"SKIP\";\r\nvalidatorGetterChecks[\"migrationValidator\"] = \"SKIP\";\r\n```\r\n\r\nEvery other `SKIP` in ",
+      "files": [
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
+        "packages/contracts-bedrock/test/scripts/VerifyOPCM.t.sol"
+      ]
+    },
+    {
       "title": "op-service,op-node: move three test helpers out of production packages",
       "prNumber": 22783,
       "type": "tests",
@@ -602,6 +626,29 @@
       "body": "This is follow up on the contracts release checklist.",
       "files": [
         "docs/security-reviews/README.md"
+      ]
+    },
+    {
+      "title": "docs: use Accordion instead of Expandable for collapsible sections",
+      "prNumber": 22781,
+      "type": "docs",
+      "body": "## Description\r\n\r\nMintlify's `<Expandable>` component is built for nested object fields in API reference pages and prepends \"Show\" / \"Hide\" to its title. The docs used it for FAQs, prerequisite blocks, flag references, and sample payloads, ",
+      "files": [
+        "docs/public-docs/app-developers/guides/transactions/integrating-subblocks.mdx",
+        "docs/public-docs/app-developers/tutorials/bridging/bridge-crosschain-eth.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/manual-relay.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/message-passing.mdx",
+        "docs/public-docs/chain-operators/guides/configuration/op-challenger-config-guide.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/index.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-challenger-setup.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-deployer-setup.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-proposer-setup.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-reth-setup.mdx",
+        "docs/public-docs/chain-operators/tutorials/migrating-permissionless.mdx",
+        "docs/public-docs/op-stack/features/subblocks.mdx",
+        "docs/public-docs/op-stack/interop/explainer.mdx",
+        "docs/public-docs/op-stack/interop/reorg.mdx",
+        "docs/public-docs/op-stack/security/interop-security.mdx"
       ]
     },
     {
@@ -657,6 +704,29 @@
         ".circleci/scripts/apt-install.sh",
         "packages/contracts-bedrock/justfile"
       ]
+    },
+    {
+      "title": "ci: improve Kontrol execution",
+      "prNumber": 22796,
+      "type": "other",
+      "body": "Moves Kontrol execution from RV-hosted compute to our CircleCI runners after each merge to develop.\n\n- Updates Kontrol to 1.0.255, preserving symbolic caller coverage.\n- Reports proof failures directly in CI and improves Slack failure notif",
+      "files": [
+        ".circleci/continue/main.yml",
+        "mise.toml",
+        "packages/contracts-bedrock/test/kontrol/README.md",
+        "packages/contracts-bedrock/test/kontrol/pausability-lemmas.md",
+        "packages/contracts-bedrock/test/kontrol/scripts/run-kontrol.sh"
+      ]
+    },
+    {
+      "title": "Revert \"contracts-bedrock: verify StandardValidator sub-contract references in VerifyOPCM (#22786)\"",
+      "prNumber": 22806,
+      "type": "other",
+      "body": "Reverts #22786 (squash-merged as 2f3e36102b007f9edb3dc4af773ac3d7eeac8b2d, which is currently `develop` HEAD).\n\nRestores `VerifyOPCM.s.sol` and `VerifyOPCM.t.sol` to their pre-#22786 contents. No other commits have touched either file since",
+      "files": [
+        "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
+        "packages/contracts-bedrock/test/scripts/VerifyOPCM.t.sol"
+      ]
     }
   ],
   "topContributors": [
@@ -683,11 +753,21 @@
     {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 157.27691923545905,
+      "totalScore": 175.77691923545905,
       "prScore": 92.37691923545904,
       "issueScore": 0,
-      "reviewScore": 64.5,
+      "reviewScore": 83,
       "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 175.12347388530787,
+      "prScore": 110.08347388530788,
+      "issueScore": 4.1,
+      "reviewScore": 60,
+      "commentScore": 0.94,
       "summary": null
     },
     {
@@ -701,13 +781,23 @@
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 154.92347388530789,
-      "prScore": 110.08347388530788,
-      "issueScore": 4.1,
-      "reviewScore": 40,
-      "commentScore": 0.74,
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 151.7320601933074,
+      "prScore": 118.23206019330739,
+      "issueScore": 0,
+      "reviewScore": 33.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 146.89378424219916,
+      "prScore": 144.87778424219917,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 2.016,
       "summary": null
     },
     {
@@ -741,26 +831,6 @@
       "summary": null
     },
     {
-      "username": "OptimismBot",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 127.97703325660889,
-      "prScore": 94.47703325660889,
-      "issueScore": 0,
-      "reviewScore": 33.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 123.1948147713078,
-      "prScore": 121.3788147713078,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.8159999999999998,
-      "summary": null
-    },
-    {
       "username": "teddyknox",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
       "totalScore": 119.54147025337714,
@@ -781,6 +851,16 @@
       "summary": null
     },
     {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 111.96066882450387,
+      "prScore": 85.46066882450387,
+      "issueScore": 8,
+      "reviewScore": 18.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
       "totalScore": 111.82175605503647,
@@ -793,9 +873,9 @@
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 108.92,
+      "totalScore": 110.92,
       "prScore": 0,
-      "issueScore": 0,
+      "issueScore": 2,
       "reviewScore": 107.5,
       "commentScore": 1.42,
       "summary": null
@@ -821,22 +901,22 @@
       "summary": null
     },
     {
-      "username": "0xOneTony",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 61.6757738965761,
-      "prScore": 39.6757738965761,
-      "issueScore": 8,
-      "reviewScore": 14,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "ogenev",
       "avatarUrl": "https://avatars.githubusercontent.com/u/39865181?u=c1987712b39ea9352a386f98e518462b15ae3a55&v=4",
       "totalScore": 50.834618412450894,
       "prScore": 50.834618412450894,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 50.328773896576095,
+      "prScore": 41.328773896576095,
+      "issueScore": 0,
+      "reviewScore": 9,
       "commentScore": 0,
       "summary": null
     },
@@ -853,11 +933,11 @@
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 44.726557048848186,
+      "totalScore": 45.16455704884819,
       "prScore": 43.510557048848185,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.2159999999999997,
+      "commentScore": 1.654,
       "summary": null
     },
     {
@@ -941,12 +1021,32 @@
       "summary": null
     },
     {
+      "username": "Steve0x2a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17063270?u=a192ed2c0f28dd63f3c30db0381ce9cc99e640f8&v=4",
+      "totalScore": 15.70861934066053,
+      "prScore": 15.70861934066053,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "shopcrazy852-del",
       "avatarUrl": "https://avatars.githubusercontent.com/u/318289851?u=e9d7647e5f60115d10b8efc05655663127119764&v=4",
       "totalScore": 10.617651256490317,
       "prScore": 10.617651256490317,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
@@ -981,16 +1081,6 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 9,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
       "totalScore": 6.4399999999999995,
@@ -998,16 +1088,6 @@
       "issueScore": 6.1,
       "reviewScore": 0,
       "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
       "summary": null
     },
     {
@@ -1081,9 +1161,9 @@
       "summary": null
     }
   ],
-  "newPRs": 61,
-  "mergedPRs": 37,
-  "newIssues": 16,
-  "closedIssues": 9,
+  "newPRs": 71,
+  "mergedPRs": 42,
+  "newIssues": 17,
+  "closedIssues": 10,
   "activeContributors": 55
 }
