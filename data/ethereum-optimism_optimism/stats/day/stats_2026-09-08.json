@@ -5,8 +5,69 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-08 to 2026-09-09, ethereum-optimism/optimism had 2 new PRs (1 merged), 0 new issues, and 3 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-09-08 to 2026-09-09, ethereum-optimism/optimism had 13 new PRs (8 merged), 3 new issues, and 25 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABQUha2A",
+      "title": "eth_getBlockByNumber for `finalized` on mainnet.optimism.io returns wrong block height most of the time",
+      "author": "jlynch1",
+      "number": 22822,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Querying eth_getBlockByNumber for `finalized` on mainnet.optimism.io gives block height 38 million below what it should be most of the time, the other times it returned correct height. \n\nSee example\n\n```\nfor i in $(seq 1 10); do\n  curl -s -X POST -H \"Content-Type: application/json\" \\\n    --data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBlockByNumber\",\"params\":[\"finalized\", false]}' \\\n    https://mainnet.optimism.io/ | python3 -c \"import json,sys; print(int(json.load(sys.stdin)['result']['number'], 16))\"\n  sleep 1\ndone\n```\n\n117387667\n117387667\n117387667\n156644963\n117387667\n117387667\n156644963\n117387667",
+      "createdAt": "2026-09-08T18:05:34Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABLR96Hw",
+      "title": "acceptance-tests: Add high-level DSL for metrics usage in tests",
+      "author": "wwared",
+      "number": 22207,
+      "repository": "ethereum-optimism/optimism",
+      "body": "A follow-up from https://github.com/ethereum-optimism/optimism/pull/22121#discussion_r3704129527\r\n\r\nThe kona-sp1-proposer ZK tests have some hacky low level code for metrics handling that should be factored into higher level DSL constructs",
+      "createdAt": "2026-08-03T16:29:02Z",
+      "closedAt": "2026-09-08T16:53:19Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPcdfmQ",
+      "title": "kona-sp1: Avoid repeating L1 derivation for every super-range transition",
+      "author": "Inphi",
+      "number": 22747,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe super-range guest currently creates a fresh derivation pipeline for every progressing `(timestamp, chain)` transition. Consecutive transitions therefore repeat overlapping L1 and DA work, including pipeline reset, L1 traversal, channel reconstruction, and batch decoding.\n\nThis may be a major contributor to proving latency. As one production data point, proving only 12 seconds of superchain time on SPN took over 30 minutes, without an obvious indication that the prover was resource-constrained.\n\n## Current behavior\n\n`build_range_outputs` calls `run_super_range_transition` independently for every claimed transition:\n\n```rust\nfor transition in &inputs.claimed_transitions {\n    let boot_info = run_super_range_transition(...).await?;\n    validate_range_transition_output(...).await?;\n}\n```\n\nEach progressing transition creates new L1/L2 providers, a new cursor, and a new derivation pipeline. Provider caches are discarded, the pipeline walks backward to reconstruct its starting state, and derivation scans forward through an L1/DA window that substantially overlaps adjacent transitions.\n\nRelevant code:\n\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs`\n- `rust/kona/crates/proof/proof/src/sync.rs`\n- `rust/kona/crates/proof/proof/src/l1/pipeline.rs`\n- `rust/kona/crates/protocol/derive/src/pipeline/core.rs`\n\nThis duplication also occurs when multiple timestamps are already included in one proposer chunk.\n\n## Preliminary benchmark\n\nA local single-chain devnet benchmark compared the current implementation with one continuous pipeline deriving the same blocks from the same agreed root and L1 head. The continuous run reproduced the exact final output root.\n\n| Range | Current | Continuous | Cycle reduction | Guest wall reduction |\n|---|---:|---:|---:|---:|\n| 2 L2 blocks | 561.4M cycles, 5.51s | 303.4M cycles, 4.58s | 46.0% | 17.0% |\n| 3 L2 blocks | 970.5M cycles, 8.52s | 365.6M cycles, 4.86s | 62.3% | 42.9% |\n\nFor the three-block run, payload derivation fell from 939.2M to 344.7M cycles. It accounted for 98.3% of the total savings. Block execution was nearly unchanged at 3.68M versus 3.59M cycles.\n\nMerging separate chunks without reusing the pipeline saved only approximately 5–6% of guest cycles. Increasing chunk size alone therefore does not address the repeated derivation.\n\n### Important limitation\n\nThese devnet blocks had very little L2 activity. Block execution represented only about 0.4% of guest cycles, so the benchmark likely overstates the percentage reduction expected on a busy production chain.\n\nOn OP Mainnet near the 30M L2 gas limit, EVM execution may become a much larger share of total cycles. Conversely, derivation may also become more expensive because it must process larger compressed batches, more transaction data, and potentially more DA inputs. L2 gas is not a direct proxy for zkVM cycles, so this needs to be measured using real chain data.\n\nThe devnet result establishes that repeated derivation exists and is expensive for low-activity blocks. It does not yet establish the proportional end-to-end benefit on OP Mainnet or explain the full 30-minute SPN result.\n\n## Proposed direction\n\nMaintain one monotonically advancing derivation session per chain within a super-range proof:\n\n1. Initialize the providers, cursor, pipeline, and executor from the earliest agreed output.\n2. Traverse L1 and DA inputs once as timestamps advance.\n3. Execute each newly required L2 block.\n4. Validate every intermediate claimed output root and block hash.\n5. Validate no-op timestamps without restarting derivation.\n6. Preserve the existing timestamp-major public output ordering.\n\nPipeline reuse should initially remain inside one guest execution. Reusing state between independent child proofs would require a cryptographically bound derivation-state commitment.\n\n## OP Mainnet follow-up\n\nBefore estimating production impact, repeat the comparison on several finalized OP Mainnet intervals, including a 12-second interval with blocks close to the 30M gas limit.\n\nMeasure for both the current and continuous paths:\n\n- Total and per-phase guest cycles.\n- Guest execution wall time.\n- Witness size and collection time.\n- L2 gas, transaction count, and compressed DA size.\n- Exact final output-root equality.\n- If practical, actual SPN proving time and queue/proving breakdown.\n\nThe Mainnet test requires a historical L1 execution RPC, an L1 Beacon endpoint with the required blob sidecars, and a proof-capable OP Mainnet L2 endpoint supporting historical `debug_executePayload`, raw headers/receipts, and `eth_getProof`.\n\n## Acceptance criteria\n\n- At most one derivation pipeline initialization per chain within a super-range proof.\n- Existing range and aggregation public-output bindings remain unchanged.\n- Tests cover multiple progressing transitions, intervening no-op timestamps, and multiple chains.\n- A benchmark demonstrates at least a 10% guest-cycle improvement when multiple transitions progress.\n- OP Mainnet measurements are recorded before making production-latency claims.\n",
+      "createdAt": "2026-09-03T02:25:05Z",
+      "closedAt": "2026-09-08T16:11:07Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQUbyMA",
+      "title": "op-node: triggers two payload jobs for the same parent block",
+      "author": "bitwiseguy",
+      "number": 22821,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\nA delayed head snapshot causes op-node to reset its sequencing state, forget the first build, and then reconstruct a build on the head it was already extending.\n\nThe payload attributes can change during that recovery, eg the observed jobs had different L1 origins so the second request receives a different payload ID.\n\nThis is more common on op-mainnet than op-sepolia because higher derivation and transaction load makes backlog in the shared event loop more likely. It can happen on op-sepolia too, but far less frequently because the event loop is usually idle.\n\n## Detailed sequence\n\nObserved behavior on op-mainnet:\n\n1. op-node captured an unsafe-head update as a snapshot and queued it in its shared event loop.\n2. Heavy derivation activity delayed that event.\n3. Meanwhile, the sequencer’s faster path advanced the unsafe head and started job A on parent P.\n4. The delayed snapshot was eventually delivered. It described an older head, but op-node cannot distinguish an aged snapshot from a genuine chain rewind.\n5. It therefore performed rewind recovery and cleared its single building slot—forgetting payload ID A without cancelling the EL job.\n6. With building now empty, the sequencing loop began building again as it caught back up.\n7. Once it reached the live unsafe head P, it submitted another FCU with payload attributes, creating job B on the same parent.\n\n## Additional context\nSee [this pr description](https://github.com/ethereum-optimism/optimism-premium/pull/256#issue-5352174175)",
+      "createdAt": "2026-09-08T17:55:33Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQNjcqg",
+      "title": "op-reth: flashblocks WS stream has no read timeout, silent upstream freezes the pending block indefinitely",
+      "author": "tuan-phan",
+      "number": 22816,
+      "repository": "ethereum-optimism/optimism",
+      "body": "### Summary\n\n`WsFlashBlockStream` has no read timeout and never originates a WebSocket ping, so a flashblocks upstream that stops sending **without closing** the TCP connection leaves the stream parked in `Poll::Pending` indefinitely. The node keeps importing canonical blocks entirely normally while its `pending` block stays frozen at the last flashblock received. Nothing is logged, no metric moves, and no reconnect is attempted.\n\nWe hit this on six op-reth `v2.4.2` nodes on OP Mainnet. The longest had been serving a frozen `pending` block for 16 days before we found it.\n\nWe reported what is very likely the same bug to OP Labs support on 2026-07-24 (ticket #7702): one node out of a pool of eight returning `0x0` for `eth_getTransactionCount(addr, \"pending\")` while every node was at tip, fixed by restarting op-reth, root cause never established. `0x0` is consistent with this mechanism — if the frozen flashblock is old enough that the address had not yet sent a transaction as of that state, the nonce read back is legitimately zero. Same cause, different distance back in history.\n\n### Impact\n\nAny `pending`-tagged read is served from the frozen state: `eth_getTransactionCount`, `eth_getBalance`, `eth_call`, `eth_estimateGas`. How it surfaces depends on state retention:\n\n- **Archive nodes** retain the old state and return a **silently wrong value**. We observed `eth_getTransactionCount(addr, \"pending\")` returning a nonce *lower* than the same call with `\"latest\"`, which is not a legal result. A caller building a transaction from that nonce gets one that is already consumed.\n- **Pruned nodes** fail loudly instead: `state at block #N is pruned`, where `N` is exactly the frozen flashblock height.\n\nWhat makes this hard to catch operationally is that everything else on the node looks perfect. `eth_blockNumber` is at tip, `eth_syncing` is `false`, `latest` state is correct, and any height-based health check passes. The only tell is `pending` < `latest`.\n\n### Root cause\n\nAll references below are at tag `op-reth/v2.4.2` (commit `f863ff4c12531b315d666331d43da3aeb3719388`).\n\nIn [`ws/stream.rs#L108-L117`](https://github.com/ethereum-optimism/optimism/blob/f863ff4c12531b315d666331d43da3aeb3719388/rust/op-reth/crates/flashblocks/src/ws/stream.rs#L108-L117), `WsFlashBlockStream::poll_next` reads the socket:\n\n```rust\nlet Some(msg) = ready!(\n    this.stream\n        .as_mut()\n        .expect(\"Stream state should be unreachable without stream\")\n        .poll_next_unpin(cx)\n) else {\n    this.state = State::Initial;\n\n    continue 'start;\n};\n```\n\n`ready!` propagates `Poll::Pending` straight out of `poll_next`, and no timer is registered alongside the read. If the underlying WebSocket never yields, the task is never woken again. Recovery is only reachable through two paths, and a silent peer takes neither:\n\n- `None` from the inner stream, meaning the stream ended, which sets `State::Initial` so the next poll reconnects.\n- `Err(..)` at [`ws/stream.rs#L131`](https://github.com/ethereum-optimism/optimism/blob/f863ff4c12531b315d666331d43da3aeb3719388/rust/op-reth/crates/flashblocks/src/ws/stream.rs#L131), which reaches [`service.rs#L319-L327`](https://github.com/ethereum-optimism/optimism/blob/f863ff4c12531b315d666331d43da3aeb3719388/rust/op-reth/crates/flashblocks/src/service.rs#L319-L327) and is logged, followed by [`CONNECTION_BACKOUT_PERIOD`](https://github.com/ethereum-optimism/optimism/blob/f863ff4c12531b315d666331d43da3aeb3719388/rust/op-reth/crates/flashblocks/src/service.rs#L29) of 5s.\n\nA half-open connection produces neither. Confirming there is no timer anywhere in the path, `grep -i timeout` across every file in `rust/op-reth/crates/flashblocks/src/` at this tag returns zero matches.\n\nRelated: the stream answers server pings at [`ws/stream.rs#L126`](https://github.com/ethereum-optimism/optimism/blob/f863ff4c12531b315d666331d43da3aeb3719388/rust/op-reth/crates/flashblocks/src/ws/stream.rs#L126) via [`fn ping`](https://github.com/ethereum-optimism/optimism/blob/f863ff4c12531b315d666331d43da3aeb3719388/rust/op-reth/crates/flashblocks/src/ws/stream.rs#L158-L162), which only queues a `Pong`. It never originates a ping of its own. So if the upstream also stops sending pings, there is no liveness probe in either direction.\n\n### Evidence\n\n**The reconnect logic itself works.** About seven minutes after one of our restarts, the upstream reset the new connection properly and op-reth recovered with no help:\n\n```\n2026-09-08T04:27:13.964094Z  WARN flashblocks: Error receiving flashblock\n  err=WebSocket protocol error: Connection reset without closing handshake retry_period=5\n```\n\nA later check on the same process showed a new local port and file descriptor with bytes flowing again. So the gap is specifically the silent case, not reconnect in general.\n\n**For the silent case**, `ss -tinp` against our dedicated `op-mainnet-fb-ws-pvt.optimism.io` endpoint on a stalled node showed the socket still in `ESTAB` with these fields (addresses redacted):\n\n```\nbytes_sent:924171  bytes_received:52173548130  data_segs_in:43840663\nlastsnd:39814924  lastrcv:39747172  lastack:39746652  busy:8039112ms  app_limited\n```\n\nReading that:\n\n- `bytes_received` of 52 GB over 43.8M inbound data segments — this connection worked normally for days and then went quiet. It is not a connection that failed to establish.\n- `lastrcv` of 39,747,172 ms is **11.04 hours with no byte received**, and `lastsnd` is 11.06 hours, so neither side was sending anything.\n- There is no `timer:(keepalive)` field on the socket, so the kernel was never going to reap it either. Since `SO_KEEPALIVE` is per-socket and has to be enabled by the application, no kernel tunable can force one — there is no workaround available to operators.\n\n`lastrcv` matched the staleness of the `pending` block to the second on all six nodes, and both matched `reth_flashblock_service_current_block_height`, which was frozen at exactly the height that `eth_getBlockByNumber(\"pending\")` returned.\n\nAfter the restart the old socket did not close cleanly either — it sat in `FIN-WAIT-1` with `backoff:7` and an unacked FIN after eight retransmits, holding no process. The upstream would not acknowledge even a FIN.\n\n**Nothing was logged during the stall.** `grep 'flashblocks:'` over the debug-level log covering the freeze returns zero lines, and a healthy control node also returns zero, so the module is simply silent unless it hits an explicit WebSocket error.\n\n**Freeze timestamps**, dated from the header timestamp of the block each node froze on: `2026-08-22 23:34:57Z`, `2026-08-22 23:34:59Z`, `2026-08-27 21:13:17Z`, `2026-09-06 19:38:05Z`, `2026-09-07 16:26:59Z`, `2026-09-07 16:27:13Z`. Staleness at discovery was 16.2 days on two nodes, 11.3 days on one, 31.9 hours on one, and 11.1 hours on the two most recent.\n\nNote they arrive in **pairs seconds apart** — two froze 2 seconds apart and another two 14 seconds apart — which looks like the upstream dropping several of our connections at once. They also straddle the 2026-08-31 Subblocks mainnet rollout rather than clustering after it, so we do not believe the 200ms interval change or the zeroed payload fields are involved.\n\n### Suggested fix\n\nRoughly in order of preference:\n\n1. **An idle read timeout on the flashblocks stream.** If no frame arrives within a configurable interval, set `State::Initial` so the existing reconnect path runs. Given flashblocks arrive every 200ms, even a generous default of a few seconds is safe.\n2. **Client-originated WebSocket pings with a pong deadline**, which would also detect a peer that has gone away without closing.\n3. Failing both, **a staleness guard on the pending block itself**, so a flashblock older than some threshold stops being served as `pending`. This is the weakest option since it does not restore the feed, but it would turn silent wrong answers into visible ones.\n\n### Environment\n\n- op-reth `v2.4.2` (`op-reth/v2.4.2-f863ff4c`), from `us-docker.pkg.dev/oplabs-tools-artifacts/images/op-reth:v2.4.2`. This is the latest release, so there is nothing for us to upgrade to.\n- op-node `v1.19.4`\n- OP Mainnet. Six nodes affected across a fleet of 21 full and archive nodes.\n- Flashblocks enabled against a dedicated `op-mainnet-fb-ws-pvt.optimism.io` endpoint, with `--rollup.disable-tx-pool-gossip` and `--rollup.retain-forwarded-txs`.\n\nRestarting op-reth is currently our only remediation, and since nothing is logged we cannot alert on it directly — we have had to add an external check comparing `eth_getBlockByNumber(\"pending\")` against `eth_blockNumber`.\n\nHappy to test a patch. We have six nodes with a known reproduction history and a diagnostic recipe.\n",
+      "createdAt": "2026-09-08T06:15:18Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDODjvEJM8AAAABClzssw",
@@ -17,41 +78,143 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-09-08T00:25:55Z",
       "mergedAt": null,
-      "additions": 1265,
-      "deletions": 258
+      "additions": 1486,
+      "deletions": 253
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABCmAxSA",
-      "title": "contracts-bedrock: restore VerifyOPCM StandardValidator ref checks, fix the profile mismatch",
-      "author": "OptimismBot",
-      "number": 22808,
-      "body": "Restores #22786 (reverted in #22806) and fixes the CI failure it caused.\n\n### Commits\n\n1. `776b4fc` — cherry-pick of #22786, unchanged.\n2. `f021625` — the fix.\n\n### Why it failed\n\n`contracts-bedrock-tests-develop` failed on develop ([job 5547680](https://circleci.com/gh/ethereum-optimism/optimism/5547680)) with:\n\n```\nEncountered 2 failing tests in test/scripts/VerifyOPCM.t.sol:VerifyOPCM_Run_Test\n[FAIL: VerifyOPCM_Failed()] test_run_corruptedValidatorDependencies_reverts()\n[FAIL: VerifyOPCM_Failed()] test_run_succeeds()\n```\n\nThe new `BYTECODE:` checks compare the deployed `standardValidatorUtils` / `migrationValidator` code against `forge-artifacts/<Name>.sol/<Name>.json` — the default compiler profile's artifact.\n\nBut `DeployImplementations` deployed both through the qualified `\"File.sol:Contract\"` identifier. `DeployUtils.getCode` explicitly passes those straight to `vm.getCode` rather than resolving the artifact path, and both contracts are pulled into the `validator` profile's compilation graph by `src/L1/OPContractsManagerStandardValidator.sol` (`optimizer_runs = 200`). So they're emitted twice — 200 runs and the default 999999 — and `vm.getCode` can resolve to either. Deploy the 200-run build, verify against the 999999-run artifact, mismatch.\n\nThis is the same failure mode and the same fix as #19323.\n\n### Why PR CI was green on #22786\n\nPR runs use `test_profile: liteci`; only develop runs `test_profile: ci`. Under `liteci` every compiler profile is `optimizer = false, optimizer_runs = 0`, so the two builds are byte-identical and the ambiguity is invisible.\n\n**That also means CI on this PR will not exercise the fix.** No PR-triggered job runs `VerifyOPCM.t.sol` under the `ci` profile. It has to be checked locally, or on develop after merge.\n\n### Testing the failing job locally\n\nFrom `packages/contracts-bedrock`, reproduce the develop-only job by forcing the `ci` profile:\n\n```bash\n# Fails on 776b4fc (the cherry-pick alone), passes with f021625.\nFOUNDRY_PROFILE=ci forge test --match-path 'test/scripts/VerifyOPCM.t.sol' -vv\n```\n\nThe first build is slow — `optimizer_runs = 999999` across the whole tree. Dropping `FOUNDRY_PROFILE=ci` (or using `liteci`) reproduces the green PR run instead, which is the whole point: the bug only appears when the profiles disagree.\n\nTo confirm the two artifacts actually diverge:\n\n```bash\nFOUNDRY_PROFILE=ci forge build\njq -r '.deployedBytecode.object | length' forge-artifacts/StandardValidatorUtils.sol/StandardValidatorUtils*.json\n```\n\nPrompted by: maurelian",
+      "id": "PR_kwDODjvEJM8AAAABCnmb3Q",
+      "title": "op-conductor: [DONT MERGE] examples using extensible op-conductor",
+      "author": "yashvardhan-kukreja",
+      "number": 22815,
+      "body": "Signed-off-by: Yashvardhan Kukreja <yashvardhan@oplabs.co>",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-08T01:05:07Z",
+      "createdAt": "2026-09-08T05:36:07Z",
       "mergedAt": null,
-      "additions": 107,
-      "deletions": 10
+      "additions": 1028,
+      "deletions": 0
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABClNiaw",
-      "title": "Revert \"contracts-bedrock: verify StandardValidator sub-contract references in VerifyOPCM (#22786)\"",
-      "author": "OptimismBot",
-      "number": 22806,
-      "body": "Reverts #22786 (squash-merged as 2f3e36102b007f9edb3dc4af773ac3d7eeac8b2d, which is currently `develop` HEAD).\n\nRestores `VerifyOPCM.s.sol` and `VerifyOPCM.t.sol` to their pre-#22786 contents. No other commits have touched either file since, so this is a clean revert.\n\nRequested after the CircleCI failure reported on `develop`.\n\nPrompted by: maurelian\n",
+      "id": "PR_kwDODjvEJM8AAAABActXSw",
+      "title": "op-devstack: move Kona proposer metrics behind DSL",
+      "author": "wwared",
+      "number": 22568,
+      "body": "## Summary\n\n- add a Kona-SP1 proposer DSL backed by the shared devstack Prometheus client, with exact same-snapshot expectations and explicit metrics-disabled diagnostics\n- replace acceptance-facing proposer metrics endpoints with cached runtime handles and distinct automatic/delayed lifecycle behavior\n- add ZK game helpers for immediate/temporal unproven verification and composable proven-by waits, then cut the ZK acceptance scenarios over to the DSL\n\n## Test plan\n\n- [x] mise exec -- just build-superchain-go\n- [x] mise exec -- go test ./op-devstack/devtest/metrics ./op-devstack/dsl/zkproposer ./op-devstack/dsl/proofs ./op-devstack/sysgo ./op-devstack/presets\n- [x] mise exec -- go test -run ^$ ./op-acceptance-tests/tests/proofs/zk\n- [x] focused invalid-game and concurrent-defense ZK acceptance scenarios (547.028s)\n- [x] full ZK acceptance package on the final reviewed source (851.486s)\n- [x] mise exec -- just lint-go\n- [ ] mise exec -- just go-tests — attempted locally; unrelated packages require missing Cannon/op-deployer generated fixtures and MAINNET_RPC_URL/SEPOLIA_RPC_URL. One unrelated timing-sensitive supernode test also failed in the aggregate run and passed immediately in isolation.\n\n## Notes\n\nThe common op-devstack metrics implementation and the existing op-dispute-mon DSL are unchanged. Interop-monitor registry assertions and load-test graph collection remain intentionally in-process/test-owned.",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-07T22:34:18Z",
-      "mergedAt": "2026-09-08T01:00:00Z",
-      "additions": 8,
-      "deletions": 100
+      "createdAt": "2026-08-20T17:17:27Z",
+      "mergedAt": "2026-09-08T16:53:18Z",
+      "additions": 934,
+      "deletions": 173
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCXwqNw",
+      "title": "kona-sp1: Reuse derivation pipelines across super-range claims",
+      "author": "Inphi",
+      "number": 22794,
+      "body": "Super-range execution currently rebuilds the derivation pipeline for every claimed L2 block, repeating L1 traversal, channel reconstruction, decompression, and batch decoding.\r\n\r\nThis change groups chain-local transitions with contiguous output roots and reuses one pipeline and driver per segment. Each progressing claim advances the same driver and retains output-root and exact block-number validation. No-op transitions preserve continuity without advancing the driver; a changed agreed root after consolidation starts a fresh segment.\r\n\r\nPublic inputs, encodings, commitments, and timestamp-major output ordering remain unchanged.\r\n\r\n## Why\r\n\r\nChannel reconstruction is a major cost of super-range guest execution. In a pre-change four-block OP Mainnet [canary](https://github.com/ethereum-optimism/optimism/pull/22791), it consumed **8.085 billion cycles—87% of payload derivation**. Each block repeated 147 lower-pipeline pulls, covering L1 traversal, frame/channel assembly, decompression, and batch decoding.\r\n\r\nA prototype using the same pipeline-reuse approach demonstrated the intended behavior: all 147 channel pulls occurred during the first block, with **zero channel-reconstruction calls for the remaining three blocks**.\r\n\r\n| Measurement | Before | Reuse prototype |\r\n|---|---:|---:|\r\n| Channel-reconstruction calls | 588 | 147 |\r\n| Channel-reconstruction cycles | 8.085B | 2.059B |\r\n| Payload-derivation cycles | 9.296B | 2.397B |\r\n| Range PGU | 17.926B | 6.073B |\r\n\r\nThe results are similar on a 24-block span - the remaining 23 block derivations reuse the result of the channel reconstructed from the first block derivation. Granting us further cycle count reduction in the super-range program.\r\n\r\nfixes https://github.com/ethereum-optimism/optimism/issues/22747",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-06T02:24:16Z",
+      "mergedAt": "2026-09-08T16:11:05Z",
+      "additions": 667,
+      "deletions": 81
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCpt5hw",
+      "title": "op-reth: bound the flashblocks websocket, drop superseded pending blocks",
+      "author": "geoknee",
+      "number": 22817,
+      "body": "Fixes #22816.\n\nA flashblocks upstream that stops sending **without closing** the connection leaves `WsFlashBlockStream::poll_next` parked in `Poll::Pending` forever — the read registers no timer, so nothing ever wakes the task. Six op-reth nodes on OP Mainnet served a frozen `pending` block that way, the longest for 16 days, while importing canonical blocks normally, logging nothing and moving no metric.\n\nThis adds two independent bounds. Either one alone contains the failure; together they cover both \"recover the feed\" and \"don't serve bad answers while it is down\".\n\n### 1. An idle deadline on the subscription (issue's suggested fix 1)\n\n`WsFlashBlockStream` now arms a `Sleep` and polls it **before anything that can return `Poll::Pending`**, so the timer is registered on every path that could otherwise park:\n\n* the websocket read,\n* the queued-pong flush (a blocked sink stalls just as silently),\n* and the connect future — a peer that completes the TCP connect and then answers neither the TLS `ClientHello` nor the HTTP upgrade hangs the same way, and the OS won't reap it.\n\nOn expiry the stream **drops both halves of the connection** (the reported incident left the old socket in `FIN-WAIT-1` holding a descriptor) and yields an error, so the existing reconnect path runs. Every frame — a websocket ping or pong included — restarts the deadline, so this is genuine idleness, not connection age.\n\nConfigurable via `--flashblocks-idle-timeout` (default `5s`, `0` disables). It must exceed the chain's flashblock interval or a healthy connection reconnects on every gap; the flag help says so.\n\nThe stall is now visible: the error goes through the existing `warn!` in `FlashBlockService`, and a new `flashblock_service_stream_errors` counter makes it alertable. Operators no longer need the external `pending` vs `latest` check described in the issue.\n\n### 2. `pending` stops answering from a superseded flashblock (issue's suggested fix 3)\n\n`pending` reads no longer use a flashblock whose height the canonical chain has already reached. That is what made the freeze harmful:\n\n* archive nodes returned an `eth_getTransactionCount(addr, \"pending\")` **below** the same call against `latest` — not a legal result, and enough to build a transaction on an already-consumed nonce;\n* pruned nodes failed outright with `state at block #N is pruned`.\n\nOnce dropped, those reads fall back to `latest`, which lags but is complete and self-consistent.\n\n**Why the canonical tip and not an age.** My first cut used a TTL — the pending block already carries reth's `expires_at`, set to 1s by the worker and never read by anything. Review showed a TTL re-introduces the same defect in a smaller window: while the flashblock is still *ahead* of the tip (during the 5s reconnect backoff, say, before block N is imported) it is the best answer available, and expiring it **lowers** a nonce that `pending` had already reported. Comparing against the tip drops the flashblock exactly when it stops being ahead — one block after a freeze — and never before. It also keeps preconfirmation lookups (`eth_getTransactionReceipt` on a flashblock tx) working right up to canonical import, which an age-based gate would have made flicker to `null`.\n\nNo new flag: it is a correctness invariant, not a tuning knob.\n\n### Tests\n\n`ws/stream.rs`:\n* `test_stream_reconnects_when_the_upstream_goes_silent` — the reproduction. It **fails on the baseline** (`a silent upstream should not park the stream forever: Elapsed(())`) and asserts the connection is dropped and the next poll reconnects.\n* `test_stream_gives_up_on_a_handshake_that_never_completes` — the connect-path variant.\n* `test_idle_deadline_restarts_on_every_frame` — traffic every 3s under a 5s timeout must not trip it, guarding against a connection-age timer.\n\nAll three use `#[tokio::test(start_paused = true)]`, so they exercise real timers in microseconds.\n\n`eth/pending_block.rs`: four cases around the tip — ahead is served, at the tip and behind are not, absent stays absent.\n\n### Verification\n\n* `cargo clippy --all-features --all-targets` clean across all 22 op-reth packages (full-workspace clippy can't run locally: an unrelated SP1 crate needs `protoc`).\n* Tests green for `reth-optimism-{flashblocks,rpc,node,cli}`.\n* `just fmt-fix`, rustdoc lints clean, CLI surface snapshot regenerated, `op-reth node --help` reference page and the node-operator Subblocks guide updated.\n\n### Notes for review\n\n* **Recovery takes ~10s**, not 5: the idle timeout yields an ordinary stream error, which the service follows with its existing 5s `CONNECTION_BACKOUT_PERIOD`. Skipping the backoff for this case would mean plumbing a typed error through; the backoff still protects a struggling upstream, and `pending` stays correct throughout via guard 2. Happy to add it if you'd rather.\n* **Client-originated pings (suggested fix 2) are not implemented.** The idle deadline detects the same condition without needing the peer to cooperate; a ping would only distinguish \"peer alive but quiet\" from \"peer gone\", which doesn't change what we do about it.\n* @tuan-phan offered nodes with a known reproduction history — this is worth a soak there before it ships, since the idle timeout's interaction with a real upstream's quiet periods is the one thing local tests can't tell us.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-08T09:55:44Z",
+      "mergedAt": null,
+      "additions": 520,
+      "deletions": 29
     }
   ],
   "codeChanges": {
-    "additions": 8,
-    "deletions": 100,
-    "files": 2,
-    "commitCount": 12
+    "additions": 2357,
+    "deletions": 387,
+    "files": 38,
+    "commitCount": 47
   },
   "completedItems": [
+    {
+      "title": "op-devstack: move Kona proposer metrics behind DSL",
+      "prNumber": 22568,
+      "type": "other",
+      "body": "## Summary\n\n- add a Kona-SP1 proposer DSL backed by the shared devstack Prometheus client, with exact same-snapshot expectations and explicit metrics-disabled diagnostics\n- replace acceptance-facing proposer metrics endpoints with cached ru",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go",
+        "op-devstack/dsl/proofs/zk_dispute_game.go",
+        "op-devstack/dsl/proofs/zk_dispute_game_test.go",
+        "op-devstack/dsl/zkproposer/zk_proposer.go",
+        "op-devstack/dsl/zkproposer/zk_proposer_test.go",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/interop_test.go",
+        "op-devstack/presets/superproofs_from_runtime.go",
+        "op-devstack/presets/zk_proposer_test.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/zk_proposer.go",
+        "op-devstack/sysgo/zk_proposer_test.go"
+      ]
+    },
+    {
+      "title": "docs: Add derivation batch reviewer",
+      "prNumber": 22749,
+      "type": "docs",
+      "body": "Derivation batch review currently relies on broad review context and implicit path knowledge. This change adds one shared specification review method, one derivation area guide, and a thin reviewer agent. The area guide maps current specifi",
+      "files": [
+        ".claude/agents/derivation-batch-reviewer.md",
+        "AGENTS.md",
+        "docs/ai/derivation-batch-review.md",
+        "docs/ai/spec-driven-review.md"
+      ]
+    },
+    {
+      "title": "op-devstack: separate ZK challenger and initial bonds",
+      "prNumber": 22788,
+      "type": "other",
+      "body": "Use different bond values for the ZK game configuration so it's a bit more realistic.",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "op-devstack/sysgo/superroot_via_upgrade.go"
+      ]
+    },
+    {
+      "title": "op-interop-mon: propagate the caller's context into job updates",
+      "prNumber": 22774,
+      "type": "other",
+      "body": "`RPCUpdater` is handed a context and drops it before the RPC.\n\n## The bug\n\n`Run(ctx)` receives a context, but nothing between it and the receipts fetch carries one. `processJobs`, `UpdateJob` and `UpdateJobStatus` all took no `ctx`, so a fr",
+      "files": [
+        "op-interop-mon/monitor/updater.go",
+        "op-interop-mon/monitor/updater_test.go"
+      ]
+    },
+    {
+      "title": "op-chain-ops: Support interop kona prestates in check-prestate",
+      "prNumber": 22797,
+      "type": "other",
+      "body": "`check-prestate` could not review a `cannon64-kona-interop` prestate, and could not resolve the superchain-registry pin for recent kona-client tags.\n\nTwo fixes:\n\n- `gitlinkCommit` resolved the submodule path relative to the working director",
+      "files": [
+        "op-chain-ops/cmd/check-prestate/README.md",
+        "op-chain-ops/cmd/check-prestate/main.go",
+        "op-chain-ops/cmd/check-prestate/prestate/kona.go",
+        "op-chain-ops/cmd/check-prestate/prestate/kona_test.go"
+      ]
+    },
+    {
+      "title": "kona-sp1: Reuse derivation pipelines across super-range claims",
+      "prNumber": 22794,
+      "type": "other",
+      "body": "Super-range execution currently rebuilds the derivation pipeline for every claimed L2 block, repeating L1 traversal, channel reconstruction, decompression, and batch decoding.\r\n\r\nThis change groups chain-local transitions with contiguous ou",
+      "files": [
+        "rust/kona/sp1/crates/client/src/witness/executor.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/ethereum/client/Cargo.toml"
+      ]
+    },
     {
       "title": "Revert \"contracts-bedrock: verify StandardValidator sub-contract references in VerifyOPCM (#22786)\"",
       "prNumber": 22806,
@@ -61,14 +224,119 @@
         "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
         "packages/contracts-bedrock/test/scripts/VerifyOPCM.t.sol"
       ]
+    },
+    {
+      "title": "Update release docs: add op-node v1.19.6, op-reth v2.4.3, more",
+      "prNumber": 22818,
+      "type": "other",
+      "body": "## Summary\nSync `releases/` pages with the latest GitHub releases for tracked OP Stack components.\n\n## Changes\n- op-node: add v1.19.6 (Sep 8) as Latest\n- op-reth: add v2.4.3 (Sep 8) as Latest\n- op-proposer: add v1.16.4 (Sep 4) as Latest\n- o",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/op-challenger.mdx",
+        "docs/public-docs/releases/op-deployer.mdx",
+        "docs/public-docs/releases/op-node.mdx",
+        "docs/public-docs/releases/op-proposer.mdx",
+        "docs/public-docs/releases/op-reth.mdx",
+        "docs/public-docs/releases/proxyd.mdx"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 73.65029347359875,
+      "prScore": 73.65029347359875,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 51.412058287784006,
+      "prScore": 36.912058287784006,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 50.74959139113258,
+      "prScore": 45.54959139113258,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 49.07202243073806,
+      "prScore": 39.07202243073806,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 46.11341997845476,
+      "prScore": 45.773419978454754,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
     {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
       "totalScore": 41.328773896576095,
       "prScore": 41.328773896576095,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 37.57403024586592,
+      "prScore": 37.57403024586592,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 34.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 34.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "trianglesphere",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/11803341?v=4",
+      "totalScore": 31.173729783880304,
+      "prScore": 31.173729783880304,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 30.420854034749738,
+      "prScore": 30.420854034749738,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -83,11 +351,131 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 19.48079054559674,
+      "prScore": 14.980790545596742,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "its-everdred",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1020682?u=ef69e13586ebc33960d4aa1bf7ef3938bebd59a3&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "kansas1295",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31484605?u=f6206f21f36e613d793db6f2e79ba187694aed63&v=4",
+      "totalScore": 4.299377389657611,
+      "prScore": 4.299377389657611,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jlynch1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17743552?u=b9fd0ab5f72b25ef14817fe8f6963800c58b86b5&v=4",
+      "totalScore": 2.3000000000000003,
+      "prScore": 0,
+      "issueScore": 2.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "tuan-phan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29539892?u=999bed60ce8486d341ae1c49695b0e0f731d5446&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sduchesneau",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1040558?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "jdodinh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/43282168?u=9822a3c0838e8f7748c9aeb882ddce64bfcc9bed&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 2,
-  "mergedPRs": 1,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 3
+  "newPRs": 13,
+  "mergedPRs": 8,
+  "newIssues": 3,
+  "closedIssues": 2,
+  "activeContributors": 25
 }
