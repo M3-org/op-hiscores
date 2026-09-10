@@ -1,0 +1,96 @@
+{
+  "interval": {
+    "intervalStart": "2026-09-10T00:00:00.000Z",
+    "intervalEnd": "2026-09-11T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-09-10 to 2026-09-11, ethereum-optimism/optimism had 0 new PRs (0 merged), 4 new issues, and 2 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABQZeSFw",
+      "title": "op-node, kona: Subtract simultaneous upgrade gas allocations",
+      "author": "ajsutton",
+      "number": 22828,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:**\n\nKarst and Lagoon can activate at the same timestamp while preserving fork order.\n\nBoth clients add both upgrade gas allocations to that activation block. Both reconstruction helpers stop after subtracting the Karst allocation.\n\nThe reconstructed system configuration retains the Lagoon allocation for later blocks.\n\nThe specification states: “The block after the activation block therefore returns to the chain's configured gas limit.”\n\nSpecification: https://github.com/ethereum-optimism/specs/blob/b733da804eeadc597c690f16601091e97af1fc68/specs/protocol/l2-upgrades-1-execution.md#reverting-the-allocation\n\nAffected code:\n\n- `op-node/rollup/derive/attributes.go:163-182`\n- `op-node/rollup/derive/payload_util.go:67-84`\n- `rust/kona/crates/protocol/derive/src/attributes/stateful.rs:190-219`\n- `rust/kona/crates/protocol/protocol/src/utils.rs:107-130`\n\nTrigger:\n\n- Enable every predecessor through Karst.\n- Set `KarstTime == LagoonTime` after genesis.\n- Keep `KeepKarstUpgradeGas` disabled.\n- Do not apply a same-origin gas update.\n\nA focused reproduction stripped `55,370,657` gas instead of `116,023,829` gas. The resulting configuration retained `60,653,172` gas.\n\nThis changes later block capacity and base-fee behavior.\n\nThe reconstruction must subtract every matching activation allocation.",
+      "createdAt": "2026-09-09T05:33:54Z",
+      "closedAt": "2026-09-10T00:00:35Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQj2Ihw",
+      "title": "op-interop-filter: Backfill the complete message expiry window",
+      "author": "ajsutton",
+      "number": 22849,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this during the interop implementation review.\n\nOp-interop-filter's default startup backfill is shorter than its default message expiry window.\n\nCurrent defaults:\n\n- `backfill-duration = 24h` (`flags/flags.go:49-54`)\n- `message-expiry-window = 168h` (`flags/flags.go:55-60`)\n\nEvent sequence:\n\n1. Start the filter with fresh storage at timestamp `S`.\n2. The ingester starts near `S - 24h` (`logsdb_chain_ingester.go:379-395`).\n3. A transaction references a canonical initiating log from `S - 48h`.\n4. Message timing accepts the reference because it is younger than seven days.\n5. LogsDB cannot find the source block because startup never ingested it.\n6. The filter rejects an otherwise valid transaction.\n\nThe LogsDB does not prune ingested history. This is a startup backfill problem, not an ongoing retention problem.\n\nThe missing range remains relevant for six days after a fresh start. Persistent storage with enough existing history avoids the problem.\n\nConfiguration validates both durations independently and enforces no relationship (`filter/config.go:61-68,93-105`).\n\nExpected behavior: default startup backfill must cover the message expiry window. Configuration should reject a shorter backfill window.",
+      "createdAt": "2026-09-10T00:39:57Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQj0sRw",
+      "title": "op-interop-filter: Serialize cross-unsafe validation with reorg recovery",
+      "author": "ajsutton",
+      "number": 22848,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this during the interop implementation review.\n\nAutomatic reorg recovery can race with active cross-unsafe validation and restore a stale watermark.\n\nThis requires `--reorg-recovery-enabled`, which is disabled by default.\n\nEvent sequence:\n\n1. `advanceValidation` passes its one-time ingester checks (`lockstep_cross_validator.go:300-318`).\n2. It captures the old watermark and minimum ingested timestamp (`lockstep_cross_validator.go:315-328`).\n3. An ingester detects an unsafe-head hash mismatch and records `ErrorReorg` (`logsdb_chain_ingester.go:488-605`).\n4. Recovery rewinds the LogsDB to finalized (`backend_reorg_recovery.go:29-69`).\n5. Recovery resets `crossValidatedTs` to the finalized timestamp (`backend_reorg_recovery.go:41`).\n6. The active validation loop continues from its old local timestamps.\n7. Post-finalized queries now exceed the rewound LogsDB tip and return an empty message list (`logsdb_chain_ingester.go:326-337`).\n8. Validation treats those timestamps as message-free and stores the stale later watermark (`lockstep_cross_validator.go:330-348`).\n9. The ingester restores canonical blocks, but the restored range is not validated again.\n\nThis affects op-interop-filter's cross-unsafe transaction admission. Op-supernode still verifies blocks independently before safe-head promotion.\n\nExpected behavior: serialize watermark advancement with recovery, or use a generation check that cancels stale validation work after a rewind.",
+      "createdAt": "2026-09-10T00:36:48Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQjxdBA",
+      "title": "op-interop-filter: Validate startup history before advancing cross-unsafe",
+      "author": "ajsutton",
+      "number": 22847,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this during the interop implementation review.\n\nOp-interop-filter trusts backfilled unsafe history without validating its executing messages.\n\nEvent sequence:\n\n1. Startup records wall-clock timestamp `S` (`filter/service.go:161-165`).\n2. Each ingester starts near `S - backfillDuration` (`logsdb_chain_ingester.go:379-394`).\n3. Fresh ingestion targets `eth.Unsafe` and continues following that label (`logsdb_chain_ingester.go:528-575,463-501`).\n4. An ingester becomes ready after its latest timestamp reaches `S` (`logsdb_chain_ingester.go:193-200`).\n5. Once every ingester is ready, the validator stores `crossValidatedTs = S` (`lockstep_cross_validator.go:305-325`).\n6. Startup never calls `validateTimestamp` for `S` or any earlier backfilled timestamp.\n7. Forward validation begins at `S+1` (`lockstep_cross_validator.go:328-348`).\n8. Cross-unsafe access checks accept source timestamps through `S` (`lockstep_cross_validator.go:213-223`).\n\nThis occurs on every process start because the cross-validated timestamp is memory-only.\n\nIt also undermines the documented recovery path. After a validation failure, wiping the data directory and restarting can backfill and trust the same invalid unsafe block.\n\nExpected behavior: initialize from a trusted cross-unsafe anchor and validate every later timestamp. Do not derive the anchor from wall-clock time alone.",
+      "createdAt": "2026-09-10T00:29:44Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQjr76g",
+      "title": "op-supernode: Do not invalidate blocks on initiating-log storage errors",
+      "author": "ajsutton",
+      "number": 22846,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this during the interop implementation review.\n\nOp-supernode converts initiating-log storage failures into protocol invalidity.\n\nEvent sequence:\n\n1. `verifyExecutingMessage` calls `sourceDB.Contains` (`activity/interop/algo.go:213-215`).\n2. `Contains` can return WAL read or block-record decode errors (`raftwallogdb/db.go:301-307`).\n3. `verifyInteropMessages` treats every returned error as an invalid executing message (`algo.go:122-145`).\n4. The round returns an invalid head and applies `DecisionInvalidate` (`interop.go:510-517,721-887`).\n5. Op-supernode can therefore replace an otherwise valid block because its local log store failed.\n\nThis differs from executing-block reads. `OpenBlock` errors abort the verification round and retry later (`algo.go:100-103`).\n\nDefault backfill already covers the complete expiry window. This issue concerns storage errors, not custom backfill configuration.\n\nExpected behavior: distinguish protocol-invalid lookups from local storage failures. Retry or halt on storage failures without invalidating the L2 block.",
+      "createdAt": "2026-09-10T00:17:02Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 6
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 8.2,
+      "prScore": 0,
+      "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 0,
+  "mergedPRs": 0,
+  "newIssues": 4,
+  "closedIssues": 1,
+  "activeContributors": 2
+}

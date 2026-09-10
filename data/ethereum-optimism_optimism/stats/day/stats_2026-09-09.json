@@ -5,33 +5,332 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-09 to 2026-09-10, ethereum-optimism/optimism had 0 new PRs (0 merged), 1 new issues, and 4 active contributors.",
+  "overview": "From 2026-09-09 to 2026-09-10, ethereum-optimism/optimism had 12 new PRs (5 merged), 9 new issues, and 26 active contributors.",
   "topIssues": [
     {
-      "id": "I_kwDODjvEJM8AAAABQXrV9A",
-      "title": "interop: Cycle detection invalidates acyclic prerequisite chains",
-      "author": "ajsutton",
-      "number": 22825,
+      "id": "I_kwDODjvEJM7ycHUD",
+      "title": "kona/derive: derivation pipeline invariant analysis — bad L1 input must never halt derivation",
+      "author": "sebastianst",
+      "number": 19510,
       "repository": "ethereum-optimism/optimism",
-      "body": "**Claude:**\n\n## Summary\n\nCurrent Go and Kona cycle detection classify every unresolved graph node as a cycle participant.\n\nReverse Kahn pruning leaves acyclic prerequisites unresolved when they feed a cycle. Both implementations then replace a valid prerequisite chain.\n\nI reproduced this behavior at `develop` commit `adb49c16082bdb82b60408097576fe393953594c`.\n\n## Reproduction\n\nConstruct this same-timestamp dependency graph:\n\n- `A0` depends on `B0`.\n- `B0` depends on `A1`.\n- `A1` depends on `A0` and `C0`.\n- `C0` has no graph dependency.\n\nOnly `A0`, `B0`, and `A1` form a cycle. `C0` is an acyclic prerequisite.\n\nThis graph is reachable through valid message declarations. Chain D can supply `C0`'s initiating log without creating another graph node.\n\nA focused Go test produced this result:\n\n```text\nexpected cycle chains: {A, B}\nactual cycle chains:   {A, B, C}\n```\n\n## Root cause\n\n`checkCycle` removes nodes that have no dependents. Cyclic `A1` depends on `C0`, so `C0` never becomes removable.\n\n`collectCycleParticipants` then treats every unresolved node as cyclic.\n\nRelevant Go locations:\n\n- `op-supernode/supernode/activity/interop/cycle.go:52-87`\n- `op-supernode/supernode/activity/interop/cycle.go:214-242`\n\nKona implements the same algorithm and result:\n\n- `rust/kona/crates/protocol/interop/src/rules.rs:183-203`\n- `rust/kona/crates/protocol/interop/src/rules.rs:225-302`\n- `rust/kona/crates/proof/proof-interop/src/consolidation.rs:149-151`\n\n## Impact\n\nGo adds chain C to `InvalidHeads`. Kona re-executes chain C as deposit-only and commits the replacement output.\n\nThis can discard valid user transactions from a chain outside the cycle.\n\nThe behavior conflicts with these specifications:\n\n- [Message graph](https://specs.optimism.io/interop/messaging.html#message-graph)\n- [Replacing invalid blocks](https://specs.optimism.io/interop/derivation.html#replacing-invalid-blocks)\n\n## Expected behavior\n\nCycle detection must report only nodes that belong to a directed cycle.\n\nThe implementation should exclude connected acyclic prerequisites. Tests should cover this graph in both Go and Kona.",
-      "createdAt": "2026-09-09T00:52:27Z",
+      "body": "## Summary\n\nInvariant analysis of the kona derivation pipeline at `rust/kona/crates/protocol/derive/`, mirroring the Go op-node analysis in #19491.\n\n**Invariant**: No malformed or bad external input (batcher transactions, system config logs, deposit transactions from L1) should cause derivation to stop. Bad input should be dropped and processing should continue. Only logic errors are allowed to cause pipeline-halting (Critical) errors.\n\n## Findings\n\nAll pipeline stages are correctly implemented **except for two issues**:\n\n| Stage | File | Status |\n|-------|------|--------|\n| Traversal | `stages/traversal/` | ✅ System config errors ignored with warn |\n| L1 Retrieval | `stages/l1_retrieval.rs` | ✅ |\n| Frame Queue | `stages/frame_queue.rs` | ✅ Malformed frames silently dropped |\n| Channel Bank | `stages/channel/channel_bank.rs` | ✅ |\n| Channel Assembler | `stages/channel/channel_assembler.rs` | ✅ |\n| Channel Reader | `stages/channel/channel_reader.rs` | ✅ |\n| Batch Queue (pre-Holocene) | [`stages/batch/batch_queue.rs:388-390`](https://github.com/ethereum-optimism/optimism/blob/48b31f0b1b1e9afcf4d07f75c28771f602cc6a1b/rust/kona/crates/protocol/derive/src/stages/batch/batch_queue.rs#L388-L390) | ⚠️ See 19511 |\n| Batch Stream (post-Holocene) | `stages/batch/batch_stream.rs` | ✅ |\n| Attributes Builder | [`attributes/stateful.rs:114-120`](https://github.com/ethereum-optimism/optimism/blob/48b31f0b1b1e9afcf4d07f75c28771f602cc6a1b/rust/kona/crates/protocol/derive/src/attributes/stateful.rs#L114-L120) | ⚠️ See 19512 |\n| Calldata Source | `sources/calldata.rs` | ✅ |\n| Blob Source | `sources/blobs.rs` | ✅ |\n\n## Sub-issues\n\n- 19511 — `batch_queue.rs`: span batch extraction failure returns `Critical` instead of flushing and continuing\n- 19512 — `stateful.rs`: system config update errors return `Critical` instead of being ignored\n\n## Notes\n\n- Deposit errors in `stateful.rs` returning `Critical` are **intentional** — matches Go op-node behaviour (deposits may never be silently dropped)\n- `BatchValidity::Past` returning `Critical` pre-Holocene is **intentional** — should never be reached with valid external data\n\n## Related\n\nCompanion to Go op-node analysis: #19491\n\n---\n🤖 Generated by [Claude Code](https://claude.com/claude-code)",
+      "createdAt": "2026-03-12T21:45:38Z",
+      "closedAt": "2026-09-09T15:58:57Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQESw8Q",
+      "title": "op-node: do not retry publish failures that cannot succeed",
+      "author": "geoknee",
+      "number": 22798,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Follow-up to #22585, which gave the async gossiper a bounded publish queue with retry-at-the-front.\n\n## Problem\n\nA block publish can fail **permanently**, and the gossiper currently cannot tell.\n\n`Topic.Publish` runs op-node's own block validator **inline and synchronously on the publishing node** — `ValidateLocal` → `validate(..., local=true)`, and at `go-libp2p-pubsub@v0.17.0/validation.go:337`: `// run validation synchronously if it's a local publish`. So a publish can fail in ~1ms with no network I/O at all, and deterministically:\n\n- bad block hash, oversized block, fork-shape mismatch, wrong `P2PSequencerAddress` (`op-node/p2p/gossip.go:292-449`)\n- a block whose timestamp has aged past `--p2p.gossip.timestamp.threshold` (`gossip.go:356-360`)\n- SSZ encode failure (`gossip.go:630`, `:634`)\n- nil p2p signer (`op-node/node/node.go:767`), `signer is closed`, `pubsub.ErrTopicClosed`\n\nBecause #22585 retries at the front of the queue, such a block burns up to `maxPublishQueue` attempts and **head-of-line blocks every descendant for ~64s** (at a 2s block time) before queue pressure evicts it. Retrying is worse than futile for the staleness case in particular: a retry only ever makes a block *older*, so each attempt is strictly more hopeless than the last.\n\nA second case falls out of the same trace: `RejectValidationIgnored` fires on any re-publish of a block that already passed local validation, and the gossiper's `isPending` dedup does not cover it (a block that published successfully and was then cleared can be re-queued). That is really \"already out\", but today it surfaces as an error, is counted as `publishing_errors`, and is retried.\n\n## Proposal\n\nHave the producer say whether a failure is permanent, and have the gossiper drop those immediately.\n\nFollow the existing convention for classified errors in this repo — a wrapping sentinel matched with `errors.Is`, as `op-node/rollup/derive/error.go` does with `ErrTemporary` / `ErrReset` / `ErrCritical`. Declare `async.ErrPermanentPublish`, and wrap in `op-node/p2p/gossip.go` and `op-node/node/node.go`.\n\nNo import cycle stands in the way: `op-node/p2p` does **not** import `op-node/rollup/async` (`go list -deps`), and `async`'s whole dependency set is `op-service/bigs` + `op-service/eth`. The cycle its `Network`/`Metrics` comments guard against is `async ← rollup/driver`, a different edge — so no duck-typed interface is needed.\n\n### The trap to avoid\n\nClassification must be an **allowlist**, never a catch-all. `Topic.Publish` also returns `ctx.Err()` from its eval loop and from `sendMsgBlocking`, so the gossiper's own `publishTimeout` surfaces as `context.DeadlineExceeded` *through the same call*. A catch-all would mark a timed-out publish permanent and silently disable retry altogether. Worth a dedicated regression test.\n\n### Known tradeoff\n\n`pubsub.ValidationError.Reason` is `\"validation failed\"` for every reject, so the one self-healing check — `gossip.go:362-366`, timestamp more than 5s in the future — cannot be isolated from the error. Treating all rejects as permanent is proposed anyway, because a self-published block realistically cannot trip it: L2 timestamps are chain-derived (`nextL2Time := l2Parent.Time + BlockTime`, `op-node/rollup/derive/attributes.go:119`), sealing is scheduled `sealingDuration` (50ms) *before* `payloadTime`, the sequencer waits rather than sealing early when the head is ahead, and the validator runs in the same process off the same clock. Reaching it needs a backwards clock step or a `sealingDuration` above 5s.\n\n## Notes\n\nThis does **not** remove the need for `retryInterval` or the attempt backstop added in #22585: a refused signer connection fails in microseconds and is legitimately transient, so the spin guard still earns its place, and stopped block production plus a refused signer is still 1 Hz forever without the backstop. This is a layer on top, not a simplification.\n\nDiscussion: https://github.com/ethereum-optimism/optimism/pull/22585#discussion_r3937626460\n",
+      "createdAt": "2026-09-07T10:11:16Z",
+      "closedAt": "2026-09-09T21:04:35Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQfkLfg",
+      "title": "op-node,kona: zlib channel decompression conformance — Go compress/zlib and miniz_oxide disagree on validity and on partial output",
+      "author": "sebastianst",
+      "number": 22834,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nop-node and kona decompress zlib channels with two independent implementations — Go's `compress/zlib` and [`miniz_oxide`](https://github.com/Frommi/miniz_oxide) 0.9.1 — and the two disagree both on **whether a stream is valid** and on **how much output a failing stream yields**. Under today's \"accept partially decompressed channel data\" rule, both disagreements change the derived batch set.\n\nThis is the zlib counterpart of #21793 (the same problem in the brotli decoders), and it lands in the same place: the residual conformance gap behind [protocol-team#84 (strict channel decompression)](https://github.com/ethereum-optimism/protocol-team/issues/84).\n\nBoth instances below are confirmed by running the real decoders on both sides. Both are malicious-batcher-reachable only; an honest batcher produces streams that decompress byte-identically on both clients.\n\n## Instance 1 — kona adopts miniz_oxide's untruncated output buffer on error (kona lenient)\n\n[`BatchReader::decompress_zlib`, `rust/kona/crates/protocol/protocol/src/batch/reader.rs#L98-L116`](https://github.com/ethereum-optimism/optimism/blob/85f7c13d7470a66254081f0177fc297201c07459/rust/kona/crates/protocol/protocol/src/batch/reader.rs#L98-L116):\n\n```rust\nErr(e) if (e.status == TINFLStatus::HasMoreOutput || !e.output.is_empty()) => {\n    self.decompressed = e.output;\n}\n```\n\nThe intent is to mirror op-node's streaming decode, which keeps the batches decoded before the error ([`BatchReader`, `op-node/rollup/derive/channel.go#L174-L219`](https://github.com/ethereum-optimism/optimism/blob/85f7c13d7470a66254081f0177fc297201c07459/op-node/rollup/derive/channel.go#L174-L219)). It does not achieve that, for two compounding reasons:\n\n1. **`decompress_to_vec_zlib_with_limit` only truncates its output buffer to the real byte count on the success path.** Every error path returns the whole allocation — `vec![0; min(2·input_len, limit)]`, grown by doubling — so `e.output` is *real bytes followed by a zero tail*.\n2. Even setting that aside, the two inflaters need not stop at the same byte. Go's emits only fully decoded bytes; miniz_oxide sometimes decodes further before failing.\n\nSo kona's `decompressed` is a **strict superset** of what op-node's reader yields, essentially always. Measured over 28,482 malformed streams (every truncation length plus single-byte corruptions of valid streams, 3 compression levels):\n\n| | count |\n|---|---|\n| kona partial output strictly longer than op-node's | **28,440 (99.85%)** |\n| op-node partial output longer | **0** |\n| partial output differing other than by a suffix | 0 |\n| kona's extra tail is all `0x00` | 27,543 |\n| kona output length exactly `2 · input length` | 9,463 |\n\nThe extra bytes change the batch set whenever they complete an RLP item. Over a channel carrying 6 valid RLP-framed singular batches, 3,135 malformed variants:\n\n```\nkona derives MORE batches    = 535 (17.1%)   always exactly +1\nop-node derives more batches = 0\n```\n\nSo this is not a knife-edge — roughly one in six arbitrary malformed zlib channels already diverges, uniformly in the kona-lenient direction. A batcher that *chooses* the truncation point can aim for it deliberately.\n\nNote this arm also swallows outright header rejections: for an invalid header miniz returns an error whose `output` is a non-empty all-zero buffer, and kona adopts it rather than reaching the `Err(_) => ZlibError` arm.\n\nTracked with the exploit analysis in [protocol-team#306](https://github.com/ethereum-optimism/protocol-team/issues/306).\n\n## Instance 2 — FDICT zlib header: op-node accepts, kona rejects (op-node lenient)\n\nGo's `zlib.Reset` rejects only `CM != 8`, `CINFO > 7` and a bad FCHECK. For the FDICT bit it reads a 4-byte `DICTID` and compares it against `adler32.Checksum(dict)` — and `NewReader` passes `dict == nil`, for which `adler32.Checksum(nil) == 1`. A stream with FDICT set and `DICTID = 0x00000001` therefore **passes**, decoding via `flate.NewReaderDict(r, nil)`. `miniz_oxide`'s `validate_zlib_header` rejects the FDICT bit unconditionally.\n\nConfirmed on a channel carrying one valid singular batch, header `78 20 00 00 00 01`:\n\n```\nop-node  fdict(DICTID=1) : decoded 1 batch\nop-node  fdict(DICTID=2) : zlib: invalid dictionary   (control — rejected)\nkona     fdict(DICTID=1) : 0 batches\n```\n\nA whole channel op-node derives is dropped by kona. Reachable by a batcher setting FDICT and `DICTID = 1` while compressing without a real preset dictionary — from-scratch deflate decodes fine against an empty dictionary.\n\nRejecting FDICT in op-node is the tighter option and matches kona.\n\n## Ruled out — please don't re-chase these\n\nTwo nearby claims have circulated; both are **not** divergences, verified by running the exact minimized inputs through both clients:\n\n- **CM = 15 (\"reserved\" compression method) header, e.g. `7fda010000ffff00000001`.** Both clients route a low nibble of `0x0F` to zlib and both then reject: Go with `zlib: invalid header`, and `miniz_oxide` with `Err(status=Failed)`. The `22` bytes visible in kona's `decompressed` are the untruncated all-zero buffer from Instance 1 (`2 × 11` input bytes, **0** of them non-zero), not decompressed content. Both derive 0 batches. (That first byte also fails Go's FCHECK, `0x7fda % 31 == 25`.)\n- **\"Valid zlib stream with the trailing 4-byte Adler-32 removed.\"** Go's reader delivers the complete payload before reporting `unexpected EOF`, so there is no partial-output gap at all and both clients derive the same batches. kona never verifies the Adler-32 checksum where op-node does, but for a *complete* deflate stream both still emit every batch present, so it only matters in combination with truncation — i.e. Instance 1.\n\n## Relationship to strict decompression\n\nThere is no sound wrapper-level fix for Instance 1. Byte-exact partial-output parity between two independent inflaters is not reachable through `miniz_oxide`'s API, and tightening kona alone makes things worse — restricting the arm to `HasMoreOutput` only, on the same corpus, has kona derive **fewer** batches than op-node in 77.6% of cases, a new divergence in the opposite direction.\n\nOnly two-sided strict semantics collapse both columns to \"reject the channel\". Same conclusion #21793 reached for brotli, and the same #84 gating applies to every \"make one decoder stricter\" step here.\n\n## Proposed work\n\n- [ ] Land [protocol-team#84](https://github.com/ethereum-optimism/protocol-team/issues/84) (strict decompression) as the foundational rule change — it subsumes Instance 1.\n- [ ] Decide the FDICT rule (Instance 2) and align both clients; it is a validity boundary, not a partial-output question, so it can be specified independently of #84.\n- [ ] Gate a Go↔Rust differential fuzzer in CI comparing the **derived batch set** (not decoder return status) for a shared corpus of malformed channels. Comparing return status is what makes this class easy to misdiagnose in both directions.\n\n## Related\n\n- #21793 — the same conformance problem in the brotli decoders (`brotli-decompressor` vs `andybalholm/brotli`).\n- #19333 — earlier kona decompression divergences (partial output accepted as success; brotli Fjord gating).\n- Companion issue on the Holocene frame-queue prune divergence, filed alongside this one.\n\n---\n🤖 *Co-created with Claude Opus 5 (1M context)*\n",
+      "createdAt": "2026-09-09T16:01:36Z",
       "closedAt": null,
       "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQfjgtQ",
+      "title": "kona/derive: Holocene frame-queue prune over-drains on channel ID reuse, dropping channels op-node keeps",
+      "author": "sebastianst",
+      "number": 22833,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nkona's Holocene frame-queue prune drops more frames than op-node's when a channel ID is **reused** inside the queue. Where op-node discards a single frame, kona drains from the *first* queue entry carrying that channel ID — so if an earlier channel with the same ID has already closed, kona destroys that complete channel and everything between it and the current position.\n\nGiven identical L1 data, op-node derives batches kona never sees. Reachable only by a malicious batcher (frame IDs are batcher-chosen), so the impact is a derivation divergence — in the direction where a kona-based verifier or fault-proof program derives a *shorter* safe chain than op-node.\n\n## The two implementations\n\n**op-node** — [`pruneFrameQueue`, `op-node/rollup/derive/frame_queue.go#L104-L141`](https://github.com/ethereum-optimism/optimism/blob/85f7c13d7470a66254081f0177fc297201c07459/op-node/rollup/derive/frame_queue.go#L104-L141):\n\n```go\n// first frames discard previously unclosed channels\nif next.FrameNumber == 0 && !current.IsLast {\n    discard(0) // discard current\n    // make sure we backwards invalidate more frames of unclosed channel\n    if i > 0 {\n        i--\n    }\n    continue\n}\n```\n\nIt removes **one** frame and steps back one index. The backward walk then re-applies the pairwise rules, so it only keeps removing while the preceding frames actually belong to the still-open channel — a closed `is_last` frame stops it.\n\n**kona** — [`FrameQueue::prune`, `rust/kona/crates/protocol/derive/src/stages/frame_queue.rs#L90-L101`](https://github.com/ethereum-optimism/optimism/blob/85f7c13d7470a66254081f0177fc297201c07459/rust/kona/crates/protocol/derive/src/stages/frame_queue.rs#L90-L101):\n\n```rust\n// If the frames are in different channels, and the current channel is not last, walk\n// back the channel and drop all prev frames.\nif !extends_channel && !prev_frame.is_last && next_frame.number == 0 {\n    // Find the index of the first frame in the queue with the same channel ID\n    // as the previous frame.\n    let first_frame =\n        self.queue.iter().position(|f| f.id == prev_frame.id).expect(\"infallible\");\n\n    // Drain all frames from the previous channel.\n    let drained = self.queue.drain(first_frame..=i);\n    i = i.saturating_sub(drained.len());\n    continue;\n}\n```\n\n`position(..)` scans from the **front of the queue** and matches the *first* frame with that ID. It is not \"the first frame of the channel `prev_frame` belongs to\" — with a reused ID it lands on the earlier, unrelated channel, and `drain(first_frame..=i)` then takes out every frame in between.\n\n## Separating input\n\nOne L1 batcher transaction, Holocene active, three distinct channel IDs `P`, `Q`, `R`:\n\n```\nP#0(is_last), Q#0(is_last), P#0(not last), R#0(not last)\n```\n\n`P` is reused *after* its own single-frame channel already closed. Run against the real production code on both sides:\n\n```\nbefore:             [P#0(last), Q#0(last), P#0, R#0]\n\nop-node after prune: [P#0(last), Q#0(last), R#0]     ← channels P and Q intact\nkona after prune:    [R#0]                            ← both destroyed\n```\n\nop-node keeps two complete, well-formed channels; kona drops them along with the offending frame. Every batch in `P` and `Q` enters op-node's derivation and never enters kona's.\n\nThe intervening frame matters: the bare `P#0(last), P#0, R#0` case is handled identically by both. The bug needs a *different* channel's frame sitting between the reused ID's two occurrences, so the drain range spans it.\n\n## Impact\n\nDerivation divergence only. Deposits are unaffected — they are derived from L1 receipts in the attributes builder ([`DeriveDeposits`](https://github.com/ethereum-optimism/optimism/blob/85f7c13d7470a66254081f0177fc297201c07459/op-node/rollup/derive/attributes.go#L93) / [`derive_deposits`](https://github.com/ethereum-optimism/optimism/blob/85f7c13d7470a66254081f0177fc297201c07459/rust/kona/crates/protocol/derive/src/attributes/stateful.rs#L131)), never from channel data, and both clients drop any batch containing a `0x7E` transaction. Frames carry only batch data, so forced inclusion via the sequencing window is untouched: the dropped channels become deposits-only blocks in kona's view.\n\nNot honest-batcher reachable — an honest batcher does not reuse a channel ID it has already closed.\n\nHolocene and later only; there is no frame-queue prune before Holocene.\n\n## Suggested fix\n\nMirror op-node: remove the single frame at `i` and step back one index, letting the pairwise rules do the backward walk.\n\n```rust\nself.queue.remove(i);\ni = i.saturating_sub(1);\ncontinue;\n```\n\nThis needs a cross-client parity test pinning the frame sequence above on both sides, in the style of the parity tests added for the span-batch channel-retention fix.\n\n## Related\n\n- #21793 — the same class of Go↔Rust derivation divergence, in the brotli decoder.\n- Companion issue on zlib decompression conformance (filed alongside this one).\n\n---\n🤖 *Co-created with Claude Opus 5 (1M context)*\n",
+      "createdAt": "2026-09-09T16:00:36Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPk_VjA",
+      "title": "kona-sp1-proposer: stop retrying games blocked on terminal proof requests",
+      "author": "digorithm",
+      "number": 22764,
+      "repository": "ethereum-optimism/optimism",
+      "body": "After an SPN incident returned `Unexecutable`, the proposer kept retrying the same game. It started 80 proving attempts, and each one recollected witnesses before failing on the cached terminal request. No new SPN requests were submitted, so this only wasted local compute.\n\n`Unexecutable` should remain sticky to avoid repeatedly buying work that cannot succeed, but the game should be parked before witness collection. We also need a way to clear or retry that state after a provider incident without restarting the proposer.\n\nA regression test should confirm that repeated scheduler cycles do not recollect witnesses for a terminal\nrequest, and that an explicit reset or changed attempt identity allows proving to resume.",
+      "createdAt": "2026-09-03T19:01:51Z",
+      "closedAt": "2026-09-09T01:27:51Z",
+      "state": "CLOSED",
       "commentCount": 0
     }
   ],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABC5ZCeA",
+      "title": "interop: atomic demo",
+      "author": "opsuperchain",
+      "number": 22840,
+      "body": "This atomic demo lets an application call a remote contract through its normal ABI, use the returned value in subsequent calls, and roll back when the remote call or its own final check fails. CREATE2 facades provide predictable local addresses. Serial discovery constructs transactions across N chains using the existing CrossL2Inbox, access-list requirements, and cycle rules; no existing protocol contract or execution-client rule changes.\n\nThe sponsored path uses signed ERC-4337 UserOperations, the preinstalled EntryPoint, CREATE2 smart accounts, and an opt-in paymaster. Both successful and reverting application calls consume sponsored gas without requiring ETH in the smart accounts. EntryPoint catches application reverts, so its outer receipt succeeds while the UserOperation event reports failure. The builder bounds discovery, performs one final canonical replay per included chain, checks results and message commitments, and returns the exact verified UserOperations and outer calldata/fee parameters.\n\nFailed result hints force rollback but cannot prove that a user caused the failure. Account owners explicitly authorize sponsorship spending; there is no user billing for discarded simulations, deliberate gas burning, or public builder admission service. Discovery still restarts transactions and uses local signers for intermediate operations. Nested callbacks, ETH/view facades, interactive signed intents, SDM refund reconciliation, and a production adapter for the complete candidate block environment remain outside this prototype. In particular, the RPC adapter retains the parent's base fee and cannot guarantee gas-price-sensitive execution against a changed next-block environment. See `op-test-sequencer/atomic/DESIGN.md` for these boundaries.\n\nCapability regression coverage and the demo are separate commits. Go and contract/security reviews cover the sponsored extension; the fee mismatch found during review is fixed with EVM/RPC regressions and pinned submission fees. A gas-trace regression also checks identical gas supplied and consumed at the application and both proxy calls between final discovery and replay, after fixing the discovery adapter's cold inbox-address surcharge. The original capability changes also received Rust and CI reviews. No review findings were dismissed.\n\nLocal validation passes for all 17 contract PR checks, the tagged EVM suite, affected Go verification packages, Go lint/module checks, and both sponsored real op-reth/supernode scenarios. The node tests verify application rollback, UserOperation success/failure, the exact paymaster deposit debit, and unfunded smart accounts. The full optimized contract suite passes with 2,335 tests and 159 skips; the final developer-mode suite passes with 2,275 tests and 183 skips. An earlier developer run was invalidated by concurrent artifact-cache replacement; the sequential rerun above is clean. The original raw node scenarios, ten native Kona cycle tests, and CI routing scenarios also passed.\n\nFull Kona/challenger execution remains blocked at setup by missing prestate artifacts; workspace Rust clippy is blocked by missing m4 in an unrelated native dependency, and local CircleCI schema/process validation is unavailable because its CLI is absent. Native cycle tests do not substitute for full proof execution. Main upstream CI requires human authorization under the repository's fork policy.\n\nOn the current commit, GitHub dependency, title, and all Wiz checks pass. The image workflow fails at [APK provenance attestation](https://github.com/ethereum-optimism/optimism/actions/runs/34422616906/job/102701496534) with `missing \"id-token\" permission`, the same restricted-fork failure seen on the prior head; the other image builds are canceled and downstream image/smoke jobs are skipped. This draft is not CI-green.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-09T21:02:15Z",
+      "mergedAt": null,
+      "additions": 4865,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAcHtjQ",
+      "title": "kona-sp1: build shared scenario world",
+      "author": "Inphi",
+      "number": 22562,
+      "body": "## Summary\r\n\r\n* Add a crate-private `ScenarioWorld` shared by fake L1, superroot, clock, proof, and action ports.\r\n* Model immutable L1 snapshots, independent clocks and visibility, scripted failures, transaction lifecycles, barriers, and target-aware journals.\r\n* Use the real prestate cache with zero retry delay and support prestate publication, initialization, and proposer restart.\r\n* Add deterministic scenario coverage for confirmations, concurrent tasks, signer serialization, transaction uncertainty, failure boundaries, and restart behavior.\r\n\r\n## Why\r\n\r\nThe existing fakes work well for focused tests, but they make longer proposer histories difficult to set up and reason about. This adds a shared world so effects from one cycle, such as a confirmed transaction, are visible to later reads, while tests retain precise control over timing, failures, and blocked tasks. This provides the foundation for the upcoming policy scenarios without adding production test hooks.\r\n\r\nPart of #22171",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-20T15:50:17Z",
+      "mergedAt": "2026-09-09T17:36:44Z",
+      "additions": 3005,
+      "deletions": 21
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABC3DcSw",
+      "title": "kona-sp1-proposer: recover refund-mode bonds",
+      "author": "wwared",
+      "number": 22835,
+      "body": "## Summary\n\nRecovers proposer bonds when a ZK dispute game closes in `REFUND` distribution mode. The proposer discovers historical refundable games, carries their complete resolution dependency chain forward, and completes both phases of the `DelayedWETH` withdrawal without making those games eligible for new creation or proving work.\n\nThis is the second PR in a two-PR stack and is based on #22787.\n\n## Stack\n\n1. #22787 — ancestry eligibility\n2. #22835 — refund-mode bond recovery (this PR)\n\nReview #22787 first. With its branch selected as this PR's base, this diff contains only refund lifecycle behavior.\n\n## High-level changes\n\n- Add dispute-game bond distribution mode and refund-credit reads to the proposer adapter boundary.\n- Classify claimable credit by mode: normal `credit` for legacy distribution and `refundModeCredit` for `REFUND`.\n- Retain proposer-created blacklisted, retired, or terminally invalid games only while needed to finish resolution or recover bonds.\n- Retain and permissionlessly resolve foreign or unknown-prestate ancestors required to advance a proposer refund, including cold-history discovery where canonical super-root data is unavailable.\n- Keep blacklist and retirement quarantine reversible so a later registered anchor can rehabilitate inherited descendants.\n- Drive the two-step `DelayedWETH` lifecycle: unlock credit first, then claim the matured withdrawal.\n- Discover refundable games on cold start or factory reset across the complete factory history, including entries older than the deadline cutoff or before an unsupported-type anchor.\n- Keep incremental-scan cutoffs while advancing the cursor only after a complete successful walk.\n- Pin lifecycle and standing reads to the synchronization block so mode, status, and claim decisions use one L1 view.\n\n## Review guide\n\n1. `contract.rs`: generated bindings for distribution mode and refund credit.\n2. `ports.rs` and `adapters.rs`: mode-aware bond state and pinned reads.\n3. `proposer.rs` discovery: cold-history refund and dependency recovery versus incremental cutoffs.\n4. `proposer.rs` lifecycle classification: dependency resolution, retention, unlock, and payout decisions.\n5. Unit and scenario tests: blacklisted refunds, foreign dependency chains, reversible quarantine, two-phase claims, and startup recovery.\n\n## Verification\n\n- `cargo nextest run -p kona-sp1-proposer` — 236 passed.\n- `mise exec -- just lint` — passed; only pre-existing Cargo manifest deprecation warnings were emitted.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-09T16:02:40Z",
+      "mergedAt": null,
+      "additions": 1505,
+      "deletions": 229
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCyFCnw",
+      "title": "op-acceptance-tests: Add skipped cycle prerequisite regression",
+      "author": "ajsutton",
+      "number": 22832,
+      "body": "This PR adds a reusable exact-chain interop setup for acceptance tests. The two-chain preset now starts exactly two chains. The three-chain preset starts exactly three chains. Both presets use the same runtime projection path.\n\nIt also adds a three-chain fault-proof scenario. Chains A and B form a dependency cycle. Chain C is an acyclic prerequisite of chain A. The scenario verifies that consolidation replaces only A and B, while preserving C. It runs through the shared Go and Kona proof runner path.\n\nThe regression remains skipped because the current cycle detection includes acyclic prerequisites. ethereum-optimism/optimism#22827 will stack on this PR, implement exact cycle participant detection, and enable the regression. This PR references ethereum-optimism/optimism#22825 without closing it.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-09T06:04:42Z",
+      "mergedAt": null,
+      "additions": 574,
+      "deletions": 284
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABC50T1Q",
+      "title": "kona-sp1-proposer: avoid proposals on invalid anchors",
+      "author": "digorithm",
+      "number": 22842,
+      "body": "An invalid anchor can make the proposer submit games it cannot prove. Anchor-based creation now waits for the registered anchor to match the supernode's canonical history, logs validation failures, and resumes without a restart when matching data is available. Once the proposer is running, these failures do not block existing-game work or proposals that use an explicit parent.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/22589\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-09T22:06:19Z",
+      "mergedAt": null,
+      "additions": 558,
+      "deletions": 116
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 3686,
+    "deletions": 202,
+    "files": 18,
+    "commitCount": 73
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "kona-sp1: build shared scenario world",
+      "prNumber": 22562,
+      "type": "other",
+      "body": "## Summary\r\n\r\n* Add a crate-private `ScenarioWorld` shared by fake L1, superroot, clock, proof, and action ports.\r\n* Model immutable L1 snapshots, independent clocks and visibility, scripted failures, transaction lifecycles, barriers, and t",
+      "files": [
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/mod.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs",
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/proposer/Cargo.toml"
+      ]
+    },
+    {
+      "title": "kona-sp1-proposer: reject terminal attempts before witness collection",
+      "prNumber": 22823,
+      "type": "other",
+      "body": "## Summary\n\nThe proposer already caches terminal SPN failures, but each retry collects witnesses again before checking that cached state. This wastes local compute without submitting a new SPN request.\n\nCheck terminal state after selecting ",
+      "files": [
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/ports.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/proving.rs"
+      ]
+    },
+    {
+      "title": "release-notes: sharpen triage tags, drop semver framing, restructure sections",
+      "prNumber": 22820,
+      "type": "other",
+      "body": "Writing the op-node/v1.19.6 and op-reth/v2.4.3 notes surfaced format rules the skill had wrong and two classes of PR its triage script was silently dropping. Both drafts were hand-edited to their final shape before publishing; this folds th",
+      "files": [
+        ".claude/skills/release-notes/SKILL.md",
+        ".claude/skills/release-notes/reference/house-style.md",
+        ".claude/skills/release-notes/reference/triage.md",
+        ".claude/skills/release-notes/scripts/pr-facts.sh",
+        ".claude/skills/release-notes/scripts/retarget-tag.sh"
+      ]
+    },
+    {
+      "title": "docs: Correct super-root bond comment",
+      "prNumber": 22844,
+      "type": "docs",
+      "body": "The tutorial uses `80000000000000000` wei for `initBond`, but its inline comment says `0.8 ether`.\n\nThe value equals `0.08 ether`. It matches the `SUPER_CANNON_KONA` bond described earlier.\n\nThis correction prevents operators from misreadin",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/upgrade-chain-to-super-roots.mdx"
+      ]
+    },
+    {
+      "title": "op-challenger: Support super permissioned games in list-games",
+      "prNumber": 22841,
+      "type": "other",
+      "body": "Super permissioned games from the simplified contract do not expose `claimDataLen`. This caused `list-games` to abort for mixed factories. The command now skips claim count queries for type-5 games and reports zero claims.",
+      "files": [
+        "op-challenger/cmd/list_games.go"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 85.68667707108112,
+      "prScore": 85.68667707108112,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 38.03327788396237,
+      "prScore": 38.03327788396237,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 29.474136855066064,
+      "prScore": 24.474136855066064,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 29,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 27,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 27.214264337945664,
+      "prScore": 27.214264337945664,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 23.801747107964573,
+      "prScore": 23.601747107964574,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 20.313069036308796,
+      "prScore": 15.113069036308797,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 11.63402209223412,
+      "prScore": 11.19602209223412,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "riba2534",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/26398978?u=e78945b60b90845e607da6474fdbd27001714c87&v=4",
+      "totalScore": 8.837585092994047,
+      "prScore": 8.837585092994047,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 7.868268334643733,
+      "prScore": 7.668268334643733,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "mds1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -50,6 +349,46 @@
       "summary": null
     },
     {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 4.638,
+      "prScore": 0,
+      "issueScore": 4.2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Joxess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
       "totalScore": 2,
@@ -57,6 +396,16 @@
       "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -70,9 +419,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 1,
-  "closedIssues": 0,
-  "activeContributors": 4
+  "newPRs": 12,
+  "mergedPRs": 5,
+  "newIssues": 9,
+  "closedIssues": 3,
+  "activeContributors": 26
 }
