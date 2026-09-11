@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-06 to 2026-09-13, ethereum-optimism/optimism had 38 new PRs (17 merged), 17 new issues, and 41 active contributors.",
+  "overview": "From 2026-09-06 to 2026-09-13, ethereum-optimism/optimism had 50 new PRs (25 merged), 19 new issues, and 46 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABQUha2A",
@@ -18,6 +18,18 @@
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 3
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABI145jg",
+      "title": "Fetching boot info in`OPSuccinctDataFetcher` should be more robust",
+      "author": "pauldowman",
+      "number": 21773,
+      "repository": "ethereum-optimism/optimism",
+      "body": "As per [this comment](https://github.com/ethereum-optimism/optimism/blob/a0b18d000696fd402b25e743fb35b1fdd7f92b89/rust/kona/sp1/crates/host/src/fetcher.rs#L168) `OPSuccinctDataFetcher` should retry when fetching boot info. ",
+      "createdAt": "2026-07-15T01:06:58Z",
+      "closedAt": "2026-09-10T14:49:53Z",
+      "state": "CLOSED",
+      "commentCount": 2
     },
     {
       "id": "I_kwDODjvEJM7ycHUD",
@@ -54,21 +66,21 @@
       "closedAt": "2026-09-08T16:11:07Z",
       "state": "CLOSED",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABQESw8Q",
-      "title": "op-node: do not retry publish failures that cannot succeed",
-      "author": "geoknee",
-      "number": 22798,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Follow-up to #22585, which gave the async gossiper a bounded publish queue with retry-at-the-front.\n\n## Problem\n\nA block publish can fail **permanently**, and the gossiper currently cannot tell.\n\n`Topic.Publish` runs op-node's own block validator **inline and synchronously on the publishing node** — `ValidateLocal` → `validate(..., local=true)`, and at `go-libp2p-pubsub@v0.17.0/validation.go:337`: `// run validation synchronously if it's a local publish`. So a publish can fail in ~1ms with no network I/O at all, and deterministically:\n\n- bad block hash, oversized block, fork-shape mismatch, wrong `P2PSequencerAddress` (`op-node/p2p/gossip.go:292-449`)\n- a block whose timestamp has aged past `--p2p.gossip.timestamp.threshold` (`gossip.go:356-360`)\n- SSZ encode failure (`gossip.go:630`, `:634`)\n- nil p2p signer (`op-node/node/node.go:767`), `signer is closed`, `pubsub.ErrTopicClosed`\n\nBecause #22585 retries at the front of the queue, such a block burns up to `maxPublishQueue` attempts and **head-of-line blocks every descendant for ~64s** (at a 2s block time) before queue pressure evicts it. Retrying is worse than futile for the staleness case in particular: a retry only ever makes a block *older*, so each attempt is strictly more hopeless than the last.\n\nA second case falls out of the same trace: `RejectValidationIgnored` fires on any re-publish of a block that already passed local validation, and the gossiper's `isPending` dedup does not cover it (a block that published successfully and was then cleared can be re-queued). That is really \"already out\", but today it surfaces as an error, is counted as `publishing_errors`, and is retried.\n\n## Proposal\n\nHave the producer say whether a failure is permanent, and have the gossiper drop those immediately.\n\nFollow the existing convention for classified errors in this repo — a wrapping sentinel matched with `errors.Is`, as `op-node/rollup/derive/error.go` does with `ErrTemporary` / `ErrReset` / `ErrCritical`. Declare `async.ErrPermanentPublish`, and wrap in `op-node/p2p/gossip.go` and `op-node/node/node.go`.\n\nNo import cycle stands in the way: `op-node/p2p` does **not** import `op-node/rollup/async` (`go list -deps`), and `async`'s whole dependency set is `op-service/bigs` + `op-service/eth`. The cycle its `Network`/`Metrics` comments guard against is `async ← rollup/driver`, a different edge — so no duck-typed interface is needed.\n\n### The trap to avoid\n\nClassification must be an **allowlist**, never a catch-all. `Topic.Publish` also returns `ctx.Err()` from its eval loop and from `sendMsgBlocking`, so the gossiper's own `publishTimeout` surfaces as `context.DeadlineExceeded` *through the same call*. A catch-all would mark a timed-out publish permanent and silently disable retry altogether. Worth a dedicated regression test.\n\n### Known tradeoff\n\n`pubsub.ValidationError.Reason` is `\"validation failed\"` for every reject, so the one self-healing check — `gossip.go:362-366`, timestamp more than 5s in the future — cannot be isolated from the error. Treating all rejects as permanent is proposed anyway, because a self-published block realistically cannot trip it: L2 timestamps are chain-derived (`nextL2Time := l2Parent.Time + BlockTime`, `op-node/rollup/derive/attributes.go:119`), sealing is scheduled `sealingDuration` (50ms) *before* `payloadTime`, the sequencer waits rather than sealing early when the head is ahead, and the validator runs in the same process off the same clock. Reaching it needs a backwards clock step or a `sealingDuration` above 5s.\n\n## Notes\n\nThis does **not** remove the need for `retryInterval` or the attempt backstop added in #22585: a refused signer connection fails in microseconds and is legitimately transient, so the spin guard still earns its place, and stopped block production plus a refused signer is still 1 Hz forever without the backstop. This is a layer on top, not a simplification.\n\nDiscussion: https://github.com/ethereum-optimism/optimism/pull/22585#discussion_r3937626460\n",
-      "createdAt": "2026-09-07T10:11:16Z",
-      "closedAt": "2026-09-09T21:04:35Z",
-      "state": "CLOSED",
-      "commentCount": 1
     }
   ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABC629Yg",
+      "title": "interop: suspend atomic demo router execution",
+      "author": "opsuperchain",
+      "number": 22850,
+      "body": "Stacked on #22840. The atomic demo now supports nested cross-chain callbacks while retaining one live OP EVM transaction per chain. A on chain A calls B on chain B; B uses the same facade/router mechanism to call a distinct C on chain A; C sees A's pending state and can call back into the still-running B. The callback executes inside each chain's original transaction, preserving pending storage, transient storage, origin, gas ancestry and rollback. Each included chain receives one final replay after callback/result tapes and access lists are materialized; divergence rejects the candidate without discovery restarts or padding.\n\nCanonical callback dispatch runs through ordinary router bytecode. Gas remains local to each chain: top-level application calls have fixed budgets, while callbacks receive half the remaining gas at their dispatch point. Caller context is restored on return, scheduling depth is capped at 32, and the bundle-wide call limit still applies. Failed callback hints force application rollback even if caught. ERC-4337 uses the existing EntryPoint and demo paymaster for normal on-chain gas settlement; it does not reimburse off-chain discovery or prove that a builder honestly attempted success. Existing Go and Kona cycle algorithms remain unchanged.\n\nThe Go/devstack bridge uses pinned candidate-prefix state and exact signed envelopes. This is a **demo node integration**; production payload-service admission/publication and a single-signature wallet flow remain out of scope. ETH forwarding, STATICCALL facades and committing after a caught remote failure remain unsupported. The original Go discovery path remains available for root-driven calls; nested dispatch is connected to the suspended builder.\n\nValidation passed: all 18 contracts PR checks; full developer contract suite (2,290 passed, 183 skipped) and optimized suite (2,350 passed, 159 skipped); all 40 Rust builder tests with artifact-dependent tests enabled, including optimized bytecode; full Rust workspace lint/rustdoc and Go lint; Go bridge/message/filter/verifier tests; and Go/Kona nested-cycle regressions. All four real-node suspended/nested ERC-4337 success/revert cases pass, including exact receipt gas/log parity and sponsor settlement. Contract checks used the configured Foundry remappings plus explicit Solady/OpenZeppelin mappings with automatic remapping disabled to avoid the local duplicate `src/src` import issue.\n\nSolidity, Rust lifecycle/application-effect and Go reviews are complete; all findings were fixed, none dismissed. Shared node fixtures are included by the normal contracts artifact build. #22840's branch remains unchanged.\n\nCI on `ac7332b5d4af30420badf96e670243ec59df941d` is complete but not green: title/dependency checks and five Wiz scanners passed; Wiz SAST was skipped. The x86 multicannon package built, then [artifact attestation failed because the fork workflow lacks `id-token` permission](https://github.com/ethereum-optimism/optimism/actions/runs/34524915489/job/103031802906), reproducing the previous head's permission failure. The other seven package jobs were canceled by fail-fast; image/smoke jobs were skipped. Full upstream CI for this fork still requires human authorization.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-10T01:14:58Z",
+      "mergedAt": null,
+      "additions": 10639,
+      "deletions": 8
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABC5ZCeA",
       "title": "interop: atomic demo",
@@ -80,6 +92,18 @@
       "mergedAt": null,
       "additions": 4865,
       "deletions": 2
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAh04LA",
+      "title": "feat: interop message-expiry refunds (censorship escape hatch for SuperchainETHBridge)",
+      "author": "opsuperchain",
+      "number": 22601,
+      "body": "# feat: interop message-expiry refunds (censorship escape hatch for SuperchainETHBridge)\n\n## Problem\n\nInterop **executing messages cannot be force-included via deposit transactions** — `CrossL2Inbox.validateMessage` requires the message checksum slot to be warm via the tx's EIP-2930 access list, and deposits have no access list (upstream even added an explicit `CrossL2Inbox_NoExecutingDeposits` guard). So the force-inclusion path that normally defeats sequencer censorship does **not** work for interop: if a destination sequencer refuses to relay an executing message, delivery is impossible.\n\nFor `SuperchainETHBridge.sendETH` this strands funds: the ETH is burned into `ETHLiquidity` on the **source** before the message is sent, and only minted on the destination inside `relayETH`. A censored relay means the ETH is burned on A and never minted on B — permanently in flight, with no way for the sender to recover it. Interop ETH therefore lacks the \"always recoverable to the sender\" property that L1↔L2 bridging has.\n\n## Key protocol fact this builds on\n\n`MESSAGE_EXPIRY_WINDOW` (7 days, per-depset configurable) is a **protocol validity rule**, enforced both at cross-safety (op-supernode invalidates heads carrying expired executing messages) and **in the fault proof** (kona's `MessageGraph` forces a deposit-only replacement block). Once a destination chain's clock passes `initiatingTimestamp + window` with the message still unrelayed, **delivery is permanently impossible** — no valid block can ever relay it. This PR turns that permanent fact into a recoverable refund, riding only existing censorship-resistant rails (withdrawals and deposits). It does **not** add any new expiry machinery and does **not** modify `L2ToL2CrossDomainMessenger`.\n\n## Mechanism\n\nFor a message `H` sent A→B that was never relayed on B:\n\n1. **B (attest)** — anyone calls `MessageExpiryRelay.attestUndelivered(H, sourceChainId, minGas)`. The relay checks the local `L2ToL2CrossDomainMessenger.successfulMessages(H) == false` and exports `(H, sourceChainId, block.timestamp)` to the `MessageExpiryHub` on L1 via B's ordinary L2→L1 withdrawal. (This is *not* an executing message, so if B censors it, it is itself force-includable as a deposit.)\n2. **L1 (route)** — after the withdrawal finalizes, `MessageExpiryHub.receiveExpiryNotice` authenticates the calling L1CrossDomainMessenger and its cluster, records the notice, then `forwardExpiryNotice` deposits it into the source chain via A's L1CrossDomainMessenger (force-includable).\n3. **A (consume)** — `MessageExpiryRelay.receiveExpiry` verifies the attestation against the recorded send: the attestor must equal the recorded destination and `attestedAt` must be strictly beyond `recordedAt + expiryWindow`. It then notifies the sending application once.\n4. **App (refund)** — `SuperchainETHBridge.onMessageExpired` re-mints the burned ETH and force-sends it back to the original sender.\n\n**No double-spend:** the attestation only exists if `H` was undelivered; the refund only fires once `attestedAt > recordedAt + expiryWindow`; past the window, delivery is protocol-impossible; and both the relay record and the bridge's pending-send entry are deleted before any external call. Delivery and refund are mutually exclusive.\n\n## Reusable primitive\n\nThe escape hatch is **not** ETH-bridge-specific. Any L2 contract that sends interop messages can opt in:\n- call `MessageExpiryRelay.recordSentMessage(...)` when it sends (preimage-verified, so only the actual sender can register as the handler for a message hash), and\n- implement `IMessageExpiryHandler.onMessageExpired(msgHash, attestorChainId, attestedAt)` to compensate.\n\n`SuperchainETHBridge` is the first consumer and the reference integration.\n\n## SuperchainETHBridge diff (minimal)\n\n`1.0.1 → 1.1.0`. `sendETH` records the pending send and registers with the relay (guarded by a code-size check so non-interop chains are unaffected); new `onMessageExpired` refunds the sender. `relayETH` and everything else are untouched. The contract previously had zero storage; `pendingETHSends` is added at slot 0.\n\n## New contracts\n\n- `src/L2/MessageExpiryRelay.sol` — predeploy `0x42…2E` (proxied, interop-gated), both source-side (record/receive) and destination-side (attest) roles; same address on every chain.\n- `src/L1/MessageExpiryHub.sol` — ownerless L1 singleton that routes notices between the chains of an interop cluster. Cluster membership is derived on-chain per call (SystemConfig ↔ L1CrossDomainMessenger ↔ OptimismPortal bidirectional binding + shared ETHLockbox authorization + shared AnchorStateRegistry); notices are namespaced by the cluster's lockbox so chains with colliding IDs across clusters cannot interfere.\n- `interfaces/L2/IMessageExpiryHandler.sol` — the opt-in callback interface.\n\nPredeploy wired through `Predeploys.sol`, `L2ContractsManager` (`→ 1.15.0`), `L2Genesis`, the Go predeploy registry, and the NUT upgrade bundle. The relay proxy ships **uninitialized** (fails closed); `hub`/`expiryWindow` are set post-deploy by the ProxyAdmin owner.\n\n## Testing\n\n- **Unit (forge):** full auth + boundary matrices for all three contracts, including sender-binding, exact expiry off-by-one, cross-cluster non-interference, and the refund end-state. (~70 tests.)\n- **Acceptance (`op-acceptance-tests/tests/interop/expiry`, in-process two-chain interop devnet):** end-to-end — `sendETH` A→B, never relay, wait past a 12s expiry window, attest on B, prove + finalize the withdrawal on L1, forward through the hub, deposit into A, assert the sender is refunded exactly and all records are cleared. Plus a delivered-message regression guard (normal relay still works on the 1.1.0 bridge, and attesting a delivered message reverts). Runs without time-travel by shrinking the L1 dispute windows via new deployer options.\n\n## Security\n\nTwo independent adversarial reviews were run. Both found the same **critical** in an earlier revision — the hub authenticated the incoming messenger but not the portal, letting a forged SystemConfig point at a real cluster-authorized portal and mint a false notice. **Fixed** by binding `portal.systemConfig() == systemConfig` (plus a registration-overwrite guard, notice-key namespacing by source chain, an attestation-timestamp bound, a monotone `expiryWindow` setter + `hub` setter for remediation, and a contract-handler requirement). Details and the list of attacks that were tried and failed are in the review notes.\n\n## Known follow-ups (not in this PR)\n\n- **Deploy/init wiring:** this is contracts-first. A production rollout needs a deploy script for `MessageExpiryHub` and an OPCM/governance step to `initialize` each relay proxy (`hub`, `expiryWindow`). The feature fails closed until then.\n- **`expiryWindow` ↔ depset coupling:** the relay's window must be ≥ the dependency-set message-expiry window, but there is no on-chain link on L2 today (it is trusted ProxyAdmin-owner config, guarded only by the monotone setter). When the protocol exposes the depset window on-chain, self-validate.\n- **Hub guardian pause:** considered as an incident kill-switch, deliberately omitted to avoid adding a trust role to an ownerless singleton; remediation today is re-pointing relays via `setHub`.\n- Cluster liquidity/ASR migrations strand pending notices until re-attested (multi-day, recoverable).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T09:12:56Z",
+      "mergedAt": null,
+      "additions": 4108,
+      "deletions": 39
     },
     {
       "id": "PR_kwDODjvEJM8AAAABAcHtjQ",
@@ -94,49 +118,64 @@
       "deletions": 21
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABC3DcSw",
-      "title": "kona-sp1-proposer: recover refund-mode bonds",
-      "author": "wwared",
-      "number": 22835,
-      "body": "## Summary\n\nRecovers proposer bonds when a ZK dispute game closes in `REFUND` distribution mode. The proposer discovers historical refundable games, carries their complete resolution dependency chain forward, and completes both phases of the `DelayedWETH` withdrawal without making those games eligible for new creation or proving work.\n\nThis is the second PR in a two-PR stack and is based on #22787.\n\n## Stack\n\n1. #22787 — ancestry eligibility\n2. #22835 — refund-mode bond recovery (this PR)\n\nReview #22787 first. With its branch selected as this PR's base, this diff contains only refund lifecycle behavior.\n\n## High-level changes\n\n- Add dispute-game bond distribution mode and refund-credit reads to the proposer adapter boundary.\n- Classify claimable credit by mode: normal `credit` for legacy distribution and `refundModeCredit` for `REFUND`.\n- Retain proposer-created blacklisted, retired, or terminally invalid games only while needed to finish resolution or recover bonds.\n- Retain and permissionlessly resolve foreign or unknown-prestate ancestors required to advance a proposer refund, including cold-history discovery where canonical super-root data is unavailable.\n- Keep blacklist and retirement quarantine reversible so a later registered anchor can rehabilitate inherited descendants.\n- Drive the two-step `DelayedWETH` lifecycle: unlock credit first, then claim the matured withdrawal.\n- Discover refundable games on cold start or factory reset across the complete factory history, including entries older than the deadline cutoff or before an unsupported-type anchor.\n- Keep incremental-scan cutoffs while advancing the cursor only after a complete successful walk.\n- Pin lifecycle and standing reads to the synchronization block so mode, status, and claim decisions use one L1 view.\n\n## Review guide\n\n1. `contract.rs`: generated bindings for distribution mode and refund credit.\n2. `ports.rs` and `adapters.rs`: mode-aware bond state and pinned reads.\n3. `proposer.rs` discovery: cold-history refund and dependency recovery versus incremental cutoffs.\n4. `proposer.rs` lifecycle classification: dependency resolution, retention, unlock, and payout decisions.\n5. Unit and scenario tests: blacklisted refunds, foreign dependency chains, reversible quarantine, two-phase claims, and startup recovery.\n\n## Verification\n\n- `cargo nextest run -p kona-sp1-proposer` — 236 passed.\n- `mise exec -- just lint` — passed; only pre-existing Cargo manifest deprecation warnings were emitted.",
+      "id": "PR_kwDODjvEJM8AAAABCR4ahg",
+      "title": "kona-sp1: add multi-cycle proposer policy scenarios",
+      "author": "Inphi",
+      "number": 22789,
+      "body": "## Summary\n\nAdds comprehensive multi-cycle proposer policy coverage using the deterministic `ScenarioWorld` and `ScenarioHarness`.\n\nThe scenarios cover:\n\n- Frozen proposal horizons and long foreign-game histories\n- Concurrent defense while creation is stalled\n- Trusted and untrusted superroot contradictions\n- Timed-out creation, late inclusion, and duplicate-creation guards\n- Invalid topology, ownership, resolution, claim, and payout policy\n- Independent pinned L1, latest L1, host, safe, and finalized clocks\n- Factory, pending-game, and cached-game read-failure isolation\n- Fresh proposer reconstruction over existing confirmed history\n\nThe scenario world now supports:\n\n- L1 read faults keyed by boundary, target, and attempt\n- Superroot query journaling with trust and L1 metadata\n- Fresh proposer restarts over persistent world state\n- Small history mutation controls required by the policy scenarios\n\nThe scenarios also exposed and fix a creation-safety issue:\n\n- Game creation now requires a trusted superroot response before querying the UUID or submitting a bonded transaction.\n- Trusted claim mismatches are terminal regardless of creator; untrusted observations remain retryable.\n- The duplicate-creation guard is cleared when its tracked game becomes terminal or when factory history resets.\n\nTreating a trusted contradiction as terminal may immediately release the creation guard and allow a\nreplacement at the same timestamp, putting a second bond at risk if the trusted response itself is\nwrong. This is intentional: trusted supernode responses are the proposer's canonicality boundary;\nretaining the guard would otherwise block recovery indefinitely at a frozen horizon.\n\nProof deadlines continue to use latest L1 chain time, matching the on-chain `block.timestamp` deadline check.\n\nNo launch, devstack, or acceptance-test configuration changes are required.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-09T16:02:40Z",
-      "mergedAt": null,
-      "additions": 1505,
-      "deletions": 229
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABClzssw",
-      "title": "contracts-bedrock: Improve OPCMv2 migration flow and harden validator checks",
-      "author": "0xiamflux",
-      "number": 22807,
-      "body": "## Context\r\n\r\n`OPCM.migrate()` is an irreversible operation that moves independent chains onto a shared ETHLockbox, DisputeGameFactory and AnchorStateRegistry, sweeps every chain's ETH into the shared lockbox, and invalidates all outstanding withdrawal proofs. `OPContractsManagerMigrationValidator` is meant to prove afterwards that this landed correctly.\r\n\r\n**Three main gaps**\r\n\r\n`migrate()` could run twice. A second call drains the first shared lockbox into a new one and clears every game implementation from the shared factory, breaking every chain in the set. \r\n\r\nIt accepted chains from any release. A chain one release behind came out with its portal, `SystemConfig` and dispute contracts upgraded, while its bridges and messengers stayed the same. `upgrade()` refuses that while `migrate()` performed it silently.\r\n\r\nThe validator's per-chain clearing checks were behind a condition that cannot hold after a successful migration, so they never ran.\r\n\r\n## Changes\r\n\r\n**Migrator**\r\n\r\n- Reject chains that already have `Features.INTEROP` enabled. `migrate()` is the only thing in that sets that flag on L1, so it means\r\n  migration already ran.\r\n- Require every chain to be on this OPCM's release. `isPermittedMigrateSequence` accepts the same OPCM, or a replacement OPCM for the\r\n  same release. It refuses next-major, because that would allow upgrades through the migrate function.\r\n- Enforce the `SuperchainConfig` version floor that `_apply` already enforced.\r\n- Grant proxy-deployment permission by name for the replacing the blanket ALL grant.\r\n\r\n**Validator**\r\n\r\n- Run the legacy-clearing checks unconditionally, taking each chain's pre-migration factory as input.\r\n- Assert migration by checking anchor root, respected game type, init bonds, expected shared addresses, portal and retired-lockbox balances, and stale pauses on retired identifiers.\r\n\r\n**Shared**\r\n\r\n- One canonical list of the game types migration clears, in `GameTypes`.\r\n- One encoder for `SystemConfig.initialize`, in `OPContractsManagerUtilsCaller`.\r\n- Both sequence predicates moved into OPContractsManagerUtils. Keeping them inline pushed OPCMv2 past EIP-170.\r\n\r\n**Test Plan**\r\n\r\n- Every new guard proved by negative control.\r\n- The re-entry guard was proved against real corruption first. Before the fix, a second migration one second later succeeded, wiped the shared factory's `SUPER_PERMISSIONED` implementation, and drained the shared lockbox to zero.\r\n- size-check passes. OPCMv2 runtime is 24,553 with 23 bytes of margin.\r\n- lint, snapshots, unused-imports and test-validation clean.\r\n\r\nCloses #22771 ",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-08T00:25:55Z",
-      "mergedAt": null,
-      "additions": 1488,
-      "deletions": 255
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABCnmb3Q",
-      "title": "op-conductor: [DONT MERGE] examples using extensible op-conductor",
-      "author": "yashvardhan-kukreja",
-      "number": 22815,
-      "body": "Signed-off-by: Yashvardhan Kukreja <yashvardhan@oplabs.co>",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-08T05:36:07Z",
-      "mergedAt": null,
-      "additions": 1028,
-      "deletions": 0
+      "createdAt": "2026-09-05T01:04:28Z",
+      "mergedAt": "2026-09-10T18:27:26Z",
+      "additions": 2128,
+      "deletions": 154
     }
   ],
   "codeChanges": {
-    "additions": 6497,
-    "deletions": 804,
-    "files": 80,
-    "commitCount": 179
+    "additions": 11572,
+    "deletions": 2347,
+    "files": 156,
+    "commitCount": 245
   },
   "completedItems": [
+    {
+      "title": "op-acceptance-tests: port and deduplicate conductor system coverage",
+      "prNumber": 22244,
+      "type": "tests",
+      "body": "## Summary\n\nDraft alternative to #21977.\n\n- ports the user-visible conductor behaviors from `op-e2e` to acceptance tests\n- removes each superseded `op-e2e` behavior in the same commit that adds its acceptance replacement, so every commit ca",
+      "files": [
+        "docs/ai/writing-acceptance-tests.md",
+        "op-acceptance-tests/tests/base/conductor/cluster_startup_test.go",
+        "op-acceptance-tests/tests/base/conductor/disaster_recovery_test.go",
+        "op-acceptance-tests/tests/base/conductor/failover_test.go",
+        "op-acceptance-tests/tests/base/conductor/leadership_transfer_test.go",
+        "op-acceptance-tests/tests/base/conductor/membership_test.go",
+        "op-acceptance-tests/tests/base/conductor/proxy_test.go",
+        "op-devstack/dsl/conductor.go",
+        "op-devstack/dsl/l2_cl.go",
+        "op-devstack/presets/minimal_with_conductors.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/presets/rpc_frontends.go",
+        "op-devstack/presets/singlechain_from_runtime.go",
+        "op-devstack/presets/sysgo_runtime.go",
+        "op-devstack/stack/conductor.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "op-e2e/system/conductor/sequencer_failover_setup.go",
+        "op-e2e/system/conductor/sequencer_failover_test.go",
+        "rust/kona/tests/node/common/conductor_test.go",
+        "rust/kona/tests/node/utils/mixed_preset_with_conductor.go",
+        "op-acceptance-tests/tests/base/conductor/sequencer_admin_test.go",
+        "op-acceptance-tests/tests/base/conductor/sequencer_persistence_test.go",
+        "op-acceptance-tests/tests/base/conductor/unsafe_payload_test.go",
+        "op-devstack/presets/singlechain_multinode.go",
+        "op-devstack/sysgo/l2_cl.go",
+        "op-devstack/sysgo/l2_cl_opnode.go",
+        "op-e2e/system/conductor/system_adminrpc_test.go"
+      ]
+    },
     {
       "title": "op-reth: add chain head gas and base fee metrics",
       "prNumber": 22587,
@@ -182,6 +221,45 @@
         "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs",
         "rust/Cargo.lock",
         "rust/kona/sp1/crates/proposer/Cargo.toml"
+      ]
+    },
+    {
+      "title": "rust: fix upstream mirror review gaps",
+      "prNumber": 22641,
+      "type": "bugfix",
+      "body": "Fixes the review findings on #22477.\n\n- makes the mirror checker fail closed, tested, and required by Rust CI\n- corrects and completes the `UPSTREAM-MIRROR` inventory\n- makes tag advances and fork cherry-picks explicit reviewer inputs\n- ali",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        ".claude/agents/reth-update-reviewer.md",
+        ".claude/skills/update-reth/SKILL.md",
+        "docs/ai/reth-update-review.md",
+        "docs/ai/reth-upstream-mirrors.md",
+        "rust/UPDATING-RETH.md",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/justfile",
+        "rust/op-alloy/crates/consensus/src/reth_codec.rs",
+        "rust/op-alloy/crates/rpc-types/src/reth_compat.rs",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs",
+        "rust/op-revm/src/api/exec.rs",
+        "rust/op-revm/src/evm.rs",
+        "rust/op-revm/src/handler.rs",
+        "rust/op-revm/src/precompiles.rs",
+        "rust/op-revm/src/transaction/abstraction.rs",
+        "rust/scripts/test_upstream_mirrors.py",
+        "rust/scripts/upstream-mirrors.py"
       ]
     },
     {
@@ -249,6 +327,18 @@
       "files": [
         "op-interop-mon/monitor/updater.go",
         "op-interop-mon/monitor/updater_test.go"
+      ]
+    },
+    {
+      "title": "kona-sp1: add multi-cycle proposer policy scenarios",
+      "prNumber": 22789,
+      "type": "other",
+      "body": "## Summary\n\nAdds comprehensive multi-cycle proposer policy coverage using the deterministic `ScenarioWorld` and `ScenarioHarness`.\n\nThe scenarios cover:\n\n- Frozen proposal horizons and long foreign-game histories\n- Concurrent defense while ",
+      "files": [
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/mod.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs"
       ]
     },
     {
@@ -351,6 +441,17 @@
       ]
     },
     {
+      "title": "kona-sp1-proposer: avoid proposals on invalid anchors",
+      "prNumber": 22842,
+      "type": "other",
+      "body": "An invalid anchor can make the proposer submit games it cannot prove. Anchor-based creation now waits for the registered anchor to match the supernode's canonical history, logs validation failures, and resumes without a restart when matchin",
+      "files": [
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs"
+      ]
+    },
+    {
       "title": "op-challenger: Support super permissioned games in list-games",
       "prNumber": 22841,
       "type": "other",
@@ -358,17 +459,94 @@
       "files": [
         "op-challenger/cmd/list_games.go"
       ]
+    },
+    {
+      "title": "ci: update EVM security on-call mentions",
+      "prNumber": 22864,
+      "type": "other",
+      "body": "Use the Slack group ID to preserve mentions after the rename.",
+      "files": [
+        ".circleci/continue/main.yml",
+        "packages/contracts-bedrock/test/kontrol/README.md"
+      ]
+    },
+    {
+      "title": "ci: rightsize Kona acceptance executors",
+      "prNumber": 22859,
+      "type": "other",
+      "body": "Across 263 logical runs from 2026-09-03 through 2026-09-10, `memory-all-kona-op-reth-fusaka` averaged 2.435 CPU cores and 2.91 GiB memory on a 20-vCPU / 40-GiB executor, with a 21.32 GiB peak and 2,183,696 credits charged (8,303 credits/run",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "kona-sp1: bump SP1 to 6.7.0",
+      "prNumber": 22858,
+      "type": "other",
+      "body": "Bumps the coordinated SP1 zkVM toolchain pin (mise `cargo-prove`, `sp1-sdk`, `sp1-lib`/`sp1-zkvm`, Docker build tag) from 6.4.0 to 6.7.0 and regenerates both `Cargo.lock`s to match. No Rust source changes were needed.\r\n\r\nNo effect on chain/",
+      "files": [
+        "mise.toml",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/deny.toml",
+        "rust/kona/sp1/justfile",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml"
+      ]
+    },
+    {
+      "title": "kona-sp1: embed the build commit in the guest ELFs",
+      "prNumber": 22855,
+      "type": "other",
+      "body": "Given a guest ELF and nothing else, there was no way to tell which commit built it. Whether it was reconstructed from tags, CI logs, or memory. Both guests now carry the commit as a single `.rodata` literal:\r\n\r\n```bash\r\ngrep -aoE 'KONA_SP1_",
+      "files": [
+        ".circleci/continue/rust-e2e.yml",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/build-info/Cargo.toml",
+        "rust/kona/sp1/crates/build-info/build.rs",
+        "rust/kona/sp1/crates/build-info/src/lib.rs",
+        "rust/kona/sp1/crates/build-info/src/sha.rs",
+        "rust/kona/sp1/justfile",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/super-aggregation/Cargo.toml",
+        "rust/kona/sp1/programs/super-aggregation/src/main.rs",
+        "rust/kona/sp1/programs/super-range/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/src/main.rs"
+      ]
     }
   ],
   "topContributors": [
     {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 131.1010679011723,
+      "prScore": 92.56106790117232,
+      "issueScore": 0,
+      "reviewScore": 38,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 106.13827730644388,
-      "prScore": 104.96027730644388,
+      "totalScore": 117.48561977563836,
+      "prScore": 115.96761977563835,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.178,
+      "commentScore": 1.5179999999999998,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 116.88375853310365,
+      "prScore": 77.18375853310364,
+      "issueScore": 0,
+      "reviewScore": 39.5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -389,6 +567,16 @@
       "issueScore": 2,
       "reviewScore": 45.5,
       "commentScore": 0.6000000000000001,
+      "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 86.7775477931522,
+      "prScore": 86.7775477931522,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -414,11 +602,31 @@
     {
       "username": "OptimismBot",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 75.78830482066087,
+      "totalScore": 80.78830482066087,
       "prScore": 61.78830482066087,
       "issueScore": 0,
-      "reviewScore": 14,
+      "reviewScore": 19,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 77.42842762502971,
+      "prScore": 39.39042762502971,
+      "issueScore": 6.2,
+      "reviewScore": 31,
+      "commentScore": 0.838,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 76.4251273240928,
+      "prScore": 52.02512732409281,
+      "issueScore": 0,
+      "reviewScore": 24,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -432,73 +640,53 @@
       "summary": null
     },
     {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 71.7251273240928,
-      "prScore": 52.02512732409281,
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 68.04931067029989,
+      "prScore": 48.54931067029989,
       "issueScore": 0,
       "reviewScore": 19.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 61.714264337945664,
-      "prScore": 27.214264337945664,
-      "issueScore": 0,
-      "reviewScore": 34.5,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 55.25885403474974,
-      "prScore": 30.420854034749738,
-      "issueScore": 4.2,
-      "reviewScore": 20,
-      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 49.197042231219825,
+      "totalScore": 62.697042231219825,
       "prScore": 48.99704223121983,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 13.5,
       "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 45.23939664134826,
-      "prScore": 35.53939664134826,
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 57.09651898398103,
+      "prScore": 52.09651898398103,
       "issueScore": 0,
-      "reviewScore": 9.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 43.974136855066064,
-      "prScore": 24.474136855066064,
-      "issueScore": 0,
-      "reviewScore": 19.5,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "opsuperchain",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
-      "totalScore": 43.5437738965761,
-      "prScore": 43.5437738965761,
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 41.258439727056974,
+      "prScore": 35.91843972705697,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 40.46254914097914,
+      "prScore": 29.022549140979137,
+      "issueScore": 6.1,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -508,6 +696,16 @@
       "prScore": 37.57403024586592,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 32.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 32.5,
       "commentScore": 0.2,
       "summary": null
     },
@@ -532,22 +730,12 @@
       "summary": null
     },
     {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 28.68746771614648,
-      "prScore": 23.68746771614648,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 23.2,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 24.7,
       "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 23,
+      "issueScore": 2,
+      "reviewScore": 22.5,
       "commentScore": 0.2,
       "summary": null
     },
@@ -558,6 +746,16 @@
       "prScore": 15.70861934066053,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
@@ -574,11 +772,11 @@
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 9,
+      "totalScore": 9.2,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 9,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -592,8 +790,18 @@
       "summary": null
     },
     {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "username": "imitater-dou",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/287387610?u=12f6d7a042a5f12399623f115bd79d35f35da2c2&v=4",
+      "totalScore": 6.137573590279973,
+      "prScore": 6.137573590279973,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tremarkley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15234569?u=b2a30602eb3a6a6fbd8e7b2ee2eef68888738704&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -602,8 +810,8 @@
       "summary": null
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -629,6 +837,16 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -672,16 +890,6 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 2,
-      "prScore": 0,
-      "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "bitwiseguy",
       "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
       "totalScore": 2,
@@ -712,9 +920,9 @@
       "summary": null
     }
   ],
-  "newPRs": 38,
-  "mergedPRs": 17,
-  "newIssues": 17,
-  "closedIssues": 7,
-  "activeContributors": 41
+  "newPRs": 50,
+  "mergedPRs": 25,
+  "newIssues": 19,
+  "closedIssues": 13,
+  "activeContributors": 46
 }

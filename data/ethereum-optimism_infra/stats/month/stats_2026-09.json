@@ -5,8 +5,21 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-09-01 to 2026-10-01, ethereum-optimism/infra had 10 new PRs (9 merged), 0 new issues, and 31 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-09-01 to 2026-10-01, ethereum-optimism/infra had 10 new PRs (9 merged), 1 new issues, and 34 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOL-xLQ88AAAABQsi7cQ",
+      "title": "[op-conductor-ops] bootstrap-cluster is not idempotent when an existing cluster has an unhealthy follower",
+      "author": "joshklop",
+      "number": 740,
+      "repository": "ethereum-optimism/infra",
+      "body": "## Summary\n\nNetchef's generated `op-conductor-bootstrap-cluster` Job is not reliably idempotent after a conductor cluster has already been formed.\n\nIf the cluster has an elected, active leader but one or more follower sequencers are temporarily unhealthy, rerunning `op-conductor-ops bootstrap-cluster` exits 1:\n\n```text\nAll sequencers are running. Bootstrapping cluster...\nERROR! Current leader is active. Please pause conductor first.\n```\n\nIt exits 0 only after every sequencer happens to become healthy:\n\n```text\nAll sequencers are running. Bootstrapping cluster...\nAll sequencers are already healthy. Skipping bootstrap.\n```\n\nThis caused Netchef's bootstrap Job to retry/fail for hours on `glamsterdam-defense-2`, despite the Raft cluster already being formed and having an active leader. No conductor reset was required; the Job eventually passed when the followers caught up.\n\n## Root cause\n\nIn `op-conductor-ops/v0.1.0`, the existing-cluster check is based on aggregate runtime health:\n\nhttps://github.com/ethereum-optimism/infra/blob/op-conductor-ops/v0.1.0/op-conductor-ops/op-conductor-ops.py#L661-L675\n\n```python\nif network_obj.is_healthy() and any(\n    sequencer.sequencer_active for sequencer in network_obj.sequencers\n):\n    typer.echo(\"All sequencers are already healthy. Skipping bootstrap.\")\n    raise typer.Exit(code=0)\n\nleader = network_obj.find_conductor_leader()\n...\nif leader.conductor_active:\n    print_error(\"Current leader is active. Please pause conductor first.\")\n    raise typer.Exit(code=1)\n```\n\n`Network.is_healthy()` requires every `conductor_sequencerHealthy` result to be true:\n\nhttps://github.com/ethereum-optimism/infra/blob/op-conductor-ops/v0.1.0/op-conductor-ops/network.py#L42-L43\n\nTransient follower health is not a durable indication of whether Raft membership has already been bootstrapped. Consequently, this valid state fails:\n\n- desired Raft membership already exists\n- leader is elected and active\n- one sequencer is actively sequencing\n- one or more followers are temporarily unhealthy/catching up\n\nThe active-leader guard is reasonable for a genuinely incomplete/destructive bootstrap. The problem is reaching it before recognizing that membership is already complete.\n\n## Evidence\n\nEnvironment:\n\n- Network: `glamsterdam-defense-2`\n- Three sequencers: `seq-0`, `seq-1`, `seq-2`\n- `op-conductor-ops/v0.1.0`\n- `op-conductor/v0.9.4`\n- Job namespace: `ps-glamsterdam-def-2-opn-reth-f-seq-0`\n\nObserved timeline:\n\n```text\n2026-09-02T07:33:19Z Conductors resumed. Bootstrap complete.\n2026-09-02T15:24:36Z All sequencers are running. Bootstrapping cluster...\n2026-09-02T15:24:36Z ERROR! Current leader is active. Please pause conductor first.\n... repeated across multiple Job pods/container retries ...\n2026-09-02T18:05:55Z All sequencers are running. Bootstrapping cluster...\n2026-09-02T18:05:55Z All sequencers are already healthy. Skipping bootstrap.\n```\n\nRetrieve the relevant Loki records with:\n\n```bash\ngcx logs query \\\n  '{namespace=\"ps-glamsterdam-def-2-opn-reth-f-seq-0\",container=\"op-conductor-ops\"} |~ \"(All sequencers are running|Current leader is active|Skipping bootstrap|Bootstrap complete|Updating cluster membership|Cluster membership updated|Conductors resumed)\"' \\\n  --from '2026-09-02T00:00:00Z' \\\n  --to '2026-09-03T00:00:00Z' \\\n  --limit 5000 -o json \\\n| jq -r '\n    [.data.result[] | .stream as $s | .values[] |\n      [(.[0] | tonumber / 1000000000 | strftime(\"%Y-%m-%dT%H:%M:%SZ\")),\n       ($s.pod // \"\"), .[1]]]\n    | sort_by(.[0])[] | @tsv\n  '\n```\n\nFollower health errors during a representative failed retry:\n\n```bash\ngcx logs query \\\n  '{namespace=~\"ps-glamsterdam-def-2-opn-reth-f-seq-[0-2]\"} |~ \"(Sequencer is unhealthy|server \\\\(follower\\\\) is not healthy|unsafe head is falling behind|Current leader is active)\"' \\\n  --from '2026-09-02T17:50:00Z' \\\n  --to '2026-09-02T17:56:00Z' \\\n  --limit 5000 -o json\n```\n\nThe later retries failed before calling `update_cluster_membership`; there is no evidence of membership corruption.\n\n## Expected behavior\n\nOnce desired Raft membership exists, rerunning the generated bootstrap Job should exit successfully without requiring every follower to be healthy at that instant.\n\nSuggested flow:\n\n1. Wait for conductor/sequencer RPC reachability.\n2. Query the leader's current Raft membership.\n3. Compare stable server IDs/addresses and voting status with desired membership.\n4. If membership is complete and a valid leader exists, report that the cluster is already bootstrapped and exit 0, independently of transient follower health.\n5. Enter fresh/disaster-recovery bootstrap only when membership is absent or incomplete.\n6. If membership is incomplete while a leader is active, fail safely with a membership-specific message rather than automatically pausing the leader.\n\nHealth may still be reported separately, but should not determine whether the cluster counts as bootstrapped.\n\n## Impact\n\n- Netchef deployment/health automation can remain failed while conductor itself is operational.\n- Kubernetes repeatedly retries an operation that has already achieved its desired state.\n- Operators receive misleading advice to pause a live conductor, which could cause an unnecessary sequencing interruption.\n- Unrelated follower sync or L1 availability problems are surfaced as bootstrap failures.\n",
+      "createdAt": "2026-09-10T17:36:24Z",
+      "closedAt": "2026-09-10T17:40:28Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDOL-xLQ88AAAABB6smwg",
@@ -210,6 +223,16 @@
   ],
   "topContributors": [
     {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 253.84712319073776,
+      "prScore": 163.14712319073774,
+      "issueScore": 2,
+      "reviewScore": 88.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "oplabs-renovate",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 241.10211576917732,
@@ -232,41 +255,51 @@
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 210.18232792005762,
-      "prScore": 140.50432792005762,
-      "issueScore": 8.3,
-      "reviewScore": 60,
-      "commentScore": 1.378,
+      "totalScore": 232.3519015103376,
+      "prScore": 149.47390151033758,
+      "issueScore": 10.3,
+      "reviewScore": 71,
+      "commentScore": 1.5779999999999998,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 222.16421786045726,
+      "prScore": 143.62421786045726,
+      "issueScore": 2,
+      "reviewScore": 76,
+      "commentScore": 0.54,
       "summary": null
     },
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 204.64122631288805,
-      "prScore": 201.84722631288804,
+      "totalScore": 215.9885687820825,
+      "prScore": 212.8545687820825,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 2.7939999999999996,
-      "summary": null
-    },
-    {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 198.67762899557977,
-      "prScore": 113.17762899557977,
-      "issueScore": 2,
-      "reviewScore": 83.5,
-      "commentScore": 0,
+      "commentScore": 3.134,
       "summary": null
     },
     {
       "username": "OptimismBot",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 189.76533807726975,
+      "totalScore": 194.76533807726975,
       "prScore": 156.26533807726975,
       "issueScore": 0,
-      "reviewScore": 33.5,
+      "reviewScore": 38.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 189.97691923545904,
+      "prScore": 92.37691923545904,
+      "issueScore": 0,
+      "reviewScore": 97,
+      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
@@ -277,16 +310,6 @@
       "issueScore": 0,
       "reviewScore": 35,
       "commentScore": 1.0759999999999998,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 180.47691923545904,
-      "prScore": 92.37691923545904,
-      "issueScore": 0,
-      "reviewScore": 87.5,
-      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
@@ -310,6 +333,16 @@
       "summary": null
     },
     {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 161.53596252201348,
+      "prScore": 83.83596252201347,
+      "issueScore": 0,
+      "reviewScore": 77.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "0xOneTony",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
       "totalScore": 145.46066882450387,
@@ -330,23 +363,13 @@
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 136.3025466006332,
-      "prScore": 86.60254660063322,
-      "issueScore": 2,
-      "reviewScore": 47.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 133.12691125417894,
-      "prScore": 55.42691125417892,
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 130.32132168972828,
+      "prScore": 130.32132168972828,
       "issueScore": 0,
-      "reviewScore": 77.5,
-      "commentScore": 0.2,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -362,31 +385,21 @@
     {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 107.7251273240928,
+      "totalScore": 112.4251273240928,
       "prScore": 52.02512732409281,
       "issueScore": 2,
-      "reviewScore": 53.5,
-      "commentScore": 0.2,
+      "reviewScore": 58,
+      "commentScore": 0.4,
       "summary": null
     },
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 96.2606331666295,
+      "totalScore": 96.4606331666295,
       "prScore": 87.2606331666295,
       "issueScore": 0,
       "reviewScore": 9,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "opsuperchain",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
-      "totalScore": 87.0875477931522,
-      "prScore": 87.0875477931522,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -410,6 +423,26 @@
       "summary": null
     },
     {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 73.04931067029989,
+      "prScore": 48.54931067029989,
+      "issueScore": 0,
+      "reviewScore": 24.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 71.69704223121983,
+      "prScore": 48.99704223121983,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
       "totalScore": 68.96630415681275,
@@ -417,16 +450,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 1.8539999999999999,
-      "summary": null
-    },
-    {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 58.197042231219825,
-      "prScore": 48.99704223121983,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -440,13 +463,13 @@
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 48.974136855066064,
-      "prScore": 24.474136855066064,
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 50.758439727056974,
+      "prScore": 35.91843972705697,
       "issueScore": 0,
-      "reviewScore": 24.5,
-      "commentScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -467,6 +490,16 @@
       "issueScore": 0,
       "reviewScore": 4.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 40.46254914097914,
+      "prScore": 29.022549140979137,
+      "issueScore": 6.1,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -510,13 +543,23 @@
       "summary": null
     },
     {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 31.14,
+      "prScore": 0,
+      "issueScore": 8.1,
+      "reviewScore": 22.5,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
       "username": "wiz-0f98cca50a",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 18.34,
+      "totalScore": 23.18,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 18,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 22.5,
+      "commentScore": 0.6799999999999999,
       "summary": null
     },
     {
@@ -550,22 +593,22 @@
       "summary": null
     },
     {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "khalidsaidi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/4368721?u=00fd7b48d1a22d7c8c42e2e20f998dbc45f03dcf&v=4",
       "totalScore": 9.78843897916644,
       "prScore": 9.78843897916644,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "hdcesario-op",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
-      "totalScore": 9.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9.5,
       "commentScore": 0,
       "summary": null
     },
@@ -590,18 +633,18 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 8.44,
-      "prScore": 0,
-      "issueScore": 8.1,
+      "username": "imitater-dou",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/287387610?u=12f6d7a042a5f12399623f115bd79d35f35da2c2&v=4",
+      "totalScore": 6.137573590279973,
+      "prScore": 6.137573590279973,
+      "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.33999999999999997,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "op-owner-falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/218228085?v=4",
+      "username": "tremarkley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15234569?u=b2a30602eb3a6a6fbd8e7b2ee2eef68888738704&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -610,8 +653,8 @@
       "summary": null
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "username": "op-owner-falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/218228085?v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -752,7 +795,7 @@
   ],
   "newPRs": 10,
   "mergedPRs": 9,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 31
+  "newIssues": 1,
+  "closedIssues": 1,
+  "activeContributors": 34
 }
