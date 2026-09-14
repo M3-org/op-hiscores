@@ -5,30 +5,142 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-13 to 2026-09-20, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 1 active contributors.",
+  "overview": "From 2026-09-13 to 2026-09-20, ethereum-optimism/optimism had 3 new PRs (3 merged), 0 new issues, and 12 active contributors.",
   "topIssues": [],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABDS7h9Q",
-      "title": "ci: bump rust nightly pin to nightly-2026-09-12",
-      "author": "opgitgovernance",
-      "number": 22883,
-      "body": "Automated weekly bump of the pinned nightly Rust toolchain from `nightly-2026-08-22` to `nightly-2026-09-12`. CI on this PR will validate the new toolchain compiles cleanly.",
+      "id": "PR_kwDODjvEJM8AAAABBi1SrA",
+      "title": "kona!: add a chain_id label to every metric, from an ambient scope",
+      "author": "ajsutton",
+      "number": 22707,
+      "body": "Closes #22529. **Replaces #22569** — same goal, different design. Please close that one in favour of this.\n\n### Why replace it\n\n#22569 threads `chain_id` to the emit: 59 files, ~20 constructors gain a parameter, every `Metrics::zero()` is rewritten, three public constants and `EngineSyncState::apply_update` change shape. It also accumulated 24 review comments, most of them about `zero()` drift that the label work dragged in.\n\nThe chain does not have to reach the emit. `metrics::counter!`/`gauge!`/`histogram!` call `Recorder::register_*` on **every** emit, and no kona emit site hoists a `Counter`/`Gauge`/`Histogram` into a field, `static` or `LazyLock` — I checked all ~320. So a wrapping recorder observes 100% of emits and can add the label itself. This is the same shape as op-supernode, which wraps a per-chain `prometheus.Registerer` with `WrapRegistererWith` (`op-node/metrics/metrics.go:160-176`) rather than labelling at each call site.\n\n| | #22569 | this PR |\n|---|---|---|\n| files | 59 | 20 |\n| emit sites changed | ~320 | 0 |\n| `Metrics::zero()` bodies rewritten | 7 | 0 |\n| constructors gaining a parameter | ~20 | 0 |\n\n### Design\n\nNew crate `kona-metrics`, ~140 lines of production code:\n\n- `scoped(chain, fut)` / `sync_scoped(chain, f)` bind a chain to the work that emits its metrics, via a `tokio::task_local`.\n- `ChainLabelRecorder<R>` wraps the real recorder and reads that binding on each `register_*`.\n\nThe scope rides the future, so it survives `.await` and worker-thread migration, but a **new task inherits nothing**. Four places bind a chain, and between them they cover every kona emit:\n\n1. `spawn_and_wait!` (`service/util.rs`) — one line covers all seven per-chain actors. The libp2p swarm is polled inside `NetworkActor::step`, so all gossip metrics are covered here too.\n2. `Discv5Driver::start` — its event loop is a detached `tokio::spawn` and it emits the discovery metrics. The struct already held `chain_id`.\n3. The jsonrpsee servers, through a `ChainScope` `RpcServiceT` middleware, because jsonrpsee serves each call on its own task. This is the only way to reach the 24 emits in `kona-rpc`. Installed by the node's launcher **and** by the `net` subcommand, which builds its own server.\n4. The `net` subcommand's network actor, which it spawns directly rather than through `spawn_and_wait!`.\n\nThe remaining emitters own no chain: the `metrics_process` collector on its non-tokio thread, `kona_node_info`, and the start-up zero-fill, which runs on the main thread before the runtime exists. `ChainLabelRecorder::new`'s `fallback` covers those. kona-node serves one chain, so it passes that chain and **every** series is labelled. A multi-chain process passes `None`, so a process-wide emit stays unlabelled rather than claiming a chain it does not have — which also means a missed scope shows up there as a visible unlabelled series, not as a silently wrong one.\n\nThe fallback is taken from the **resolved rollup config**, not from `--chain`. `node --l2-config-file` overrides the flag, and the actors scope themselves with the chain from that file, so deriving the fallback from the flag would give a devnet two chain ids in one process: real series under the devnet and a full set of permanently-zero ones under OP Mainnet.\n\nAn emit that already carries `chain_id` is passed through untouched, so an explicit label remains available to a component that serves several chains from one task.\n\n### Cost\n\nThe per-emit cost is a `task_local` `try_with` — one thread-local read plus a `RefCell` borrow — and, when a chain is known, one `Vec<Label>` allocation plus a key rehash inside `Key::with_extra_labels`. `PrometheusRecorder::register_*` already calls `key.to_retained()` and a sharded lookup per emit, so this is a constant factor on an existing cost rather than a new one, but it is a real one on the derivation hot path. The label value is a shared `Arc<str>` built once per chain, so cloning it is a refcount bump. Caching the extended `Key` per (scope, key) pair would remove the allocation; I left it out because a cache adds a lock and an eviction question for a cost that is not measured to matter.\n\n`kona-metrics` is a hard dependency while the emits it serves are behind each crate's optional `metrics` feature, so the scope is established even when the feature is off. That is one code path instead of `#[cfg]` on a macro body and two spawn sites; the cost with the feature off is an `Option` swap per poll.\n\n### Fit in the lokahi stack\n\n#22599 (\"lokahi: run N chains in one process\") merged #22569's threading into its composition line and adds `Metrics::init(chain_id)` per chain plus ~26 `Arc<str>` label fields. Against this PR it needs none of that. What it needs instead is small and already has the seam: it composes each chain then flattens every chain's actors into one `run_actors` call, and `label_chain`/`ChainLabeledActor` already carries the chain id across that boundary — so `ChainLabeledActor::step_erased` wraps its inner step in `kona_metrics::scoped`, `init_prometheus_server` is called with `None`, and each chain's `Metrics::init` runs in a `sync_scoped`. Its multi-chain `L1WatcherActor` — the one component that serves N chains from a single task, and the case ambient scoping genuinely cannot handle — emits no metrics at all, so it needs nothing.\n\n### Verification\n\n**End to end, on the real binary.** kona-node built and run with `--metrics.enabled -c 11155420`, then `/metrics` scraped: **168 series, every one carrying `chain_id=\"11155420\"`, none without.** That includes `process_cpu_seconds_total`, `kona_node_info`, `kona_node_rollup_config`, and the whole zero-fill — with zero emit-site changes.\n\n**The config-file path too.** Run with `-c 10` but `--l2-config-file` naming chain `424242`: all 168 series carry `chain_id=\"424242\"`. Before that fix they would have carried `10`.\n\n**Both spawn seams are regression-tested, not asserted.**\n\n- `actor_metrics_carry_the_chain_the_supervisor_was_given` drives `spawn_and_wait!` with a stub `NodeActor` that awaits and then emits. Remove the scope from the macro and it fails with `left: [None]`.\n- `rpc_handler_metrics_carry_the_launcher_chain` launches a real jsonrpsee server through `JsonrpseeServerLauncher`, calls a method over HTTP, and asserts the label. Point the middleware at a different chain and it fails with `left: [Some(\"0\")]`.\n\nBoth need the process-global recorder, since a thread-local one cannot reach a spawned task; `test_metrics.rs` owns the single install.\n\n**7 tests in `kona-metrics`** cover the recorder and the scope semantics, including `a_spawned_task_does_not_inherit_the_scope`, which pins the limitation the design is built around so a change in tokio's behaviour is caught here rather than by a mislabelled dashboard.\n\n244 tests pass across kona-metrics, kona-cli, kona-disc, kona-node-service, kona-node and kona-rpc. `clippy --all-features --all-targets -D warnings` clean. `cargo check` with default features clean for each package individually, not just in the workspace. `lint-docs` reproduced locally with CI's exact `RUSTDOCFLAGS` on the pinned nightly.\n\n### Not in scope\n\n- `kona_node_engine_task_failure`'s dynamic label key is fixed in #22705, and the `Metrics::zero()` drift in #22706. Both were found by #22569; neither needs the chain work, and splitting them keeps all three reviewable.\n- `kona-metrics` is not wired into kona-host or the sp1 host. Neither is multi-chain, and the sp1 host installs its own recorder.\n- jsonrpsee runs a subscription callback under `tokio::spawn` and a blocking method under `spawn_blocking`, so neither inherits the middleware's scope. kona registers four subscriptions and no blocking method, and none of the four emits a metric; the limitation is documented on `ChainScope`.\n- Nothing forces a new spawn site to be scoped. The `None` fallback makes an unscoped emit visible in a multi-chain process rather than wrong, which is the cheap version; a lint or an assertion in lokahi's acceptance run would be the thorough one.\n\nBREAKING CHANGE: three public items of `kona-cli` change, so it goes to 0.4.0. `MetricsArgs::init_metrics` and `init_prometheus_server` take a `chain_id: Option<u64>`, `init_prometheus_server` returns `CliResult` rather than `Result<(), BuildError>`, and `CliError` gains two variants. `CliError` is `#[non_exhaustive]` now, so later variants are additive. No in-repo caller outside `bin/node` is affected.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-13T00:01:48Z",
+      "createdAt": "2026-08-31T02:10:32Z",
       "mergedAt": null,
-      "additions": 1,
-      "deletions": 1
+      "additions": 669,
+      "deletions": 35
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAgBrlw",
+      "title": "kona-engine: record the L1 origin of the local-safe head",
+      "author": "claude",
+      "number": 22596,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\nPart of #22528. Groundwork for the atomic snapshot query in #22527.\n\n### Before\n\nThe engine's sync state held a local-safe head with no record of which L1 block it was derived from. To answer \"which L1 block was the chain safe at, at this L2 timestamp?\" — the query interop uses to decide cross-safety — a caller had to pair the head with a `derived_from` observed somewhere else, and the ChainController cannot do that reliably:\n\n- The engine task queue is a `BinaryHeap` (`task_queue/core.rs`) and `EngineTask::Ord` returns `Ordering::Equal` for two `Consolidate` tasks, so among equal-priority consolidations the last `derived_from` forwarded is not guaranteed to be the last one executed.\n- `Engine::drain` peeks, executes, and only then pops, so a task error halts the drain with that task still queued. A drain can end with local-safe written by an earlier task while later-forwarded origins were never consumed — pairing would then report an L1 key *ahead of* the head. `ChainController::step` drains at the top and enqueues at the bottom, so more than one consolidation really can be in flight.\n- Two writers hold no L1 key at all: the derivation-delegation path, where the input is a bare `L2BlockInfo`, and engine resets, which install a walkback point found by traversing L2.\n\nA wrong L1 key here is worse than no answer, since the caller has no way to tell the two apart.\n\n### After\n\nThe pairing is recorded by the writer of the head, in the same step that writes it, and read back through one call:\n\n- `EngineSyncState::local_safe()` returns the head and its origin from a single snapshot, so a consumer cannot observe a head from one update beside an origin from another. That is the read path #22527's handler needs; the handler itself is not in this PR.\n- No writer can move the local-safe head without saying where it came from — the origin is part of the update, not a field beside it.\n- Writers with no L1 key record an explicit \"unpaired\" rather than leaving a stale origin behind. A reset thereby *invalidates* the pairing it supersedes, instead of leaving one that describes a head the engine is no longer on.\n- The absent case is a distinct variant, so a consumer cannot mistake it for a real L1 block the way a flattened `Option<BlockInfo>` defaulted to block 0 could.\n\n### How\n\n`LocalSafeOrigin` is `Unpaired | DerivedFrom(BlockInfo)`. `LocalSafeHead` bundles a head with its origin and is both the write shape — `EngineSyncStateUpdate::local_safe_head` becomes an `Option<LocalSafeHead>` — and the read shape.\n\n`ConsolidateInput` derives the origin from its own variant: attributes supply their `derived_from`, a delegated `L2BlockInfo` is unpaired. `Engine::reset` / `reset_to` write unpaired. `InsertTask` trades `is_payload_local_safe: bool` for `local_safe_origin: Option<LocalSafeOrigin>`, carrying the same \"is this local-safe at all\" bit in its outer layer and the L1 key in its inner one; `SealTask` supplies it from the attributes it already holds, so nothing new is threaded through the build path. The Holocene deposits-only retry keeps the origin for free, since `as_deposits_only` copies `derived_from`.\n\nNot in scope: #22528's rocksdb SafeDB store and #22527's query handler. Both issues stay open.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5)_",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T03:43:23Z",
+      "mergedAt": null,
+      "additions": 605,
+      "deletions": 50
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAfb6Kg",
+      "title": "kona-node-service: EngineActor becomes ChainController",
+      "author": "claude",
+      "number": 22595,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Sebastian Stammler** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\nPart of #22527. Stacked on #22586.\n\n**Before.** The actor that owns a chain's head state was called `EngineActor`, as if it wrapped the Engine API. Under interop a multi-chain host runs one of these per chain, so the name reads as one engine per chain. Separately, a gossiped payload at or below the local-safe head was inserted anyway, rewinding the unsafe head under a head derived from L1 and breaking `unsafe >= local-safe`.\n\n**After.** It is the `ChainController`: the sole writer of the engine's heads, the mediator of every derivation-bound signal, and the owner of reset initiation. A gossiped payload is now admitted only if it descends from the local-safe head.\n\n**How.** The rename covers the types that named the actor rather than the Engine API — `EngineActorRequest`, `EngineError`, `EngineRpcActor`/`EngineRpcRequest`, `EngineDerivationClient`, `EngineClientError`/`EngineClientResult`, and the `actors::engine` module. The last two also resolve a collision with kona-engine's own `EngineClientError`. `EngineConfig` keeps its name (it configures the real Engine API connection), as do the per-consumer `DerivationEngineClient` / `NetworkEngineClient` / `SequencerEngineClient` traits, which are named for their consumer. No wire names change: RPC methods, WS subscriptions and `dev_subscribe_engine_queue_size` are untouched, and the `engine` tracing target stays so operator log filters keep working.\n\nThe payload check rejects the two cases decidable from state on hand — a payload at or below the local-safe head, and one exactly above it whose parent is not that head — and admits anything further ahead, whose ancestry is not available and which derivation settles when local-safe catches up. Untrusted input is rejected rather than clamped: the payload is dropped at the queue boundary, next to the existing drop for an `INVALID` payload status. The check reads the state the write itself uses rather than the state at enqueue time, which the local-safe head can outrun; `EngineSyncState::apply_update` deliberately clamps only the cross-safe head, and this is what makes its assumption that no writer produces an unsafe head below it true for the one writer fed from outside the node.\n\n**Not in this PR.** The issue also asks for a read-only query handler serving an atomic local-safe-at-timestamp plus L1-at-safe snapshot. That needs the L2 head paired with the L1 block it was derived from, and the pairing has to be recorded where the local-safe head is written, not inferred afterwards by the controller — a consolidation can fall back to build-and-seal and land a different block than the attributes named, so pairing \"last `derived_from` forwarded\" with \"local-safe head after drain\" can silently answer with an L1 key the head was not derived from. That makes it a `kona-engine` sync-state change, and it wants its own slice. Left as a follow-up on #22527; details in a comment there.\n\nTwo other items on the issue already hold from earlier slices in this stack and are unchanged here: the controller already mediates the derivation-bound signals and owns reset initiation, and the depth-1 lockstep confirmation is already fed from local-safe (with a lagging-cross test asserting it).\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T01:43:59Z",
+      "mergedAt": null,
+      "additions": 514,
+      "deletions": 270
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBiwoaw",
+      "title": "kona: make the pre-created metric series match what the code emits",
+      "author": "ajsutton",
+      "number": 22706,
+      "body": "`Metrics::zero()` pre-creates one series per expected label tuple so Prometheus exposes it before the first event. Nothing links that list to the emit sites, and the two had drifted apart in both directions. A series no code can produce sits at 0 forever beside the real ones, and an emitted series is missing until its first event — which is the gap `zero()` exists to close. Three shipped dashboard panels are empty today because of it.\n\nEvery label list is now derived from the emit sites, and written as a loop over the emitted values rather than one call per series.\n\n### Corrected in `zero()`\n\n|metric|was|is|\n|---|---|---|\n|`kona_node_dial_peer_error`|one unlabelled series|the 9 `type` values emitted by `driver.rs`/`gater.rs`|\n|`kona_node_find_node_requests`|one unlabelled series|the constant `find_node` label the emit carries|\n|`kona_node_rpc_calls`|17 methods|19 — adds the emitted `opp2p_unblockPeer` and `admin_postUnsafePayload`|\n|`kona_node_block_validation_failed`|12 reasons|11 — drops `parent_beacon_root`, which no `BlockInvalidError` variant produces|\n|`kona_node_gossip_events`|5 `type` values|the 2 topic-free ones|\n|`kona_node_banned_peers`|one unlabelled series|not pre-created|\n|`kona_providers_chain_rpc_calls` / `_errors`|4 methods|5 — adds the emitted `block_by_number`|\n|`kona_providers_beacon_requests` / `_errors`|`blob_sidecars`|`blobs`, which is what `beacon_client.rs` emits|\n|`kona_providers_l2_chain_requests` / `_errors`|3 methods, 2 with no code path|the 2 emitted: `l2_block_by_hash`, `l2_block_ref_by_number`|\n|`kona_providers_local_cache_hits` / `_misses`|included `block_by_hash`, omitted `l2_block_info_by_hash`|the 4 methods `buffered.rs` emits|\n\nTwo of these need a word on why the fix goes the way it does. `kona_node_gossip_events` pre-created five `type` values, but the `message`, `subscribed` and `unsubscribed` emits also carry `topic`; for the last two the topic is whatever a remote peer announces, so the value set is not knowable at startup. `kona_node_banned_peers` carries `peer_id` and `score`, so it has no finite series set either. Both keep their emits and drop the phantom pre-created series.\n\n`opp2p_peerStats` was pre-created, but `P2pRpc::opp2p_peer_stats` was the one handler of eighteen with no emit at all. That reads as the omission, so the emit is added rather than the series removed.\n\n`SEQUENCER_STATE` was declared with `describe_counter!` and is emitted with `metrics::gauge!`, so the description never attached to the series. Same class of defect, one line.\n\n### Removed\n\nFour metrics were declared and described but emitted by nothing anywhere in `rust/`. They are removed rather than left reporting a permanent 0: `kona_node_gossipsub_events` (duplicated `kona_node_gossip_events`, which carries the real data), `kona_providers_cache_memory_bytes`, `kona_providers_request_duration` and `kona_providers_local_cache_capacity`.\n\nOnly `kona_providers_cache_memory_bytes` had a consumer: the \"Cache Memory Usage\" panel on both kona-node dashboards, rendering the constant 0 from `zero()`. That panel is removed with it. The other three had none.\n\nWhile checking consumers I found the dashboards querying two metric names that do not exist — `kona_providers_blob_sidecar_fetches` and `kona_providers_blob_sidecar_errors`, against emitted names `kona_providers_blob_fetches` and `kona_providers_blob_fetch_errors`. Same drift, other direction; those two panels now use the emitted names.\n\n### Verification\n\n13 new tests render `zero()` through a `DebuggingRecorder` and assert the pre-created label set for each corrected metric. All fail on `develop`. `cargo test --all-features` across kona-gossip, kona-disc, kona-providers-alloy, kona-providers-local, kona-derive, kona-node-service and kona-rpc passes, except `kona-disc driver::tests::test_online_discv5_driver_bootstrap_testnet`, which dials real testnet boot nodes and fails identically on `develop`. `clippy --all-features --all-targets -D warnings` clean over those crates plus kona-node. `cargo build -p kona-derive --target riscv32imac-unknown-none-elf --no-default-features` still builds.\n\n### Deliberately not in scope\n\nThese are real defects found on the way. They are behavioural changes or separate work, so they are recorded here rather than folded in.\n\n- Metrics with no `zero()` entry at all: 17 in kona-derive, 6 in kona-node-service. That is the pre-existing scope of `zero()`, not drift. Several are level gauges where publishing a fake 0 height is arguably worse than an absent series, so it needs a decision rather than a sweep.\n- `kona_node_banned_peers` uses `inc!(gauge, ..)` per `peer_id`, so it is a one-shot 1 per peer rather than a count, and its cardinality is unbounded.\n- `kona_derive_batch_validity` carries 26 free-text `BatchDropReason` sentences as label values.\n- `kona_providers_cache_entries` uses `inc!` on insert against a bounded `LruCache`, so it grows without bound and never reflects the real entry count.\n- `SEQUENCER_STATE` sets the current `active`/`recovery` combination to 1 and never clears the previous one, so two series read 1 after any flip.\n- `RollupRpc::RPC_IDENT` is `\"rollup_rpc\"`: off-convention name, never described, never zeroed.\n- Nothing prevents this drifting again. The structural fix is to make the label values constants that both the emit and `zero()` read, or to add a lint. `kona_node_engine_task_failure` in #22705 shows the shape, using `EngineTaskErrorSeverity::ALL`.\n\nSplit out of #22569, which found most of this while adding a chain dimension. It is independent of that work, and much easier to review on its own.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-31T01:51:14Z",
+      "mergedAt": null,
+      "additions": 478,
+      "deletions": 451
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCFTypQ",
+      "title": "Update release docs: op-deployer 0.8.0 RCs, proxyd v4.32.1",
+      "author": "mintlify",
+      "number": 22761,
+      "body": "## Summary\nSync `releases/` with the latest GitHub releases for tracked components.\n\n## Changes\n- `op-deployer.mdx`: prepend v0.8.0-rc.2 and v0.8.0-rc.1 (September 1, 2026) as Release Candidate entries; v0.7.1 stays Latest/Stable.\n- `proxyd.mdx`: prepend v4.32.1 (August 31, 2026) as Latest/Stable; demote v4.32.0 to Stable.\n- `index.mdx`: proxyd card bumped to v4.32.1.\n\n## Context\nAll other tracked components (op-node, kona-node, op-reth, op-batcher, op-proposer, op-challenger, op-contracts, op-conductor, kona-client, kona-host, op-acceptor) have no GitHub releases newer than their current top entry (tags newer than the docs exist for some, but none have published releases). Internal `op-deployer/v0.8.0-pcd-test.*` test releases were intentionally skipped.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-03T16:13:55Z",
+      "mergedAt": null,
+      "additions": 231,
+      "deletions": 109
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 93,
+    "deletions": 19,
+    "files": 9,
+    "commitCount": 6
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "docs: remove stale op-supervisor entry from README",
+      "prNumber": 22852,
+      "type": "docs",
+      "body": "## Summary\nREADME Directory Structure still links to `./op-supervisor`, but that package was removed from the tree (`chore: remove unused op-supervisor packages` #21369). The path 404s on develop tip. `op-interop-mon` is already listed for ",
+      "files": [
+        "README.md"
+      ]
+    },
+    {
+      "title": "Update release docs: op-node v1.19.7, op-reth v2.4.4, op-batcher v1.17.0, kona v1.7.0",
+      "prNumber": 22882,
+      "type": "other",
+      "body": "## Summary\nPrepend the latest GitHub releases to each tracked component file and refresh the index cards.\n\n## Changes\n- op-node: add v1.19.7 (Sep 11, 2026) as latest\n- op-reth: add v2.4.4 (Sep 11, 2026) as latest\n- op-batcher: add v1.17.0 (",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/kona-client.mdx",
+        "docs/public-docs/releases/kona-host.mdx",
+        "docs/public-docs/releases/kona-node.mdx",
+        "docs/public-docs/releases/op-batcher.mdx",
+        "docs/public-docs/releases/op-node.mdx",
+        "docs/public-docs/releases/op-reth.mdx"
+      ]
+    },
+    {
+      "title": "docs: Document proposer metric replacement for Upgrade 20",
+      "prNumber": 22885,
+      "type": "docs",
+      "body": "Upgrade 20 changes `op-proposer` proposals from block-number Output Roots to timestamp-based Super Roots. This notice identifies `op_proposer_default_proposed_sequence_number` as the replacement for `op_proposer_default_refs_number`. It als",
+      "files": [
+        "docs/public-docs/notices/upgrade-20.mdx"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 35.291402172337456,
+      "prScore": 30.09140217233745,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 34.513044875446845,
+      "prScore": 34.513044875446845,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
@@ -38,11 +150,41 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zloglevel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/227594782?u=e131219b0f79d18a1d5d4d506b672905063aa916&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 0,
+  "newPRs": 3,
+  "mergedPRs": 3,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 1
+  "activeContributors": 12
 }
