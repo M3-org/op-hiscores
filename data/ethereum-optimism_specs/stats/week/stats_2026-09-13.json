@@ -5,55 +5,188 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/specs",
-  "overview": "From 2026-09-13 to 2026-09-20, ethereum-optimism/specs had 0 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "overview": "From 2026-09-13 to 2026-09-20, ethereum-optimism/specs had 1 new PRs (0 merged), 0 new issues, and 13 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOLB-lzc8AAAABDdLuqA",
+      "title": "lagoon: specify the span batch encoding of post-exec transactions",
+      "author": "geoknee",
+      "number": 944,
+      "body": "Closes [protocol-team#318](https://github.com/ethereum-optimism/protocol-team/issues/318).\n\n## The gap\n\nThe post-exec transaction type `0x7D` is fully specified as an EIP-2718 envelope in `specs/protocol/lagoon/post-exec.md`. Its span batch representation was specified nowhere — the word \"span\" did not appear anywhere under `specs/protocol/lagoon/`.\n\nDelta lists `tx_datas` encodings for legacy, type 1 and type 2. Isthmus adds type 4 with an exact field order. Nothing added `0x7D`.\n\nDelta's generic sentence — that `tx_datas` matches \"the encoding of the fields as in the EIP-2718 format of the `TransactionType`\" — does not close it. It settles only `tx_datas`, and the document does not treat it as sufficient for a new type anyway, since Isthmus still added an explicit row. It settles none of the other slots. `contract_creation_bits` is defined as marking a contract creation, which a post-exec transaction is not, yet both clients set the bit to `1` so that no `tx_tos` entry is consumed. Nothing authorised that.\n\nThis is a specification gap, not a client bug. The two clients agree byte for byte. No document stated the layout they chose.\n\n## What this adds\n\nA new `specs/protocol/lagoon/derivation.md`, following the Isthmus precedent for adding a transaction type to span batches:\n\n- **`tx_datas` row.** `0x7D ++ rlp_encoded_payload` — the payload RLP list verbatim, so the element is the transaction's whole EIP-2718 encoding rather than a reduced one. Unlike every other type, no fields are omitted, because there are none to omit.\n- **Every transposed slot.** `contract_creation_bits` = 1, no `tx_tos` entry, `y_parity_bits` = 0, `tx_sigs` r = s = 0, `tx_nonces` = 0, `tx_gases` = 0, no `protected_bits` entry.\n- **Reconstruction**, and why the batch/safe-block overlap check is well defined for these blocks.\n\nAlso wired into `SUMMARY.md` and the Lagoon overview, with a cross-link from `post-exec.md`.\n\n## The three questions in the issue\n\n1. **Which `tx_datas` form?** The verbatim EIP-2718 body, as both clients use.\n2. **`contract_creation_bits` for a type with no `to`?** `1`. The document explains why this is not a contradiction of Delta's wording: what the bit governs is whether the transaction consumes a `tx_tos` entry. For every pre-Lagoon type, \"is a contract creation\" and \"has no `to`\" are the same condition, so Delta states the former; post-exec is the first type where they diverge, and the operative reading is the latter.\n3. **Must the unused slots be zero?** Yes, and strictly, in both directions: a batcher MUST zero them, and a decoder MUST verify they are zero and reject the batch otherwise. The same applies to a `contract_creation_bits` bit of `0` for a post-exec transaction.\n\nThat third answer changed during review. I first wrote the decoder side permissively — ignore the values, never reject — reasoning that the clients discard those fields during reconstruction, so no value can change the derived blocks, and that turning a client convention into a drop rule is usually a consensus change in disguise. @geoknee pushed for strictness and is right. The general caution does not bite here, because `0x7D` cannot legally appear in a batch before Lagoon and no chain in the superchain-registry sets `lagoon_time` — there is no posted batch for a stricter rule to reinterpret. Meanwhile permissiveness has a real cost: it makes a span batch's encoding malleable, giving one sequence of L2 blocks unboundedly many valid encodings that differ in bytes a batcher picks freely, with `tx_sigs` alone reserving 64 unused bytes per transaction to pick them in.\n\nThe issue also suggested the overlap check is non-deterministic without a zero rule. It isn't: `checkSpanBatchOverlap` compares reconstructed transaction bytes, and reconstruction discards those slots. The document states that positively rather than repeating the concern.\n\n## Client changes are required before Lagoon activates\n\nThis is now a spec that leads the implementations rather than one that records them. Neither client rejects what this document says a decoder MUST reject:\n\n- **op-node** — `fullTxs` (`span_batch_txs.go`) consumes a `tx_tos` entry for a `0` bit and `convertToFullTx` then discards it; no slot values are checked.\n- **kona** — `full_txs` (`batch/transactions.rs`) and `to_full_tx_bytes` (`batch/tx_data/wrapper.rs`) do the same.\n\nThe encoder side already complies on both sides, and op-batcher reaches `addPostExecTx` through `AppendSingularBatch`, so no batcher change is needed.\n\nOne caveat that decides how the client work should be done: these slots are only reachable at reconstruction time, so the check lands in `fullTxs` / `full_txs` — the exact path of the open [protocol-team#222](https://github.com/ethereum-optimism/protocol-team/issues/222), where a non-critical error there makes op-node drop only the batch and continue the channel while kona drops the whole remaining channel. Adding this rule naively would add a new batcher-triggerable trigger for that divergence. Either #222 lands first, or the rejection surfaces as a batch-queue validity verdict rather than a decode failure.\n\n## Verification\n\nEvery normative claim was checked against both clients in both directions, then re-checked by an adversarial review pass:\n\n- op-node — `span_batch_txs.go` (`addPostExecTx`, `AddTxs`, `fullTxs`, `recoverV`), `span_batch_tx.go` (`spanBatchPostExecTxData`, `encodeTyped`, `convertToFullTx`), `op-core/types/post_exec_tx.go`, `batches.go` (overlap check), `channel_in_reader.go` (drop path).\n- kona — `batch/tx_data/wrapper.rs`, `batch/transactions.rs`, `batch/raw.rs`, `rust/op-alloy/.../post_exec.rs`.\n\n`markdownlint`, `doctoc`, `cspell` and the filename check all pass; every internal anchor resolves.\n\n## Out of scope\n\nThe batch queue drop rule for future types above `2` still needs a Lagoon amendment — that is [protocol-team#319](https://github.com/ethereum-optimism/protocol-team/issues/319). It applies to singular batches too, where no encoding question arises, so it belongs in its own change. This document marks the boundary and notes the amendment is still owed, rather than assuming a rule that does not exist yet.\n\nOne adjacent observation, left alone deliberately: `post-exec.md` says post-exec transactions are submitted to the DA layer \"alongside the user transactions and any deposited transactions\". Deposits are never in batch data, so that clause is loose. It is pre-existing text and not this change's business, but the new paragraph sits just below it, so it is now more visible.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/specs",
+      "createdAt": "2026-09-14T13:29:58Z",
+      "mergedAt": null,
+      "additions": 148,
+      "deletions": 0
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 3
   },
   "completedItems": [],
   "topContributors": [
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 35.291402172337456,
-      "prScore": 30.09140217233745,
+      "totalScore": 143.32058905477172,
+      "prScore": 123.62058905477171,
       "issueScore": 0,
-      "reviewScore": 5,
+      "reviewScore": 19.5,
       "commentScore": 0.2,
       "summary": null
     },
     {
       "username": "OptimismBot",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 34.513044875446845,
-      "prScore": 34.513044875446845,
+      "totalScore": 120.22486660204429,
+      "prScore": 120.02486660204428,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 101.91977463163418,
+      "prScore": 44.119774631634186,
+      "issueScore": 2.1,
+      "reviewScore": 55.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 42.84789261189092,
+      "prScore": 29.007892611890917,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 40.75826433794566,
+      "prScore": 23.75826433794566,
+      "issueScore": 2,
+      "reviewScore": 15,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 10,
-      "prScore": 0,
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 29.48744915467244,
+      "prScore": 24.48744915467244,
       "issueScore": 0,
-      "reviewScore": 10,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 5.068306144334055,
-      "prScore": 5.068306144334055,
+      "totalScore": 28.45633124488516,
+      "prScore": 28.45633124488516,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 21.503220981414973,
+      "prScore": 21.503220981414973,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "huklaa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/129692708?u=c05bfda288117361c6a3e7b4012759cf592f6eb3&v=4",
+      "totalScore": 21.241494030119284,
+      "prScore": 21.241494030119284,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 15.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 11.07602663467388,
+      "prScore": 11.07602663467388,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "kburrus64-max",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/272851395?v=4",
+      "totalScore": 9.00005020110221,
+      "prScore": 9.00005020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 8.705563680037475,
+      "prScore": 8.705563680037475,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "3456smille",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12291047?v=4",
+      "totalScore": 8.597213344056216,
+      "prScore": 8.597213344056216,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 7.638,
+      "prScore": 0,
+      "issueScore": 2.2,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -64,6 +197,46 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -87,9 +260,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
+  "newPRs": 1,
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 3
+  "activeContributors": 13
 }

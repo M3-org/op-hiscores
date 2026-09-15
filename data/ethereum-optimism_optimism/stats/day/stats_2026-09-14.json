@@ -5,9 +5,82 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-14 to 2026-09-15, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 1 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-09-14 to 2026-09-15, ethereum-optimism/optimism had 10 new PRs (5 merged), 4 new issues, and 19 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABRMx5Bg",
+      "title": "kona-sp1: revm-precompile 42 pulls sha2 0.11, which has no SP1 patch",
+      "author": "sebastianst",
+      "number": 22890,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Situation\n\nrevm-precompile 42 (pulled in by reth v2.5.0, #22495) depends on `sha2 = \"0.11\"`. The SP1 guest workspace accelerates SHA-256 by patching `sha2` with [sp1-patches/RustCrypto-hashes](https://github.com/sp1-patches/RustCrypto-hashes), and a `[patch.crates-io]` entry only replaces the version it names: the guest patches [`sha2 0.10.9`](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/kona/sp1/programs/Cargo.toml#L137). sp1-patches has no `patch-sha2-0.11.*` tag (only mirrors of the upstream `sha2-v0.11.0-*` tags), and Succinct's own zkevm still pins patched 0.10.9.\n\nSo the guest now carries two `sha2` crates: patched 0.10.9 (alloy, kona) and vanilla 0.11.0, whose only dependent is revm-precompile. Two consensus paths hash through the vanilla copy inside the zkVM: the SHA-256 precompile (0x02) and the KZG point-evaluation versioned-hash check. Correctness is unaffected; those hashes run as plain RISC-V cycles instead of the SHA-256 syscalls, i.e. a proving-cost regression. `check-sp1-guest-precompile-patches` caught it.\n\n## Workaround in #22495\n\nrevm 42 routes both hashes through its pluggable `Crypto` trait, so kona's `CustomCrypto` now [implements `sha256`](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/kona/sp1/crates/client/src/precompiles/custom.rs#L24) with the client crate's own `sha2`, which is the patched 0.10 line in the guest. The vanilla 0.11 stays compiled in as dead code (`DefaultCrypto`), so the CI check gained an [exemption](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/justfile#L298-L318): an unpatched `sha2` is tolerated only while revm-precompile is its sole dependent.\n\nResidual risk: the guard checks the dependency graph, not call sites. A future revm-precompile that hashes with `sha2` directly instead of through `Crypto` would regress silently.\n\n## Follow-up\n\n1. **SP1 (Succinct):** publish a `patch-sha2-0.11.0-sp1-6.x` tag in sp1-patches/RustCrypto-hashes. revm-precompile ≥ 42 (revm 42, reth ≥ v2.5.0) requires sha2 0.11, so every SP1 program executing a current revm is affected, not only kona.\n2. **Here, once the tag exists:** add `sha2 0.11` to the guest's `[patch.crates-io]`, delete the `CustomCrypto::sha256` override and the check exemption, and restore the strict \"every sha2 resolves from sp1-patches\" invariant.\n\n🤖 *Co-created with Claude Fable 5.1*\n",
+      "createdAt": "2026-09-14T12:20:14Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABRQrmFA",
+      "title": "kona-sp1-proposer: resolve foreign ancestors blocking refund claims",
+      "author": "wwared",
+      "number": 22894,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nFollow up to #22835. A proposer-created game can be blacklisted or retired and therefore eligible to recover its creation bond through refund mode, but resolving that game may still be blocked by an unresolved foreign ancestor.\n\nPR #22835 intentionally does not add permissionless foreign-game resolution. It keeps refund recovery narrow: the proposer resolves and claims only its own disallowed games, and waits when an ancestor has not reached a resolvable state.\n\n## Desired behavior\n\nWhen an owned disallowed game is blocked by foreign ancestors, identify the minimal unresolved ancestor chain and permissionlessly resolve only ancestors whose on-chain clocks/status make resolution valid. Once the dependency is resolved, continue resolving the owned game and claim its refund-mode credit.\n\n## Constraints\n\n- Do not resolve active or otherwise unready foreign games.\n- Preserve parent-before-child transaction ordering across cycles.\n- Do not retain foreign games for bond claims or treat them as proposer-owned.\n- Keep failures isolated so one foreign dependency does not block unrelated refund claims.\n- Avoid a full-history startup scan.\n\n## Acceptance criteria\n\n- A scenario test covers an owned blacklisted/retired game blocked by a resolvable foreign ancestor.\n- The foreign ancestor resolves before the owned game.\n- The owned game's creation bond is subsequently unlocked and paid through refund mode.\n- Unready foreign ancestors produce no resolution transaction.\n\nFiled by an AI coding assistant at the user's request.",
+      "createdAt": "2026-09-14T18:53:28Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQj2Ihw",
+      "title": "op-interop-filter: Backfill the complete message expiry window",
+      "author": "ajsutton",
+      "number": 22849,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this during the interop implementation review.\n\nOp-interop-filter's default startup backfill is shorter than its default message expiry window.\n\nCurrent defaults:\n\n- `backfill-duration = 24h` (`flags/flags.go:49-54`)\n- `message-expiry-window = 168h` (`flags/flags.go:55-60`)\n\nEvent sequence:\n\n1. Start the filter with fresh storage at timestamp `S`.\n2. The ingester starts near `S - 24h` (`logsdb_chain_ingester.go:379-395`).\n3. A transaction references a canonical initiating log from `S - 48h`.\n4. Message timing accepts the reference because it is younger than seven days.\n5. LogsDB cannot find the source block because startup never ingested it.\n6. The filter rejects an otherwise valid transaction.\n\nThe LogsDB does not prune ingested history. This is a startup backfill problem, not an ongoing retention problem.\n\nThe missing range remains relevant for six days after a fresh start. Persistent storage with enough existing history avoids the problem.\n\nConfiguration validates both durations independently and enforces no relationship (`filter/config.go:61-68,93-105`).\n\nExpected behavior: default startup backfill must cover the message expiry window. Configuration should reject a shorter backfill window.",
+      "createdAt": "2026-09-10T00:39:57Z",
+      "closedAt": "2026-09-14T21:05:30Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQZlbpw",
+      "title": "op-supernode: Enforce dependency-set membership during live verification",
+      "author": "ajsutton",
+      "number": 22830,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this during the interop implementation review.\n\nOp-supernode currently assumes that its managed chains match the dependency set. Live message verification does not enforce that invariant.\n\n`Supernode.New` passes every managed chain to the interop activity. It reads the first available dependency set only to obtain the message expiry window.\n\n`verifyExecutingMessage` checks whether each chain exists in `i.chains` and `i.logsDBs`. It does not call `DependencySet.HasChain` for either chain.\n\nThis normally works because operators should manage only expected chains. However, a configuration mismatch can make op-supernode validate messages involving a chain outside the dependency set.\n\nKona checks dependency-set membership for both the executing chain and the initiating chain.\n\nExpected behavior: retain the dependency set in the interop verifier. Reject messages unless both chain IDs belong to that set.\n\nA startup consistency check may also detect mismatched configuration. The live check should remain the final validity guard.\n\nRelevant code:\n\n- `op-supernode/supernode/supernode.go:83-128`\n- `op-supernode/supernode/activity/interop/algo.go:158-215`\n- `op-core/interop/depset/depset.go:13-22`\n- `rust/kona/crates/protocol/interop/src/graph.rs:175-195`\n\nSpecification: https://github.com/ethereum-optimism/specs/blob/b733da804eeadc597c690f16601091e97af1fc68/specs/interop/messaging.md#messaging-invariants",
+      "createdAt": "2026-09-09T05:49:47Z",
+      "closedAt": "2026-09-14T21:05:30Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABRSns4g",
+      "title": "ZK Specs",
+      "author": "pauldowman",
+      "number": 22899,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Specs updates for ZK proofs.",
+      "createdAt": "2026-09-14T22:42:17Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABDfsVZw",
+      "title": "kona-sp1-proposer: recover resolution and bonds beyond the observation window",
+      "author": "Inphi",
+      "number": 22893,
+      "body": "Games outside the 14-day observation window can still block resolution of tracked descendants. This PR extends resolution and bond recovery to their required ancestors without adding those ancestors to the proposal DAG.\r\n\r\nRecovery scope:\r\n\r\n- Normal bond recovery continues for games in `state.games`, including resolved entries.\r\n- Only unresolved tracked games initiate parent traversal.\r\n- Unresolved ancestors are followed and resolved parent-first, regardless of age.\r\n- The first resolved ancestor is included for its own credit recovery, then traversal stops—even if older ancestors have outstanding bonds.\r\n- Ancestor candidates are rebuilt each sweep, not retained independently. Recovery can stop before a withdrawal matures if the connecting child or intermediate ancestor resolves, or the child leaves the tracked set.\r\n- No factory-wide historical bond scan, including after restart.\r\n\r\nExisting policy and claim safeguards:\r\n\r\n- Prestate-based eligibility remains unchanged, including for foreign-created games.\r\n- Defense/proving policy is unchanged.\r\n- Claims respect each game’s own registry, normal/refund distribution rules, finality, and withdrawal delay.\r\n- Paused tracked games retain recovery eligibility; failed claim preflight reads defer submission.\r\n\r\nFixes https://github.com/ethereum-optimism/optimism/issues/18429",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-14T18:28:54Z",
+      "mergedAt": null,
+      "additions": 1072,
+      "deletions": 95
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABBi1SrA",
       "title": "kona!: add a chain_id label to every metric, from an ambient scope",
@@ -33,29 +106,302 @@
       "deletions": 451
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABBisj-Q",
-      "title": "kona-engine!: label the engine task failure counter by type and severity",
-      "author": "ajsutton",
-      "number": 22705,
-      "body": "`kona_node_engine_task_failure` used the task name as the label **key** and the severity as its value, so the emit at `task_queue/tasks/task.rs:219` produced `{insert=\"critical\"}`. Two consequences: every task type minted a new label key, and `Metrics::zero` pre-created `{type=\"insert\"}`, a series nothing ever incremented. The counter therefore rendered one set of series at startup and a different, incompatible set once anything failed.\n\nIt now emits `{type=<task>,severity=<severity>}`, matching `kona_node_engine_task_count`.\n\n`zero` pre-creates the task × severity cross product, and picks up the `seal` task it omitted — `EngineTask::task_metrics_label` returns it and the engine actor enqueues seal tasks, so `{type=\"seal\"}` was absent from both counters until the sequencer's first seal. `EngineTaskErrorSeverity::ALL` supplies the severity list so the pre-created set cannot drift from the emitted one.\n\nOne adjacent fix, because it is what makes the new test runnable: `test_chain_label_metrics` called `PrometheusBuilder::install_recorder`, which may only succeed once per process, so three of its four `rstest` cases panicked with `FailedToSetGlobalRecorder` under `--features metrics`. It was green in CI only because `metrics` is not a default feature of `kona-engine`. It uses a local recorder now.\n\nSplit out of #22569, which found this while adding a chain dimension. It is an independent bug, so it should not wait on that work.\n\n### Verification\n\n`cargo test -p kona-engine --features metrics,test-utils`: 76 passed, 0 failed (was 3 failed). `clippy --features metrics,test-utils --all-targets -D warnings` clean; without the feature the crate reports the same 13 pre-existing errors as `develop`. Reverting the emit to the old shape makes `task_failure_metric_carries_type_and_severity_labels` fail, so it is a regression test rather than a claim.\n\nBREAKING CHANGE: `kona_node_engine_task_failure` changes shape. It emitted `{insert=\"critical\"}`; it now emits `{type=\"insert\",severity=\"critical\"}`. Operators selecting `kona_node_engine_task_failure{insert=...}` (or `consolidate`/`build`/`finalize`) must migrate those panels and alert rules. No in-repo Grafana dashboard selects this metric — `docker/recipes/kona-node*/grafana/dashboards/overview.json` uses `kona_node_engine_task_count`, whose shape is unchanged — so the blast radius is external dashboards only.",
+      "id": "PR_kwDODjvEJM8AAAABAtNWcg",
+      "title": "kona-node-service: survive transient L1 RPC failures in the L1 watcher",
+      "author": "claude",
+      "number": 22656,
+      "body": "<!-- ccr-slack-attribution -->\n_Requested by **Adrian Sutton** · [Slack thread](https://oplabs-pbc.slack.com/archives/C0BHEH8TG91/p1787240090382769)_\n\n**Before:** a transient L1 RPC failure — one chain's `eth_getLogs` for its system config logs erroring on a new L1 head — made the L1 watcher's `step` return `Err`. The service loop treats any actor error as critical (`service/util.rs`), cancels every actor, and the host exits. With N chains, one chain's L1 blip stopped every chain; even a standalone single-chain kona-node died on it.\n\n**After:** a failed system config log fetch is logged as a warning and that head's logs are skipped for that chain. The other chains' fetches (issued concurrently) are answered as before, the watcher keeps stepping, and the failed chain is served again on the next L1 head. A closed channel to a chain's derivation actor stays fatal — a missing peer actor is shutdown, not a transient fault.\n\n**How:** this mirrors op-node, which never treats a transient L1 RPC failure as fatal. Its runtime-config reloader — the component that, like this fetch, reads the unsafe block signer from the SystemConfig contract — logs a failed reload and waits for the next interval, with the comment \"Missing a runtime-config update is not critical\" (`op-node/node/node.go:430-450`; only the startup-time initial load is fatal, after 5 retries, `node.go:422-427`). Its L1 head subscription resubscribes forever on error (`op-node/node/node.go:356-368`), and its safe/finalized polls warn and keep polling (`op-service/eth/heads.go:69-101`). In derivation, L1 RPC failures become `NewTemporaryError` (`op-node/rollup/derive/attributes.go:76-112`) which the driver handles with warn-and-retry (`op-node/rollup/driver/sync_deriver.go:70-77`); only `CriticalErrorEvent` cancels the node (`op-node/node/node.go:740-742`). Kona's head/finalized block streams already match this — alloy's poller retries transient errors without ending the stream — so the log fetch was the one remaining path where a transient error was actor-fatal. `process_system_config_logs` is now infallible and the fan-out uses `join_all`; new tests assert that one chain's failed `eth_getLogs` leaves `step` returning `Ok`, the healthy chains served, and the failed chain recovering on the next head (both fail on the previous code), plus the same for a single-chain node.\n\nPart of #22531. Tracks #22655.\n\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01WEDeDWcHt2X1mZYhvHmnZ5)_",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-31T01:33:58Z",
+      "createdAt": "2026-08-23T14:10:46Z",
       "mergedAt": null,
-      "additions": 145,
-      "deletions": 34
+      "additions": 385,
+      "deletions": 17
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABDgS_0A",
+      "title": "op-reth: report the real cause of a failed interop failsafe poll",
+      "author": "jelias2",
+      "number": 22895,
+      "body": "When no interop filter endpoint answers the failsafe poll, op-reth reported `inbox entry validation timed out, timeout: 2 secs` no matter what actually happened — a TLS handshake failure, DNS failure, connection refused, an HTTP error and a genuine deadline expiry were indistinguishable, because the per-endpoint results were collected with `if let Ok(Ok(v))`. An operator seeing that message goes looking at endpoint load and health. On a production interop devnet a connector error that failed in ~4.5ms was reported as a 2-second timeout and cost a multi-day investigation.\n\nOperators now see the real cause: `Timeout` is returned only when the deadline really expired, and each per-endpoint failure is logged with the reason. Endpoints are identified by index rather than URL, because `--rollup.interop-http` URLs can carry basic-auth credentials. No config or flag change, and admission behavior is unchanged — the aggregation logic (first-`true` short-circuit, the partial-reply \"don't clear the gate\" path, unanimity to clear) is untouched.\n\nTwo things a reviewer cannot see in the diff:\n\n- The error is built with `InteropTxValidatorError::other`, not `from_json_rpc`. `from_json_rpc` is the access-list verdict classifier: applied to `admin_getFailsafeEnabled` it can turn the filter's failsafe code `-320602` into `Err(FailsafeEnabled)` — which would log a failsafe error *without* turning the gate on. `other` keeps the transport reason verbatim and claims no verdict.\n- Per-endpoint failures log at `warn`, not `debug`. The poll runs at 1 Hz, so a persistently unreachable endpoint repeats the warning; that is deliberate, since a failure that still leaves a quorum returns `Ok` and is otherwise invisible. Flagging for reviewers who would rather trade that visibility for quieter logs.\n\nReported against v2.4.2 (deployed) and v2.4.4. No issue; the report came out of the interop-demo filter-connectivity investigation, and this is **not** the root cause of that outage — it is the diagnosability bug that hid it.\n\nReviews run: `rust-code-reviewer` and a silent-failure/error-handling review. Findings applied: the `from_json_rpc` misuse above; the two new negative `!matches!(_, Timeout)` assertions replaced with positive `Other(_)` ones; the unreachable-endpoint test now binds and drops a loopback port instead of assuming `127.0.0.1:1` is refused (on a firewalled host a dropped packet would stall past the deadline and flake); and a test added for an errored endpoint beside a healthy one, pinning that a failure never escapes into the `Ok` paths.\n\nDismissed, with the author's agreement:\n\n- A `PollOutcome` enum to move classification into the async block, leaving the loop as pure aggregation. Behavior-identical; skipped to keep the diff surgical.\n- `check_access_list` in the same file drops non-definitive per-endpoint errors (`Err(_) => continue`) with no logging at all — the same shape as this bug. Pre-existing and outside this scope; worth a follow-up.\n\nLocal verification: `just lint` (exit 0) and `cargo test -p reth-optimism-txpool --all-features` (65 pass). Note that `just clippy` over the whole Rust workspace fails on untouched code in `rust/kona/crates/node/peers/src/utils.rs` with a local nightly newer than CI's pin; the scoped run on this crate is clean.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-14T19:44:57Z",
+      "mergedAt": null,
+      "additions": 174,
+      "deletions": 13
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 350,
+    "deletions": 160,
+    "files": 19,
+    "commitCount": 28
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 1
+  "completedItems": [
+    {
+      "title": "docs: Triage known specification review findings",
+      "prNumber": 22884,
+      "type": "docs",
+      "body": "Repeated specification reviews now identify matching repository issues without suppressing verified findings. The derivation reviewer also checks [ethereum-optimism/optimism#22854](https://github.com/ethereum-optimism/optimism/issues/22854)",
+      "files": [
+        "docs/ai/derivation-batch-review.md",
+        "docs/ai/spec-driven-review.md"
+      ]
+    },
+    {
+      "title": "ci: drop duplicated release build and SP1 ELF jobs",
+      "prNumber": 22901,
+      "type": "other",
+      "body": "Stacked on #22900 — review/merge that first; this PR's base is its branch, and the diff below is only this commit.\n\nRemoves two jobs that are duplicates of a job in a sibling workflow that always runs alongside them. I limited this to cases",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
+      "title": "kona-sp1: bump SP1 to 6.8.0",
+      "prNumber": 22891,
+      "type": "other",
+      "body": "Bumps the SP1 pin from 6.7.0 to 6.8.0: the `mise.toml` `cargo-prove` toolchain, `sp1-sdk`/`sp1-core-executor` in the root workspace, and `sp1-lib`/`sp1-zkvm` in the SP1 guest programs workspace, with both `Cargo.lock` files regenerated (`ca",
+      "files": [
+        "mise.toml",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/kona/sp1/justfile",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml"
+      ]
+    },
+    {
+      "title": "op-supernode: Enforce dependency-set membership",
+      "prNumber": 22888,
+      "type": "other",
+      "body": "Op-supernode can currently validate messages for managed chains outside its dependency set. This change makes live verification fail closed and enforce membership for both chain roles.\n\nOperators with mismatched chain configuration now see ",
+      "files": [
+        "op-supernode/supernode/activity/interop/algo.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/activity/interop/startup_test.go",
+        "op-supernode/supernode/supernode.go"
+      ]
+    },
+    {
+      "title": "op-interop-filter: Backfill the full message expiry window",
+      "prNumber": 22887,
+      "type": "other",
+      "body": "Fresh op-interop-filter instances now backfill seven days by default. This matches the default message expiry window.\n\nThe change prevents valid messages from failing when their initiating logs exceed the old 24-hour startup window. Explici",
+      "files": [
+        "op-interop-filter/flags/flags.go",
+        "op-interop-filter/flags/flags_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 103.02918688243426,
+      "prScore": 93.52918688243426,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 101.91977463163418,
+      "prScore": 44.119774631634186,
+      "issueScore": 2.1,
+      "reviewScore": 55.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 85.51182172659745,
+      "prScore": 85.51182172659745,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 42.84789261189092,
+      "prScore": 29.007892611890917,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 40.75826433794566,
+      "prScore": 23.75826433794566,
+      "issueScore": 2,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 29.48744915467244,
+      "prScore": 24.48744915467244,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 23.388025100551104,
+      "prScore": 23.388025100551104,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 21.503220981414973,
+      "prScore": 21.503220981414973,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "huklaa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/129692708?u=c05bfda288117361c6a3e7b4012759cf592f6eb3&v=4",
+      "totalScore": 21.241494030119284,
+      "prScore": 21.241494030119284,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 11.07602663467388,
+      "prScore": 11.07602663467388,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 10.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "kburrus64-max",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/272851395?v=4",
+      "totalScore": 9.00005020110221,
+      "prScore": 9.00005020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 8.705563680037475,
+      "prScore": 8.705563680037475,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "3456smille",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12291047?v=4",
+      "totalScore": 8.597213344056216,
+      "prScore": 8.597213344056216,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 7.638,
+      "prScore": 0,
+      "issueScore": 2.2,
+      "reviewScore": 5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 10,
+  "mergedPRs": 5,
+  "newIssues": 4,
+  "closedIssues": 2,
+  "activeContributors": 19
 }
