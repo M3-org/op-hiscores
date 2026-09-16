@@ -1,0 +1,78 @@
+{
+  "interval": {
+    "intervalStart": "2026-09-16T00:00:00.000Z",
+    "intervalEnd": "2026-09-17T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/op-geth",
+  "overview": "From 2026-09-16 to 2026-09-17, ethereum-optimism/op-geth had 0 new PRs (0 merged), 0 new issues, and 1 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOH2Qg5s8AAAABRcW8eg",
+      "title": "engine_getPayloadV3 hangs indefinitely building the first payload on a custom Jovian-active genesis",
+      "author": "Temm2",
+      "number": 812,
+      "repository": "ethereum-optimism/op-geth",
+      "body": "# op-geth hangs indefinitely building the first payload on a custom Jovian-active genesis\n\n## Summary\n\n`engine_getPayloadV3` never returns for the very first block after genesis on a\nfresh, custom (non-Superchain-registry) OP Stack chain with the Jovian hardfork\nactive at genesis. Confirmed via a direct, unauthenticated-by-op-node JWT call —\nnot an op-node, networking, or config issue.\n\n## Environment\n\n- `op-geth`: `v1.101702.2` (also reproduced on `v1.101511.1`, which additionally\n  panics with `invalid eip-1559 params in extradata` before even reaching this\n  hang — see \"Also observed\" below)\n- `op-node`: `v1.13.5`\n- `op-deployer`: `v0.7.1` (`75254822-2026-05-27T13:58:19Z`)\n- L1 (settlement layer): a local Anvil fork of Base Sepolia (chain 84532), pinned\n  to a specific block\n- Deployment: `op-deployer init --intent-type custom` → `apply` → `inspect genesis`\n  / `inspect rollup`, run against the Anvil fork's RPC\n- Fork schedule: all forks through **Jovian** active at genesis (confirmed via\n  `op-deployer inspect deploy-config`: `l2GenesisJovianTimeOffset: \"0x0\"`). This\n  op-deployer version's `custom` intent type does not expose an option to genesis\n  without Jovian.\n\n## Steps to reproduce\n\n1. Deploy a fresh superchain root (OPCM, `OptimismPortal2`, `SystemConfig`,\n   `DisputeGameFactory`, etc.) onto an Anvil fork of Base Sepolia via\n   `op-deployer apply` with a `custom`-type intent.\n2. `op-deployer inspect genesis` / `inspect rollup` to generate `genesis.json`\n   and `rollup.json` for the new L2.\n3. `geth init` op-geth's datadir with the generated genesis, then start op-geth\n   with `--syncmode=full --gcmode=full --nodiscover --maxpeers=0`.\n4. Start op-node pointed at the Anvil L1 and at op-geth, with\n   `--sequencer.enabled=true --l1.beacon.ignore=true` (no real L1 beacon exists\n   for a Base-settled chain — see note below).\n5. op-node correctly reaches \"Engine reset confirmed, sequencer may continue\" and\n   begins sequencing — `engine_forkchoiceUpdatedV3` succeeds and returns a\n   payload ID.\n6. `engine_getPayloadV3` for that payload ID never returns.\n\n## Expected behavior\n\nThe first payload — genesis has ~2,372 preinstalled accounts (MultiCall3,\nCreate2Deployer, Safe singletons, Permit2, ERC-4337 EntryPoints, etc.) but no\nuser transactions — builds and is retrievable within a normal timeframe (single-\ndigit seconds at most, matching every other OP Stack devnet setup with a\ncomparable preinstall count).\n\n## Actual behavior\n\n`engine_getPayloadV3` hangs indefinitely. Confirmed multiple ways, ruling out\neverything upstream of op-geth itself:\n\n- **Not a networking/op-node issue**: a raw, JWT-signed `curl` directly to\n  op-geth's authrpc port (`engine_getPayloadV3`, bypassing op-node entirely)\n  times out with **zero response** after 15s.\n- **Not resource contention**: `docker stats` shows both op-geth and op-node\n  essentially idle (op-geth ~1.7% CPU) throughout.\n- **Not op-node's retry behavior interrupting the build**: at `--verbosity=4`,\n  op-geth logs `\"Payload building already interrupted. id=<id> interrupt=4\"` on\n  every op-node retry (~12s cadence) — looked like a plausible cause. Tested\n  directly: stopped op-node entirely, gave op-geth 30+ *uninterrupted* seconds\n  with zero incoming requests, then called `engine_getPayloadV3` manually.\n  Still zero response. Rules this out as the actual cause.\n- **Not P2P/discovery overhead**: disabled entirely (`--nodiscover --maxpeers=0`),\n  no change.\n- **Not archive-mode I/O**: reproduced identically on both `--gcmode=archive` and\n  `--gcmode=full`.\n- **Not a stale/mismatched L1 anchor**: reproduced on a freshly-redeployed,\n  internally-consistent genesis/rollup pair anchored to the Anvil fork's actual\n  current state.\n\n## Suspected trigger\n\nJovian is the newest, least-exercised hardfork in this stack, and is active from\nblock 0 in this reproduction (not activated partway through a running chain,\nwhich is the more commonly-tested path). Unable to isolate further: this\nop-deployer version's `custom` intent type has no exposed override to genesis\nwithout Jovian, and no readily-available older op-deployer release predates\nJovian's Sepolia activation (would require building from source to test).\n\n## Also observed (separate, already worked around)\n\n- `op-geth v1.101511.1` panics outright on the same genesis with\n  `panic: invalid eip-1559 params in extradata` during payload building —\n  upgrading to `v1.101702.2` avoided the panic but not the hang described above.\n- Pimlico's bundler (used for an unrelated ERC-4337 gasless-transaction layer in\n  the application this devnet supports) doesn't implement the plain\n  `eth_maxPriorityFeePerGas` RPC method some tooling defaults to — unrelated to\n  this bug, noted only in case it's useful context for anyone reproducing with a\n  similar stack.\n\n## Additional context\n\nThis devnet's purpose was proving the mechanism for a chain settling to Base as\nits L1/DA layer (an \"L3 on Base,\" analogous to how Base itself settles to\nEthereum) rather than to Ethereum directly. `--l1.beacon.ignore=true` was\nnecessary because Base itself has no beacon-chain API of its own to point\n`--l1.beacon` at (it's an execution-layer L2, not a consensus-layer chain) —\nworth flagging in case that's an unusual enough setup to matter for\nreproduction, though the hang itself appears unrelated to the beacon flag (the\nengine API call fails identically regardless).\n",
+      "createdAt": "2026-09-15T17:55:09Z",
+      "closedAt": "2026-09-16T00:43:24Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 0
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 37.077634739493135,
+      "prScore": 37.077634739493135,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 0,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 1,
+  "activeContributors": 1
+}
