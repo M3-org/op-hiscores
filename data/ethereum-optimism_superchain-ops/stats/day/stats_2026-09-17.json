@@ -5,17 +5,104 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/superchain-ops",
-  "overview": "From 2026-09-17 to 2026-09-18, ethereum-optimism/superchain-ops had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-09-17 to 2026-09-18, ethereum-optimism/superchain-ops had 2 new PRs (1 merged), 0 new issues, and 12 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOKIsnqM8AAAABD9syng",
+      "title": "fix(SuperchainAddressRegistry): discover the v8.0.0 super-root games",
+      "author": "OptimismBot",
+      "number": 1554,
+      "body": "## Problem\n\n`stacked_simulation_sep` and `forge_test` are failing on `main` with\n\n```\nError: script failed: SuperchainAddressRegistry: zero address for PermissionedDisputeGame\n```\n\n([job 211255](https://circleci.com/gh/ethereum-optimism/superchain-ops/211255), [job 211261](https://circleci.com/gh/ethereum-optimism/superchain-ops/211261)). The trigger commit is unrelated — the same SHA was green two hours earlier in [job 211230](https://circleci.com/gh/ethereum-optimism/superchain-ops/211230).\n\nThe cause is on-chain, not in the repo: [`src/tasks/sep/108-U20-op-ink-soneium-uni`](https://github.com/ethereum-optimism/superchain-ops/tree/main/src/tasks/sep/108-U20-op-ink-soneium-uni) has executed. Upgrade 20 clears `CANNON` (0), `PERMISSIONED_CANNON` (1) and `CANNON_KONA` (8) and installs `SUPER_CANNON_KONA` (9) plus `SUPER_PERMISSIONED` (5). `_saveDisputeGameEntries` guards the fault game (`src/SuperchainAddressRegistry.sol:373`) but read the permissioned game unconditionally (`src/SuperchainAddressRegistry.sol:378`), so discovery now reverts for OP, Ink, Soneium and Unichain Sepolia. Verified on OP Sepolia's `DisputeGameFactoryProxy` [`0x05F9613aDB30026FFd634f38e5C4dFd30a197Fa1`](https://sepolia.etherscan.io/address/0x05F9613aDB30026FFd634f38e5C4dFd30a197Fa1): `gameImpls(0)` and `gameImpls(1)` are `address(0)`, `gameImpls(5)` = `0x5C3eb47cB0174aea522a2a9Ae79487139A53D691`, `gameImpls(9)` = `0x19AF533Cc2A2A55786DCB8672aA5717e64213208`.\n\n## Change\n\n`src/SuperchainAddressRegistry.sol` — guard the permissioned game the way the fault game already is, and fall back to the super games:\n\n- Register `SuperFaultDisputeGame` (9) and `SuperPermissionedDisputeGame` (5) when the legacy games are cleared. Those names match the ones already used in the U20 validation files.\n- Resolve the shared roles — `AnchorStateRegistryProxy`, `MIPS`, `PreimageOracle`, `PermissionlessWETH`, `Proposer` — through the super games' `gameArgs`. The legacy permissioned game is still preferred, so pre-U20 chains keep their current entries exactly.\n- Only register `Challenger` and `PermissionedWETH` when the legacy permissioned game exists. `SuperPermissionedDisputeGame` is bondless and proposer-only: its args are just `anchorStateRegistry | proposer`, so neither role exists on-chain after the upgrade.\n- `SUPER_PERMISSIONED` args are 40 bytes, not the 124/164-byte layout, so they get their own decoder (`_tryDecodeSuperPermissionedGameArgs`).\n- Only register `MIPS` and `PreimageOracle` when a game that carries a VM exists — the legacy permissioned game, the legacy fault game, or the super fault game. Upgrade 20 leaves `SUPER_CANNON_KONA` (9) disabled on a chain that had no `CANNON_KONA` impl to carry over, so that chain is left with `SUPER_PERMISSIONED` (5) alone and has no VM at all: registering `MIPS` unconditionally reverted its discovery with `zero address for MIPS`. [sepolia-devnet-3](https://github.com/ethereum-optimism/superchain-ops/tree/main/src/tasks/sep/107-U20-sepolia-devnet-2-3) is in this state today, and Soneium will be once [eth/071](https://github.com/ethereum-optimism/superchain-ops/tree/main/src/tasks/eth/071-U20-op-ink-soneium-uni) executes (`startingRespectedGameType = 5`).\n\n`test/registry/SuperchainAddressRegistry.t.sol` — accept the super games in `assertAddresses` and require `MIPS`/`PreimageOracle` only for a chain that has a fault game. Adds `test_superRootGamesDiscovered_opSepolia` for the post-U20 OP Sepolia shape, and `SuperchainAddressRegistryTest_SuperPermissionedOnly`, a pinned-fork case (sepolia-devnet-3 at block `11700000`) where the super permissioned game, its `AnchorStateRegistryProxy` and its `Proposer` resolve while `MIPS`, `PreimageOracle`, `PermissionedDisputeGame` and `Challenger` are absent.\n\nResulting OP Sepolia entries:\n\n| Identifier | Address | Source |\n|---|---|---|\n| `SuperFaultDisputeGame` | `0x19AF533Cc2A2A55786DCB8672aA5717e64213208` | `gameImpls(9)` |\n| `SuperPermissionedDisputeGame` | `0x5C3eb47cB0174aea522a2a9Ae79487139A53D691` | `gameImpls(5)` |\n| `AnchorStateRegistryProxy` | `0xa1Cec548926eb5d69aa3B7B57d371EdBdD03e64b` | `gameArgs(9)` / `gameArgs(5)` |\n| `MIPS` | `0xaCc005DCd857B401e4732E6F7837135A22825cfA` | `gameArgs(9)` |\n| `PreimageOracle` | `0x1E1d73536A081Ef2F355d29794547a9770Aeb1E0` | `MIPS.oracle()` |\n| `PermissionlessWETH` | `0xF6900d822268F011d085191fe1abc6B557038eB7` | `gameArgs(9)` |\n| `Proposer` | `0x49277EE36A024120Ee218127354c4a3591dc90A9` | `gameArgs(5)` |\n\n## Verification\n\n- Both `gameArgs` decoders were run against OP Sepolia's live `gameArgs(5)` (40 bytes) and `gameArgs(9)` (124 bytes) payloads in a standalone Foundry harness, and produce the addresses in the table above. The 124/164-byte decoder correctly ignores the 40-byte payload.\n- `forge fmt --check` is clean on both files under the repo's pinned `forge 1.1.0`.\n- The type-5-only shape was confirmed on-chain at the pinned block: devnet-3's DisputeGameFactory `0xbDE04Dc0b4DbdA6A1A60B0Bf5F32262e129523Ea` has only `gameImpls(5)` set, with `gameArgs(5)` = `0x764138B0…Ff99` (ASR) ‖ `0x7824594364cDd4ee…604a` (proposer).\n- The suite itself was **not** run here: it needs the submodules plus the archive-RPC forks, which exceed this sandbox. CI is the check that matters — `forge_test` and `stacked_simulation_sep` should both go green.\n\n`src/tasks/sep/108-U20-op-ink-soneium-uni/README.md` is also marked `[EXECUTED]`, pointing at [`0x788dfac2…a603c4a`](https://sepolia.etherscan.io/tx/0x788dfac2ac1b025b31a95b72336e7435fd192a352af8aec302a7d3907a603c4a) — the successful `execTransaction` from the standard L1PAO `0x1Eb2fFc903729a0F03966B917003800b145F56E2` in block `11724769`, the same block in which the four chains' `PERMISSIONED_CANNON` implementations were cleared. #1553 made the same change and has been closed as superseded.\n\nPrompted by: @Wazabie\n\n\n",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-09-17T17:00:24Z",
+      "mergedAt": null,
+      "additions": 195,
+      "deletions": 25
+    },
+    {
+      "id": "PR_kwDOKIsnqM8AAAABDzxwqw",
+      "title": "Update U20 mainnet status to 'READY TO SIGN' in README",
+      "author": "Wazabie",
+      "number": 1552,
+      "body": "Update task status on U20 Mainnet",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-09-16T17:52:33Z",
+      "mergedAt": "2026-09-17T14:44:03Z",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOKIsnqM8AAAABD9UdKw",
+      "title": "Update U20 Sepolia task status in README to reflect execution",
+      "author": "Wazabie",
+      "number": 1553,
+      "body": "Update U20 sepolia task status",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-09-17T16:11:42Z",
+      "mergedAt": null,
+      "additions": 1,
+      "deletions": 1
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 1,
+    "deletions": 1,
+    "files": 1,
+    "commitCount": 6
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "Update U20 mainnet status to 'READY TO SIGN' in README",
+      "prNumber": 1552,
+      "type": "other",
+      "body": "Update task status on U20 Mainnet",
+      "files": [
+        "src/tasks/eth/071-U20-op-ink-soneium-uni/README.md"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 159.99845999808224,
+      "prScore": 139.99845999808224,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 127.68091150458054,
+      "prScore": 93.44291150458054,
+      "issueScore": 2.3,
+      "reviewScore": 31.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 69.38806759148997,
+      "prScore": 62.18806759148997,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 58.14084056873217,
+      "prScore": 43.64084056873217,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
@@ -25,11 +112,141 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 37.50839650691849,
+      "prScore": 37.50839650691849,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 31.702957400824367,
+      "prScore": 31.502957400824368,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 27.29724405227663,
+      "prScore": 27.09724405227663,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 23.57061228866811,
+      "prScore": 23.13261228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 11.29702209223412,
+      "prScore": 11.09702209223412,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 6.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "rodibozman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35802112?u=860baf83afad970ce27cafd170720d90e23015f4&v=4",
+      "totalScore": 4.3,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ogenev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/39865181?u=c1987712b39ea9352a386f98e518462b15ae3a55&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 2,
+  "mergedPRs": 1,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 12
 }

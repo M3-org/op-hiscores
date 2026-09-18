@@ -5,17 +5,128 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/specs",
-  "overview": "From 2026-09-17 to 2026-09-18, ethereum-optimism/specs had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
+  "overview": "From 2026-09-17 to 2026-09-18, ethereum-optimism/specs had 1 new PRs (3 merged), 0 new issues, and 10 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOLB-lzc8AAAABDdLuqA",
+      "title": "lagoon: specify the span batch encoding of post-exec transactions",
+      "author": "geoknee",
+      "number": 944,
+      "body": "Closes [protocol-team#318](https://github.com/ethereum-optimism/protocol-team/issues/318).\n\n## The gap\n\nThe post-exec transaction type `0x7D` is fully specified as an EIP-2718 envelope in `specs/protocol/lagoon/post-exec.md`. Its span batch representation was specified nowhere — the word \"span\" did not appear anywhere under `specs/protocol/lagoon/`.\n\nDelta lists `tx_datas` encodings for legacy, type 1 and type 2. Isthmus adds type 4 with an exact field order. Nothing added `0x7D`.\n\nDelta's generic sentence — that `tx_datas` matches \"the encoding of the fields as in the EIP-2718 format of the `TransactionType`\" — does not close it. It settles only `tx_datas`, and the document does not treat it as sufficient for a new type anyway, since Isthmus still added an explicit row. It settles none of the other slots. `contract_creation_bits` is defined as marking a contract creation, which a post-exec transaction is not, yet both clients set the bit to `1` so that no `tx_tos` entry is consumed. Nothing authorised that.\n\nThis is a specification gap, not a client bug. The two clients agree byte for byte. No document stated the layout they chose.\n\n## What this adds\n\nA new `specs/protocol/lagoon/derivation.md`, following the Isthmus precedent for adding a transaction type to span batches:\n\n- **`tx_datas` row.** `0x7D ++ rlp_encoded_payload` — the payload RLP list verbatim, so the element is the transaction's whole EIP-2718 encoding rather than a reduced one. Unlike every other type, no fields are omitted, because there are none to omit.\n- **Every transposed slot.** `contract_creation_bits` = 1, no `tx_tos` entry, `y_parity_bits` = 0, `tx_sigs` r = s = 0, `tx_nonces` = 0, `tx_gases` = 0, no `protected_bits` entry.\n- **Reconstruction**, and why the batch/safe-block overlap check is well defined for these blocks.\n\nAlso wired into `SUMMARY.md` and the Lagoon overview, with a cross-link from `post-exec.md`.\n\n## The three questions in the issue\n\n1. **Which `tx_datas` form?** The verbatim EIP-2718 body, as both clients use.\n2. **`contract_creation_bits` for a type with no `to`?** `1`. The document explains why this is not a contradiction of Delta's wording: what the bit governs is whether the transaction consumes a `tx_tos` entry. For every pre-Lagoon type, \"is a contract creation\" and \"has no `to`\" are the same condition, so Delta states the former; post-exec is the first type where they diverge, and the operative reading is the latter.\n3. **Must the unused slots be zero?** Yes, and strictly, in both directions: a batcher MUST zero them, and a decoder MUST verify they are zero and reject the batch otherwise. The same applies to a `contract_creation_bits` bit of `0` for a post-exec transaction.\n\nThat third answer changed during review. I first wrote the decoder side permissively — ignore the values, never reject — reasoning that the clients discard those fields during reconstruction, so no value can change the derived blocks, and that turning a client convention into a drop rule is usually a consensus change in disguise. @geoknee pushed for strictness and is right. The general caution does not bite here, because `0x7D` cannot legally appear in a batch before Lagoon and no chain in the superchain-registry sets `lagoon_time` — there is no posted batch for a stricter rule to reinterpret. Meanwhile permissiveness has a real cost: it makes a span batch's encoding malleable, giving one sequence of L2 blocks unboundedly many valid encodings that differ in bytes a batcher picks freely, with `tx_sigs` alone reserving 64 unused bytes per transaction to pick them in.\n\nThe issue also suggested the overlap check is non-deterministic without a zero rule. It isn't: `checkSpanBatchOverlap` compares reconstructed transaction bytes, and reconstruction discards those slots. The document states that positively rather than repeating the concern.\n\n## Client changes are required before Lagoon activates\n\nThis is now a spec that leads the implementations rather than one that records them. Neither client rejects what this document says a decoder MUST reject:\n\n- **op-node** — `fullTxs` (`span_batch_txs.go`) consumes a `tx_tos` entry for a `0` bit and `convertToFullTx` then discards it; no slot values are checked.\n- **kona** — `full_txs` (`batch/transactions.rs`) and `to_full_tx_bytes` (`batch/tx_data/wrapper.rs`) do the same.\n\nThe encoder side already complies on both sides, and op-batcher reaches `addPostExecTx` through `AppendSingularBatch`, so no batcher change is needed.\n\nOne caveat that decides how the client work should be done: these slots are only reachable at reconstruction time, so the check lands in `fullTxs` / `full_txs` — the exact path of the open [protocol-team#222](https://github.com/ethereum-optimism/protocol-team/issues/222), where a non-critical error there makes op-node drop only the batch and continue the channel while kona drops the whole remaining channel. Adding this rule naively would add a new batcher-triggerable trigger for that divergence. Either #222 lands first, or the rejection surfaces as a batch-queue validity verdict rather than a decode failure.\n\n## Verification\n\nEvery normative claim was checked against both clients in both directions, then re-checked by an adversarial review pass:\n\n- op-node — `span_batch_txs.go` (`addPostExecTx`, `AddTxs`, `fullTxs`, `recoverV`), `span_batch_tx.go` (`spanBatchPostExecTxData`, `encodeTyped`, `convertToFullTx`), `op-core/types/post_exec_tx.go`, `batches.go` (overlap check), `channel_in_reader.go` (drop path).\n- kona — `batch/tx_data/wrapper.rs`, `batch/transactions.rs`, `batch/raw.rs`, `rust/op-alloy/.../post_exec.rs`.\n\n`markdownlint`, `doctoc`, `cspell` and the filename check all pass; every internal anchor resolves.\n\n## Out of scope\n\nThe batch queue drop rule for future types above `2` still needs a Lagoon amendment — that is [protocol-team#319](https://github.com/ethereum-optimism/protocol-team/issues/319). It applies to singular batches too, where no encoding question arises, so it belongs in its own change. This document marks the boundary and notes the amendment is still owed, rather than assuming a rule that does not exist yet.\n\nOne adjacent observation, left alone deliberately: `post-exec.md` says post-exec transactions are submitted to the DA layer \"alongside the user transactions and any deposited transactions\". Deposits are never in batch data, so that clause is loose. It is pre-existing text and not this change's business, but the new paragraph sits just below it, so it is now more visible.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/specs",
+      "createdAt": "2026-09-14T13:29:58Z",
+      "mergedAt": "2026-09-17T10:17:15Z",
+      "additions": 192,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDOLB-lzc8AAAABDmIlHg",
+      "title": "delta: rename contract_creation_bits to zero_to_bits",
+      "author": "geoknee",
+      "number": 945,
+      "body": "Stacked on #944 — **base is `gk/lagoon-span-batch-post-exec`, not `main`.** Review after #944, or read [the single commit](https://github.com/ethereum-optimism/specs/pull/944/commits) for this change alone. Retarget to `main` once #944 merges.\r\n\r\nRequested in [#944 review](https://github.com/ethereum-optimism/specs/pull/944#discussion_r4014708102).\r\n\r\n## Why\r\n\r\n`contract_creation_bits` is named for a condition it does not test. What the bit governs is whether a transaction consumes an entry from `tx_tos`: a `0` bit consumes the next address, a `1` bit consumes none. For every transaction type that has a `to` field, \"is a contract creation\" and \"has no `to`\" coincide — so the name has been accurate by luck rather than by construction.\r\n\r\nThe Lagoon post-exec transaction (`0x7D`) is the first type where they come apart. It has no `to` field and is not a contract creation, so it sets a bit whose documented meaning is false of it. Specifying that in #944 took a paragraph of apology; this rename removes the need for it, and that paragraph goes away here.\r\n\r\n## Why `zero_to_bits` and not `nonzero_to_bits`\r\n\r\nThe name first suggested would invert the meaning. The bit is `1` when the `to` is *absent*; `nonzero_to_bits` reads as `1` = `to` is present, so a find-and-replace would silently flip the sense for anyone reading it fresh. `zero_to_bits` keeps the polarity. `no_to_bits` and `to_omitted_bits` would do equally well — it is a one-line change if either reads better.\r\n\r\nFlipping the bit *and* renaming would read best of all, but that is a wire change rather than a rename, and not worth a fork gate.\r\n\r\n## Why this is safe\r\n\r\nPurely editorial. Nothing in a span batch is self-describing — `txs` is a positional concatenation (`zero_to_bits ++ y_parity_bits ++ tx_sigs ++ ...`) with no tags or field names on the wire. The encoding, the bit polarity and every derived chain are untouched, and no fork gate is involved.\r\n\r\nEdits a shipped fork document, so the Delta text keeps a note recording the former name, which keeps searches and third-party implementations landing in the right place.\r\n\r\nClient identifiers (`contractCreationBits` in op-node, `contract_creation_bits` in kona) can follow whenever convenient. Nothing breaks while spec and code vocabulary differ — this is a comment-level mismatch, not an interface one.\r\n\r\n## Changes\r\n\r\n- `specs/protocol/delta/span-batches.md` — the field definition (reworded to describe what the bit actually selects), the `txs` layout line, the decode-ordering note, and the `tx_tos` parsing note. Plus the former-name note.\r\n- `specs/protocol/lagoon/derivation.md` — renamed heading, table row and cross-reference; the explanatory paragraph collapses from seven lines to two, which was the point.\r\n\r\n`markdownlint`, `doctoc`, `cspell` and the filename check all pass.\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/specs",
+      "createdAt": "2026-09-15T11:07:21Z",
+      "mergedAt": "2026-09-17T13:53:26Z",
+      "additions": 18,
+      "deletions": 21
+    },
+    {
+      "id": "PR_kwDOLB-lzc8AAAABD7_HPg",
+      "title": "lagoon: finish the batch queue amendment for post-exec transactions",
+      "author": "geoknee",
+      "number": 947,
+      "body": "Closes [protocol-team#319](https://github.com/ethereum-optimism/protocol-team/issues/319).\n\n#944 got most of the way there — it amended the `batch.transactions` drop rule in `derivation.md` to admit `0x7D` and added the activation paragraph. Two gaps remain, and #319 names both.\n\n## The drop rule appears twice\n\n`delta/span-batches.md:363-365` repeats the rule verbatim for span batch validity and still names only the Isthmus type 4 exception. A literal reading of the span batch rules therefore still drops every span batch carrying a post-exec transaction — exactly the contradiction #319 was filed about, just in the copy that was missed. #319 flags this explicitly (\"Isthmus needed both edits separately\"), and Isthmus did amend both sites.\n\n## The activation paragraph named the wrong fork\n\nIt read:\n\n> Singular batches with transactions of type `0x7D` must only be accepted if Lagoon is active at the timestamp of the batch. **If a singular batch contains a transaction of type 4 before Isthmus is active, this batch must be dropped.**\n\nThe second sentence looks adapted from the Isthmus paragraph and was left un-retargeted, so the Lagoon drop obligation it was meant to state went unwritten — directly after the sentence saying `0x7D` is accepted only when Lagoon is active. Now says type `0x7D` and Lagoon.\n\n## Matches both clients\n\nThe corrected text describes what already ships, including the activation *granularity*:\n\n- **op-node** — `checkSequencerTxData` drops a `PostExec` tx when `!isSDM`, and `batches.go:411` computes `isSDM := cfg.IsSDM(blockTimestamp)` *inside* the per-block loop of the span batch check.\n- **kona** — `single.rs:183` gates on `cfg.is_sdm_active(self.timestamp)` per `SingleBatch`, dropping with `BatchDropReason::PostExecPreLagoon`.\n\nSo a span batch may straddle the Lagoon activation and carry post-exec transactions only in the blocks at or after it, which is the Isthmus rule and what the paragraph now specifies.\n\n`markdownlint`, `doctoc`, `cspell` and the filename check pass; every link and anchor in the touched files resolves.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/specs",
+      "createdAt": "2026-09-17T13:51:33Z",
+      "mergedAt": "2026-09-17T21:28:00Z",
+      "additions": 4,
+      "deletions": 3
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 214,
+    "deletions": 26,
+    "files": 6,
+    "commitCount": 12
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "lagoon: specify the span batch encoding of post-exec transactions",
+      "prNumber": 944,
+      "type": "other",
+      "body": "Closes [protocol-team#318](https://github.com/ethereum-optimism/protocol-team/issues/318).\n\n## The gap\n\nThe post-exec transaction type `0x7D` is fully specified as an EIP-2718 envelope in `specs/protocol/lagoon/post-exec.md`. Its span batch",
+      "files": [
+        "specs/SUMMARY.md",
+        "specs/protocol/lagoon/derivation.md",
+        "specs/protocol/lagoon/overview.md",
+        "specs/protocol/lagoon/post-exec.md",
+        "specs/protocol/derivation.md"
+      ]
+    },
+    {
+      "title": "delta: rename contract_creation_bits to zero_to_bits",
+      "prNumber": 945,
+      "type": "other",
+      "body": "Stacked on #944 — **base is `gk/lagoon-span-batch-post-exec`, not `main`.** Review after #944, or read [the single commit](https://github.com/ethereum-optimism/specs/pull/944/commits) for this change alone. Retarget to `main` once #944 merg",
+      "files": [
+        "specs/protocol/delta/span-batches.md",
+        "specs/protocol/lagoon/derivation.md"
+      ]
+    },
+    {
+      "title": "lagoon: finish the batch queue amendment for post-exec transactions",
+      "prNumber": 947,
+      "type": "other",
+      "body": "Closes [protocol-team#319](https://github.com/ethereum-optimism/protocol-team/issues/319).\n\n#944 got most of the way there — it amended the `batch.transactions` drop rule in `derivation.md` to admit `0x7D` and added the activation paragraph",
+      "files": [
+        "specs/protocol/delta/span-batches.md",
+        "specs/protocol/lagoon/derivation.md"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 159.99845999808224,
+      "prScore": 139.99845999808224,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 127.68091150458054,
+      "prScore": 93.44291150458054,
+      "issueScore": 2.3,
+      "reviewScore": 31.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 69.38806759148997,
+      "prScore": 62.18806759148997,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 58.14084056873217,
+      "prScore": 43.64084056873217,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
@@ -25,11 +136,141 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 37.50839650691849,
+      "prScore": 37.50839650691849,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 31.702957400824367,
+      "prScore": 31.502957400824368,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 27.29724405227663,
+      "prScore": 27.09724405227663,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 23.57061228866811,
+      "prScore": 23.13261228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 11.29702209223412,
+      "prScore": 11.09702209223412,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 6.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "rodibozman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35802112?u=860baf83afad970ce27cafd170720d90e23015f4&v=4",
+      "totalScore": 4.3,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ogenev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/39865181?u=c1987712b39ea9352a386f98e518462b15ae3a55&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 1,
+  "mergedPRs": 3,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 10
 }

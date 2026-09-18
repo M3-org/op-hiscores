@@ -5,30 +5,179 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-17 to 2026-09-18, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 2 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-09-17 to 2026-09-18, ethereum-optimism/optimism had 12 new PRs (0 merged), 3 new issues, and 24 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABRx4MEw",
+      "title": "flaky test: `TestLeadershipTransferMovesActiveSequencer`",
+      "author": "geoknee",
+      "number": 22924,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Confirmed flake — failed once, then passed on a rerun of the identical commit with no code change.\n\n**Test:** `TestLeadershipTransferMovesActiveSequencer`\n**File:** `op-acceptance-tests/tests/base/conductor/leadership_transfer_test.go`\n**Job:** `memory-all-opn-op-reth-fusaka`\n\n## Occurrences\n\n| When | Job | Branch | Result |\n| --- | --- | --- | --- |\n| 2026-09-17 11:03 UTC | [5574188](https://circleci.com/gh/ethereum-optimism/optimism/5574188) | `gk/lagoon-span-batch-client-rules` (#22922) | **fail** — 1 of 245 acceptance tests |\n| 2026-09-17 (rerun, same commit) | [5574386](https://circleci.com/gh/ethereum-optimism/optimism/5574386) | same | pass |\n\nEncountered while working on #22922, whose diff touches only op-node span-batch decode and the kona protocol crate and cannot reach op-conductor.\n\n## Failure output\n\n```\nraft_logger.go:27:  WARN [09-17|11:14:43.296] heartbeat timeout reached, starting election\n                         component=conductor name=sequencer chain=901 component=raft\n                         last-leader-addr= last-leader-id=\n\nraft.go:290:        ERROR[09-17|11:14:49.161] failed to transfer leadership to server\n                         component=conductor name=sequencer chain=901 id=b\n                         addr=127.0.0.1:36039 err=\"leadership transfer timeout\"\n\n    Error Trace:  /home/circleci/project/op-devstack/dsl/conductor.go:386\n    Error:        Received unexpected error:\n                  leadership transfer timeout\n    Test:         TestLeadershipTransferMovesActiveSequencer\n\n--- FAIL: TestLeadershipTransferMovesActiveSequencer (12.55s)\n```\n\n## Likely cause\n\nThe two log lines are ~6 seconds apart and look causally linked: raft loses its leader (`heartbeat timeout reached, starting election`, with `last-leader-addr=` and `last-leader-id=` both empty), and the explicit `TransferLeader` the test then issues times out because the cluster is mid-election with no leader to transfer *from*.\n\nIf that reading is right, this is a raft timing race rather than a product bug: the test asks for a leadership transfer without first establishing that a stable leader exists, so a heartbeat timeout landing in the wrong place fails it. The fix would be to wait for a settled leader before requesting the transfer, and/or to retry the transfer when it returns `leadership transfer timeout`, rather than to lengthen the timeout.\n\n## How often\n\nRare — as far as I can measure, this is the **first recorded occurrence**:\n\n- Walked the 300 most recent CircleCI pipelines, inspected all 37 failed `memory-all*` jobs and grepped their logs: exactly 1 hit, the one above.\n- CircleCI insights for `memory-all-opn-op-reth-fusaka` on `develop`: 5 failures in 217 runs (97.7%) over 2026-08-11 → 2026-09-16, but the most-failed-tests window (100 runs) does not list this test, and the flaky-tests endpoint records a different test for this job (`TestInteropFilter_IngressRejectsInvalid`).\n- No pre-existing issue matches the test name.\n\nFiling it anyway so the next occurrence lands somewhere rather than being rediscovered.\n\n## Possibly related\n\n`TestSequencerFailover_DisasterRecovery_OverrideLeader` — 1/62 failures in `go-tests` per CircleCI insights. Different test, same conductor-leadership area, and plausibly the same underlying raft-timing sensitivity. Worth checking together if anyone picks this up.\n",
+      "createdAt": "2026-09-17T13:39:00Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABO2ewew",
+      "title": "linter/bigint: suggested fix emits an unbound qualifier when op-service/bigs is aliased or dot-imported",
+      "author": "kyle4814",
+      "number": 22702,
+      "repository": "ethereum-optimism/optimism",
+      "body": "### Summary\n\nThe `bigint` custom linter's suggested fix decides two things separately that\nhave to agree:\n\n- **whether** to add the `op-service/bigs` import — `fileHasImport()` matches on the import **path**\n- **what identifier** to qualify the rewritten call with — `buildStrictCall()` hardcodes `\"bigs.\"`\n\nWhen a file already imports `op-service/bigs` under any name other than `bigs`,\nthe import edit is suppressed (path matches) *and* the emitted call references\nan identifier that isn't bound. `golangci-lint --fix` then rewrites the file\ninto code that doesn't compile.\n\nObserved on `develop` at `2258ea57`.\n\n### Reproduction\n\nAdd a testdata package containing a file that imports the package under an\nalias, then run the analyzer with suggested fixes applied:\n\n```go\npackage a\n\nimport (\n\t\"math/big\"\n\n\tmybigs \"github.com/ethereum-optimism/optimism/op-service/bigs\"\n)\n\nvar _ = mybigs.Uint64Strict\n\nfunc aliased() {\n\tx := new(big.Int)\n\t_ = x.Uint64()\n}\n```\n\n`analysistest.RunWithSuggestedFixes` produces:\n\n```go\nimport (\n\t\"math/big\"\n\n\tmybigs \"github.com/ethereum-optimism/optimism/op-service/bigs\"\n)\n...\n\t_ = bigs.Uint64Strict(x)   // undefined: bigs\n```\n\nThe dot-import form (`. \"…/bigs\"`) fails the same way — the fix emits a\n`bigs.` qualifier where the call should be unqualified. A blank import (`_`)\nbinds no identifier at all, so it also needs a usable import added.\n\n### Why this isn't currently caught\n\n`linter/analyzers/bigint/bigint_test.go` uses `analysistest.Run`, which checks\ndiagnostics only and never applies the suggested fixes. The whole fix path —\n`buildStrictCall`, `fileHasImport`, `importEdit`, and the one-shot\n`addImportEdit` logic — has no test coverage today.\n\n### Impact\n\nLatent, not currently triggered. Across `develop` at `2258ea57` I count 188\nplain imports of `op-service/bigs`, zero named aliases, zero dot imports, and\none blank import (`op-service/testutils/depguard/depguard_test.go`) which\ncontains no `.Uint64()` calls. So no file in the tree today would be broken by\n`--fix`; the defect would surface the first time someone aliases that import in\na file containing a flagged call.\n\n### Suggested direction\n\nResolve the package's actual local binding in the file and use it for both\ndecisions, rather than deciding the import and the qualifier independently:\nalias → use the alias; dot import → unqualified call; blank import → treat as\nabsent so a usable import is added.\n\nI have a patch along those lines plus `RunWithSuggestedFixes` golden tests\ncovering the plain, aliased and dot-import forms, if that would be useful — happy\nto open a PR.\n",
+      "createdAt": "2026-08-30T10:42:17Z",
+      "closedAt": "2026-09-17T12:20:58Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABRxsAcw",
+      "title": "Make MIN_BLOCKS_FOR_PIPELINE_RUN configurable",
+      "author": "rodibozman",
+      "number": 22923,
+      "repository": "ethereum-optimism/optimism",
+      "body": " ## Describe the feature\n\n  `MIN_BLOCKS_FOR_PIPELINE_RUN` is hardcoded to `EPOCH_SLOTS` (32) in `crates/engine/tree/src/tree/mod.rs`. When the node is more than 32 blocks behind the forkchoice head, the\n  engine runs the full staged pipeline instead of downloading the missing blocks directly.\n\n  I would like to set this value from the CLI or `TreeConfig`, for example `--engine.backfill-threshold` <BLOCKS>.\n\n## Why\n\n  On a 2-second chain a pipeline run on our node takes about 150 seconds regardless of how many blocks it covers, because each of the 14\n  stages costs us roughly 8 seconds. In 150 seconds the chain produces about 75 new blocks. So after every run the node is still more than 32 blocks behind,\n  and it starts another run. It never switches back to live sync. We observed this loop for over an hour with a constant 77 to 83 block gap per run.\n\n  The direct download path handles 30 blocks in about 4 seconds on the same machine. We recovered only by pausing the consensus client and sending forkchoice updates by\n  hand, 30 blocks at a time, until the gap was under 32.\n\n  A threshold of a few hundred or a thousand blocks would have let the engine close the gap on its own in seconds.\n\n## Proposed change\n\n  - Add a `backfill_run_threshold: u64` field to `TreeConfig`, defaulting to the current `EPOCH_SLOTS`.\n  - Use it in `exceeds_backfill_run_threshold` and `backfill_sync_target` instead of the constant.\n  - Expose it as `--engine.backfill-threshold`.\n\n  Default behaviour stays identical.\n\n\nIf it's ok, I'd like to open a PR on that, for now we made a dirty patch to change the hardcoded value.",
+      "createdAt": "2026-09-17T13:21:28Z",
+      "closedAt": "2026-09-17T13:38:16Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7Y-C1k",
+      "title": "vm-runner: Support ZK execution",
+      "author": "ajsutton",
+      "number": 18325,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Update vm-runner to support running ZK proof programs in native or dev mode. The aim is to verify that they validate the chain correctly without having to pay for actual ZK proof generation.",
+      "createdAt": "2025-11-18T22:00:35Z",
+      "closedAt": "2026-09-17T17:18:41Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQ5Ekcw",
+      "title": "Glamsterdam Defense devnet testing",
+      "author": "joshklop",
+      "number": 22879,
+      "repository": "ethereum-optimism/optimism",
+      "body": "| Devnet | L1 | Pre/Post Activation | Type | Result |\n|--------|--------|--------|--------|--------|\n| glamsterdam-def-0 | Plataberget | Pre | Permissioned | Unsafe and safe head stalls due to L1 bugs, recovered |\n| glamsterdam-def-2 | glamsterdam-devnet-9 | Pre | Permissioned | Stalls due to L1 bugs, recovered |\n| glamsterdam-def-4 | Plataberget | Post | Permissioned | Peachy, torn down |\n| glamsterdam-def-5 | Plataberget | Post | Permissionless | TBD: we want to deploy the L1 contracts successfully and see a safe head bump |\n| glamsterdam-11-0 | glamsterdam-devnet-11 | Pre | Permissioned | Online; we want to see a safe head bump post-activation | \n| glamsterdam-11-1 | glamsterdam-devnet-11 | Pre | Permissionless | Online; we want to see a safe head bump post-activation |\n\nTo-dos:\n\n- [ ] Sync test on one post-activation network\n- [ ] Batch using calldata post-Glamsterdam",
+      "createdAt": "2026-09-11T20:11:48Z",
+      "closedAt": "2026-09-17T13:57:50Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABD2dqrw",
-      "title": "contracts-bedrock,op-deployer,kona-sp1: check the SP1 verifier matches the sp1-sdk circuit",
-      "author": "digorithm",
-      "number": 22920,
-      "body": "Closes https://github.com/ethereum-optimism/optimism/issues/18422\n\n## Why\n\nEvery SP1 PLONK proof starts with 4 bytes that identify the circuit it was made with, and the verifier contract rejects any proof whose 4 bytes differ from its own `VERIFIER_HASH()`. Our prover's circuit is decided by the `sp1-sdk` version in `rust/Cargo.toml`; the verifier is decided by an address pinned in op-deployer and `VerifyOPCM`. Nothing connected the two. They agree today only because sp1-sdk 6.3.1 through 6.8.0 all ship circuit v6.1.0. A bump to a new circuit without moving the address would make every `ZKDisputeGame.prove` revert after the proving spend, and nothing would report it.\n\n## What changes for users\n\nNothing on chain: no bytecode, ABI, or semver change. Three new checks, each in the place that can see the fact it checks:\n\n- `standard.SP1VerifierHash` records the `VERIFIER_HASH()` of the release-approved verifier, next to its address. The sepolia integration test reads the hash from the deployed verifier and holds the constant to the chain, so the address and the hash move together.\n- `VerifyOPCM` fails at release when the adapter's verifier returns a different `VERIFIER_HASH()` than the circuit we prove for (`EXPECTED_SP1_VERIFIER_HASH` overrides the constant, like `EXPECTED_SP1_VERIFIER`).\n- `kona-sp1-proposer` in network mode refuses to start against a verifier whose hash does not match the circuit its own SDK proves for. It derives that hash from the verification key the SDK ships (`sha256(sp1_verifier::PLONK_VK_BYTES)`), so no proof is generated; that replaces the issue's \"first four bytes of a simple proof\". The error names both hashes and the SDK circuit, and fails before any game is created or proof is bought. Mock mode logs the hash only, since `MockSP1Verifier` accepts any bytes.\n\nAn sp1-sdk bump to a new circuit is therefore caught by the proposer at startup and by `VerifyOPCM` at release, not before merge. A pre-merge link was tried (a JSON pin read by both a Rust test and the Go test) and dropped: it introduced a hand-maintained cross-language data file with no precedent in the repo, for a failure that is loud, early, and harmless on chain.\n\n## Reviewer notes\n\n- The Solidity constant in `VerifyOPCM` is a copy of the Go constant. Solidity cannot read op-deployer (Foundry `fs_permissions` stop at `packages/contracts-bedrock`), so it is held to the chain only when `VerifyOPCM` runs at release, the same as the address constant today. Dismissed the go-code-reviewer note on this for that reason.\n- No per-game verifier check before proving: games created before an OPCM verifier swap cannot be proven by the new SDK regardless, and the startup check covers the configured deployment.\n- The mocks gain `VERIFIER_HASH()` because they implement `ISP1Verifier`; devstack deploys `MockSP1Verifier` behind `SP1PlonkAdapter`, so the ZK acceptance tests exercise the new adapter and verifier reads with the real proposer binary.\n- Review agents run: rust-code-reviewer (clean, two style suggestions applied), go-code-reviewer (lint-go green, no findings retained). No agent covers Solidity; `just pr` passes 16/16 with no snapshot or semver-lock drift.\n",
+      "id": "PR_kwDODjvEJM8AAAABBIIrRw",
+      "title": "Silhouette: private interoperable chains (v1, attested)",
+      "author": "opsuperchain",
+      "number": 22665,
+      "body": "## Silhouette: private interoperable chains (v1, attested)\n\nA silhouette chain is a private L2 that participates in an ordinary interop dependency set. Its\ntransactions stay private. L1 carries a signed proof envelope describing the chain's public outline\nand a standard derivation carrier with user transactions removed.\n\nv1 is explicitly operator-attested: the trusted submitter's L1 signature authenticates the claimed\nstate. The wire reserves a proof slot for a future proven mode, but this PR contains no ZK toolchain\nor L1 settlement path.\n\n### Architecture\n\n- **No `op-node` changes.** The final PR diff under `op-node/` is empty.\n- **No custom submitter.** The normal `op-batcher` loads real private blocks, receipts and output\n  roots and retains its normal channel, reorg, txmgr and retry lifecycle. A terminal encoder emits\n  the silhouette proof envelope followed by standard carrier frames for the same block cadence with\n  user transactions removed.\n- **Normal inbox and stock portal.** Both envelope and carrier go to the rollup's normal batch inbox.\n  Deposits remain enabled and are stock-derived; there is no gated portal contract.\n- **Stock derivation.** A stock verifier `op-node` ignores the `KCPB` proof blob as an unknown\n  derivation format, consumes the following standard carrier frames, and runs the ordinary\n  Holocene/interop rewind and deposits-only replacement path.\n- **One verifier-only supernode role.** Silhouette chains cannot be sequenced by a supernode virtual\n  node. Private sequencing is performed by a LightCL op-node backed by the private EL.\n- **Standalone magic EL.** `op-silhouette-el` is an in-memory Engine/eth RPC service. It watches the\n  authenticated proof stream independently, maps stock carrier attributes to proof-committed block\n  hashes and roots, and delegates a stock deposits-only replacement build to the private EL when\n  interop invalidates a proven block.\n- **Normal interop semantics.** The supernode's stock judge validates the private chain's declared\n  imports against independently derived public-chain messages. Invalid blocks are replaced and\n  transitive invalidation propagates across chains.\n\n### What is posted to L1\n\nEach normal batcher submission contains:\n\n1. `KCPB` envelope magic, wire version, public-values length/data, and proof length/data (empty in\n   attested mode).\n2. Batch commitments: previous/new output root, L1 head hash, rollup-config hash, dependency-set\n   hash, export-policy hash, and the block list.\n3. Per block: number, timestamp, real block hash, state root, message-passer storage root, exported\n   logs, imported messages, L1-origin hash/number, and sequence number.\n4. Per exported log: real block log index, log hash, and optional preimage (empty under the default\n   all-hashes policy).\n5. Per imported message: origin, source block/log index/timestamp/chain ID, and payload hash.\n6. Standard compressed derivation channel/frame data carrying each block's parent, epoch, timestamp,\n   stock deposits/L1-info transaction, and an empty user-transaction list.\n\nIt does **not** publish private user transaction bytes or hashes, senders, calldata, receipts,\ncontract state, or full log contents. The ordinary L1 blob transaction still exposes its sender,\ndestination inbox, nonce, fees, commitments and inclusion block.\n\n### Images\n\nBuild these three branch-specific targets:\n\n```sh\ndocker buildx bake op-batcher op-supernode op-silhouette-el\n```\n\n| Image | Difference from a normal interop deployment |\n|---|---|\n| `op-batcher` | Enables the terminal silhouette proof + stripped-carrier encoding. |\n| `op-supernode` | Loads the silhouette verifier manifest and proof observer. It remains verifier-only. |\n| `op-silhouette-el` | New in-memory proof-backed Engine/eth service used as P's verifier EL. |\n\nThe standalone `op-node`, L1/L2 execution clients, and portal contracts are stock. There is no\n`proofbatch-submitter` image.\n\n### Minimal configuration delta\n\nPrivate producer:\n\n```sh\nop-batcher <normal flags> --data-availability-type blobs --silhouette \\\n  --max-pending-tx 1 --target-num-frames 6 \\\n  --silhouette.inbox $NORMAL_BATCH_INBOX --silhouette.wire-version 4 \\\n  --silhouette.rollup-config-hash $ROLLUP_HASH \\\n  --silhouette.dependency-set-hash $DEPSET_HASH\n```\n\nThe producer is otherwise a normal LightCL sequencer + private EL. It uses the stock\n`OptimismPortal`; the silhouette inbox must equal the normal rollup batch inbox.\n\nMagic EL:\n\n```sh\nop-silhouette-el --l1 $L1_RPC --l1.beacon $L1_BEACON \\\n  --supernode $SUPERNODE_RPC --rollup-config rollup-p.json \\\n  --verifier-config verifier-p.json \\\n  --replacement-engine $PRIVATE_ENGINE_AUTH_RPC \\\n  --replacement-engine.jwt-secret jwt.txt --rpc.addr 0.0.0.0 --rpc.port 9545\n```\n\nVerifier supernode:\n\n```sh\nop-supernode <normal interop flags> --silhouette manifest.json \\\n  --vn.<P>.l2 http://op-silhouette-el:9545 \\\n  --vn.<P>.interop.dependency-set depset.json\n```\n\nThe `op-node` VN has no silhouette/private flag: its only unusual input is that its configured EL\nendpoint speaks the proof-backed Engine API. The manifest names P's verifier config; A is absent and\nremains an ordinary chain. The verifier config binds L1 chain ID, trusted submitter, normal inbox,\nrollup/dependency-set hashes, `proofType: \"attested\"`, `wireVersion: 4`, and the anchor.\n\n### Local network and smoke tests\n\n```sh\ngo run ./op-up --silhouette\n# funded transactional RPCs: A http://127.0.0.1:8545, B http://127.0.0.1:8546\n\ngo run ./op-up smoke-interop all\ngo run ./op-up smoke-interop invalid-message --direction both --reorg-timeout 5m\ngo run ./op-up smoke-interop chained-invalid-message --require-cascade --reorg-timeout 5m\n\n# comparison topology\ngo run ./op-up --interop\n```\n\nObserved locally on this revision:\n\n- silhouette `smoke-interop all`: PASS;\n- bidirectional invalid A→B and B→A: both replaced and both chains resumed;\n- strict chained invalidation: invalid P block, direct dependent, and descendant dependent all\n  reorged while the independent control remained;\n- normal sysgo bidirectional invalid smoke: same replacement/resume semantics (lower latency because\n  it does not wait for the proof-batch cadence);\n- focused `TestSilhouetteImportThatIsFalseIsReplaced`: PASS;\n- `op-batcher`, all `op-supernode`, sysgo/presets, smoke utility, and `op-up` unit suites: PASS.\n\nThe serialized full silhouette acceptance package still has one known timeout in\n`TestSilhouetteCrossChainPinsThenAdvances`; the replacement regression and proof-slot refusal tests\npass independently.\n\n### Diff size\n\nAgainst the PR base: approximately **24.3k insertions / 1.45k deletions across 267 files**. Much of\nthe file count is the existing cross-language fixture corpus. The architecture rewrite in the latest\ncommit is **3,487 insertions / 7,004 deletions**: it deletes the custom submitter, sequencing-side\nsilhouette role, custom portal, and op-node hook in favor of the stock paths above.\n\nOperational details and the exact trust statement live in\n`op-supernode/silhouette/docs/RUNNING-V1.md` and `TRUST-MODEL.md`.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-17T00:34:40Z",
+      "createdAt": "2026-08-26T20:41:19Z",
       "mergedAt": null,
-      "additions": 297,
-      "deletions": 6
+      "additions": 117287,
+      "deletions": 316
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBKD3cg",
+      "title": "kona-node,op-reth,op-batcher: multi-blocks PoC (up to max_multi_blocks blocks per block time)",
+      "author": "sebastianst",
+      "number": 22671,
+      "body": "**Draft / PoC, work in progress — CI feedback only for now.**\n\nMulti-blocks: keep `block_time`, allow the sequencer to build up to `max_multi_blocks` L2 blocks sharing one timestamp after a feature timestamp `multi_block_time` (≥ Karst, not a hardfork). Sealing policy is the builder's choice; consensus only bounds the group size. Chain consistency is parent-hash linkage.\n\nScope of the PoC: kona-node (sequencer + derivation), op-reth (EL), op-batcher (span batch v2), op-devstack + acceptance tests on a kona-node/op-reth-only devnet. op-node keeps rejecting span batch v2; interop, proofs, flashblocks and registry support are out of scope.\n\nLanded so far (one commit per workstream):\n- op-reth: `ts == parent.ts` accepted iff siblings are allowed at `ts`; builder seal policy flags; `engine_awaitPayloadReadyV1`\n- kona: `multi_block_time`/`max_multi_blocks` config; `BatchType::SpanV2` = Delta span + `same_ts_bits` (bit 0 = sibling of the span's parent, so groups may straddle spans/channels)\n- Go: rollup/deploy config, span batch v2 codec + `SpanChannelOut` switch, devstack options and DSL helpers, shared golden vectors\n\nStill to come: kona derivation validity, kona sequencer slot loop, acceptance tests.\n\nJudgement calls worth a look:\n- the `min-build-time` policy only seals a payload that holds ≥ 1 user tx, so an idle sequencer still makes one block per block time\n- straddling groups across span batches/channels is allowed (bit 0), instead of forcing the batcher to keep groups atomic across L1-driven channel closes\n- `siblings_allowed` is false at *every* configured fork activation timestamp, which keeps the timestamp-only `is_first_<fork>_block` predicates correct for forks scheduled after activation\n\n🤖 *Co-created with Claude Fable 5*\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01Fi2GEEBE6LmUwLS25WPKfq\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T04:00:29Z",
+      "mergedAt": null,
+      "additions": 8083,
+      "deletions": 600
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABD_v7_Q",
+      "title": "contracts-bedrock: add opt-in atomic ETH bridging PoC",
+      "author": "opsuperchain",
+      "number": 22929,
+      "body": "Ordinary ETH bridging irreversibly locks the source before destination delivery. This PoC adds an optional safe mode that keeps native ETH refundable until the destination reserves mint capacity and the source commits. Existing `sendETH`/`relayETH` remain available; callers choose the three-message safe path through `initiateTransfer`.\n\nSafe reservations have priority over ordinary relays, which must retry if unreserved capacity is insufficient. Both modes pay native ETH using existing ETHLiquidity. The acceptance fixture installs the experimental implementation behind the existing bridge predeploy on fresh test chains; production bridge code, messenger, inbox, and network upgrade bundles remain unchanged.\n\nThis demonstrates atomic asynchronous settlement, not synchronous execution or unconditional availability. Safety assumes canonical Interop histories, matching peer logic, and upgrades that preserve reservations. Committed transfers cannot be refunded if a chain disappears permanently. Live migration, reservation griefing, reorg/fault-proof testing, and expiry-resend integration remain production work. See the [design note](https://github.com/karlfloersch/optimism/blob/poc/safe-eth-bridge/packages/contracts-bedrock/docs/safe-eth-bridge.md) and [validation report](https://github.com/karlfloersch/optimism/blob/poc/safe-eth-bridge/packages/contracts-bedrock/docs/safe-eth-bridge-validation.md).\n\nGo, contract/security, and documentation/coverage reviews completed; their actionable findings were fixed. No applicable review was skipped and no finding was dismissed.\n\nFinal validation: 35 new Foundry tests, 86 broader Interop tests, all three real two-L2 acceptance scenarios, and full Go lint pass. Earlier full contract runs pass (2,337 development / 2,397 optimized). The pre-PR runner passes 15 checks; its missing upgrade-script artifact is resolved by building scripts and rerunning that check successfully. The validation report records artifact/profile caveats, Slither advisories, and the reused op-reth binary.\n\nCI: title, dependency review, and Wiz scanners pass. The [ARM image job](https://github.com/ethereum-optimism/optimism/actions/runs/35276843548/job/105389902427) builds the package successfully, then fails provenance attestation with `missing \"id-token\" permission`; the x86 job is cancelled by the workflow. No CI configuration is changed here. The main fork CI suite still requires human authorization under repository policy.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-17T21:28:12Z",
+      "mergedAt": null,
+      "additions": 2027,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBRFP4w",
+      "title": "contracts: prototype L1-certified event relay",
+      "author": "opsuperchain",
+      "number": 22693,
+      "body": "## Overview\n\nThis draft prototypes an L1-mediated, censorship-resistant slow path for L2 events and interop messages.\n\nA source `CrossL2Inbox` asks a consensus `LocalLogOracle` precompile to verify a recent local log, then exports the certificate through the existing `L2ToL1MessagePasser`. After ordinary withdrawal proving/finalization, `L1EventRegistry` records the certificate and can force-deposit it into any destination portal authorized by the same `ETHLockbox`. The destination inbox caches it and can either expose generic event validation or execute a certified `SentMessage` in the same deposit.\n\nThe event must be exported within seven days. Once registered on L1, the certificate is durable and can be relayed after ordinary interop expiry.\n\n## Security decisions\n\n- L1 derives the source chain from the calling portal and authenticates `portal.l2Sender()` as the canonical `CrossL2Inbox`; source identity is never trusted from calldata.\n- Source and destination portals must both be current members of the registry immutable `ETHLockbox` cluster.\n- Destination imports authenticate the L1 registry through standard L1-to-L2 address aliasing.\n- Certified execution emits `ExecutingCertifiedMessage`, not `ExecutingMessage`, so ordinary interop expiry/dependency hazard rules are not accidentally applied.\n- Certificates bind the full existing `Identifier` and exact payload hash. Messenger replay protection remains authoritative.\n\n## Included\n\n- `ILocalLogOracle` execution-client boundary and reserved system address\n- source export and destination certificate cache in `CrossL2Inbox`\n- immutable `L1EventRegistry` with portal/lockbox/source-chain authentication\n- generic `relayEvent` and one-deposit `relayMessage` paths\n- ABI, storage-layout, and semver snapshots\n- focused L1/L2 unit tests\n- design note: `packages/contracts-bedrock/specs/event-certificates.md`\n\n## Draft blockers / follow-ups\n\n- Specify and implement deterministic historical receipt access in op-geth, op-reth, Kona, and fault-proof re-execution. An optional archival database lookup is not consensus-safe; the final design needs a state-committed history structure or explicit witnesses anchored to consensus state.\n- Define precompile gas, receipt encoding, pruning, reorg, and exact boundary semantics.\n- Update interop clients to classify `ExecutingCertifiedMessage` as L1-certified rather than an ordinary executing-message dependency.\n- Add genesis/NUT/deployment/standard-validator wiring for the registry and inbox configuration.\n- Add forced-deposit and withdrawal-finalization end-to-end coverage.\n- For ETH bridge recovery, separately enforce a unique transfer ID and one terminal outcome across relay and refund paths. Event presence alone does not prove non-execution.\n- Consider batched exports before production use.\n\n## Verification\n\n- `mise x -- just build` (passes; one pre-existing payable-fallback warning in `L2ContractsManager.t.sol`)\n- `mise x -- just test-dev --match-path test/L2/CrossL2Inbox.t.sol` — 18 passed\n- `mise x -- just test-dev --match-path test/L1/L1EventRegistry.t.sol` — 7 passed\n- clean default-profile source build, interface check, snapshot generation, formatting, pragma, unused-import, spacer, reinitializer, semver, and test-structure checks pass\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T22:05:09Z",
+      "mergedAt": null,
+      "additions": 1559,
+      "deletions": 24
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBPCUcw",
+      "title": "contracts-bedrock: add UnorderedExecutionModule for nonceless Safe execution",
+      "author": "maurelian",
+      "number": 22675,
+      "body": "## Summary\n\nAdds `UnorderedExecutionModule`, a Safe module enabling nonceless (hash-once) execution for superchain-ops tasks: owners sign the Safe's own transaction hash computed with a per-task hash-once value (keccak of a unique string pinned in the task config) in the nonce slot instead of the sequential nonce. Signatures stay valid regardless of task ordering, so reordering pending tasks never forces re-signing.\n\nDesign points:\n- Replay protection is a per-`(safe, hashOnce)` consumed-once mapping; hash-once values must exceed `type(uint128).max` so they can never collide with a real nonce.\n- No cancellation/expiry mechanism: cancel by consuming the hash-once value with a no-op, or rotate the task's `hashOnceInput`.\n- No ordering support (no dependency chaining): tasks that need ordering use the existing nonce flow.\n- Signature verification uses the Safe's `checkSignatures`, so approveHash, EIP-1271 and EOA signatures all work; the EIP-712 encoding is built locally so Safe 1.5.0 (which removed `encodeTransactionData`) is supported alongside 1.3.0/1.4.1.\n- Approver addresses are exposed via `signers()` in transient storage for future module guards (liveness); nothing but the replay mapping persists.\n\nDeployed and source-verified on Sepolia at `0xADcbCff796a47D468fE8C0252FBe8d856d4e63D7`, enabled on Safe 1.5.0 and 1.4.1 instances, and exercised end-to-end (single and nested safes) by superchain-ops test tasks — see companion superchain-ops PR.\n\nPart of the San Diego hackathon nonceless (hash-once) Safe execution project.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T16:47:02Z",
+      "mergedAt": null,
+      "additions": 1381,
+      "deletions": 0
     }
   ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 5
+    "commitCount": 45
   },
   "completedItems": [],
   "topContributors": [
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 159.99845999808224,
+      "prScore": 139.99845999808224,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 127.68091150458054,
+      "prScore": 93.44291150458054,
+      "issueScore": 2.3,
+      "reviewScore": 31.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 69.38806759148997,
+      "prScore": 62.18806759148997,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 58.14084056873217,
+      "prScore": 43.64084056873217,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
@@ -38,11 +187,141 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "opsuperchain",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/195841377?v=4",
+      "totalScore": 37.50839650691849,
+      "prScore": 37.50839650691849,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 31.702957400824367,
+      "prScore": 31.502957400824368,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 27.29724405227663,
+      "prScore": 27.09724405227663,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 23.57061228866811,
+      "prScore": 23.13261228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 11.29702209223412,
+      "prScore": 11.09702209223412,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 6.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "rodibozman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35802112?u=860baf83afad970ce27cafd170720d90e23015f4&v=4",
+      "totalScore": 4.3,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ogenev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/39865181?u=c1987712b39ea9352a386f98e518462b15ae3a55&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 1,
+  "newPRs": 12,
   "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 2
+  "newIssues": 3,
+  "closedIssues": 4,
+  "activeContributors": 24
 }
