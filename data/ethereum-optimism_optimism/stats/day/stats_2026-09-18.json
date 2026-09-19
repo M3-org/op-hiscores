@@ -5,53 +5,195 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-18 to 2026-09-19, ethereum-optimism/optimism had 1 new PRs (2 merged), 0 new issues, and 3 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-09-18 to 2026-09-19, ethereum-optimism/optimism had 15 new PRs (9 merged), 5 new issues, and 31 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABR3Tc2A",
+      "title": "Fix fork tests after the U20 upgrade",
+      "author": "ajsutton",
+      "number": 22934,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:**\n\nFork tests do not handle chains where U20 is already applied:\n\n- `TestEndToEndBootstrapApplyWithUpgrade/.../upgrade_chain_v2` rejects the live game configuration, then the upgrade sequence. This blocks merges. [Failure](https://circleci.com/gh/ethereum-optimism/optimism/5575268).\n- `contracts-bedrock-tests-upgrade-develop op-mainnet CUSTOM_GAS_TOKEN` fails during setup with `PastUpgrades: OPCMv2 upgrade failed`. [Failure](https://circleci.com/gh/ethereum-optimism/optimism/5575204).\n\nUpdate the fork tests for post-U20 state and remove the temporary skip in the Go test.\n",
+      "createdAt": "2026-09-17T23:43:00Z",
+      "closedAt": "2026-09-18T10:46:44Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQXrV9A",
+      "title": "interop: Cycle detection invalidates acyclic prerequisite chains",
+      "author": "ajsutton",
+      "number": 22825,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:**\n\n## Summary\n\nCurrent Go and Kona cycle detection classify every unresolved graph node as a cycle participant.\n\nReverse Kahn pruning leaves acyclic prerequisites unresolved when they feed a cycle. Both implementations then replace a valid prerequisite chain.\n\nI reproduced this behavior at `develop` commit `adb49c16082bdb82b60408097576fe393953594c`.\n\n## Reproduction\n\nConstruct this same-timestamp dependency graph:\n\n- `A0` depends on `B0`.\n- `B0` depends on `A1`.\n- `A1` depends on `A0` and `C0`.\n- `C0` has no graph dependency.\n\nOnly `A0`, `B0`, and `A1` form a cycle. `C0` is an acyclic prerequisite.\n\nThis graph is reachable through valid message declarations. Chain D can supply `C0`'s initiating log without creating another graph node.\n\nA focused Go test produced this result:\n\n```text\nexpected cycle chains: {A, B}\nactual cycle chains:   {A, B, C}\n```\n\n## Root cause\n\n`checkCycle` removes nodes that have no dependents. Cyclic `A1` depends on `C0`, so `C0` never becomes removable.\n\n`collectCycleParticipants` then treats every unresolved node as cyclic.\n\nRelevant Go locations:\n\n- `op-supernode/supernode/activity/interop/cycle.go:52-87`\n- `op-supernode/supernode/activity/interop/cycle.go:214-242`\n\nKona implements the same algorithm and result:\n\n- `rust/kona/crates/protocol/interop/src/rules.rs:183-203`\n- `rust/kona/crates/protocol/interop/src/rules.rs:225-302`\n- `rust/kona/crates/proof/proof-interop/src/consolidation.rs:149-151`\n\n## Impact\n\nGo adds chain C to `InvalidHeads`. Kona re-executes chain C as deposit-only and commits the replacement output.\n\nThis can discard valid user transactions from a chain outside the cycle.\n\nThe behavior conflicts with these specifications:\n\n- [Message graph](https://specs.optimism.io/interop/messaging.html#message-graph)\n- [Replacing invalid blocks](https://specs.optimism.io/interop/derivation.html#replacing-invalid-blocks)\n\n## Expected behavior\n\nCycle detection must report only nodes that belong to a directed cycle.\n\nThe implementation should exclude connected acyclic prerequisites. Tests should cover this graph in both Go and Kona.",
+      "createdAt": "2026-09-09T00:52:27Z",
+      "closedAt": "2026-09-18T02:14:54Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQtSCSA",
+      "title": "op-devstack: supernode route readiness timeout flakes ZK dispute-monitor test",
+      "author": "joshklop",
+      "number": 22862,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## CI failure\n\n**CI run:** https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/134225/workflows/adf3a44c-bbf9-4e53-9a53-1155c50b5774/jobs/5557165\n**Job:** `memory-all-opn-op-reth-fusaka` (shard 3)\n**Commit:** `bf7f8937cf9c80e6274a43851680953569197319`\n\n```text\nError Trace: op-devstack/sysgo/multichain_supernode_runtime.go:777\nError:       supernode route readiness\nTest:        TestZKDisputeMonitorCanonicalChildOfInvalidParent\nMessages:    timed out waiting for supernode route http://127.0.0.1:43139/901\n```\n\n## What happened\n\nThe test failed during devstack setup, before exercising any ZK dispute-monitor behavior:\n\n1. Both op-reth L2 processes started and reported ready.\n2. The supernode and its RPC router started.\n3. Both supernode virtual nodes began initialization and opened their safe-head databases, but did not finish initialization/register their per-chain RPC APIs within the readiness budget.\n4. `waitForSupernodeRoute` failed while probing `optimism_rollupConfig`.\n5. Test teardown canceled the virtual nodes, which then reported `failed to init the runtime config: failed to load runtime configuration repeatedly, last error: context canceled`.\n\n`waitForSupernodeRoute` has a hard-coded 15-second wall-clock deadline, but each `CallContext` uses the RPC client's default 10-second call timeout and the deadline is checked only between calls. In this run two blocked probes consumed about 20 seconds before the helper failed. The helper therefore neither enforces its stated deadline precisely nor tolerates transient full-devstack startup delays.\n\nThe acceptance runner executes eight full-devstack packages concurrently on each CircleCI node. Another heavy multi-node test was failing concurrently on this same shard, so scheduling/resource contention is a plausible trigger, although the logs do not prove exactly where virtual-node initialization stopped making progress.\n\n## Flake evidence\n\n- The tested commit only changed executor sizing for the separate Kona acceptance job; no supernode, devstack, ZK test, or OP Node executor behavior changed.\n- The immediately preceding 14 sampled `develop` runs passed this test.\n- The immediately following `develop` run passed the test in 84.41s: https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/134226/workflows/5359111f-a882-4fe7-88c7-c21416cc8eb3/jobs/5557266\n- CircleCI Insights showed 97 recent successful runs in the Kona acceptance variant before this failure.\n\n## Suggested direction\n\nReplace the ad hoc deadline loop with a context-bounded readiness wait whose individual probes are bounded by the remaining overall budget, and use a startup budget appropriate for full devstack initialization (or a direct virtual-node readiness signal). Preserve useful diagnostics for the last probe/startup error.\n",
+      "createdAt": "2026-09-10T18:59:25Z",
+      "closedAt": "2026-09-18T15:53:14Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABSBN3Sw",
+      "title": "kona-sp1-proposer: add defense-only mode with deterministic game ownership",
+      "author": "wwared",
+      "number": 22951,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nAdd an explicit defense-only operating mode for `kona-sp1-proposer`. This mode is needed to keep games from an older prestate or proof-stack version defensible while a newer proposer deployment creates games under the new version.\n\nDefense-only mode must disable new game creation and fast-finality proving while retaining the full lifecycle for selected existing games:\n\n- game synchronization;\n- challenged-game defense;\n- resolution; and\n- bond claims.\n\nThe change must also provide a simple, deterministic, operator-configurable way to partition game ownership between proposer deployments. Running old and new deployments against the same factory must not cause both deployments to purchase proofs for the same game.\n\n## Motivation\n\nThe proposer currently combines game creation and defense in one service. During a prestate, circuit, witness-generation, or SDK upgrade, the simplest safe compatibility boundary may be to run:\n\n- an old proposer version that only defends games created under the old proof stack; and\n- a new proposer version that creates and defends games under the new proof stack.\n\nUsing a very large proposal interval or intentionally withholding the currently registered prestate artifacts is not an adequate substitute for an explicit mode. Those approaches do not express operator intent, may produce misleading alarms, and do not provide a hard guarantee that an old deployment cannot create a game.\n\nThere is also a proof duplication risk. The proposer currently treats a game as owned when its prestate artifacts are loadable. If both deployments can load the same artifacts, both may attempt to defend the same challenged game and purchase duplicate Succinct Prover Network proofs. The operating mode therefore needs an ownership partition, not only a creation toggle.\n\n## Desired behavior\n\nWhen defense-only mode is enabled, the proposer:\n\n- never schedules or submits a new game;\n- never starts fast-finality proving for an unchallenged game;\n- continues to discover and synchronize relevant games;\n- defends challenged games in its configured ownership partition;\n- resolves and claims bonds for games in that same lifecycle-ownership partition; and\n- reports its mode and effective ownership configuration clearly at startup and through existing operational surfaces.\n\nThe ownership mechanism must:\n\n- be deterministic from stable game metadata, such as prestate or another proof-stack identity;\n- be configurable on both normal and defense-only deployments so operators can define disjoint ownership sets;\n- apply before a proof request is purchased;\n- preserve the invariant that the prove, resolve, and claim sets are aligned; and\n- make overlapping or unsafe configuration detectable before it causes duplicate proof spend where practical.\n\nThe implementation may choose the simplest suitable interface, such as positive prestate selection, but this issue does not prescribe allowlist versus another configuration shape. Avoid introducing distributed coordination or a shared lock unless configuration-based partitioning is shown to be insufficient.\n\n## Example upgrade deployment\n\nFor an upgrade from proof stack A to proof stack B:\n\n- the A deployment runs in defense-only mode and owns lifecycle operations for A games;\n- the B deployment runs in normal mode, creates B games, and owns lifecycle operations for B games; and\n- both deployments may observe the same factory, but exactly one deployment can reach the proof provider for any individual game.\n\nAfter every A game is past its defensible and claimable lifetime, the A deployment and its artifacts can be retired.\n\n## Acceptance criteria\n\n- In defense-only mode, a scheduling cycle cannot call the game-creation path even when a new proposal would otherwise be due.\n- In defense-only mode, unchallenged games do not trigger fast-finality proof work.\n- Challenged games inside the configured ownership partition can still be proven, resolved, and claimed.\n- Games outside the configured ownership partition are filtered before any proof request is submitted or purchased.\n- A scenario with normal and defense-only proposer instances observing the same game set and using disjoint ownership configuration demonstrates that exactly one instance requests a proof for each challenged game.\n- The same ownership decision governs proving, resolution, and claims.\n- Existing normal-mode creation and defense behavior remains unchanged when the new mode and ownership partition are not configured.\n- Invalid or internally contradictory mode and ownership configuration fails clearly rather than silently disabling required defense.\n- Operator documentation includes the old/new deployment sequence, artifact-retention requirement, overlap checks, and retirement condition.\n\n## Relationship to the architecture spike\n\nThis mode is a safe operational fallback and enables the version-pinned deployment approach evaluated by #22950. The spike may recommend a more decoupled long-term architecture, but it should not be a prerequisite for implementing this explicit mode.\n",
+      "createdAt": "2026-09-18T20:03:57Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABSBNssg",
+      "title": "kona-sp1-proposer: spike on proof-stack version coexistence across upgrades",
+      "author": "wwared",
+      "number": 22950,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nBefore the first update to the registered SP1 prestate, decide how operators will keep games created under the previous proof stack defensible while new games use the updated stack.\n\nThe proposer can currently load multiple prestate program artifacts and set up SP1 proving keys per prestate. That supports multiple guest program versions when they remain compatible with the witness-generation code and SP1 SDK compiled into the running proposer. It does not establish that one proposer version can handle:\n\n- guest programs with different witness requirements or serialization;\n- different `kona-host` or input-generation behavior;\n- verifier or circuit changes that require different SP1 SDK versions or proof-request parameters; or\n- a future second ZKVM backend.\n\nRun a focused spike that recommends an operational and software architecture and implements only the minimal working prototype needed to resolve the riskiest compatibility question.\n\nRelated issues:\n\n- #22021 asks whether the proposer should be generic across ZKVMs or whether each backend should have a separate proposer.\n- #22740 considers moving proof generation into a separate service for resource isolation.\n- #22951 tracks the explicit defense-only mode and deterministic ownership partition needed by the version-pinned deployment approach.\n\nThis spike should use SP1 version coexistence as the concrete problem, inform those broader decisions, and avoid blocking future multi-ZKVM support without attempting to settle the full multi-ZKVM architecture.\n\n## Problem\n\nA prestate upgrade may change several independently versioned layers:\n\n1. The on-chain game identity: `absolutePrestate`, verifier address, verifier implementation, and accepted proof encoding.\n2. The range and aggregation guest ELFs, their verifying keys, and their circuit format.\n3. Input and witness generation: `kona-host`, native execution, requested preimages, and witness serialization.\n4. The SP1 SDK and Succinct Prover Network request, receipt, and proof APIs.\n5. Proposer orchestration: game discovery, proof dispatch, retries, resolution, and claims.\n6. Artifact publication, version selection, and retention for games that remain live after an upgrade.\n\nToday, program ELFs are selected by `absolutePrestate`, but witness collection is linked into `kona-sp1-proposer` through `kona-sp1-super-range-executor`, and the workspace pins one SP1 SDK version. Loading an old ELF is therefore not sufficient evidence that the current binary can generate its witness, request its proof, or submit proof bytes accepted by its verifier.\n\nRunning complete old and new proposer versions in parallel is the simplest isolation boundary, but it increases operational complexity and may require bug fixes to be backported to an old proposer while its games remain live. A rolling proposer that delegates version-sensitive work could avoid that coupling, but we need evidence that the boundary is practical and complete.\n\n## Approaches to evaluate\n\nAt minimum, compare:\n\n1. **Version-pinned proposer deployments:** Run the old proposer in defense-only mode for old games and the new proposer for new games. Partition lifecycle ownership so only one deployment purchases a proof for each game.\n2. **Versioned out-of-process proof-stack workers:** Keep proposer orchestration on a rolling release and dispatch each game to a worker that bundles the matching input generation, `kona-host` behavior, guest artifacts, SP1 SDK, and proof provider integration.\n3. **In-process multi-version support:** Determine whether one binary can safely select compatible host, circuit, and SDK behavior per game without dependency conflicts or hidden cross-version coupling.\n\nAlso test the narrower possibility that one SP1 SDK version can request proofs for multiple circuit versions through explicit Succinct Prover Network request parameters. If this works, document exactly which compatibility problems it removes and which witness-generation or verifier differences remain.\n\n## Questions the spike must answer\n\n- Which on-chain identifiers are sufficient to select the complete off-chain proof stack for a game? Is `absolutePrestate` enough, or is the verifier identity or explicit version metadata also required?\n- Which upgrades can the current artifact-loading model handle without retaining old host or SDK code?\n- Can the current SP1 SDK request and consume proofs for an older circuit version, and can the resulting proof be verified by the matching old on-chain verifier?\n- Where should the stable boundary sit if version-sensitive work is decoupled: high-level game inputs, synthesized guest inputs, serialized witnesses, or proof requests?\n- Which component owns artifact discovery, compatibility validation, proof-request persistence, retries, and proof verification before submission?\n- How are old proof-stack versions packaged, published, selected, monitored, rolled back, and retired after all corresponding games expire?\n- How do we avoid backporting proposer orchestration fixes into old version-pinned proof stacks?\n- Does the recommended boundary preserve a credible path to multiple ZKVM backends without requiring this spike to design that full system?\n\n## Minimal prototype\n\nAfter mapping the compatibility risks, prototype only the boundary with the highest decision value. The prototype must be the smallest working end-to-end slice that resolves that risk, not a production implementation.\n\nIt must:\n\n- exercise two deliberately different proof-stack configurations;\n- state exactly which layer differs between them and why that difference represents the risky upgrade class;\n- route each representative game or proof job to the matching configuration;\n- generate the expected witness or proof request and validate the resulting proof output against the matching verification boundary; and\n- demonstrate that version-sensitive dependencies do not leak across the proposed isolation boundary.\n\nMerely loading two guest ELFs through the same current host and SDK is not sufficient unless the compatibility analysis shows that this is the riskiest unresolved case. The prototype does not need production deployment automation, durable queues, complete metrics, or a full proposer lifecycle.\n\n## Deliverables\n\n- A compatibility matrix covering the six versioned layers above and representative upgrade combinations.\n- A comparison of the three approaches, including operational complexity, failure isolation, backport requirements, artifact retention, proof duplication risk, and multi-ZKVM implications.\n- The minimal working prototype and a short report of what it proves and does not prove.\n- A recommended architecture and upgrade procedure for running old and new proof stacks concurrently, rolling back, and retiring the old stack.\n- Follow-up implementation issues with explicit dependencies. Update or cross-reference #22021 and #22740 rather than duplicating their remaining scope.\n\n## Acceptance criteria\n\n- The spike tests at least one compatibility boundary beyond using two prestates with the same compiled witness generator and SP1 SDK.\n- The recommendation identifies the stable version-selection key and assigns ownership for witness generation, proof generation, proof verification, and submission.\n- The recommendation explains how games created before an upgrade remain defensible for their full lifetime.\n- The recommendation includes an operator model that prevents two deployments or workers from purchasing proofs for the same game.\n- The prototype clears the highest-risk technical uncertainty with the minimum working implementation and records any assumptions or untested boundaries.\n- The result is specific enough to split the chosen design into implementation issues without another architecture spike.\n",
+      "createdAt": "2026-09-18T20:03:38Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABCyFCnw",
-      "title": "op-acceptance-tests: Add skipped cycle prerequisite regression",
-      "author": "ajsutton",
-      "number": 22832,
-      "body": "This PR adds a reusable exact-chain interop setup for acceptance tests. The two-chain preset now starts exactly two chains. The three-chain preset starts exactly three chains. Both presets use the same runtime projection path.\n\nIt also adds a three-chain fault-proof scenario. Chains A and B form a dependency cycle. Chain C is an acyclic prerequisite of chain A. The scenario verifies that consolidation replaces only A and B, while preserving C. It runs through the shared Go and Kona proof runner path.\n\nThe regression remains skipped because the current cycle detection includes acyclic prerequisites. ethereum-optimism/optimism#22827 will stack on this PR, implement exact cycle participant detection, and enable the regression. This PR references ethereum-optimism/optimism#22825 without closing it.",
+      "id": "PR_kwDODjvEJM8AAAABC629Yg",
+      "title": "interop: suspend atomic demo router execution",
+      "author": "opsuperchain",
+      "number": 22850,
+      "body": "Stacked on #22840. The atomic demo now supports nested cross-chain callbacks while retaining one live OP EVM transaction per chain. A on chain A calls B on chain B; B uses the same facade/router mechanism to call a distinct C on chain A; C sees A's pending state and can call back into the still-running B. The callback executes inside each chain's original transaction, preserving pending storage, transient storage, origin, gas ancestry and rollback. Each included chain receives one final replay after callback/result tapes and access lists are materialized; divergence rejects the candidate without discovery restarts or padding.\n\nCanonical callback dispatch runs through ordinary router bytecode. Gas remains local to each chain: top-level application calls have fixed budgets, while callbacks receive half the remaining gas at their dispatch point. Caller context is restored on return, scheduling depth is capped at 32, and the bundle-wide call limit still applies. Failed callback hints force application rollback even if caught. ERC-4337 uses the existing EntryPoint and demo paymaster for normal on-chain gas settlement; it does not reimburse off-chain discovery or prove that a builder honestly attempted success. Existing Go and Kona cycle algorithms remain unchanged.\n\nThe Go/devstack bridge uses pinned candidate-prefix state and exact signed envelopes. This is a **demo node integration**; production payload-service admission/publication and a single-signature wallet flow remain out of scope. ETH forwarding, STATICCALL facades and committing after a caught remote failure remain unsupported. The original Go discovery path remains available for root-driven calls; nested dispatch is connected to the suspended builder.\n\nValidation passed: all 18 contracts PR checks; full developer contract suite (2,290 passed, 183 skipped) and optimized suite (2,350 passed, 159 skipped); all 40 Rust builder tests with artifact-dependent tests enabled, including optimized bytecode; full Rust workspace lint/rustdoc and Go lint; Go bridge/message/filter/verifier tests; and Go/Kona nested-cycle regressions. All four real-node suspended/nested ERC-4337 success/revert cases pass, including exact receipt gas/log parity and sponsor settlement. Contract checks used the configured Foundry remappings plus explicit Solady/OpenZeppelin mappings with automatic remapping disabled to avoid the local duplicate `src/src` import issue.\n\nSolidity, Rust lifecycle/application-effect and Go reviews are complete; all findings were fixed, none dismissed. Shared node fixtures are included by the normal contracts artifact build. #22840's branch remains unchanged.\n\nCI on `ac7332b5d4af30420badf96e670243ec59df941d` is complete but not green: title/dependency checks and five Wiz scanners passed; Wiz SAST was skipped. The x86 multicannon package built, then [artifact attestation failed because the fork workflow lacks `id-token` permission](https://github.com/ethereum-optimism/optimism/actions/runs/34524915489/job/103031802906), reproducing the previous head's permission failure. The other seven package jobs were canceled by fail-fast; image/smoke jobs were skipped. Full upstream CI for this fork still requires human authorization.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-09T06:04:42Z",
-      "mergedAt": "2026-09-18T01:04:57Z",
-      "additions": 655,
-      "deletions": 333
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABEAtEeg",
-      "title": "docs: fix create-l2 example path and stale README links",
-      "author": "imitater-dou",
-      "number": 22935,
-      "body": "## Summary\nThree verified docs drifts against `develop` tip `a3e9e91a83cde7708123d52727711baef270f093`:\n\n1. **`docs/public-docs/create-l2-rollup-example/README.md`** told readers to `cd docs/create-l2-rollup-example`, but that path 404s. The example lives at `docs/public-docs/create-l2-rollup-example` (already used correctly in the tutorial `index.mdx`).\n2. **`CONTRIBUTING.md`** linked `README.md#branching-model-and-releases`, which is not an existing heading. The correct anchor is `#development-and-release-process`.\n3. **`README.md` Directory Structure** omitted `op-interop-filter` and `op-supernode`, both present on tip with their own packages/READMEs.\n\n## Repro\n```bash\nTIP=a3e9e91a83cde7708123d52727711baef270f093\n\n# 1) wrong example path (404)\ngh api repos/ethereum-optimism/optimism/contents/docs/create-l2-rollup-example?ref=$TIP\n# Not Found\ngh api repos/ethereum-optimism/optimism/contents/docs/public-docs/create-l2-rollup-example?ref=$TIP\n# DIR ok\nrg -n 'cd docs/create-l2-rollup-example' <(curl -sL https://raw.githubusercontent.com/ethereum-optimism/optimism/$TIP/docs/public-docs/create-l2-rollup-example/README.md)\n\n# 2) dead CONTRIBUTING anchor\nrg -n 'branching-model-and-releases' <(curl -sL https://raw.githubusercontent.com/ethereum-optimism/optimism/$TIP/CONTRIBUTING.md)\nrg -n '^## ' <(curl -sL https://raw.githubusercontent.com/ethereum-optimism/optimism/$TIP/README.md) | rg -i 'branch|release|develop'\n\n# 3) missing directory entries (packages exist)\ngh api repos/ethereum-optimism/optimism/contents/op-interop-filter?ref=$TIP  # DIR\ngh api repos/ethereum-optimism/optimism/contents/op-supernode?ref=$TIP      # DIR\n```\n\n## Change\n- Correct the two `cd` paths in the create-l2 example README.\n- Point CONTRIBUTING at `#development-and-release-process`.\n- Add `op-interop-filter` and `op-supernode` lines to the README directory tree.",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-18T00:28:31Z",
+      "createdAt": "2026-09-10T01:14:58Z",
       "mergedAt": null,
-      "additions": 5,
-      "deletions": 3
+      "additions": 10639,
+      "deletions": 8
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABEAdqXA",
-      "title": "op-deployer: Skip broken Sepolia chain upgrade subtest",
-      "author": "ajsutton",
-      "number": 22933,
-      "body": "The fork upgrade test does not handle chains where U20 is already applied. Its failure blocks merges through `go-tests` and `ci-gate`.\n\nTemporarily skip only `TestEndToEndBootstrapApplyWithUpgrade/opcm_upgrade_test/upgrade_opcm_v2/upgrade_chain_v2`; sibling subtests remain active. Restore coverage when ethereum-optimism/optimism#22934 is resolved. This change does not affect production behavior.\n",
+      "id": "PR_kwDODjvEJM8AAAABC5ZCeA",
+      "title": "interop: atomic demo",
+      "author": "opsuperchain",
+      "number": 22840,
+      "body": "This atomic demo lets an application call a remote contract through its normal ABI, use the returned value in subsequent calls, and roll back when the remote call or its own final check fails. CREATE2 facades provide predictable local addresses. Serial discovery constructs transactions across N chains using the existing CrossL2Inbox, access-list requirements, and cycle rules; no existing protocol contract or execution-client rule changes.\n\nThe sponsored path uses signed ERC-4337 UserOperations, the preinstalled EntryPoint, CREATE2 smart accounts, and an opt-in paymaster. Both successful and reverting application calls consume sponsored gas without requiring ETH in the smart accounts. EntryPoint catches application reverts, so its outer receipt succeeds while the UserOperation event reports failure. The builder bounds discovery, performs one final canonical replay per included chain, checks results and message commitments, and returns the exact verified UserOperations and outer calldata/fee parameters.\n\nFailed result hints force rollback but cannot prove that a user caused the failure. Account owners explicitly authorize sponsorship spending; there is no user billing for discarded simulations, deliberate gas burning, or public builder admission service. Discovery still restarts transactions and uses local signers for intermediate operations. Nested callbacks, ETH/view facades, interactive signed intents, SDM refund reconciliation, and a production adapter for the complete candidate block environment remain outside this prototype. In particular, the RPC adapter retains the parent's base fee and cannot guarantee gas-price-sensitive execution against a changed next-block environment. See `op-test-sequencer/atomic/DESIGN.md` for these boundaries.\n\nCapability regression coverage and the demo are separate commits. Go and contract/security reviews cover the sponsored extension; the fee mismatch found during review is fixed with EVM/RPC regressions and pinned submission fees. A gas-trace regression also checks identical gas supplied and consumed at the application and both proxy calls between final discovery and replay, after fixing the discovery adapter's cold inbox-address surcharge. The original capability changes also received Rust and CI reviews. No review findings were dismissed.\n\nLocal validation passes for all 17 contract PR checks, the tagged EVM suite, affected Go verification packages, Go lint/module checks, and both sponsored real op-reth/supernode scenarios. The node tests verify application rollback, UserOperation success/failure, the exact paymaster deposit debit, and unfunded smart accounts. The full optimized contract suite passes with 2,335 tests and 159 skips; the final developer-mode suite passes with 2,275 tests and 183 skips. An earlier developer run was invalidated by concurrent artifact-cache replacement; the sequential rerun above is clean. The original raw node scenarios, ten native Kona cycle tests, and CI routing scenarios also passed.\n\nFull Kona/challenger execution remains blocked at setup by missing prestate artifacts; workspace Rust clippy is blocked by missing m4 in an unrelated native dependency, and local CircleCI schema/process validation is unavailable because its CLI is absent. Native cycle tests do not substitute for full proof execution. Main upstream CI requires human authorization under the repository's fork policy.\n\nOn the current commit, GitHub dependency, title, and all Wiz checks pass. The image workflow fails at [APK provenance attestation](https://github.com/ethereum-optimism/optimism/actions/runs/34422616906/job/102701496534) with `missing \"id-token\" permission`, the same restricted-fork failure seen on the prior head; the other image builds are canceled and downstream image/smoke jobs are skipped. This draft is not CI-green.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-17T23:41:24Z",
-      "mergedAt": "2026-09-18T00:39:10Z",
-      "additions": 3,
-      "deletions": 0
+      "createdAt": "2026-09-09T21:02:15Z",
+      "mergedAt": null,
+      "additions": 4865,
+      "deletions": 2
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBPSNzQ",
+      "title": "contracts-bedrock: throttle ERC20 and ETH withdrawals",
+      "author": "Inphi",
+      "number": 22676,
+      "body": "## Summary\r\n\r\nAdds development-gated withdrawal throttling for whitelisted ERC20s and ETH using percentage-based token buckets.\r\n\r\n- Supports `L1StandardBridge`, `OptimismPortal2`, and shared `ETHLockbox` custody.\r\n- Uses live escrow balances, lazy exact fractional refill, and revert-on-exhaustion.\r\n- Adds owner configuration/refresh APIs and monitoring events.\r\n- Configures throttles through OPCM instructions behind `WITHDRAWAL_THROTTLE`.\r\n- Centralizes accounting in a reusable two-slot packed `WithdrawalThrottle.State`.\r\n- Conservatively saturates capacities above `uint128.max`.\r\n\r\nCold-path benchmarks measure throttle overhead at approximately 17.3k gas for ERC20 finalization and 14.9k gas for ETH finalization.\r\n\r\n## Testing\r\n\r\nAdded coverage for refill precision, overflow boundaries, reconfiguration, live-stock changes, shared-lockbox behavior, OPCM configuration, storage writes, and cold-path gas benchmarks.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T17:23:43Z",
+      "mergedAt": null,
+      "additions": 4217,
+      "deletions": 51
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAL78dw",
+      "title": "rust: tag upstream mirrors and extend reth bump-review guidance",
+      "author": "sebastianst",
+      "number": 22477,
+      "body": "Several op-crates carry code that mirrors upstream reth, revm or alloy — ports, verbatim\ncopies, overridden defaults, and re-declared surfaces. Nothing marked them, so an upstream\nchange that should force a matching edit here produces no diff and no compile error, and the\ndivergence is only found by someone reading both sides.\n\n**Tags.** Each site gets ``UPSTREAM-MIRROR(<kind>): <crate>@<version> `<symbol>` ``, recording the\nversion the mirror was last verified against. Kinds are `port`, `copy`, `override`, `set` and\n`delegate`.\n\n**Tooling.** `rust/scripts/upstream-mirrors.py` (`just mirrors`) lists every tag and flags any\nwhose recorded version has fallen behind the pin; `--check` fails on a malformed tag. Current\nstate: **24 mirrors, 20 current, 4 frozen.**\n\n**Guides.** `docs/ai/reth-upstream-mirrors.md` covers the grammar, the kinds, and which repo to\ndiff a `reth` mirror against. `docs/ai/reth-update-review.md` and `rust/UPDATING-RETH.md` gain\nmatching bump-review guidance, including triaging the fork's cherry-picks on each bump: list\nwhat the branch carries on top of its upstream base, drop what has landed upstream, replay what\nhas not, and ask when an upstream equivalent was squashed or rewritten.\n\nNo behaviour changes — comments, docs and one new script.\n\n### Follow-up\n\nThe tags describe the duplication; they do not reduce it. #22478 tracks the reduction work:\ndelegating where a seam already exists, deleting outright duplicates, and asking upstream for\nabstractions where none exists today.\n\n🤖 *Co-created with Claude Opus 5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-18T18:52:00Z",
+      "mergedAt": "2026-09-18T11:58:18Z",
+      "additions": 1604,
+      "deletions": 73
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABEA8OhA",
+      "title": "op-devstack: Deploy chains through OPCM on local L1",
+      "author": "ajsutton",
+      "number": 22937,
+      "body": "Stacked on ethereum-optimism/optimism#22939. Merge that compatibility fix first.\n\nLocal test chains now use normal op-deployer flows instead of a separate local deployment coordinator. OPCM and shared implementations remain in L1 genesis. Fixtures start L1, use `Prepare`, `Prestate`, and `Continue` for committed anchors, then start L2. Permissioned-only fixtures use normal `Apply` and still support earlier forks.\n\nFixture funds and pre-fork allocations are included before anchor commitments. Legacy CannonKona fixtures retain output-root anchors. Each chain requires one OPCM deployment transaction, plus any explicitly configured additions. This adds startup cost but exercises the production deployment path.\n\nHistorical super-root migration uses the deployed previous release through the normal upgrade sequence. This removes the fresh-chain migration workaround without assuming OP Mainnet has already upgraded. Current upgrades preserve anchors. Genuine interop migration remains supported.\n\nethereum-optimism/optimism#22936 remains the genesis-only alternative. Do not merge both approaches.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-18T01:13:24Z",
+      "mergedAt": null,
+      "additions": 982,
+      "deletions": 874
     }
   ],
   "codeChanges": {
-    "additions": 658,
-    "deletions": 333,
-    "files": 22,
-    "commitCount": 8
+    "additions": 3331,
+    "deletions": 2203,
+    "files": 90,
+    "commitCount": 126
   },
   "completedItems": [
+    {
+      "title": "rust: tag upstream mirrors and extend reth bump-review guidance",
+      "prNumber": 22477,
+      "type": "other",
+      "body": "Several op-crates carry code that mirrors upstream reth, revm or alloy — ports, verbatim\ncopies, overridden defaults, and re-declared surfaces. Nothing marked them, so an upstream\nchange that should force a matching edit here produces no di",
+      "files": [
+        ".claude/agents/reth-update-reviewer.md",
+        ".claude/skills/update-reth/SKILL.md",
+        "docs/ai/reth-update-review.md",
+        "docs/ai/reth-upstream-mirrors.md",
+        "rust/UPDATING-RETH.md",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/justfile",
+        "rust/kona/bin/client/src/fpvm_evm/tx.rs",
+        "rust/op-alloy/crates/consensus/src/reth_codec.rs",
+        "rust/op-alloy/crates/consensus/src/reth_core.rs",
+        "rust/op-alloy/crates/rpc-types/src/reth_compat.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/rpc/src/witness.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-revm/src/api/exec.rs",
+        "rust/op-revm/src/handler.rs",
+        "rust/op-revm/src/precompiles.rs",
+        "rust/op-revm/src/spec.rs",
+        "rust/op-revm/src/transaction/abstraction.rs",
+        "rust/scripts/upstream-mirrors.py",
+        ".circleci/continue/rust-ci.yml",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs",
+        "rust/op-revm/src/evm.rs",
+        "rust/scripts/test_upstream_mirrors.py",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/provider.rs",
+        "rust/alloy-op-evm/src/tx.rs",
+        "rust/op-reth/crates/payload/src/payload.rs"
+      ]
+    },
+    {
+      "title": "fix(op-node): reject simultaneous fork activations after genesis",
+      "prNumber": 22838,
+      "type": "bugfix",
+      "body": "Companion to [ethereum-optimism/specs#942](https://github.com/ethereum-optimism/specs/pull/942), which adds the rule to the specs. This PR documents it and enforces it.\n\n### Validation\n\n`Config.Check` hand-rolled a `checkFork` chain that st",
+      "files": [
+        "docs/public-docs/op-stack/protocol/network-upgrades.mdx",
+        "op-node/rollup/types.go",
+        "op-node/rollup/types_test.go"
+      ]
+    },
     {
       "title": "op-acceptance-tests: Add skipped cycle prerequisite regression",
       "prNumber": 22832,
@@ -82,6 +224,28 @@
       ]
     },
     {
+      "title": "interop: Exclude acyclic prerequisites from cycle replacement",
+      "prNumber": 22827,
+      "type": "other",
+      "body": "This PR stacks on ethereum-optimism/optimism#22832. It replaces residual indegree detection with iterative strongly connected component detection in Go and Kona.\n\nThe new logic returns only graph vertices that belong to cycles. It includes ",
+      "files": [
+        "op-acceptance-tests/tests/interop/proofs/serial/interop_fault_proofs_test.go",
+        "op-supernode/supernode/activity/interop/cycle.go",
+        "op-supernode/supernode/activity/interop/cycle_test.go",
+        "rust/kona/crates/protocol/interop/src/graph.rs",
+        "rust/kona/crates/protocol/interop/src/rules.rs"
+      ]
+    },
+    {
+      "title": "op-devstack: bound supernode route readiness probes",
+      "prNumber": 22872,
+      "type": "other",
+      "body": "Under loaded acceptance shards, supernode virtual nodes can legitimately take longer than 15 seconds to register their routes. Route readiness now tolerates delayed initialization without allowing a blocked RPC probe to overrun the overall ",
+      "files": [
+        "op-devstack/sysgo/multichain_supernode_runtime.go"
+      ]
+    },
+    {
       "title": "op-deployer: Skip broken Sepolia chain upgrade subtest",
       "prNumber": 22933,
       "type": "tests",
@@ -89,9 +253,177 @@
       "files": [
         "op-deployer/pkg/deployer/integration_test/apply_test.go"
       ]
+    },
+    {
+      "title": "op-node,kona: enforce the Lagoon post-exec span batch slot rules",
+      "prNumber": 22922,
+      "type": "other",
+      "body": "Brings op-node and kona in line with [specs#944](https://github.com/ethereum-optimism/specs/pull/944), which specified the span batch encoding of a post-exec (`0x7D`) transaction. Until that merged, no document stated the layout; both clien",
+      "files": [
+        "op-node/rollup/derive/span_batch.go",
+        "op-node/rollup/derive/span_batch_txs.go",
+        "op-node/rollup/derive/span_batch_txs_test.go",
+        "op-node/rollup/derive/span_channel_out.go",
+        "rust/kona/crates/protocol/protocol/src/batch/errors.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/raw.rs",
+        "rust/kona/crates/protocol/protocol/src/batch/transactions.rs",
+        "rust/kona/tests/proofs/isthmus_setcode_tx_test.go"
+      ]
+    },
+    {
+      "title": "op-reth!: remove legacy import commands",
+      "prNumber": 22942,
+      "type": "other",
+      "body": "The pre-Bedrock OVM import paths have passed their announced deprecation deadline and retain command-specific codecs and database machinery that is no longer supported. Operators can no longer run `import-op` or `import-receipts-op`; use th",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/cli/Cargo.toml",
+        "rust/op-reth/crates/cli/src/app.rs",
+        "rust/op-reth/crates/cli/src/commands.rs",
+        "rust/op-reth/crates/cli/src/commands/import.rs",
+        "rust/op-reth/crates/cli/src/commands/import_receipts.rs",
+        "rust/op-reth/crates/cli/src/lib.rs",
+        "rust/op-reth/crates/cli/src/ovm_file_codec.rs",
+        "rust/op-reth/crates/cli/src/receipt_file_codec.rs",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/primitives/src/bedrock.rs"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: Restore OPCM upgrade test compatibility",
+      "prNumber": 22939,
+      "type": "tests",
+      "body": "Restores upgrade tests after live chains switch to super-root games. OPCM advances to the next major version but retains feature-gated anchor overrides for current devstack fixtures. The tests now preserve each chain's game mode, and histor",
+      "files": [
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/setup/PastUpgrades.sol"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 166.63250576606723,
+      "prScore": 70.93250576606724,
+      "issueScore": 4,
+      "reviewScore": 91.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 142.0202134378498,
+      "prScore": 141.58221343784982,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 105.28420464847449,
+      "prScore": 91.44420464847448,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 98.41137342587652,
+      "prScore": 98.41137342587652,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 70.2239633460731,
+      "prScore": 26.883963346073106,
+      "issueScore": 0,
+      "reviewScore": 43,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 69.5,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 67.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "parkjeongryul",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25222969?v=4",
+      "totalScore": 29.02207887089638,
+      "prScore": 29.02207887089638,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 22.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jarrensj",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/10536950?u=7009b06df84d2f0b88c6bd3e6247f0cd64639b1f&v=4",
+      "totalScore": 21.61306672028108,
+      "prScore": 21.61306672028108,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 20.104666867240017,
+      "prScore": 20.104666867240017,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 15.7,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 13.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "imitater-dou",
       "avatarUrl": "https://avatars.githubusercontent.com/u/287387610?u=12f6d7a042a5f12399623f115bd79d35f35da2c2&v=4",
@@ -101,11 +433,131 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "genedeyev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64695428?u=ad33bad8014fe86563e9462d2e7668c408b1237d&v=4",
+      "totalScore": 12.140295829986474,
+      "prScore": 12.140295829986474,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 11.197022092234121,
+      "prScore": 10.857022092234121,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.754474678730769,
+      "prScore": 7.316474678730769,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 5.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "kabirkbr",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1760288?u=8a67b3ce00b6c0c28f03b8488959396d24fc9d0f&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "huklaa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/129692708?u=c05bfda288117361c6a3e7b4012759cf592f6eb3&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Flotapponnier",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/160007691?u=cdb85b770f1f62a4443e52b978dc907ee60d1049&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 2,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 3
+  "newPRs": 15,
+  "mergedPRs": 9,
+  "newIssues": 5,
+  "closedIssues": 3,
+  "activeContributors": 31
 }
