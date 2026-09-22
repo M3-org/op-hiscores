@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-01 to 2026-10-01, ethereum-optimism/optimism had 175 new PRs (107 merged), 54 new issues, and 81 active contributors.",
+  "overview": "From 2026-09-01 to 2026-10-01, ethereum-optimism/optimism had 193 new PRs (113 merged), 61 new issues, and 83 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABOil9AA",
@@ -56,15 +56,15 @@
       "commentCount": 2
     },
     {
-      "id": "I_kwDODjvEJM8AAAABRMx5Bg",
-      "title": "kona-sp1: revm-precompile 42 pulls sha2 0.11, which has no SP1 patch",
-      "author": "sebastianst",
-      "number": 22890,
+      "id": "I_kwDODjvEJM8AAAABO2ewew",
+      "title": "linter/bigint: suggested fix emits an unbound qualifier when op-service/bigs is aliased or dot-imported",
+      "author": "kyle4814",
+      "number": 22702,
       "repository": "ethereum-optimism/optimism",
-      "body": "## Situation\n\nrevm-precompile 42 (pulled in by reth v2.5.0, #22495) depends on `sha2 = \"0.11\"`. The SP1 guest workspace accelerates SHA-256 by patching `sha2` with [sp1-patches/RustCrypto-hashes](https://github.com/sp1-patches/RustCrypto-hashes), and a `[patch.crates-io]` entry only replaces the version it names: the guest patches [`sha2 0.10.9`](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/kona/sp1/programs/Cargo.toml#L137). sp1-patches has no `patch-sha2-0.11.*` tag (only mirrors of the upstream `sha2-v0.11.0-*` tags), and Succinct's own zkevm still pins patched 0.10.9.\n\nSo the guest now carries two `sha2` crates: patched 0.10.9 (alloy, kona) and vanilla 0.11.0, whose only dependent is revm-precompile. Two consensus paths hash through the vanilla copy inside the zkVM: the SHA-256 precompile (0x02) and the KZG point-evaluation versioned-hash check. Correctness is unaffected; those hashes run as plain RISC-V cycles instead of the SHA-256 syscalls, i.e. a proving-cost regression. `check-sp1-guest-precompile-patches` caught it.\n\n## Workaround in #22495\n\nrevm 42 routes both hashes through its pluggable `Crypto` trait, so kona's `CustomCrypto` now [implements `sha256`](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/kona/sp1/crates/client/src/precompiles/custom.rs#L24) with the client crate's own `sha2`, which is the patched 0.10 line in the guest. The vanilla 0.11 stays compiled in as dead code (`DefaultCrypto`), so the CI check gained an [exemption](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/justfile#L298-L318): an unpatched `sha2` is tolerated only while revm-precompile is its sole dependent.\n\nResidual risk: the guard checks the dependency graph, not call sites. A future revm-precompile that hashes with `sha2` directly instead of through `Crypto` would regress silently.\n\n## Follow-up\n\n1. **SP1 (Succinct):** publish a `patch-sha2-0.11.0-sp1-6.x` tag in sp1-patches/RustCrypto-hashes. revm-precompile ≥ 42 (revm 42, reth ≥ v2.5.0) requires sha2 0.11, so every SP1 program executing a current revm is affected, not only kona.\n2. **Here, once the tag exists:** add `sha2 0.11` to the guest's `[patch.crates-io]`, delete the `CustomCrypto::sha256` override and the check exemption, and restore the strict \"every sha2 resolves from sp1-patches\" invariant.\n\n🤖 *Co-created with Claude Fable 5.1*\n",
-      "createdAt": "2026-09-14T12:20:14Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "body": "### Summary\n\nThe `bigint` custom linter's suggested fix decides two things separately that\nhave to agree:\n\n- **whether** to add the `op-service/bigs` import — `fileHasImport()` matches on the import **path**\n- **what identifier** to qualify the rewritten call with — `buildStrictCall()` hardcodes `\"bigs.\"`\n\nWhen a file already imports `op-service/bigs` under any name other than `bigs`,\nthe import edit is suppressed (path matches) *and* the emitted call references\nan identifier that isn't bound. `golangci-lint --fix` then rewrites the file\ninto code that doesn't compile.\n\nObserved on `develop` at `2258ea57`.\n\n### Reproduction\n\nAdd a testdata package containing a file that imports the package under an\nalias, then run the analyzer with suggested fixes applied:\n\n```go\npackage a\n\nimport (\n\t\"math/big\"\n\n\tmybigs \"github.com/ethereum-optimism/optimism/op-service/bigs\"\n)\n\nvar _ = mybigs.Uint64Strict\n\nfunc aliased() {\n\tx := new(big.Int)\n\t_ = x.Uint64()\n}\n```\n\n`analysistest.RunWithSuggestedFixes` produces:\n\n```go\nimport (\n\t\"math/big\"\n\n\tmybigs \"github.com/ethereum-optimism/optimism/op-service/bigs\"\n)\n...\n\t_ = bigs.Uint64Strict(x)   // undefined: bigs\n```\n\nThe dot-import form (`. \"…/bigs\"`) fails the same way — the fix emits a\n`bigs.` qualifier where the call should be unqualified. A blank import (`_`)\nbinds no identifier at all, so it also needs a usable import added.\n\n### Why this isn't currently caught\n\n`linter/analyzers/bigint/bigint_test.go` uses `analysistest.Run`, which checks\ndiagnostics only and never applies the suggested fixes. The whole fix path —\n`buildStrictCall`, `fileHasImport`, `importEdit`, and the one-shot\n`addImportEdit` logic — has no test coverage today.\n\n### Impact\n\nLatent, not currently triggered. Across `develop` at `2258ea57` I count 188\nplain imports of `op-service/bigs`, zero named aliases, zero dot imports, and\none blank import (`op-service/testutils/depguard/depguard_test.go`) which\ncontains no `.Uint64()` calls. So no file in the tree today would be broken by\n`--fix`; the defect would surface the first time someone aliases that import in\na file containing a flagged call.\n\n### Suggested direction\n\nResolve the package's actual local binding in the file and use it for both\ndecisions, rather than deciding the import and the qualifier independently:\nalias → use the alias; dot import → unqualified call; blank import → treat as\nabsent so a usable import is added.\n\nI have a patch along those lines plus `RunWithSuggestedFixes` golden tests\ncovering the plain, aliased and dot-import forms, if that would be useful — happy\nto open a PR.\n",
+      "createdAt": "2026-08-30T10:42:17Z",
+      "closedAt": "2026-09-17T12:20:58Z",
+      "state": "CLOSED",
       "commentCount": 2
     }
   ],
@@ -80,6 +80,18 @@
       "mergedAt": null,
       "additions": 117287,
       "deletions": 316
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABEc6xMw",
+      "title": "op-private-interop!: establish the private-chain PoC reference",
+      "author": "karlfloersch",
+      "number": 22966,
+      "body": "Establishes an upstream draft reference for the private-chain interop PoC, including private execution, deterministic public projection, message-position resolution before publication, and persistent LightCL recovery. This is experimental work intended for eventual upstreaming after substantial review and refinement.\n\nProjection spans are admitted as a whole before derivation releases their first new block. A pure Go/Kona validator enforces the transaction grammar, claim framing, per-block private OutputV0 records, and the span proof statement. After invalidation or sequencing-window expiry, publication binds to the canonical public parent and the last surviving private checkpoint, including a commitment to intervening replacement inputs. LightCL checks the local private output against the surviving record before adopting it, then retains its rewind, deposit-only replacement, and restart safeguards.\n\nThe verifier remains an explicitly configured insecure stub: publication is operator-attested, and private execution correspondence is not cryptographically verified. Protocol fallback blocks need no publisher proof; a future real proof must cover private execution through their recovery interval. This profile requires fresh deployments with interop and Isthmus active at genesis. Published spans cannot cross future activation blocks under the current rules. Initiating messages retain upstream's strict earlier-timestamp rule; same-timestamp dependencies remain unsupported. Private execution proofs, complete fault-proof execution support, and native ETH bridging/withdrawal settlement remain outside the supported profile.\n\nValidation: targeted Go suites and repository Go lint pass; 662 affected Rust tests, strict clippy, no-std, feature propagation and SP1 guest lock checks pass; 31 private-profile Solidity tests plus three cross-language claim-vector tests pass. A fresh op-up private-interop smoke run passes. The full devstack/sysgo private-interop acceptance run passes all 13 enabled tests in 37m23s, including outage/expiry, invalidation, L1 reorgs, interrupted recovery, and restart after newer valid history. Changed registry artifacts and its interface pass scoped verification. Repository-wide contract tooling also encounters unchanged dispute-game interface mismatches and conflicting duplicate ZK-game build artifacts; those unrelated files are outside this update. The optional production-cadence soaks have not been repeated for this change. Two independent scoped reviews covered derivation parity, recovery, and public-source publication; broader production/security and full-feature reviews remain necessary.\n\nKnown existing CI issue: broad acceptance shards previously exposed the ordinary-follow finality guard rejecting stock EL-sync bootstrap snapshots whose follower finalized label is ahead of its source. That guard is unchanged by this update and remains an open issue for the recovery stack. Prior CI results do not establish that this revision is green.\n\nThis reference excludes atomic coordinator/shared-block builder work and local deployment artifacts. It does not update running devnet images.\n\n**BREAKING CHANGE:** the new claim wire format, per-block output records, contract bytecode and private genesis-output configuration require matching clients/contracts and fresh databases. Preserve the private recovery journal alongside the private execution database. Unsupported private native bridge routes must remain disabled.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-21T16:20:20Z",
+      "mergedAt": null,
+      "additions": 30663,
+      "deletions": 391
     },
     {
       "id": "PR_kwDODjvEJM8AAAABDFKA3A",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 18741,
       "deletions": 204
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABC629Yg",
-      "title": "interop: suspend atomic demo router execution",
-      "author": "opsuperchain",
-      "number": 22850,
-      "body": "Stacked on #22840. The atomic demo now supports nested cross-chain callbacks while retaining one live OP EVM transaction per chain. A on chain A calls B on chain B; B uses the same facade/router mechanism to call a distinct C on chain A; C sees A's pending state and can call back into the still-running B. The callback executes inside each chain's original transaction, preserving pending storage, transient storage, origin, gas ancestry and rollback. Each included chain receives one final replay after callback/result tapes and access lists are materialized; divergence rejects the candidate without discovery restarts or padding.\n\nCanonical callback dispatch runs through ordinary router bytecode. Gas remains local to each chain: top-level application calls have fixed budgets, while callbacks receive half the remaining gas at their dispatch point. Caller context is restored on return, scheduling depth is capped at 32, and the bundle-wide call limit still applies. Failed callback hints force application rollback even if caught. ERC-4337 uses the existing EntryPoint and demo paymaster for normal on-chain gas settlement; it does not reimburse off-chain discovery or prove that a builder honestly attempted success. Existing Go and Kona cycle algorithms remain unchanged.\n\nThe Go/devstack bridge uses pinned candidate-prefix state and exact signed envelopes. This is a **demo node integration**; production payload-service admission/publication and a single-signature wallet flow remain out of scope. ETH forwarding, STATICCALL facades and committing after a caught remote failure remain unsupported. The original Go discovery path remains available for root-driven calls; nested dispatch is connected to the suspended builder.\n\nValidation passed: all 18 contracts PR checks; full developer contract suite (2,290 passed, 183 skipped) and optimized suite (2,350 passed, 159 skipped); all 40 Rust builder tests with artifact-dependent tests enabled, including optimized bytecode; full Rust workspace lint/rustdoc and Go lint; Go bridge/message/filter/verifier tests; and Go/Kona nested-cycle regressions. All four real-node suspended/nested ERC-4337 success/revert cases pass, including exact receipt gas/log parity and sponsor settlement. Contract checks used the configured Foundry remappings plus explicit Solady/OpenZeppelin mappings with automatic remapping disabled to avoid the local duplicate `src/src` import issue.\n\nSolidity, Rust lifecycle/application-effect and Go reviews are complete; all findings were fixed, none dismissed. Shared node fixtures are included by the normal contracts artifact build. #22840's branch remains unchanged.\n\nCI on `ac7332b5d4af30420badf96e670243ec59df941d` is complete but not green: title/dependency checks and five Wiz scanners passed; Wiz SAST was skipped. The x86 multicannon package built, then [artifact attestation failed because the fork workflow lacks `id-token` permission](https://github.com/ethereum-optimism/optimism/actions/runs/34524915489/job/103031802906), reproducing the previous head's permission failure. The other seven package jobs were canceled by fail-fast; image/smoke jobs were skipped. Full upstream CI for this fork still requires human authorization.\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-10T01:14:58Z",
-      "mergedAt": null,
-      "additions": 10639,
-      "deletions": 8
     }
   ],
   "codeChanges": {
-    "additions": 35168,
-    "deletions": 21145,
-    "files": 477,
-    "commitCount": 935
+    "additions": 36074,
+    "deletions": 21366,
+    "files": 491,
+    "commitCount": 1058
   },
   "completedItems": [
     {
@@ -1616,6 +1616,47 @@
       ]
     },
     {
+      "title": "kona-sp1-proposer: batch game state RPC reads",
+      "prNumber": 22904,
+      "type": "other",
+      "body": "## Description\n\nBatch independent `eth_call` requests used to build and refresh proposer game state. Identity and validity discovery now require one RPC round trip each instead of four; lifecycle and bond refreshes require one instead of th",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/README.md"
+      ]
+    },
+    {
+      "title": "contracts-bedrock,op-deployer,kona-sp1: check the SP1 verifier matches the sp1-sdk circuit",
+      "prNumber": 22920,
+      "type": "other",
+      "body": "Closes https://github.com/ethereum-optimism/optimism/issues/18422\n\n## Why\n\nEvery SP1 PLONK proof starts with 4 bytes that identify the circuit it was made with, and the verifier contract rejects any proof whose 4 bytes differ from its own `",
+      "files": [
+        "docs/ai/devfeatures.md",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/standard/standard.go",
+        "packages/contracts-bedrock/interfaces/vendor/ISP1Verifier.sol",
+        "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
+        "packages/contracts-bedrock/test/dispute/zk/MockSP1RejectingVerifier.sol",
+        "packages/contracts-bedrock/test/dispute/zk/MockSP1Verifier.sol",
+        "packages/contracts-bedrock/test/scripts/VerifyOPCM.t.sol",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/crates/proposer/src/contract.rs",
+        "rust/kona/sp1/crates/proposer/src/lib.rs",
+        "rust/kona/sp1/crates/proposer/src/ports.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs",
+        "rust/kona/sp1/crates/proposer/src/verifier.rs",
+        "op-deployer/pkg/deployer/standard/sp1-verifier.json"
+      ]
+    },
+    {
       "title": "contracts-bedrock: reduce batch upgrade gas usage",
       "prNumber": 22919,
       "type": "other",
@@ -1694,6 +1735,20 @@
       ]
     },
     {
+      "title": "op-deployer: Run CLI resume tests in parallel",
+      "prNumber": 22938,
+      "type": "tests",
+      "body": "The nine resume cases run serially on the slowest Go shard. Locally, they take 7m20s with one slot and 1m40s with eight slots, matching CI's parallelism. Both runs use the subprocess-based runner.\n\nCLI calls share command state, environment",
+      "files": [
+        "op-deployer/pkg/deployer/integration_test/cli/cli_runner.go",
+        "op-deployer/pkg/deployer/integration_test/cli/cli_runner_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/cli_testable.go",
+        "op-deployer/pkg/deployer/integration_test/cli/e2e_prepare_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_resume_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/prestate_test.go"
+      ]
+    },
+    {
       "title": "Update release docs: op-proposer v1.16.5, op-challenger v1.9.6, proxyd v4.32.2",
       "prNumber": 22955,
       "type": "other",
@@ -1704,37 +1759,65 @@
         "docs/public-docs/releases/op-proposer.mdx",
         "docs/public-docs/releases/proxyd.mdx"
       ]
+    },
+    {
+      "title": "ci: run APKO smoke tests on Docker-capable runners",
+      "prNumber": 22964,
+      "type": "tests",
+      "body": "## What\n\n- Pin all APKO factory stages to `b87283a8bb6c325da0ef18400eb819b5979a9bd3`.\n- Inherit the factory's Docker-capable smoke runners and image pull and architecture preflight.\n\n## Why\n\nThe previous factory revision defaulted amd64 smo",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    },
+    {
+      "title": "rust: bump imbl-sized-chunks to fix RUSTSEC-2026-0292",
+      "prNumber": 22962,
+      "type": "bugfix",
+      "body": "The `rust-deny` job on `develop` started failing on 2026-09-21 ([CircleCI job 5582634](https://circleci.com/gh/ethereum-optimism/optimism/5582634), [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1789981611688669)) after t",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/deny.toml"
+      ]
+    },
+    {
+      "title": "docs: point REDIRECTS_GUIDE at docs/public-docs/docs.json",
+      "prNumber": 22960,
+      "type": "docs",
+      "body": "## Summary\nUpdates `docs/public-docs/REDIRECTS_GUIDE.md` so contributors open the Mintlify docs config at the correct path.\n\n## Repro / evidence\n- Repo-root `docs.json` on `develop` tip (`a6a088325deebbe6cad74db395b9a079669580b6`): **HTTP 4",
+      "files": [
+        "docs/public-docs/REDIRECTS_GUIDE.md"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 573.3374035884392,
-      "prScore": 278.19940358843917,
-      "issueScore": 8.1,
-      "reviewScore": 286,
-      "commentScore": 1.038,
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 648.1961363084604,
+      "prScore": 537.4801363084604,
+      "issueScore": 14,
+      "reviewScore": 94.5,
+      "commentScore": 2.2159999999999997,
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 547.0545195484556,
-      "prScore": 441.1785195484556,
-      "issueScore": 14,
-      "reviewScore": 90,
-      "commentScore": 1.876,
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 583.7754035884392,
+      "prScore": 278.19940358843917,
+      "issueScore": 8.1,
+      "reviewScore": 296,
+      "commentScore": 1.476,
       "summary": null
     },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 477.46011909453466,
-      "prScore": 275.7221190945346,
+      "totalScore": 553.9978458531594,
+      "prScore": 347.5598458531594,
       "issueScore": 4.3,
-      "reviewScore": 194.5,
-      "commentScore": 2.9379999999999997,
+      "reviewScore": 199,
+      "commentScore": 3.138,
       "summary": null
     },
     {
@@ -1750,21 +1833,41 @@
     {
       "username": "OptimismBot",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 419.058166003635,
+      "totalScore": 419.25816600363504,
       "prScore": 354.75816600363504,
       "issueScore": 2,
       "reviewScore": 61.5,
-      "commentScore": 0.8,
+      "commentScore": 1,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 378.7918648564107,
+      "prScore": 176.35786485641069,
+      "issueScore": 24.6,
+      "reviewScore": 174.5,
+      "commentScore": 3.3339999999999996,
       "summary": null
     },
     {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 346.68220525837523,
-      "prScore": 303.58220525837527,
+      "totalScore": 376.6183255406455,
+      "prScore": 333.5183255406455,
       "issueScore": 0,
       "reviewScore": 42.5,
       "commentScore": 0.6000000000000001,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 347.34476130768564,
+      "prScore": 206.30476130768565,
+      "issueScore": 8,
+      "reviewScore": 132.5,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -1778,30 +1881,20 @@
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 340.34476130768564,
-      "prScore": 206.30476130768565,
-      "issueScore": 6,
-      "reviewScore": 127.5,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 320.8518648564107,
-      "prScore": 176.35786485641069,
-      "issueScore": 12.5,
-      "reviewScore": 129,
-      "commentScore": 2.9939999999999998,
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 289.0371248699124,
+      "prScore": 222.41712486991239,
+      "issueScore": 8.1,
+      "reviewScore": 57.5,
+      "commentScore": 1.02,
       "summary": null
     },
     {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 250.15790057061704,
-      "prScore": 136.25790057061704,
+      "totalScore": 273.50636508521893,
+      "prScore": 159.60636508521893,
       "issueScore": 2,
       "reviewScore": 111.5,
       "commentScore": 0.4,
@@ -1838,13 +1931,33 @@
       "summary": null
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 227.28961095231287,
-      "prScore": 169.66961095231287,
-      "issueScore": 8.1,
-      "reviewScore": 48.5,
-      "commentScore": 1.02,
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 235.27804167893018,
+      "prScore": 199.2020416789302,
+      "issueScore": 0,
+      "reviewScore": 35,
+      "commentScore": 1.0759999999999998,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 231.65704567899468,
+      "prScore": 163.7570456789947,
+      "issueScore": 0,
+      "reviewScore": 67.5,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 227.1543941127394,
+      "prScore": 200.8143941127394,
+      "issueScore": 0,
+      "reviewScore": 26,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -1858,22 +1971,12 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 187.93881710159397,
-      "prScore": 151.86281710159398,
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 181.28622570444506,
+      "prScore": 86.58622570444506,
       "issueScore": 0,
-      "reviewScore": 35,
-      "commentScore": 1.0759999999999998,
-      "summary": null
-    },
-    {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 169.10147373536168,
-      "prScore": 130.90147373536166,
-      "issueScore": 0,
-      "reviewScore": 38,
+      "reviewScore": 94.5,
       "commentScore": 0.2,
       "summary": null
     },
@@ -1888,23 +1991,13 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 165.99845999808224,
-      "prScore": 139.99845999808224,
-      "issueScore": 0,
-      "reviewScore": 26,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 154.69662627382073,
+      "totalScore": 164.39662627382074,
       "prScore": 100.99662627382074,
       "issueScore": 4,
-      "reviewScore": 49.5,
-      "commentScore": 0.2,
+      "reviewScore": 59,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -1918,6 +2011,16 @@
       "summary": null
     },
     {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 138.5733216897283,
+      "prScore": 128.3733216897283,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "teddyknox",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
       "totalScore": 119.54147025337714,
@@ -1928,16 +2031,6 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 118.28622570444504,
-      "prScore": 86.58622570444506,
-      "issueScore": 0,
-      "reviewScore": 31.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "jefr90",
       "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?v=4",
       "totalScore": 102.88068442456594,
@@ -1945,16 +2038,6 @@
       "issueScore": 0,
       "reviewScore": 37.5,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 94.82954779315219,
-      "prScore": 84.82954779315219,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
       "summary": null
     },
     {
@@ -2008,6 +2091,16 @@
       "summary": null
     },
     {
+      "username": "huklaa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/129692708?u=c05bfda288117361c6a3e7b4012759cf592f6eb3&v=4",
+      "totalScore": 59.60240141857371,
+      "prScore": 59.40240141857372,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "pcw109550",
       "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
       "totalScore": 51.864317725792134,
@@ -2028,23 +2121,23 @@
       "summary": null
     },
     {
-      "username": "huklaa",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/129692708?u=c05bfda288117361c6a3e7b4012759cf592f6eb3&v=4",
-      "totalScore": 40.51692293373973,
-      "prScore": 40.31692293373973,
+      "username": "imitater-dou",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/287387610?u=12f6d7a042a5f12399623f115bd79d35f35da2c2&v=4",
+      "totalScore": 41.93936553081196,
+      "prScore": 41.93936553081196,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "wiz-0f98cca50a",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 37.08,
+      "totalScore": 41.78,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 36,
-      "commentScore": 1.08,
+      "reviewScore": 40.5,
+      "commentScore": 1.28,
       "summary": null
     },
     {
@@ -2158,16 +2251,6 @@
       "summary": null
     },
     {
-      "username": "imitater-dou",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/287387610?u=12f6d7a042a5f12399623f115bd79d35f35da2c2&v=4",
-      "totalScore": 19.025410456284302,
-      "prScore": 19.025410456284302,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "asdv23",
       "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
       "totalScore": 18.71419732320115,
@@ -2208,6 +2291,16 @@
       "summary": null
     },
     {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "genedeyev",
       "avatarUrl": "https://avatars.githubusercontent.com/u/64695428?u=ad33bad8014fe86563e9462d2e7668c408b1237d&v=4",
       "totalScore": 12.140295829986474,
@@ -2245,6 +2338,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "softxy464",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/325259794?v=4",
+      "totalScore": 9.645306144334056,
+      "prScore": 9.445306144334056,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -2308,16 +2411,6 @@
       "summary": null
     },
     {
-      "username": "raffaele-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "op-owner-falcorocks",
       "avatarUrl": "https://avatars.githubusercontent.com/u/218228085?v=4",
       "totalScore": 5,
@@ -2330,6 +2423,16 @@
     {
       "username": "its-everdred",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1020682?u=ef69e13586ebc33960d4aa1bf7ef3938bebd59a3&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ericbrown99",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18172972?u=89230abadda9c87431b68c068c6256c932b79e52&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -2488,9 +2591,9 @@
       "summary": null
     }
   ],
-  "newPRs": 175,
-  "mergedPRs": 107,
-  "newIssues": 54,
-  "closedIssues": 43,
-  "activeContributors": 81
+  "newPRs": 193,
+  "mergedPRs": 113,
+  "newIssues": 61,
+  "closedIssues": 44,
+  "activeContributors": 83
 }

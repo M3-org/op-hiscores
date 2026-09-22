@@ -5,20 +5,437 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-21 to 2026-09-22, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 1 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-09-21 to 2026-09-22, ethereum-optimism/optimism had 16 new PRs (6 merged), 7 new issues, and 24 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABSa0Qlg",
+      "title": "op-revm: make the deposit gas-cap exemption a property of OpHandler::tx_gas",
+      "author": "sebastianst",
+      "number": 22971,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Found while reviewing the reth v2.5.2 bump (#22495).\n\nDeposits are exempt from the EIP-7825 transaction gas cap. Today that exemption is implemented only in `alloy_op_evm::OpEvm::transact_raw`, which temporarily replaces `cfg.tx_gas_limit_cap` with `u64::MAX` around a deposit ([`lib.rs`](https://github.com/ethereum-optimism/optimism/blob/0f9780f366/rust/alloy-op-evm/src/lib.rs#L363-L376)). `OpHandler` itself does not override the gas split: revm 42 moved `initial_gas_and_reservoir` into a new defaulted `Handler::tx_gas` (`revm-handler` 42.0.1, `handler.rs:215`), called from `run_without_catch_error`, `run_system_call`, `runtime_oog_result` and the inspector path. A consumer driving published `op-revm` directly (`ExecuteEvm::transact`/`replay`/`transact_commit`) therefore hands an oversized deposit `cap - intrinsic` regular gas and parks the rest in the EIP-8037 reservoir, i.e. a spuriously OOG deposit. `op-revm` is a published crate; Flashbots' `op-rbuilder` redirects it to this repo via `[patch.crates-io]`.\n\nProposed: override `Handler::tx_gas` in `OpHandler` to pass `u64::MAX` for `DEPOSIT_TRANSACTION_TYPE` (next to the existing deposit skip in `validate_env`, [`handler.rs`](https://github.com/ethereum-optimism/optimism/blob/0f9780f366/rust/op-revm/src/handler.rs#L89)), then delete the save/restore in alloy-op-evm. The two deposit-cap tests in `alloy-op-evm/src/tests.rs` should keep passing unchanged, plus a new op-revm-level test.\n\n🤖 *Co-created with Claude Fable 5.1*\n",
+      "createdAt": "2026-09-21T18:43:06Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7a72FZ",
+      "title": "Define sane game parameters/constants for the superchain",
+      "author": "pauldowman",
+      "number": 18423,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Examples: proposer_bond, max_prove_duration, etc.",
+      "createdAt": "2025-11-27T22:09:52Z",
+      "closedAt": "2026-09-21T17:02:08Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM7a71z7",
+      "title": "contracts: Add checks to confirm that SP1Verifier is compatible with the SP1 zkVM releases",
+      "author": "pauldowman",
+      "number": 18422,
+      "repository": "ethereum-optimism/optimism",
+      "body": "We'll need extra checks to ensure this is the case. This is possible by comparing the contract VERIFIER_HASH() against the first four bytes of simple proof and wiring that into CI / op-contracts release.",
+      "createdAt": "2025-11-27T22:09:17Z",
+      "closedAt": "2026-09-21T15:10:17Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABScQwRw",
+      "title": "kona-sp1-proposer: rebuild game state each tick",
+      "author": "Inphi",
+      "number": 22977,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Problem\n\nThe proposer keeps a lot of state between ticks: the game graph, the canonical head, invalid games, pending games, games it cannot prove, and flags for resolution and bond collection.\n\nMuch of this information comes from RPCs or can be calculated from their responses. Keeping it around makes the proposer difficult to follow. When a game becomes invalid, several pieces of state must be updated together. Background tasks also change this state while the tick loop is running.\n\nWe are willing to spend more RPC calls and accept somewhat slower ticks to simplify this. The extra cost should remain reasonable during normal operation.\n\n## Proposed approach\n\nBuild a fresh view of the relevant games each tick:\n\n1. Choose an L1 block and read the relevant chain state at that block.\n2. Discover new games and reread games that may still need attention, including their required ancestors.\n3. Build the game graph, select the canonical head, and decide which games need proving, resolution, or bond collection.\n4. Start work that is not already running.\n\nThe game graph and these decisions should belong to that tick. Background tasks should report their results without having to update a shared game graph. Long-running proofs should continue across ticks, with fresh checks before submitting transactions.\n\n## State to keep\n\nKeep the information needed to avoid losing work or repeating expensive actions:\n\n- A discovery cursor and enough information to handle changes to the chain history.\n- A set of game identifiers that still need attention. This includes older games waiting for resolution or bond collection, games awaiting validation, and games still relevant to choosing a parent.\n- Running jobs, proof request IDs, and completed proof work that can be reused after a retry.\n- One record for a submitted creation, covering both an uncertain transaction outcome and a created game that is not yet visible in the selected L1 snapshot.\n- Downloaded programs and proving keys.\n\nCaching immutable game details is also reasonable if rereading them adds too much RPC traffic. The main goal is to stop maintaining derived game state across ticks.\n\n## Replacing `undefendable`\n\nThe current checks for an invalid proof claim use the superroots at the start and end of the game's span:\n\n- Does the starting root match?\n- Does the ending root match?\n- Does the claim require L1 data newer than the game's L1 head?\n\nThese checks can be repeated using the two endpoints. Do not fetch the entire span just to make this decision: a one-hour span currently involves 3,601 timestamp lookups.\n\nVerifier compatibility can also be checked again. A game with an incompatible verifier may still have a valid claim and valid descendants, so it must be handled differently from an invalid claim.\n\nMissing or untrusted data must leave eligibility undecided. Removing a remembered rejection must not cause the proposer to treat an uncertain game or branch as valid. Reconstruct the necessary checks before selecting parents as well as before proving.\n\n## Requirements\n\n- Avoid scanning the entire factory history every tick. A single old game waiting for its bond should not force repeated reads of every newer game.\n- Do not forget outstanding work just because a game is old or the anchor has advanced.\n- Continue following relevant games created by other proposers; lifecycle ownership depends on available prestates.\n- Preserve protection against duplicate proof requests and duplicate creations after transaction timeouts or confirmation delays.\n- Preserve ancestry checks, the registered anchor trust boundary, and each game's own registry and WETH addresses.\n- Keep failures isolated where possible, so unavailable data for one game does not stop unrelated work.\n- Account explicitly for any history needed by metrics, such as counting a missed deadline only once.\n\n## Validation\n\nUse the existing proposer scenarios to check late transactions, confirmation lag, invalid ancestors, unavailable superroot data, prestate changes, and delayed bond collection.\n\nCompare RPC counts and tick duration with the current implementation for realistic numbers of outstanding games, including hundreds of games and one old stalled game. Count individual RPC methods as well as HTTP requests; batching alone does not remove the underlying work.\n\nThe result should make it possible to understand a tick from its fresh observations and unfinished work, without tracing how previous ticks updated several overlapping caches.\n",
+      "createdAt": "2026-09-21T21:16:53Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABSa500Q",
+      "title": "rust: track full sha2 0.11 migration across host and SP1 guests",
+      "author": "sebastianst",
+      "number": 22974,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Context and conclusion\n\nFollow-up to [the SHA patch review in #22495](https://github.com/ethereum-optimism/optimism/pull/22495#discussion_r4018080020). Record the full migration investigation here; do not expand the current reth update into an ecosystem-wide SHA migration.\n\n**Reth v2.6.0 does not complete the migration.** Both the main Rust workspace and the nested SP1 guest workspace still need SHA-2 0.10 alongside 0.11. Migrating our direct consumers alone cannot eliminate incompatible transitive requirements, so keep both SP1 SHA patches until the guest graph no longer contains 0.10.\n\nThis investigation inspected manifests, lockfiles, dependency trees, and published crate sources. It did not attempt a dependency bump or prove that the proposed migration compiles.\n\n## Reth v2.6.0 evidence\n\n- The [tagged workspace manifest](https://github.com/paradigmxyz/reth/blob/v2.6.0/Cargo.toml#L500) still specifies `sha2 = { version = \"0.10\", default-features = false }`.\n- Its [lockfile](https://github.com/paradigmxyz/reth/blob/v2.6.0/Cargo.lock#L11396-L11415) contains both `sha2 0.10.9` / `digest 0.10.7` and `sha2 0.11.0` / `digest 0.11.3`.\n- [revm-precompile 43.0.2](https://github.com/paradigmxyz/reth/blob/v2.6.0/Cargo.lock#L10569-L10593) directly uses SHA 0.11, but still depends on k256/p256 versions using 0.10. This is the same split as revm-precompile 42.0.1 in #22495.\n- Reth v2.6.0 still resolves `alloy-eips 2.4.2`, `k256 0.13.4`, and `p256 0.13.2`; none removes the remaining guest SHA 0.10 requirement.\n\nDirect `sha2 0.10.9` consumers in the tagged Reth lockfile:\n\n| Consumer | Version |\n| --- | --- |\n| alloy-eips | 2.4.2 |\n| bs58 | 0.5.1 |\n| coins-bip32, coins-bip39, coins-core | 0.12.0 |\n| ed25519-dalek | 2.2.0 |\n| ethereum_hashing | 0.8.0 |\n| k256 | 0.13.4 |\n| libp2p-identity | 0.2.14 |\n| p256 | 0.13.2 |\n| reth-ecies, reth-era, reth-era-downloader, reth-payload-primitives | 2.6.0 |\n\nReth's workspace lockfile is not a claim that every one of these packages is enabled in every binary; feature-specific trees must be checked for each production build.\n\n## Optimism migration scope\n\nAt #22495, the two explicit local version declarations are:\n\n- `rust/Cargo.toml`: `sha2 = { version = \"0.10.9\", default-features = false }`.\n- `rust/kona/sp1/programs/Cargo.toml`: the independent guest workspace has the same declaration.\n\nLocal manifest consumers inheriting one of these pins:\n\n- `rust/kona/bin/client/Cargo.toml`\n- `rust/kona/crates/proof/preimage/Cargo.toml` (normal/optional and dev dependencies)\n- `rust/kona/sp1/crates/client/Cargo.toml`\n- `rust/kona/sp1/crates/zkvm-canary/Cargo.toml`\n- `rust/kona/sp1/programs/super-aggregation/Cargo.toml`\n- `rust/op-alloy/crates/rpc-types-engine/Cargo.toml`\n- `rust/op-reth/crates/chainspec/Cargo.toml`\n- `rust/op-reth/crates/payload/Cargo.toml`\n- `rust/op-revm/Cargo.toml`\n\nThese local sites use ordinary `Sha256`/`Digest` operations. No local source-level blocker was established, but source compatibility with 0.11 remains untested. Updating the two workspace declarations does not update the version requirements inside dependencies.\n\nThe host lockfile also has older external roots, including Alloy, bs58/coins wallet crates, ed25519-dalek, ethereum_hashing, libp2p-gossipsub/libp2p-identity, and the curve crates. Inventory the entire host graph, not just the guest or revm-precompile branch.\n\n## Exact current guest blockers\n\nThe guest lockfile resolves SHA 0.10 through these external packages in addition to local consumers:\n\n| Consumer | SHA requirement | Relationship to reth |\n| --- | --- | --- |\n| [alloy-eips 2.4.2](https://docs.rs/crate/alloy-eips/2.4.2/source/Cargo.toml) | `0.10` | Shared Alloy dependency; SHA feature used by KZG sidecars |\n| [k256 0.13.4](https://docs.rs/crate/k256/0.13.4/source/Cargo.toml) | `0.10` | Shared curve dependency, with an SP1 patch |\n| [p256 0.13.2](https://docs.rs/crate/p256/0.13.2/source/Cargo.toml) | `0.10` | Shared curve dependency, with an SP1 patch |\n| [kzg-rs 0.2.8](https://docs.rs/crate/kzg-rs/0.2.8/source/Cargo.toml) | `0.10.8` | Independent of upstream reth; reth uses c-kzg |\n| [sp1-primitives 6.8.0](https://docs.rs/crate/sp1-primitives/6.8.0/source/Cargo.toml) | `0.10.8` | Independent SP1 runtime dependency |\n| [sp1-zkvm 6.8.0](https://docs.rs/crate/sp1-zkvm/6.8.0/source/Cargo.toml) | `0.10.8` | Independent SP1 runtime dependency |\n\nCargo's caret requirements `0.10` and `0.10.8` exclude 0.11. A workspace pin or the 0.11 patch cannot satisfy those requirements.\n\n## RustCrypto and SP1 prerequisites\n\nSHA 0.10 and SHA 0.11 use different `digest` major versions. A SHA implementation using the 0.11 traits cannot simply stand in for a type required to implement the 0.10 traits. The curve/ECDSA/signature stack and its consumers need compatible version upgrades together.\n\nPublished [k256 0.14.0](https://docs.rs/crate/k256/0.14.0/source/Cargo.toml) and [p256 0.14.0](https://docs.rs/crate/p256/0.14.0/source/Cargo.toml) already require SHA 0.11. This establishes a possible upstream migration path, not a tested drop-in upgrade for Optimism. Parent packages still requiring curve 0.13 must also migrate.\n\nThe current guest patches k256 0.13.4 and p256 0.13.2, and its patched k256 uses a patched signatures/ECDSA dependency for SP1 recovery. Before moving to newer curves, verify availability and compatibility of matching SP1 syscall patches for every selected curve/signature version. Availability of the necessary newer SP1 patch set was not established by this investigation.\n\nThe guest currently carries both:\n\n- `sha2`: `patch-sha2-0.10.9-sp1-6.2.0`\n- `sha2-0-11` with `package = \"sha2\"`: `patch-sha2-0.11.0-sp1-6.2.0`\n\nRetain both while both package versions resolve. Once the guest has no SHA 0.10 consumers, remove its patch and use a single 0.11 `sha2` entry, deleting the dual-version alias/comment.\n\n## Follow-up work and acceptance criteria\n\n- [ ] Upgrade both explicit local SHA pins and migrate the listed in-repo consumers.\n- [ ] Upgrade the relevant Reth/Alloy, wallet/networking, and RustCrypto dependencies so their own SHA requirements no longer introduce 0.10; coordinate the digest/ECDSA/signature changes rather than overriding an incompatible leaf crate.\n- [ ] Adopt compatible SP1 and kzg-rs releases or maintained upstreamable patches that migrate their SHA requirements.\n- [ ] Use and validate matching SP1 crypto patches for every resolved guest SHA/curve/signature version; do not trade dependency deduplication for unaccelerated guest crypto.\n- [ ] Audit both lockfiles and the relevant production dependency graphs: no `sha2 0.10.x` remains. This does not require removing unrelated `digest 0.10` consumers that do not depend on SHA-2.\n- [ ] Build/test affected host and no_std/FPVM configurations, preserving existing SHA/hash/preimage/payload-ID behavior.\n- [ ] Rebuild and exercise the SP1 guests/canary using the normal workflow; verify correct SHA-256 output and use of the SHA compression/extension syscalls. Refresh derived guest artifacts/vkeys as required by that workflow.\n- [ ] Refresh the guest lock and pass `just check-sp1-guest-lock` and `just check-sp1-guest-precompile-patches` from `rust/`.\n- [ ] Only once the old guest SHA line is gone and the 0.11 patch is validated, remove the 0.10 patch and temporary dual-version alias/comment.\n\n## Reproducing the inventory\n\nRun from the Optimism repository root:\n\n```sh\ncargo tree --manifest-path rust/Cargo.toml --workspace --locked -i sha2@0.10.9\ncargo tree --manifest-path rust/Cargo.toml --workspace --locked -i sha2@0.11.0\ncargo tree --manifest-path rust/kona/sp1/programs/Cargo.toml --workspace --locked -i sha2@0.10.9\ncargo tree --manifest-path rust/kona/sp1/programs/Cargo.toml --workspace --locked -i sha2@0.11.0\n```\n\nIn an upstream reth v2.6.0 checkout, use `cargo tree --workspace --locked -i sha2@0.10.9` and the equivalent 0.11.0 query. The package versions above describe the inspected snapshots; also audit lockfile package entries and feature/target-specific trees when doing the migration rather than relying only on the absence of the exact 0.10.9 version.\n\nRelated but separate: #21767 concerns SP1 EIP-2537 acceleration, and #22973 tracks other evidence gaps from #22495. Neither tracks this full SHA migration.\n",
+      "createdAt": "2026-09-21T18:52:31Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABEc6xMw",
+      "title": "op-private-interop!: establish the private-chain PoC reference",
+      "author": "karlfloersch",
+      "number": 22966,
+      "body": "Establishes an upstream draft reference for the private-chain interop PoC, including private execution, deterministic public projection, message-position resolution before publication, and persistent LightCL recovery. This is experimental work intended for eventual upstreaming after substantial review and refinement.\n\nProjection spans are admitted as a whole before derivation releases their first new block. A pure Go/Kona validator enforces the transaction grammar, claim framing, per-block private OutputV0 records, and the span proof statement. After invalidation or sequencing-window expiry, publication binds to the canonical public parent and the last surviving private checkpoint, including a commitment to intervening replacement inputs. LightCL checks the local private output against the surviving record before adopting it, then retains its rewind, deposit-only replacement, and restart safeguards.\n\nThe verifier remains an explicitly configured insecure stub: publication is operator-attested, and private execution correspondence is not cryptographically verified. Protocol fallback blocks need no publisher proof; a future real proof must cover private execution through their recovery interval. This profile requires fresh deployments with interop and Isthmus active at genesis. Published spans cannot cross future activation blocks under the current rules. Initiating messages retain upstream's strict earlier-timestamp rule; same-timestamp dependencies remain unsupported. Private execution proofs, complete fault-proof execution support, and native ETH bridging/withdrawal settlement remain outside the supported profile.\n\nValidation: targeted Go suites and repository Go lint pass; 662 affected Rust tests, strict clippy, no-std, feature propagation and SP1 guest lock checks pass; 31 private-profile Solidity tests plus three cross-language claim-vector tests pass. A fresh op-up private-interop smoke run passes. The full devstack/sysgo private-interop acceptance run passes all 13 enabled tests in 37m23s, including outage/expiry, invalidation, L1 reorgs, interrupted recovery, and restart after newer valid history. Changed registry artifacts and its interface pass scoped verification. Repository-wide contract tooling also encounters unchanged dispute-game interface mismatches and conflicting duplicate ZK-game build artifacts; those unrelated files are outside this update. The optional production-cadence soaks have not been repeated for this change. Two independent scoped reviews covered derivation parity, recovery, and public-source publication; broader production/security and full-feature reviews remain necessary.\n\nKnown existing CI issue: broad acceptance shards previously exposed the ordinary-follow finality guard rejecting stock EL-sync bootstrap snapshots whose follower finalized label is ahead of its source. That guard is unchanged by this update and remains an open issue for the recovery stack. Prior CI results do not establish that this revision is green.\n\nThis reference excludes atomic coordinator/shared-block builder work and local deployment artifacts. It does not update running devnet images.\n\n**BREAKING CHANGE:** the new claim wire format, per-block output records, contract bytecode and private genesis-output configuration require matching clients/contracts and fresh databases. Preserve the private recovery journal alongside the private execution database. Unsupported private native bridge routes must remain disabled.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-21T16:20:20Z",
+      "mergedAt": null,
+      "additions": 30663,
+      "deletions": 391
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABDFKA3A",
+      "title": "op-private-interop,contracts!: derive and recover a private ETH chain public projection",
+      "author": "karlfloersch",
+      "number": 22866,
+      "body": "Private interop keeps application execution private while publishing the message history needed by the public interop set. One private-chain genesis produces a deterministic public projection, using standard span-batch transport and cross-chain dependency checks. This replaces #22729 and uses the existing `private-interop/devnet-readiness` branch unchanged at `9f679db23ac12be10049766843495a03eb2993c2`.\n\nOrdinary L1 deposits execute against private state. On the public projection, user deposits are included as successful no-ops with no minting, state changes, execution gas or logs; authenticated system deposits still execute. After sequencing-window expiry, interop invalidation or an L1 reorg, the private node returns to a surviving authenticated checkpoint and rebuilds canonical deposit-only intervals before publication resumes. Recovery ancestry persists across restarts, and batch publication waits for private reconciliation and an authorized batcher epoch.\n\nThe PoC remains operator-attested; execution-proof enforcement and private withdrawal settlement are future work. Native ETH bridge routes remain disabled in the private profile. The diff also includes the companion L1 event-certificate contracts, which are separate from the projection mechanism. Versioned bundle tooling, remote private-pair smoke, and deposit/recovery/reorg/rotation/cadence tests support devnet preparation.\n\n**BREAKING CHANGE:** projection deposit execution, the claimed-follow RPC and recovery journal configuration require matching clients/contracts and fresh databases when migrating from earlier prototypes. Configure the persistent recovery path and ordinary projection rollup RPC as documented in [DEVNET.md](https://github.com/karlfloersch/optimism/blob/9f679db23ac12be10049766843495a03eb2993c2/op-private-interop/docs/DEVNET.md). Installing the custom native ETH bridge implementation requires explicit send/relay permissions.\n\nValidation on this unchanged revision:\n\n- Fourteen targeted Go test packages pass, covering private interop, batcher, claim-follow, chain container, driver, engine, sequencing, source client, smoke and devstack.\n- Ten focused Rust projection/genesis tests and 78 targeted Solidity tests pass (Foundry lite profile). Main-workspace and SP1-guest Rust formatting pass.\n- Full Go lint finds two existing issues: unchecked `big.Int.Uint64` in the position resolver and import ordering in the private interop preset. The fixes prepared locally are intentionally excluded to preserve this revision.\n- Current upstream `develop` has three merge conflicts with this branch, in devstack configuration/signer setup. No upstream reconciliation is included.\n- Full protocol/security review, full devnet acceptance and the production-cadence soak remain outstanding for this draft.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-11T01:49:06Z",
+      "mergedAt": null,
+      "additions": 25726,
+      "deletions": 347
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBsZ1nQ",
+      "title": "feat: add private interop cleanroom implementation",
+      "author": "opsuperchain",
+      "number": 22720,
+      "body": "## Summary\n\n- add the private-interop private/rendering chain pair, contracts, deterministic rendering codec, builder, and claim-follow path\n- integrate the pair with op-deployer, op-batcher, op-supernode, op-interop-filter, devstack, and op-up\n- add private-pair-aware interop smoke coverage and a design document\n- harden the implementation after adversarial review: structurally close deposits, bind rendering inputs and emitters, cap amplification, remove the separate operator key/premine, disable the stock ETH path, and make rendering execution fully zero-fee\n\n## `op-up --private-interop` topology\n\n```text\n                         L1 EL + beacon node\n                          ^              |\n                          | batches      | derives\n         +----------------+---+      +---v-----------------+\n         |                    |      |                     |\n   normal A batcher    private-interop batcher       shared supernode\n         ^                    ^                      public view: {A, B-render}\n         |                    |                         |          |\n A sequencer op-node   B private op-node               |          |\n         |                    |                         |          |\n A sequencer op-reth   B private op-reth         A verifier   B rendering\n   public chain 901    private chain 902           op-reth       op-reth\n                              ^                                     |\n                              +------ `/902/claimed` ----------------+\n```\n\n- Chain A is an ordinary public OP chain with a stock batcher and proposer.\n- Chain B has two different histories sharing chain ID 902: the sequenced, user-facing custom-gas-token private chain and a public, derived-only rendering with no sequencer or mempool.\n- The private-interop batcher reads private B blocks, converts exported logs into claim/replay transactions, checks the rendering parent, and posts an ordinary channel to L1.\n- The shared supernode derives and judges `{A, B-render}` using the stock message database and cross-safety logic. It has no private-chain access and does not know that B is a rendering.\n- The only private-interop addition in the supernode is the `/902/claimed` follow endpoint. It reconstructs the committed private-B safe block reference from public rendering claims for the private op-node; it does not alter judging.\n- Private B and rendering B are never P2P-peered: they deliberately have the same chain ID but different genesis hashes and block contents.\n- `--smoke` runs `interopsmoke` in the same process so private receipt positions can be resolved to their canonical public rendering positions.\n\n## Verification\n\n- `go test ./op-batcher/batcher ./op-chain-ops/interopsmoke/... ./op-deployer/pkg/deployer/state ./op-interop-filter/filter ./op-private-interop/... ./op-supernode/supernode/chain_container -count=1`\n- focused op-deployer private-interop genesis/rollup integration tests\n- 49/49 private-interop Solidity tests\n- 24/24 L2-to-L2 messenger Solidity tests\n- 15/15 L2 genesis Solidity tests\n- `op-up --private-interop --smoke`: chain identity, native transfers, valid messages in both directions, rendered private-chain message resolution, and invalid-message reorg all pass\n\n## Notes\n\nThis is intentionally a draft for design and security review. The stock Superchain ETH bridge smoke case is skipped on the custom-gas-token private half; that path is closed by design and `NativeMintBridge` is the sanctioned liquidity path.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-01T04:06:39Z",
+      "mergedAt": null,
+      "additions": 18896,
+      "deletions": 215
+    },
+    {
+      "id": "PR_kwDODjvEJM76LVBS",
+      "title": "ci: expose authoritative post-merge gate",
+      "author": "joshklop",
+      "number": 22213,
+      "body": "## Summary\n\n- publish a stable `circleci-checks / post-merge-gate` check for webhook pushes to `develop`\n- aggregate the exact CircleCI pipeline and exact-SHA GitHub Actions push runs, including conditional Rust and security routes\n- fail closed on missing, unsuccessful, canceled, timed-out, or unreadable workflows while supporting provider and gate reruns\n- enforce explicit gate membership for future post-merge workflows with policy-drift tests\n\n## Testing\n\n- `bun test ./.circleci/scripts/post-merge-gate.test.ts`\n- `bash .circleci/scripts/test-decision-tree.sh`\n- `bash .circleci/scripts/merge-configs.sh`\n- `bash .circleci/scripts/test-continuation-params.sh /tmp/merged-config.yml`\n- `shellcheck` on changed shell scripts\n\nCloses https://github.com/ethereum-optimism/protocol-team/issues/259\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-03T19:03:18Z",
+      "mergedAt": null,
+      "additions": 1421,
+      "deletions": 22
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABEdhewA",
+      "title": "op-node: publish blocks after inserting them, not before",
+      "author": "geoknee",
+      "number": 22967,
+      "body": "Explores the design in #22585's follow-up direction: keep the async publish queue, but trigger it *after* the local insert rather than before.\n\nDesign write-up behind this: the archaeology, the cost analysis, and what each ordering deletes.\n\n## Why the current order exists\n\nIt is not the original design. Before #8905 (Jan 2024) op-node inserted and *then* gossiped, synchronously in the driver state loop. #8905 — titled \"op-node: Gossip Before Import\" — reversed it, and this is the entire stated rationale:\n\n> There is interest in gossiping earlier in the derivation pipeline. … We would like to insert the gossiping of the block between the receiving and reinserting of the block to **avoid waiting any longer than needed before gossiping**.\n\nNo linked issue, no design doc, no measurement. The reuse buffer `Get()` exposes was never a goal either — it is cleanup after the reordering, in the author's words: *\"we want to avoid regenerating a new block at the same height if we've already begun gossiping this one.\"*\n\nTwo maintainers have since designed away from it:\n\n- **#14580** (protolambda, still open): *\"Blocks are currently 'async-gossiped'. This becomes obsolete with flash-blocks, and **never won us that much time**. It did however **add fragility**…\"*\n- **op-test-sequencer** `fullseq.Next()` runs `Seal → Sign → Commit → Publish`, where `Commit` is `apis.CommitAPI.CommitBlock` — *\"processes the block, and sets it as canonical block of the chain.\"*\n- **#22545** states lokahi has *\"no reliance on publish-after-insert gossip ordering\"* — kona's sequencer already inserts first.\n\n## What the ordering costs today\n\nPublishing before adopting means op-node can hand peers a block it never makes canonical. Verifiers adopt a gossiped unsafe payload as their head on arrival, so if the insert then fails and the sequencer seals a sibling at that height, every verifier reorgs.\n\nThe sharpest case is the denylist: `ErrPayloadDenied` is checked **inside** `ProcessPayload`, so a block on the SuperAuthority denylist is broadcast to the network *before* the sequencer consults the denylist.\n\n## The invariant this buys\n\n| | invariant |\n|---|---|\n| before | op-node may publish a block it never adopts |\n| after | anything peers receive is already the sequencer's canonical head |\n\nA queued block can be **late**, but never one the sequencer has to **take back**. That is what makes the queue safe to be aggressive with — retry, queue deeper, batch, delay; none of it can produce a reorg. The publish queue stops being a correctness surface and becomes a pure liveness surface.\n\n## The queue\n\n`SimpleAsyncGossiper` now holds a bounded queue drained by a dedicated goroutine. `Gossip` and `Clear` only take a mutex, so neither waits for the network.\n\nPreviously the publish ran inline in the gossiper's select loop over unbuffered channels, so with a remote signer the sequencer's `Clear()` — issued 1–2 ms after `Gossip()` — blocked for the rest of an HTTPS round-trip, and that stall came 1:1 out of the next block's build window (#22554). A publish also now carries a deadline of its own, which the signer round-trip did not.\n\nA failed publish is retried at the **front**: peers follow the chain block by block, so a gap they cannot cross is worse than a delay. Retries are paced at 1s, because `Topic.Publish` runs op-node's own block validator inline and synchronously on the publishing node and so can fail in about a millisecond.\n\n`maxPublishAttempts` bounds head-of-line blocking **without** needing the permanent-vs-transient error classification of #22798 — giving up after a fixed number of paced attempts bounds the stall directly. Queue overflow evicts the oldest block.\n\n## What the interface loses\n\n`Get()` is gone. It existed only to let the sequencer re-insert a block it had already gossiped. With it go the reuse buffer, the resume-from-buffer branch in `RunAction`, the `toBlockRef` hook, and four of the six `Clear()` call sites — `handleInvalid`, `onPayloadSuccess` and both stale paths no longer need to unpublish anything, because nothing was published.\n\nThe interface is now `Gossip` / `Clear` / `Start` / `Stop`. Net **−60 lines** in `sequencer.go`.\n\n## What is deliberately kept\n\n`BuildingState.Envelope` holds the sealed block from the moment it is committed to the conductor. **This guards the conductor invariant, not the gossip one** — I initially thought insert-first made it removable and that was wrong. Re-sealing after a temporary insert failure would stake recovery on the engine still holding the build job, and losing it would abandon a block the conductor has already committed and build a different one at that height.\n\nA nice consequence: because the envelope now lives in the build state, a forkchoice update onto a competing branch drops it automatically, with no explicit discard. `TestSequencerDropsRetainedBlockOnCompetingHead` pins that.\n\nThis does **not** fix the other half of #14580 — the conductor is still committed before the block is published. Unchanged here.\n\n## Reviewer note\n\n`insertAndPublish` keeps a re-plan guard (`ref.ParentHash != s.unsafeHead.Hash`) that I believe is now **unreachable**: `onForkchoiceUpdate` clears the build job whenever the head leaves `building.Onto`, and a sealed `Ref` always extends `Onto`. It is kept, and labelled as such at the call site, because the cost of being wrong is a halted sequencer. Happy to drop it if a reviewer agrees it is dead.\n\n## The number that decides how far to take this\n\nThe latency peers lose is exactly `insert_time` in the `\"Inserted new L2 unsafe block\"` log line. Some findings on actually getting it, because it is less straightforward than it looks:\n\n- **There is no Prometheus metric for it.** Despite the name, `logBlockProcessingMetrics` only logs. `sequencer_sealing_seconds` covers `engine_getPayload`, not the insert. So today this is a log-parsing question, not a dashboard question.\n- **`insert_time` is an upper bound**, not the figure for the variant that publishes after `newPayload`: it is measured to `updateEngineFinish`, so it includes the concluding forkchoice update.\n- **The split already exists on the follower path.** `insertUnsafePayload` logs `\"Inserted new L2 unsafe block (synchronous)\"` with separate `newpayload_time` and `fcu2_time`. A follower re-executing a gossiped block is an upper bound on the sequencer's own `newPayload` cost (the sequencer's EL has caches warm from building it), so this gives a usable bound today with no code change.\n- **Isolating the sequencer is harder than it looks**, and three separate traps bite:\n  - `|= \"Inserted new L2 unsafe block\"` substring-matches *both* lines, since the follower line only appends `(synchronous)`. Use `| logfmt | msg = \"Inserted new L2 unsafe block\"` instead, which is immune by construction.\n  - Filtering `| build_time != \"0s\"` looks like it selects sequencer-built blocks. It does not, in **either** direction. Derivation-built blocks have non-zero `build_time` and log the *non-synchronous* line — `onBuildSealed` emits `PayloadProcessEvent` whenever `DerivedFrom != zero`, reaching the same `logBlockProcessingMetrics`. And genuine sequencer blocks can have `build_time == \"0s\"`, because the insert-retry path passes a zero `buildStarted` — so that filter silently drops exactly the retries, which are the slow tail this PR cares about.\n  - The log line carries no field distinguishing a sequencer insert from a derivation insert, so the query has to be pinned to the confirmed sequencer **pod**. On a conductor set only the current leader emits it.\n- Values are `common.PrettyDuration` strings (`521.23µs`, `1.234ms`), so `| unwrap duration(insert_time)`, never `| unwrap insert_time`.\n\nAlso, one correction to my own #22554: the ~1–2 ms figure there is probably too low. op-geth's `newPayload` does **not** short-circuit for the sequencer's own block — `GetBlockByHash` misses because `getPayload` never inserts into the chain, so it falls through to `InsertBlockWithoutSetHead`, a full re-execution against warm caches, proportional to gas used. There is no sequencer fast path in `miner/payload_building.go`.\n\nIf that cost turns out to matter, there is a cheaper variant: publish after `newPayload` returns VALID but before the forkchoice write (safety is identical — a nil `ProcessPayload` already tolerates a transient forkchoice failure), or after only the stale and denylist checks, which are pure in-memory and cost nothing.\n\nAdding an insert-time histogram next to `sequencer_sealing_seconds` would make this measurable properly, before and after. Deliberately left out to keep this PR small — happy to split it out if reviewers want the baseline. Two notes for whoever picks it up: the wiring cost is near zero (`EngineController` already holds `opmetrics.Metricer` and already calls `RecordSequencerSealingTime`), but pricing the newPayload-only variant needs one real change — `processNewPayload` must also return the instant `engine_newPayload` returned, since the sequencer path currently fuses newPayload and the FCU into a single `insert_time`. Buckets should start well under the sealing histogram's 5ms floor; a `521µs` insert falls entirely inside its first bucket, which cannot tell \"nearly free\" from \"5ms\" — the exact distinction at issue here.\n\n## Metrics (second commit)\n\nThe reorder trades sequencer-side latency for a guarantee about what peers hold, and none of that trade was measurable. Five metrics, one per question:\n\n| Metric | Answers |\n|---|---|\n| `sequencer_insert_seconds{stage=\"newpayload\"\\|\"forkchoice\"\\|\"total\"}` | What does the reorder cost, and is the newPayload-only variant worth it? |\n| `sequencer_publish_handoff_seconds` | Is the hot path actually free? (regression guard for #22554) |\n| `publish_queue_len` | Is the queue healthy? Should be 0 in steady state. |\n| `publish_delay_seconds` | Queued-to-published — added to insert time, what the ordering costs peers. |\n| `unsafe_payload_arrival_delay_seconds` | **What peers actually experience**, measured on the receiving node. |\n\nThat last one is the one that matters most: how far behind its own timestamp a gossiped block arrives. It is the only metric that shows the end-to-end effect, and the only thing that directly measures what #8905 claimed to be optimising without ever measuring it. It depends on sequencer↔receiver clock skew, so read it in aggregate or as before/after on one node, not as an absolute. No new call site — it folds into the existing `RecordReceivedUnsafePayload` hook on the gossip receipt path.\n\nTwo details worth a reviewer's eye:\n\n- **`total` is observed in its own right**, not derived. Summing buckets across label values pools the observations rather than convolving the distributions, so it would not give the p99 of the sum.\n- **Buckets start at 50µs.** A sub-millisecond insert sits entirely inside the first bucket of `sequencer_sealing_seconds` (5ms), which cannot tell \"nearly free\" from \"5ms\" — exactly the distinction this PR turns on.\n\n`sequencer_insert_seconds` is recorded only from `ProcessPayload`, whose sole production caller is the sequencer, so the derivation and follower paths are untouched and the metric name stays honest. It needed `processNewPayload` to also return the instant `engine_newPayload` came back.\n\n**No op-reth change.** Its engine API comes from the external `op-rs/reth` dependency rather than this repo, and reth already exposes per-method `engine.rpc` latency histograms including `new_payload_v*`. Subtracting those from `sequencer_insert_seconds{stage=\"newpayload\"}` isolates RPC overhead from EL execution, which is a better split than anything we could add here.\n\nThis also supersedes the \"adding a histogram would make this measurable\" note above — it is now in the PR.\n\n## Testing\n\nEvery behaviour has a test verified by reverting the code rather than assumed:\n\n- inlining the publish in `Gossip` → `TestAsyncGossiperDoesNotBlockOnPublish` fails\n- dropping instead of retrying → `TestAsyncGossiperRetriesAtFront` fails\n- unbounded attempts → `TestAsyncGossiperGivesUpAfterMaxAttempts` fails\n- moving `Gossip` back before `ProcessPayload` → `TestSequencer_StaleBuild`, all three `TestSequencerProcessPayloadErrors` cases and `TestSequencerStopAfterStaleProcess` fail\n\nPlus seal-order publishing, queue overflow eviction, `Clear` against an in-flight publish, prompt `Stop` during a retry pause, `Start`/`Stop` idempotency, and a concurrency hammer.\n\n`go build ./...` clean, `./op-node/...` green under `-race`, `op-golangci-lint run ./op-node/rollup/...` reports 0 issues, `go mod tidy -diff` clean.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-21T17:34:09Z",
+      "mergedAt": null,
+      "additions": 805,
+      "deletions": 352
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 906,
+    "deletions": 221,
+    "files": 30,
+    "commitCount": 73
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 1
+  "completedItems": [
+    {
+      "title": "kona-sp1-proposer: batch game state RPC reads",
+      "prNumber": 22904,
+      "type": "other",
+      "body": "## Description\n\nBatch independent `eth_call` requests used to build and refresh proposer game state. Identity and validity discovery now require one RPC round trip each instead of four; lifecycle and bond refreshes require one instead of th",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/README.md"
+      ]
+    },
+    {
+      "title": "contracts-bedrock,op-deployer,kona-sp1: check the SP1 verifier matches the sp1-sdk circuit",
+      "prNumber": 22920,
+      "type": "other",
+      "body": "Closes https://github.com/ethereum-optimism/optimism/issues/18422\n\n## Why\n\nEvery SP1 PLONK proof starts with 4 bytes that identify the circuit it was made with, and the verifier contract rejects any proof whose 4 bytes differ from its own `",
+      "files": [
+        "docs/ai/devfeatures.md",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/standard/standard.go",
+        "packages/contracts-bedrock/interfaces/vendor/ISP1Verifier.sol",
+        "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
+        "packages/contracts-bedrock/test/dispute/zk/MockSP1RejectingVerifier.sol",
+        "packages/contracts-bedrock/test/dispute/zk/MockSP1Verifier.sol",
+        "packages/contracts-bedrock/test/scripts/VerifyOPCM.t.sol",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/crates/proposer/src/contract.rs",
+        "rust/kona/sp1/crates/proposer/src/lib.rs",
+        "rust/kona/sp1/crates/proposer/src/ports.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs",
+        "rust/kona/sp1/crates/proposer/src/verifier.rs",
+        "op-deployer/pkg/deployer/standard/sp1-verifier.json"
+      ]
+    },
+    {
+      "title": "op-deployer: Run CLI resume tests in parallel",
+      "prNumber": 22938,
+      "type": "tests",
+      "body": "The nine resume cases run serially on the slowest Go shard. Locally, they take 7m20s with one slot and 1m40s with eight slots, matching CI's parallelism. Both runs use the subprocess-based runner.\n\nCLI calls share command state, environment",
+      "files": [
+        "op-deployer/pkg/deployer/integration_test/cli/cli_runner.go",
+        "op-deployer/pkg/deployer/integration_test/cli/cli_runner_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/cli_testable.go",
+        "op-deployer/pkg/deployer/integration_test/cli/e2e_prepare_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_resume_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/prestate_test.go"
+      ]
+    },
+    {
+      "title": "ci: run APKO smoke tests on Docker-capable runners",
+      "prNumber": 22964,
+      "type": "tests",
+      "body": "## What\n\n- Pin all APKO factory stages to `b87283a8bb6c325da0ef18400eb819b5979a9bd3`.\n- Inherit the factory's Docker-capable smoke runners and image pull and architecture preflight.\n\n## Why\n\nThe previous factory revision defaulted amd64 smo",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    },
+    {
+      "title": "rust: bump imbl-sized-chunks to fix RUSTSEC-2026-0292",
+      "prNumber": 22962,
+      "type": "bugfix",
+      "body": "The `rust-deny` job on `develop` started failing on 2026-09-21 ([CircleCI job 5582634](https://circleci.com/gh/ethereum-optimism/optimism/5582634), [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1789981611688669)) after t",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/deny.toml"
+      ]
+    },
+    {
+      "title": "docs: point REDIRECTS_GUIDE at docs/public-docs/docs.json",
+      "prNumber": 22960,
+      "type": "docs",
+      "body": "## Summary\nUpdates `docs/public-docs/REDIRECTS_GUIDE.md` so contributors open the Mintlify docs config at the correct path.\n\n## Repro / evidence\n- Repo-root `docs.json` on `develop` tip (`a6a088325deebbe6cad74db395b9a079669580b6`): **HTTP 4",
+      "files": [
+        "docs/public-docs/REDIRECTS_GUIDE.md"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 76.53772675862476,
+      "prScore": 71.83772675862475,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 63,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 63,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 62.55557194363301,
+      "prScore": 32.85557194363301,
+      "issueScore": 0,
+      "reviewScore": 29.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 61.74751391759951,
+      "prScore": 52.74751391759951,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 61.15593411465716,
+      "prScore": 60.81593411465715,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 57.940000000000005,
+      "prScore": 0,
+      "issueScore": 12.1,
+      "reviewScore": 45.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 52.56981406775889,
+      "prScore": 47.72981406775889,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 47.339224577336225,
+      "prScore": 47.339224577336225,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 43.7437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 29.936120282270263,
+      "prScore": 29.936120282270263,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 23.348464514601886,
+      "prScore": 23.348464514601886,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "imitater-dou",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/287387610?u=12f6d7a042a5f12399623f115bd79d35f35da2c2&v=4",
+      "totalScore": 22.913955074527657,
+      "prScore": 22.913955074527657,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "huklaa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/129692708?u=c05bfda288117361c6a3e7b4012759cf592f6eb3&v=4",
+      "totalScore": 19.085478484833985,
+      "prScore": 19.085478484833985,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 10.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 9.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "softxy464",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/325259794?v=4",
+      "totalScore": 9.645306144334056,
+      "prScore": 9.445306144334056,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 7,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ericbrown99",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/18172972?u=89230abadda9c87431b68c068c6256c932b79e52&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 16,
+  "mergedPRs": 6,
+  "newIssues": 7,
+  "closedIssues": 2,
+  "activeContributors": 24
 }
