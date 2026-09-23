@@ -5,20 +5,81 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-22 to 2026-09-23, ethereum-optimism/optimism had 2 new PRs (0 merged), 0 new issues, and 2 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-09-22 to 2026-09-23, ethereum-optimism/optimism had 13 new PRs (7 merged), 4 new issues, and 23 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABSa0OyQ",
+      "title": "op-reth: eth_simulateV1 ignores the EIP-7825 gas cap on OP chains after reth v2.5.2",
+      "author": "sebastianst",
+      "number": 22969,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Found while reviewing the reth v2.5.2 bump (#22495).\n\nreth v2.5.2's `eth_simulateV1` sets `tx_gas_limit_cap = Some(u64::MAX)` whenever EIP-8037/Amsterdam is off ([`helpers/call.rs`](https://github.com/ethereum-optimism/reth/blob/0fbe428518594611bdd3fdd822eb5968823c8e66/crates/rpc/rpc-eth-api/src/helpers/call.rs#L147-L151)), not only when `validation: false`. No OP fork maps to Amsterdam ([`spec.rs`](https://github.com/ethereum-optimism/optimism/blob/0f9780f366/rust/op-revm/src/spec.rs#L50)) and OP leaves the cap unset to use revm's spec-derived fallback ([`env.rs`](https://github.com/ethereum-optimism/optimism/blob/0f9780f366/rust/alloy-op-evm/src/env.rs#L123-L127)), so on every Karst+ chain a *validated* simulate accepts a transaction with `gas_limit > 2^24` that block validation rejects. `OpEthApi` inherits the default ([`call.rs`](https://github.com/ethereum-optimism/optimism/blob/0f9780f366/rust/op-reth/crates/rpc/src/eth/call.rs#L7)).\n\nThe upstream comment ties EIP-7825 to Amsterdam's accounting, but the cap itself is Osaka, so this looks wrong for L1 Osaka too. Options: upstream-first fix (lift the cap only when `validation` is false, or derive it from the spec), or an OP `simulate_v1` override. Either way `estimate_gas_7825`-style coverage exists for `eth_estimateGas` but not for simulate.\n\n🤖 *Co-created with Claude Fable 5.1*\n",
+      "createdAt": "2026-09-21T18:43:02Z",
+      "closedAt": "2026-09-22T15:49:03Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABSeK8uw",
+      "title": "op-supernode: Full rewind deletes backfilled logs and invalidates valid blocks",
+      "author": "ajsutton",
+      "number": 22984,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this while I reviewed ethereum-optimism/optimism#22846.\n\nA full rewind deletes every chain's logsDB, including the cold-start backfill. The backfill is the history the node needs to verify the timestamps it is about to replay. After the delete, the node invalidates valid blocks.\n\n## Event sequence\n\n1. `buildRewindPlan` returns a plan with a nil `TargetHeads` when `lastTS <= firstVerifiableTimestamp` (`interop.go:953-961`).\n2. `applyRewindPlan` then calls `db.Clear()` on every chain (`interop.go:1065-1070`).\n3. `clearLocked` deletes the whole range and resets `firstBlock` to 0 (`db.go:474-484`).\n4. Verification resumes at the first verifiable timestamp with an empty logsDB.\n5. `verifyExecutingMessage` calls `Contains` for an initiating message that the backfill held (`algo.go:229-231`).\n6. `Contains` returns `interop.ErrFuture` because `hasBlocks` is false (`db.go:287-289`).\n7. `verifyInteropMessages` treats the error as an invalid executing message (`algo.go:129-141`).\n8. The round applies `DecisionInvalidate` and replaces a valid block.\n\n## Why the delete is wrong\n\nThe logsDB holds history below `firstVerifiableTimestamp` on purpose. `runColdStartBackfill` seals one message expiry window of history before the first verified timestamp (`log_backfill.go:100-166`). A rewind of the verified state to that timestamp does not make the backfill invalid. It is exactly the history the node needs to verify that timestamp again.\n\n## Why the node does not recover\n\nCold start runs once, from `Start` (`interop.go:333`). `waitingForSync` never returns to true, so no backfill re-runs in process.\n\nA restart repairs the node only if the verifiedDB also emptied. If any commit survives, `tryInitFromVerifiedDB` resumes and skips backfill (`interop.go:342-350`).\n\n## Reachability\n\nThe window is narrow. A rewind removes one timestamp per round.\n\n`progressInterop` calls `buildRewindPlan(*obs.LastVerifiedTS)` (`interop.go:736`). `observeRound` sets `LastVerifiedTS` from `verifiedDB.LastTimestamp()` (`interop.go:600-603`). So the plan always targets the last verified timestamp, not a reorg depth. The loop then re-checks `SameL1Chain` on the new last entry (`interop.go:635-643`) and repeats.\n\nThe verifiedDB has no pruning. `firstTimestamp` moves only in `Rewind`, and only downward or to empty (`verified_db.go:254-290`). So `first` stays at the first round the node ever verified, for the life of the data directory.\n\nTo reach `lastTS <= first`, the node must walk its verified DB back to the single first entry. The L1 reorg must invalidate the L1 inclusion of every verified timestamp. In practice the reorg depth must exceed the age of the verified DB. That gives two reachable cases:\n\n1. A young verified DB. A node that cold-started minutes ago holds a recent `L1Inclusion` on its first entry. An ordinary one or two block L1 reorg reaches past it. If the node has verified exactly one timestamp, `last == first` and any L1 inconsistency triggers the clear at once.\n2. After an operator wipes the data directory, which is the documented recovery path. That returns the node to case 1.\n\nA mature node is effectively immune. The reorg would have to be deeper than the whole run.\n\nA rewind to the interop activation timestamp is harmless. `runColdStartBackfill` clamps `commonStart` to `activationTimestamp` (`log_backfill.go:122`), so nothing is retained below activation, and a message cannot reference a pre-activation block anyway.\n\nThe damaging case is a node that cold-starts long after activation. `advanceColdStartInit` sets `verificationStartTimestamp` to `max(activation, max_c firstSafeHeadTS)` (`log_backfill.go:31-38`). The backfill below that point is real data, and the clear destroys it.\n\n## Expected behavior\n\nTruncate the logsDB to the last block that backfill sealed, instead of a full delete. Keep every block below `firstVerifiableTimestamp`. Clear the database only when the rewind reaches the interop activation timestamp.\n\nIn process, this is sufficient. After the verifiedDB empties, `observeRound` reads `firstVerifiableTimestamp`, which falls back to the unchanged `verificationStartTimestamp` (`interop.go:235-245`). So verification resumes at the same point that backfill ended.\n\nRe-run backfill if the resume point can ever move later than the backfill end. `verifyCanAddTimestamp` rejects a gap larger than one block time (`logdb.go:193-198`), so a later resume point would wedge the seal path.\n\n## Related\n\n- ethereum-optimism/optimism#20627 added `reconcileLogsDBTail` and the backfill-path clear.\n- ethereum-optimism/optimism#19287 introduced the L1 reorg rewind handling.\n- ethereum-optimism/optimism#22846 covers storage errors that cause invalidation. This issue is a separate cause of the same outcome.\n",
+      "createdAt": "2026-09-22T02:22:28Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABKXQR0w",
+      "title": "proposer: Read DGF from superchain registry (kona-genesis crate)",
+      "author": "Inphi",
+      "number": 22051,
+      "repository": "ethereum-optimism/optimism",
+      "body": "For standard networks, the DGF proxy address should be read from the superchain-registry rather than be required as an input.\n\nSimilar to the op-proposer, a `--network` flag should be accepted to auto configure the proposer to use the appropriate DGF proxy.",
+      "createdAt": "2026-07-27T17:09:13Z",
+      "closedAt": "2026-09-22T16:33:07Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPmnWvQ",
+      "title": "contracts-bedrock: harden OPCMMigrator and the MigrationValidator",
+      "author": "0xOneTony",
+      "number": 22771,
+      "repository": "ethereum-optimism/optimism",
+      "body": "`migrate()` is the one-time entrypoint that moves a set of chains onto shared dispute contracts and a shared `ETHLockbox`. Goal is to improve and harden the migrate flow.\n\n`OPContractsManagerMigrator` need to fix:\n\n- Nothing prevents `migrate()` from being called twice. A second call deploys another set of shared proxies and re-migrates the portals onto them.\n- `migrate()` does not check that `SuperchainConfig`, the portals or the SystemConfigs are on the OPCM's release; `upgrade()` does. \n- `_makeSystemConfigInitArgs` exists twice with different signatures, in `OPContractsManagerV2` and in the migrator.\n- `migrate()` grants `PERMIT_ALL_CONTRACTS_INSTRUCTION` to deploy three known proxies, while `deploy()` documents itself as the only place that grants it. Scope the permission to those three.\n- Shared contracts are initialized directly with `chainSystemConfigs[0]`. Verify this is fully replaced by the lockbox binding from PR #22760.\n\n`OPContractsManagerMigrationValidator`:\n\n- The legacy-games-cleared checks are gated on a chain's derived `DisputeGameFactory` differing from the first chain's, which is never true after a successful migration. Take the old factory addresses as input and run the checks unconditionally.\n- The clearing list checks six game types; the migrator zeroes seven. Add `ZK_DISPUTE_GAME` and derive both lists from one constant.\n- The input has no anchor root, init bonds, respected game type or expected shared addresses, and nothing checks balances or stale pauses. Add these to the input and assert them: intended anchor root and respected game type, init bonds, shared contract addresses, old lockboxes and portals hold no ETH, no scoped pause active on a retired identifier.",
+      "createdAt": "2026-09-03T22:28:46Z",
+      "closedAt": "2026-09-22T22:08:22Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABQjr76g",
+      "title": "op-supernode: Do not invalidate blocks on initiating-log storage errors",
+      "author": "ajsutton",
+      "number": 22846,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this during the interop implementation review.\n\nOp-supernode converts initiating-log storage failures into protocol invalidity.\n\nEvent sequence:\n\n1. `verifyExecutingMessage` calls `sourceDB.Contains` (`activity/interop/algo.go:213-215`).\n2. `Contains` can return WAL read or block-record decode errors (`raftwallogdb/db.go:301-307`).\n3. `verifyInteropMessages` treats every returned error as an invalid executing message (`algo.go:122-145`).\n4. The round returns an invalid head and applies `DecisionInvalidate` (`interop.go:510-517,721-887`).\n5. Op-supernode can therefore replace an otherwise valid block because its local log store failed.\n\nThis differs from executing-block reads. `OpenBlock` errors abort the verification round and retry later (`algo.go:100-103`).\n\nDefault backfill already covers the complete expiry window. This issue concerns storage errors, not custom backfill configuration.\n\nExpected behavior: distinguish protocol-invalid lookups from local storage failures. Retry or halt on storage failures without invalidating the L2 block.",
+      "createdAt": "2026-09-10T00:17:02Z",
+      "closedAt": "2026-09-22T22:06:50Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABEgS3hw",
-      "title": "op-supernode: Prevent local-safe promotion while verified state is stale",
-      "author": "ajsutton",
-      "number": 22982,
-      "body": "An L1 reorg can pull local-safe back below the last verified interop timestamp. In that window the supernode never rewinds its verified state, and the node labels blocks as safe that no chain verified. The next round asks for a timestamp above local-safe, so the readiness check fails with `ethereum.NotFound` and the round returns before it checks the accepted L1 inclusion. Derivation then advances local-safe on the new canonical branch, and the engine controller returned local-safe because the recorded verified head was ahead. The forkchoice update sent that unverified block as the safe hash.\n\nThe supernode now checks the accepted L1 inclusion before the frontier, and a rewind takes priority over a wait. The engine controller now uses the cross-safe fallback, which returns the validated cross-safe cache or finalized state.\n\nOperators see the safe tag hold at the last verified block instead of advancing during this window. The safe tag also holds after a resync until local-safe passes the verified head. The extra L1 call per not-ready round can turn a transient L1 failure into a logged round error, where the round was silent before.\n\nFixes ethereum-optimism/optimism#22845\n",
+      "id": "PR_kwDODjvEJM8AAAABClzssw",
+      "title": "contracts-bedrock: Improve OPCMv2 migration flow and harden validator checks",
+      "author": "0xiamflux",
+      "number": 22807,
+      "body": "## Context\r\n\r\n`OPCM.migrate()` is an irreversible operation that moves independent chains onto a shared ETHLockbox, DisputeGameFactory and AnchorStateRegistry, sweeps every chain's ETH into the shared lockbox, and invalidates all outstanding withdrawal proofs. `OPContractsManagerMigrationValidator` is meant to prove afterwards that this landed correctly.\r\n\r\n**Three main gaps**\r\n\r\n`migrate()` could run twice. A second call drains the first shared lockbox into a new one and clears every game implementation from the shared factory, breaking every chain in the set. \r\n\r\nIt accepted chains from any release. A chain one release behind came out with its portal, `SystemConfig` and dispute contracts upgraded, while its bridges and messengers stayed the same. `upgrade()` refuses that while `migrate()` performed it silently.\r\n\r\nThe validator's per-chain clearing checks were behind a condition that cannot hold after a successful migration, so they never ran.\r\n\r\n## Changes\r\n\r\n**Migrator**\r\n\r\n- Reject chains that already have `Features.INTEROP` enabled. `migrate()` is the only thing in that sets that flag on L1, so it means\r\n  migration already ran.\r\n- Require every chain to be on this OPCM's release. `isPermittedMigrateSequence` accepts the same OPCM, or a replacement OPCM for the\r\n  same release. It refuses next-major, because that would allow upgrades through the migrate function.\r\n- Enforce the `SuperchainConfig` version floor that `_apply` already enforced.\r\n- Grant proxy-deployment permission by name for the replacing the blanket ALL grant.\r\n\r\n**Validator**\r\n\r\n- Run the legacy-clearing checks unconditionally, taking each chain's pre-migration factory as input.\r\n- Assert migration by checking anchor root, respected game type, init bonds, expected shared addresses, portal and retired-lockbox balances, and stale pauses on retired identifiers.\r\n\r\n**Shared**\r\n\r\n- One canonical list of the game types migration clears, in `GameTypes`.\r\n- One encoder for `SystemConfig.initialize`, in `OPContractsManagerUtilsCaller`.\r\n- Both sequence predicates moved into OPContractsManagerUtils. Keeping them inline pushed OPCMv2 past EIP-170.\r\n\r\n**Test Plan**\r\n\r\n- Every new guard proved by negative control.\r\n- The re-entry guard was proved against real corruption first. Before the fix, a second migration one second later succeeded, wiped the shared factory's `SUPER_PERMISSIONED` implementation, and drained the shared lockbox to zero.\r\n- size-check passes. OPCMv2 runtime is 24,553 with 23 bytes of margin.\r\n- lint, snapshots, unused-imports and test-validation clean.\r\n\r\nCloses #22771 ",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-22T00:09:54Z",
-      "mergedAt": null,
-      "additions": 148,
-      "deletions": 20
+      "createdAt": "2026-09-08T00:25:55Z",
+      "mergedAt": "2026-09-22T22:08:20Z",
+      "additions": 1475,
+      "deletions": 386
     },
     {
       "id": "PR_kwDODjvEJM8AAAABEgTQxQ",
@@ -28,19 +89,183 @@
       "body": "Op-supernode treated every executing-message verification error as proof that the\nmessage broke the interop rules. A local log store failure therefore invalidated an\notherwise valid L2 block. The raft WAL log store returns a read error or a\nblock-record decode error from `Contains`, and the verification round turned that\nerror into `DecisionInvalidate`. A node with a damaged local log store could replace\na correct block.\n\nThe round now separates the errors that report an invalid message from local\nfailures. A local failure aborts the round, the same way an `OpenBlock` failure\nalready aborts it. The activity logs the error, counts it, and retries the round\nafter the error backoff.\n\nEffect on operators: a node with a healthy log store sees no change. A node with a\ndamaged log store stalls on the affected timestamp instead of invalidating a block.\nThe stall is visible through the `ActivityErrors` counter for the interop activity.\nAn operator must repair the log store to make the node progress again.\n\nFixes ethereum-optimism/optimism#22846\n\nBoth review agents asked whether `ErrUnknownChain`, `ErrFuture` and `ErrSkipped`\nalso report local state rather than an invalid message. This PR keeps their current\ntreatment, because that question is separate from the storage-error bug. Tell me if\nyou want a follow-up issue.\n",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-09-22T00:10:52Z",
+      "mergedAt": "2026-09-22T22:06:49Z",
+      "additions": 323,
+      "deletions": 72
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABEqUbqQ",
+      "title": "docs: Add a safedb review guide and reviewer agent",
+      "author": "ajsutton",
+      "number": 22998,
+      "body": "The safe head database has no specification, and its failures are silent. A gap in recorded history makes the backward walk answer with a later L1 block and no error. Local-safe and cross-safe also hold the same block in the modes most unit tests run in, so a passing test does not prove which label a ref carries. Five bugs have reached this path; none was caught by the compiler or by the unit tests.\n\nThe guide states the behaviour contract, the invariants, and the traps. It covers both implementations — op-node's pebble store and `kona-safedb`'s rocksdb one — and marks what is implementation-local. The stored layout is not a compatibility surface; the RPC answers are.\n\nIt describes the reset truncation as using local-safe, which ethereum-optimism/optimism#22997 makes true.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-22T23:00:26Z",
       "mergedAt": null,
-      "additions": 108,
-      "deletions": 52
+      "additions": 307,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABEpHndQ",
+      "title": "op-batcher: price auto DA for Glamsterdam",
+      "author": "joshklop",
+      "number": 22996,
+      "body": "Auto DA selection currently keeps using the pre-Glamsterdam calldata model after the fork, underestimating submission costs and potentially choosing calldata when blobs are cheaper. This corrects the comparison for the EIP-2780 base cost and EIP-7976 calldata floor, so operators using auto DA continue to select the lower-cost mode across Glamsterdam.\n\nNo linked issue.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-22T20:23:06Z",
+      "mergedAt": null,
+      "additions": 234,
+      "deletions": 45
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABDY8eow",
+      "title": "op-interop-filter: Reject pre-Lagoon initiating messages",
+      "author": "ajsutton",
+      "number": 22886,
+      "body": "Initiating messages from pre-Lagoon blocks could pass validation while retained logs remained in the database. This change enforces the source chain activation boundary in admission and background validation. Fresh databases also wait for the source Lagoon activation block before ingestion.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/22829",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-14T03:07:35Z",
+      "mergedAt": "2026-09-22T23:54:43Z",
+      "additions": 181,
+      "deletions": 20
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 50
+    "additions": 2393,
+    "deletions": 536,
+    "files": 51,
+    "commitCount": 93
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "contracts-bedrock: Improve OPCMv2 migration flow and harden validator checks",
+      "prNumber": 22807,
+      "type": "other",
+      "body": "## Context\r\n\r\n`OPCM.migrate()` is an irreversible operation that moves independent chains onto a shared ETHLockbox, DisputeGameFactory and AnchorStateRegistry, sweeps every chain's ETH into the shared lockbox, and invalidates all outstandin",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerMigrationValidator.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerUtils.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerV2.sol",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerMigrationValidator.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerMigrator.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerStandardValidator.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerUtils.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerV2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/L1/OPContractsManagerStandardValidator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrationValidator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerUtils.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerUtilsCaller.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/src/dispute/lib/Types.sol",
+        "packages/contracts-bedrock/test/L1/OPContractsManagerStandardValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerMigrationValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol",
+        "packages/contracts-bedrock/test/setup/ForkL1Live.s.sol",
+        "packages/contracts-bedrock/test/setup/PastUpgrades.sol",
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "packages/contracts-bedrock/src/libraries/Constants.sol"
+      ]
+    },
+    {
+      "title": "op-interop-filter: Reject pre-Lagoon initiating messages",
+      "prNumber": 22886,
+      "type": "other",
+      "body": "Initiating messages from pre-Lagoon blocks could pass validation while retained logs remained in the database. This change enforces the source chain activation boundary in admission and background validation. Fresh databases also wait for t",
+      "files": [
+        "op-interop-filter/filter/interfaces.go",
+        "op-interop-filter/filter/lockstep_cross_validator.go",
+        "op-interop-filter/filter/lockstep_cross_validator_test.go",
+        "op-interop-filter/filter/logsdb_chain_ingester.go",
+        "op-interop-filter/filter/logsdb_chain_ingester_test.go",
+        "op-interop-filter/filter/logsdb_integration_helpers_test.go",
+        "op-interop-filter/filter/mock_test.go",
+        "op-interop-filter/filter/backend_test.go"
+      ]
+    },
+    {
+      "title": "op-reth: zero tx-scoped L1 fee fields on PostExec receipts",
+      "prNumber": 22941,
+      "type": "other",
+      "body": "## Why\n\nCloses DoD item 3 of [protocol-team#333](https://github.com/ethereum-optimism/protocol-team/issues/333). Specs: ethereum-optimism/specs#948.\n\nA post-exec (`0x7D`) transaction pays no fees and is charged no gas, but `OpReceiptFieldsB",
+      "files": [
+        "rust/op-reth/crates/rpc/src/eth/receipt.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt/tests.rs"
+      ]
+    },
+    {
+      "title": "op-supernode: Do not invalidate blocks on log storage errors",
+      "prNumber": 22983,
+      "type": "other",
+      "body": "Op-supernode treated every executing-message verification error as proof that the\nmessage broke the interop rules. A local log store failure therefore invalidated an\notherwise valid L2 block. The raft WAL log store returns a read error or a",
+      "files": [
+        "op-supernode/supernode/activity/interop/algo.go",
+        "op-supernode/supernode/activity/interop/algo_test.go",
+        "op-supernode/supernode/activity/interop/logdb.go",
+        "op-core/interop/interop.go",
+        "op-supernode/supernode/activity/interop/logdb_test.go",
+        "op-supernode/supernode/activity/interop/raftwallogdb/db.go",
+        "op-supernode/supernode/activity/interop/raftwallogdb/db_test.go"
+      ]
+    },
+    {
+      "title": "kona-sp1: resolve proposer DGF from network",
+      "prNumber": 22980,
+      "type": "other",
+      "body": "Standard network deployments currently have to duplicate the `DisputeGameFactory` proxy address in proposer configuration, which can drift from the Superchain Registry. Operators can instead select a predefined network name such as `op-main",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/config.rs"
+      ]
+    },
+    {
+      "title": "op-devstack: observe timed-out leadership transfers",
+      "prNumber": 22989,
+      "type": "other",
+      "body": "Hashicorp Raft can report `leadership transfer timeout` after `TimeoutNow` is already in flight, causing conductor acceptance tests to reject a handoff that completes moments later. The DSL now lets only that ambiguous timeout fall through ",
+      "files": [
+        "op-devstack/dsl/conductor.go"
+      ]
+    },
+    {
+      "title": "op-node: Bound the EL-sync safe label by the verified head",
+      "prNumber": 22986,
+      "type": "other",
+      "body": "At EL-sync completion `insertUnsafePayload` picks the head derivation resumes from — the safedb tip, or the offset-retracted synced tip. That is a local-safe head. It then published the same value as the forkchoice safe hash and as the cros",
+      "files": [
+        "op-node/rollup/engine/engine_controller.go",
+        "op-node/rollup/engine/engine_el_sync_completion_test.go"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 63.746306144334056,
+      "prScore": 6.808306144334055,
+      "issueScore": 2,
+      "reviewScore": 54.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 58.07325563437451,
+      "prScore": 53.23325563437451,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
@@ -50,11 +275,151 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 39.29365360835138,
+      "prScore": 27.35565360835137,
+      "issueScore": 2,
+      "reviewScore": 9.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 23.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 18.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 16.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 16,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 15.535267030694534,
+      "prScore": 15.535267030694534,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 13.50243897916644,
+      "prScore": 13.50243897916644,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 10.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 9.182050201102209,
+      "prScore": 8.98205020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.754474678730769,
+      "prScore": 7.316474678730769,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 2,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 2
+  "newPRs": 13,
+  "mergedPRs": 7,
+  "newIssues": 4,
+  "closedIssues": 6,
+  "activeContributors": 23
 }
