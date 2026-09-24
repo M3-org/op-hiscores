@@ -5,20 +5,440 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-23 to 2026-09-24, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-09-23 to 2026-09-24, ethereum-optimism/optimism had 9 new PRs (7 merged), 3 new issues, and 29 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABS1-RBQ",
+      "title": "op-challenger: support ZK dispute games in CLI commands",
+      "author": "pauldowman",
+      "number": 23009,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Some op-challenger CLI commands do not yet support ZK games.\n\n| Command | Status | Observed |\n|---|---|---|\n| `list-games` | works | lists game type 10 |\n| `move --attack` | works | attaches `challengerBond()` |\n| `list-claims` | fails | `unsupported game type: zk` |\n| `list-credits` | fails | `unsupported game type: zk` |\n| `game-proposal-outputs` | fails | `unsupported game type: zk` |\n| `resolve` | fails | `unsupported game type: zk` |\n| `resolve-claim` | fails | `unsupported game type: zk` |\n| `create-game` | builds an invalid tx | reverts `BadExtraData()` |\n| `run-trace` | accepts `zk`, cannot run it | no executor for the type |\n\n## Root cause\n\n`list-claims`, `list-credits`, `game-proposal-outputs`, `resolve` and `resolve-claim` all construct via `NewFaultDisputeGameContract` (`faultdisputegame.go:84`), which has no ZK case. The generic `NewDisputeGameContract` (`disputegame.go:52`) does — that is why `move` works.\n\n## In scope\n\n**`resolve`** — switch `resolve.go:15` to `DisputeGameContract` / `NewDisputeGameContract`, as `move.go:90` does. `ResolveTx()` is already on that interface.\n\n**`list-credits`** — `GetBalanceAndDelay` and `GetWithdrawals` are already on `ZKDisputeGameContract` (`zkdisputegame.go:79-81`). Only the recipient set differs: challenger, prover and game creator instead of the claim tree.\n\n**`game-proposal-outputs`** — needs `--superroot-rpc` / `superroot_atTimestamp`, because `L2SequenceNum` is a super-root timestamp, not a block number. **Already broken for `super-cannon-kona` and `super-permissioned`** for the same reason: they construct fine, then feed a timestamp to `OutputAtBlock` (`game_proposal_outputs.go:174`, `superfaultdisputegame.go:63`). That file has no super-game test coverage. The logic exists in `game/zk/actor.go`'s `SuperRootProvider`.\n\n**`create-game`** — needed by the `op-challenger-invalid-proposal` CronJob (`ethereum-optimism/k8s`, every 12h). `createGameParams` (`gamefactory.go:313`) has no ZK case; ZK `extraData` is a 4-byte `parentIndex` plus a `SuperRootProof` (`ZKDisputeGame.sol:189-205`). Reuse the existing `encodeSuperRootProof` and add `--parent-index` defaulting to `uint32.max`, which anchors to the `AnchorStateRegistry` root and keeps the cron invocation unchanged. Note `initBonds(10)` is non-zero (0.021 ETH on zk-proofs-1) and is forfeited on each invalid proposal.\n\n**ZK game state** — nothing exposes `claimData()` (proposal status, challenger, prover, deadline), which is what confirms a proof landed after a challenge. Needs a ZK branch in `list-claims` or a new subcommand.\n\n**`list-games`** (cosmetic) — prints `Claims 0`, because `GetClaimCount` is only called for `FaultDisputeGameContract` (`list_games.go:134`).\n\n`credits.go`, `resolve.go`, `resolve_claim.go` and `create_game.go` have no test files; follow the stub-RPC pattern in `move_test.go`.\n\n## Out of scope\n\n**`resolve-claim`** — ZK games have no `resolveClaim`. Improve the error message only.\n\n**`run-trace`** — ZK has no VM trace. The bug is that `--run zk/...` is accepted: `PlayableGameTypes` (`game_type.go:43`) backs the parser, but `serverExecutorForGameType` (`runner/factory.go:61`) has no case for it — same for `alphabet` and `fast`. Add a separate trace-types list; `PlayableGameTypes` must keep ZK, since it also backs `--game-type`, config validation and the monitor.\n",
+      "createdAt": "2026-09-23T21:06:31Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABSyAlNA",
+      "title": "op-reth: align the historical debug_executionWitness override with upstream (mode, by-hash, canonical witness)",
+      "author": "sebastianst",
+      "number": 23004,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Follow-ups from the reth v2.5.2 review (#22495) on the historical-proofs `debug_executionWitness` override ([`debug.rs`](https://github.com/ethereum-optimism/optimism/blob/6dd74cc398551bc95d86cd6beae935b95ca548a6/rust/op-reth/crates/rpc/src/debug.rs#L68)). All pre-date the bump.\n\n- **Mode parameter.** Upstream's `debug_executionWitness(block, mode)` takes an optional `ExecutionWitnessMode`; the override drops it, so canonical mode is silently ignored on proofs-history nodes. Mirror the signature and propagate the mode.\n- **`debug_executionWitnessByBlockHash`.** Not declared in the override, so on a proofs-history node it falls through to the stock live-state handler. Either declare it (now trivial, the override accepts a `BlockId`) or drop it from the served surface like `eth_getMultiProof` (#22990).\n- **Canonical witness mode in the proofs backend.** `OpProofsStateProviderRef::witness` ignores its mode, always includes root nodes and returns unsorted map values. Implement canonical mode or reject it explicitly.\n- **Non-canonical hash regression.** #22495 rejects a hash that names a non-canonical block in the proofs state factory and selects the witness parent by hash; there is no end-to-end test with a fork block yet. Add one to the node integration tests.\n\n🤖 *Co-created with Claude Fable 5.1*\n",
+      "createdAt": "2026-09-23T15:05:32Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABSvcYwQ",
+      "title": "changwan out of office",
+      "author": "geoknee",
+      "number": 23001,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2026-09-23T11:24:28Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABB869dQ",
+      "title": "kona-node,kona-chainview: pilot a SQL chain view compiled by Feldera behind the chainview feature",
+      "author": "teddyknox",
+      "number": 22743,
+      "body": "**Experiment, not a merge proposal.** This is the pilot from a design study on using upstream Feldera (crates.io `dbsp` + the `sql-to-dbsp` compiler, no fork) to replace hand-maintained derived state in kona-node with one incrementally maintained circuit. It is opened as a draft so the delta can be discussed with real code and numbers; the write-up with the reasoning, the reflections, and the proposed next steps is the design study `docs/feldera-in-kona-node.md` in the opql repo (rendered copy: https://claude.ai/code/artifact/a3ea095f-5297-4c98-8841-35f6008f0fe7).\n\n**Why.** kona-node keeps the consequences of chain facts in several places by hand: the safe head is copied into four structures, one L1 poll fans out to three consumers, finality lives in a map that is cleared on every pipeline reset and finalizes by number, `optimism_syncStatus` makes three L1 RPCs per call, and `optimism_safeHeadAtL1Block` is unimplemented. Each copy is a place for a reorg or a reset to leave state behind.\n\n**What changes for an operator.** The chain view is not optional: the paths it replaces are deleted, not gated. Concretely:\n\n- Finality is driven by the chain view's `finalized_l2` view and sent to the engine by hash, guarded to be above the engine's finalized head and at or below the last confirmed safe head. It survives pipeline resets. `L2Finalizer`, the finalized-L1 fan-out to derivation, and finalize-by-number are gone.\n- `optimism_syncStatus` serves its L1 fields from the chain view's snapshot with no L1 RPC on the request path; the watcher's three-RPC `L1State` query is gone.\n- `optimism_safeHeadAtL1Block` is implemented with op-node's SafeDB semantics (nearest entry at or below the requested L1 block; not persisted across restarts).\n- The gossip signer is read from the `SystemConfig` contract at every polled L1 head (one storage read per head) instead of scanned from that head's logs, so a rotation in a skipped block is no longer lost; the watcher's per-chain signer scan is gone.\n- The chain view's L1 blocks are the derivation pipeline's own traversal: the derivation actor pushes every origin it advances through, including the heights it re-walks after a reset. There is no separate L1 walk, no window, no backfill at startup, no flag, and no L1 read beyond the signer's. The L1 watcher only polls the head, safe and finalized tags, publishes them on watch channels, and fans heads out to derivation.\n- The engine's imported blocks are held by the chain view (the newest 256 at or above the engine's finalized head, pruned as finality advances) and served to derivation's hash-keyed block and `SystemConfig` lookups through a small `ImportedL2Blocks` trait in `kona-providers-alloy`, so that crate and the host binary that depends on it stay free of the chain view. `kona-providers-local`, a 32-block LRU with chain-event and reorg-depth handling that nothing in the node fed, is deleted.\n\n**Size.** Against `develop`, lockfile excluded: the new crate is 2,124 lines (1,754 product including `build.rs` and its README, 370 tests). kona's existing crates gain 752 product and 339 test lines and lose 2,286: the finalizer, the finalized-L1 fan-out, the signer scan, the `L1State` query, `kona-providers-local`, and their tests.\n\n**Reasons a reviewer cannot see in the diff.**\n\n- The SQL program (`crates/node/chainview/src/chainview.sql`) is compiled at build time by Feldera's `sql-to-dbsp` v0.342.0, shipped as a sha256-pinned release JAR that `build.rs` locates but never downloads (`just chainview-fetch-compiler` fetches and verifies it). This adds JDK 21 and the JAR as prerequisites for every `--workspace` / `--all-features` build, so **the Rust CI jobs are expected to fail on this PR** until either the CI image carries both or the crate leaves the default workspace members. That is one of the open questions, not an oversight.\n- Every table is a plain Z-set with no primary key: a reorg is a retraction and a status change is a retract-and-insert, so the circuit is never reset. The only command a view drives is the monotone finalize; nothing else asserts what was done.\n- The held L2 blocks are host state in the driver, not a table: no view needs a block body, and the driver already tracks the finalized head that prunes them. A SystemConfig fold was built and then removed because nothing consumed it; derivation keeps its own.\n- `Engine::reset` now publishes the post-reset state on its watch channel (one line, unconditional). Without it the chain view saw pre-reset heads until the next task.\n- The multi-chain watcher keeps its per-chain derivation fan-out and config queries. The view's L1 facts come from each chain's derivation actor, so a multi-chain host would get them per chain; the L1 tag statuses and the signer read are per node for now.\n- Reorgs need no code of their own in the view: the pipeline re-walks the heights it rewound over after a reset, and an origin that arrives at a height already held with another hash replaces it and its update rows.\n\n**Validation.** Circuit-level tests through the typed handles (finality, safe-head guard, L1 reorg replacement, reset retraction, nearest-at-or-below lookup, signer rotation and rollback, finalized pruning, the held blocks' cap and pruning, LATENESS drops); host tests for the derivation actor's origin publishing, finalize guard and confirmation pairing, the chain-view actor's tag statuses and signer read, the watcher's fan-out and watches, and the providers wrapper's local-first lookups; clippy `-D warnings` and rustfmt clean. sysgo: a new `TestSafeHeadHistoryMatchesOpNodeSafeDB` compares kona's `safeHeadAtL1Block` history against op-node's SafeDB on a mixed devnet with the DSL's own comparison; it passes on `develop` (24 safe blocks across several L1 blocks, every entry equal), as do the full `node/common` package (one pre-existing skip) and `node/restart`, and all three suites were re-run after each cut, the last one included. `node/reorgs` was not rerun on `develop`; on the original base its one failing subtest failed with the feature off as well. Both nodes' `syncStatus` L1 fields agreed throughout. Not run: a soak, an induced L1 reorg, and a signer rotation on a devnet.\n\n**Found in passing.** Two things worth knowing beyond this PR:\n\n- kona-node enables its Prometheus listener on port 9090 with no metrics flags set, so two kona-nodes on one host collide at startup (\"Address already in use\"); the parallel sysgo suites need `KONA_METRICS_ENABLED=false`. Not fixed here.\n- The global `--metrics.enabled` has clap id `enabled` (its field name), and clap propagates a global argument's explicit value into every subcommand under that id. Any `node` subcommand flag whose field is also named `enabled` is silently overwritten, which is how `KONA_METRICS_ENABLED=false` switched an earlier, optional version of the chain view off during validation. There is no such flag any more, but the trap is live for any future `enabled` field on a subcommand.\n\n**Reviews.** The repo's `rust-code-reviewer` and `go-code-reviewer` guides were applied as two independent review passes before opening. Fixed from them: the finality guard compared numbers only (now also the hash at the safe height, and a reset retracts an equal-height row with another hash); the safe-head history was unbounded (now capped, default 8192 entries); `LATENESS` was unchecked against the chain's `seq_window_size + channel_timeout` (the node now refuses to start when it would drop re-derived rows); the sysgo test hand-rolled the SafeDB walk (now the DSL's `VerifySafeHeadDatabaseMatches`); dead API and unused dependencies. Their findings on the separate canonical L1 walk (re-anchor seed rows, failing closed below the window, retrying transient reads) were fixed and then made moot by removing the walk in favour of the pipeline's traversal; the SystemConfig fold and its per-block log read went with it. Dismissed or deferred: a unit test for the one-line `Engine::reset` publish (no mock engine client exists; it is its own commit instead), hoisting the signer storage-slot read shared with `flags/p2p.rs` (touches unrelated CLI code), and the CI/Java question above, which is the PR's main open point.\n\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-02T19:37:22Z",
+      "mergedAt": null,
+      "additions": 5516,
+      "deletions": 2439
+    },
+    {
+      "id": "PR_kwDODjvEJM7x9Qpe",
+      "title": "op-e2e/actions: run the action tests on the out-of-process op-reth-test-engine",
+      "author": "sebastianst",
+      "number": 21786,
+      "body": "Switches `op-e2e/actions` to run against the out-of-process `op-reth-test-engine` (stacked on #21242), selected by `OP_E2E_ACTIONS_EL=reth-test-engine`. The default stays op-geth, and CI now runs the whole actions suite on **both** ELs.\n\n## Gate: same pass-set on both ELs\n\nFull sweep over all 13 `op-e2e/actions` packages at this head: **identical per-test results on both ELs** (225+ tests) — including the reorg suite (ReorgFlipFlop, DeepReorg, rewind, Holocene invalid-payload replacement), EL-sync (all 5 sync tests via the in-process sync-pump emulation), batcher garbage/blob paths, sequencer drift, altda challenge/expire, supernode rewind, and the engine-API tests. The only intended divergence:\n\n- `RestartOpGeth` (op-geth persistent-DataDir restart-recovery) is geth-gated — impossible against an ephemeral subprocess. Its durable behavior is covered on **both** ELs by the new `RestartEngineFreshState`: restart the engine with all state lost; op-node resets against the wiped engine, re-derives the safe chain from L1 (safety + finality restored), and the sequencer re-builds the identical deposit-only unsafe chain. The geth-only test is deleted in the stacked deletion PR.\n- One rare pre-existing-style flake was investigated and ruled out as a divergence: `FinalizeWhileSyncing` failed once in ~45+ runs, does not touch any of the new wiring (no peering/pump), and did not reproduce in 25 dedicated runs on the pre-wiring base.\n\n## Go-side switch (mechanical rewrites, each enumerable)\n\n- ~100 `engine.L2Chain()` sites → backend-agnostic helpers (`LatestHeader`/`SafeHeader`/`FinalizedHeader`/`BlockByNumber` over the eth RPC).\n- `ActL2IncludeTx` reframed onto the engine's parking buffer (`optest_includeNextTx`); `RemainingBlockGas`/`ForcedEmpty` via `optest_*`; blob-tx rejection asserts each EL's own irreducible message.\n- EL-sync p2p emulation: a package registry maps synthetic enode IDs to reth backends; `AddPeers` starts a per-peer sync pump that backfills `optest_syncTarget`-signalled gaps via `optest_blockPayloadByNumber`→`optest_importBlock`, never moving safe/finalized — reproducing op-geth's post-snap-sync state and log lines.\n\n## Engine additions the switch forced (same crate as #21242)\n\n- **Reorg support**: `new_payload` records every validated block; forkchoice update canonicalizes via `NewCanonicalChain::Reorg` (the engine-tree pattern), so alternate forks, flip-flops, and rewinds work. Invalid payload attributes surface as `-38003` so op-node falls back to deposits-only blocks.\n- **Engine-API-faithful canonicalization**: processed payloads stay non-canonical until FCU (the geth engine test asserts exactly this gap).\n- Richer reads (`eth_call`/`estimateGas`, OP-enriched receipts, historical `eth_getProof`) plus differential tests proving op-node decodes/validates reth receipts-roots and proofs, and that `eth_estimateGas` matches op-geth byte-for-byte on the action-test genesis.\n\n## CI\n\n`go-actions-tests-reth` runs `./op-e2e/actions/...` on the reth engine (binary from `rust-workspace-binaries`, `REQUIRE_RUST_ENGINE=1` + hard binary check so provisioning bugs fail loudly), wired into `ci-gate`. The geth side keeps running in `go-tests-short`/`go-tests-full`, so this PR puts the A/B comparison permanently in CI.\n\nPart of #21196 (Go side) and #20415 (engine design).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-07-15T09:38:25Z",
+      "mergedAt": null,
+      "additions": 3149,
+      "deletions": 172
+    },
+    {
+      "id": "PR_kwDODjvEJM790Ini",
+      "title": "feat: Keccak256 alt-DA without a challenge contract + op-supernode HTTP remote interop nodes",
+      "author": "opsuperchain",
+      "number": 22390,
+      "body": "This combines two previously-drafted features into the minimal \"bones\" of a private alt-DA chain that interops one-way with external finalized chains: keccak-committed alt-DA with no challenge contract, plus a way for a supernode to treat an external chain as a read-only member of its interop dependency set. Neither half is new work on its own — the point of putting them in one branch is that the combination is what a permissioned Validium that wants to read finalized messages from a public chain actually needs, and it is worth seeing the seam between them. Opened as a **draft for visibility and discussion, not for merge**.\n\n## Commits\n\n**1. `feat(op-alt-da): allow Keccak256 commitments without DAChallengeAddress`**\n\nA revival of #19395 by @fakedev9999 (preserved as the commit author). It makes the DA challenge contract optional for Keccak256 commitments, so a permissioned Validium can keep the `keccak256(data) == commitment` verify-on-read that generic commitments give up, without standing up a challenge game. The guard on `fetchChallengeLogs` moves from commitment-type-based to address-based: challenge machinery is skipped exactly when `da_challenge_contract_address` is zero, and is untouched otherwise.\n\nIt also fixes the two op-node alt-DA derive tests that #19395 broke. `TestAltDADataSourceStall` and `TestAltDADataSourceInvalidData` build an `altda.Config` with no challenge contract address, so under the address-based guard the manager skips challenge-log lookups and the tests fail on unmet `FetchReceipts` expectations. They now get an explicit non-zero test challenge contract, so they keep exercising the challenge flow they were written for rather than being weakened.\n\n**2. `feat(op-supernode): HTTP-backed remote interop nodes`**\n\nA revival of draft #21479 (original author and co-author preserved). It adds a *remote node*: a member of the interop dependency set that the supernode does not drive. Rather than running a consensus client for that chain, the supernode polls an HTTP endpoint for its **finalized** initiating messages and seals them into that chain's LogsDB, so driven chains can reference them as executing messages exactly as they reference driven-chain messages. Finalized-only means there is no rewind path to implement. The wire protocol is the plugin boundary — `GET {url}/finalized?after={N}` — so the far side can be any server in any language; configured with `--interop.remote-nodes <chainID>=<url>`.\n\nNew in this branch, all of it forced by running the thing against a live public chain:\n\n- **Start-height anchoring.** #21479 resumed from the LogsDB's latest sealed block and demanded strict contiguity from there, with an empty DB meaning \"expect block 1\" — unreachable for a chain whose finalized head is tens of millions of blocks past genesis. An empty LogsDB now accepts whatever height the adapter serves for `after=0` and seals it as the anchor of local history; contiguity is enforced from the anchor onward exactly as before. Nothing below the DB layer changed — the raft-wal store already keys by block number and records its own first block — and this mirrors how a driven chain's logsDB already starts at an arbitrary height via `--interop.log-backfill-depth`.\n- **Ingestion drain with a per-cycle cap.** Ingestion ran once per tick and the tick is the remote chain's block time, so it could only ever match the chain's production rate; a node that fell behind on a 2s chain could never catch up. The loop now drains until the adapter returns null, capped per cycle to keep shutdown responsive and bound adapter load.\n- **An env-gated live e2e** exercising the whole chain of custody — real server process against a real public chain, real `HTTPAdapter`, real ingester, real LogsDB — ending by asking `Contains` for a genuine on-chain log with the checksum an executing message would carry. Anchors at the wrong height, a logHash derived differently on the two sides, a log index shifted by a filtered log: none of those are visible in a test with fabricated blocks.\n\n## Validation\n\nBeyond the unit and engine-level tests, this exact combination was deployed as a live chain on Sepolia and exercised end to end: deposits through the portal, alt-DA keccak batch derivation with no challenge contract, live executing messages referencing **finalized OP Sepolia logs** delivered over the remote-node path, and withdrawals proven and finalized through super-root permissioned dispute games. No infrastructure or endpoint details are included here.\n\n## Known gaps / future work\n\n- The remote-node protocol has **no auth and no handshake**. It is a trusted-endpoint plugin seam as it stands; anything adversarial needs authentication and probably a version/chain-ID negotiation on connect.\n- **Interop tx filter integration** is future work: admission-time validation of transactions whose executing messages reference a remote chain is served by a separate service, which does not know about remote nodes yet. Today the remote path is validated at block-building/verification time only.\n- The test impact of #19395 is fixed in commit 1 rather than left for a follow-up, since the two commits are meant to be reviewable independently.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-12T01:26:52Z",
+      "mergedAt": null,
+      "additions": 1772,
+      "deletions": 16
+    },
+    {
+      "id": "PR_kwDODjvEJM7i1r9w",
+      "title": "feat(op-reth-test-engine): one-shot OP block execution (newPayload import + attrs-less FCU)",
+      "author": "sebastianst",
+      "number": 21242,
+      "body": "Phase 2 of the library-first OP test engine (`rust/op-reth-test-engine/`). Adds the import path that turns a complete execution payload into a committed canonical block, plus attrs-less forkchoice. **Stacked on #21216** (review/merge that first).\n\n## What this does\n\n- **`exec::import_payload`** (`engine_newPayload`): reuse the already-`pub` `OpExecutionPayloadValidator::ensure_well_formed_payload` for structural validation + payload→block, execute with `OpEvmConfig`/`BasicBlockExecutor`, verify the post-state root (INVALID on mismatch), and commit. Unknown parent → SYNCING.\n- **`TestEngine::{new_payload, forkchoice_updated}`**. Attrs-less FCU advances the canonical/safe/finalized pointers: unknown head → SYNCING (never a silent VALID), unknown non-zero safe/finalized → a typed error (all three resolved before any pointer moves). FCU with attributes returns `Unsupported` until the stateful builder lands.\n- **`EphemeralChain`**: stores the chain spec; adds `state_at` / `commit_block` / `advance_forkchoice`.\n\n## How insertion works (the crux)\n\nInsertion uses reth's **in-memory canonical state** (the engine-tree path), not a DB write: execute against the parent overlay, verify the state root, build an `ExecutedBlock`, then `update_chain(Commit)` + `set_canonical_head`. `latest()` then yields a `MemoryOverlayStateProvider`, so the next block executes on correct chained state. Nothing past genesis touches MDBX.\n\n## Tests (OP Mainnet, Karst active)\n\n- `import_block_with_deposit` — deposit (0x7E) receipt fields, and the sender is charged gas **plus** a non-zero L1 data fee (exact gas charge derived from the block + receipts).\n- `import_invalid_block` — a bad state root yields INVALID with the parent as `latestValidHash` (verified red/green).\n- `fcu_unknown_head_is_syncing`, `fcu_unknown_safe_is_error` — forkchoice paths.\n\nL1-fee *receipt* fields are an RPC-layer mapping; the consensus `OpReceipt` does not carry them.\n\n## Notes\n\n- Drive-by: filed #21239 — `OpChainSpecBuilder::isthmus_activated()` omits `EthereumHardfork::Prague`, so the Karst test fixture adds Prague by hand (commented + linked in the test).\n\nPart of #20415.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-06-04T20:14:36Z",
+      "mergedAt": null,
+      "additions": 1335,
+      "deletions": 14
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABCEux6w",
+      "title": "op-devstack: support external L2 consensus-client slots",
+      "author": "teddyknox",
+      "number": 22757,
+      "body": "op-devstack currently makes alternate L2 consensus-client testing depend on a downstream fork because stock CL construction is embedded in its runtimes. This adds a product-neutral factory contract for single-chain and mixed-client slots while preserving existing behavior when no factory is configured.\n\nSupplying a factory intentionally opts into EL-first, sequencer-first CL selection so verifier source endpoints exist before a slot is selected; unsupported partial fallback from an external source to Kona fails closed. This is the first PR in the stack for #22756; follow-ups add the no-supernode two-L2 topology and staged startup API.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-03T14:58:25Z",
+      "mergedAt": null,
+      "additions": 888,
+      "deletions": 366
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 1603,
+    "deletions": 1139,
+    "files": 54,
+    "commitCount": 41
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
+  "completedItems": [
+    {
+      "title": "docs: unhide the SDM guide and document the public/private boundary",
+      "prNumber": 22952,
+      "type": "docs",
+      "body": "Unhides the SDM chain-operator guide and fills in the operator-facing gaps. This is the public half of the docs boundary decision in [protocol-team#336](https://github.com/ethereum-optimism/protocol-team/issues/336); the private half is [op",
+      "files": [
+        "docs/public-docs/chain-operators/guides/features/sequencer-defined-metering.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/protocol/hardforks/lagoon.mdx",
+        "docs/public-docs/scripts/lint/nav-allowlist.json",
+        "docs/public-docs/op-stack/features/sdm.mdx"
+      ]
+    },
+    {
+      "title": "op-alloy,kona!: fix Bedrock deposit decoding and pin gas parity",
+      "prNumber": 22946,
+      "type": "bugfix",
+      "body": "Establishes deposit-gas parity on Bedrock, Regolith and Karst before #22495, including native Kona proofs against op-geth-derived blocks. Fixes the existing Bedrock system-deposit RPC decoding needed to run these cases; no dependency pins o",
+      "files": [
+        "op-core/types/deposit_tx_test.go",
+        "rust/kona/tests/proofs/deposit_gas_test.go",
+        "rust/kona/tests/proofs/helpers/env.go",
+        "rust/kona/tests/proofs/helpers/matrix.go",
+        "rust/op-alloy/crates/consensus/src/transaction/deposit.rs",
+        "rust/op-alloy/crates/rpc-types/src/transaction.rs"
+      ]
+    },
+    {
+      "title": "op-devstack: Deploy chains through OPCM on local L1",
+      "prNumber": 22937,
+      "type": "other",
+      "body": "Stacked on ethereum-optimism/optimism#22939. Merge that compatibility fix first.\n\nLocal test chains now use normal op-deployer flows instead of a separate local deployment coordinator. OPCM and shared implementations remain in L1 genesis. F",
+      "files": [
+        "op-acceptance-tests/tests/interop/super-via-upgrade/super_dispute_game_via_upgrade_test.go",
+        "op-challenger/game/fault/contracts/gameargs/gameargs.go",
+        "op-deployer/pkg/deployer/inspect/fixture_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/manage_add_game_type_v2_test.go",
+        "op-deployer/pkg/deployer/integration_test/shared/shared.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "op-deployer/pkg/deployer/pipeline/output_root.go",
+        "op-deployer/pkg/deployer/pipeline/output_root_test.go",
+        "op-deployer/pkg/deployer/prepare_test.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-devstack/sysgo/add_game_type.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/interop_zk_upgrade.go",
+        "op-devstack/sysgo/l1_runtime.go",
+        "op-devstack/sysgo/live_deployment_test.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_supernode_synctester_variant.go",
+        "op-devstack/sysgo/world.go",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/dispute/zk/ZKDisputeGameSuperMigration.t.sol",
+        "packages/contracts-bedrock/test/setup/ForkL1Live.s.sol",
+        "packages/contracts-bedrock/test/setup/PastUpgrades.sol",
+        "op-challenger/game/fault/contracts/gameargs/gameargs_test.go",
+        "op-deployer/pkg/deployer/apply.go",
+        "op-deployer/pkg/deployer/prepare.go"
+      ]
+    },
+    {
+      "title": "docs: document diff.post_exec_tx on the subblock stream",
+      "prNumber": 22978,
+      "type": "docs",
+      "body": "Closes part of ethereum-optimism/protocol-team#334 (the consumer-facing docs half).\n\nA consumer reading only the public docs had no way to learn that `diff.post_exec_tx` exists, or that the sealed block's last transaction never appears in `",
+      "files": [
+        "docs/public-docs/app-developers/guides/transactions/integrating-subblocks.mdx",
+        "docs/public-docs/op-stack/features/subblocks.mdx"
+      ]
+    },
+    {
+      "title": "op-reth: Log the interop filter error chain, not the endpoint URL",
+      "prNumber": 22976,
+      "type": "other",
+      "body": "Stacked on #22895. Review that first.\n\nFour changes on top of it:\n\n- Revert the `Endpoint.url` field and both comment rewrites. An interop-http URL can carry basic-auth credentials, which is why the index is the identifier everywhere else.\n",
+      "files": [
+        "rust/op-reth/crates/txpool/src/interop_filter/client.rs",
+        "rust/op-reth/crates/txpool/src/interop_filter/errors.rs",
+        "rust/op-reth/crates/txpool/src/interop_filter/metrics.rs"
+      ]
+    },
+    {
+      "title": "op-challenger: treat a missing datadir as nothing to clean up",
+      "prNumber": 22995,
+      "type": "refactor",
+      "body": "op-challenger logs an ERROR on every scheduler iteration when its datadir does not exist:\n\n```\nUnable to cleanup game data  err=\"failed to list directory: open /data/challenger: no such file or directory\"\n```\n\nNothing creates the datadir. I",
+      "files": [
+        "op-challenger/game/disk.go",
+        "op-challenger/game/disk_test.go"
+      ]
+    },
+    {
+      "title": "ci: use validated Melange runner profiles",
+      "prNumber": 22991,
+      "type": "other",
+      "body": "Melange builds use Factory’s validated compute profiles while preserving the existing standard runners for Go/Cannon and larger runners for Rust. The catalog and planner/workflow pins migrate together; publishing, smoke testing, and runner ",
+      "files": [
+        ".github/images.apko.json",
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 75.22322267050203,
+      "prScore": 40.52322267050202,
+      "issueScore": 0,
+      "reviewScore": 34.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 51.08219899975455,
+      "prScore": 36.58219899975455,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 46.04423796480516,
+      "prScore": 46.04423796480516,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 38.469156839287635,
+      "prScore": 38.469156839287635,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 31.140626599152,
+      "prScore": 22.140626599152,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 27.8681586411681,
+      "prScore": 20.5281586411681,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 22.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 14.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "swiftnodes",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275502250?u=67d8a6266dfbc7500bbf26931126f3d3b620d193&v=4",
+      "totalScore": 8.14761228866811,
+      "prScore": 7.80761228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.754474678730769,
+      "prScore": 7.316474678730769,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 6.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "3eph1r0th",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/26237289?u=9fba52e5321448f5484bb43ec09930245a03de68&v=4",
+      "totalScore": 6.01061228866811,
+      "prScore": 6.01061228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 2.4379999999999997,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 9,
+  "mergedPRs": 7,
+  "newIssues": 3,
   "closedIssues": 0,
-  "activeContributors": 0
+  "activeContributors": 29
 }

@@ -1,0 +1,87 @@
+{
+  "interval": {
+    "intervalStart": "2026-09-24T00:00:00.000Z",
+    "intervalEnd": "2026-09-25T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-09-24 to 2026-09-25, ethereum-optimism/optimism had 0 new PRs (2 merged), 0 new issues, and 2 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABQjW-vw",
+      "title": "op-supernode: Prevent local-safe promotion while verified state is stale",
+      "author": "ajsutton",
+      "number": 22845,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this during the interop implementation review.\n\nAn L1 reorg can leave `verifiedDB` ahead of local-safe. During this window, unverified local-safe blocks can receive the safe label.\n\nEvent sequence:\n\n1. `verifiedDB` records old-branch block `Y[N]` and its L1 inclusion (`interop.go:597-606`).\n2. An L1 reorg resets local-safe to common ancestor `M`, where `M < N` (`engine/events.go:117-128`).\n3. The next interop round requests timestamp `N+1` (`interop.go:597-606`).\n4. `checkChainsReady` calls `OptimisticAt(N+1)` on every chain (`interop.go:1146-1166`).\n5. The target exceeds local-safe, so `LocalSafeBlockAtTimestamp` returns `ethereum.NotFound` (`chain_container.go:559-580`).\n6. `observeRound` returns on that error before checking `Y[N]`'s L1 inclusion (`interop.go:620-640`). No database rewind starts.\n7. Derivation advances the new canonical branch to `X[K]`, where `M < K < N`.\n8. `SafeL2Head` still receives stale verified block `Y[N]` (`engine_controller.go:227-247`).\n9. Because `N > K`, `resolveVerifiedAsSafe` returns `X[K]` directly (`engine_controller.go:245-247`).\n10. This return bypasses the verified hash checks at `engine_controller.go:249-264`.\n11. The next forkchoice update supplies `X[K]` as `SafeBlockHash` (`engine_controller.go:670-686`).\n12. Once every chain reaches `N+1`, the L1 check runs and the verified database rewinds.\n\n`X[K]` is canonical and local-safe. It has not passed cross-chain verification, so it must not receive the cross-safe label.\n\nExpected behavior:\n\n- Check accepted L1 consistency even when the next frontier is not ready.\n- Never promote local-safe solely because the recorded verified head is ahead.\n- Fall back to a canonical verified ancestor, the cross-safe cache, or finalized state.",
+      "createdAt": "2026-09-09T23:26:07Z",
+      "closedAt": "2026-09-24T00:47:11Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABEgS3hw",
+      "title": "op-supernode: Prevent local-safe promotion while verified state is stale",
+      "author": "ajsutton",
+      "number": 22982,
+      "body": "An L1 reorg can pull local-safe back below the last verified interop timestamp. In that window the supernode never rewinds its verified state, and the node labels blocks as safe that no chain verified. The next round asks for a timestamp above local-safe, so the readiness check fails with `ethereum.NotFound` and the round returns before it checks the accepted L1 inclusion. Derivation then advances local-safe on the new canonical branch, and the engine controller returned local-safe because the recorded verified head was ahead. The forkchoice update sent that unverified block as the safe hash.\n\nThe supernode now checks the accepted L1 inclusion before the frontier, and a rewind takes priority over a wait. The engine controller now uses the cross-safe fallback, which returns the validated cross-safe cache or finalized state.\n\nOperators see the safe tag hold at the last verified block instead of advancing during this window. The safe tag also holds after a resync until local-safe passes the verified head. The extra L1 call per not-ready round can turn a transient L1 failure into a logged round error, where the round was silent before.\n\nFixes ethereum-optimism/optimism#22845\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-22T00:09:54Z",
+      "mergedAt": "2026-09-24T00:47:09Z",
+      "additions": 148,
+      "deletions": 20
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABEqUSJg",
+      "title": "op-node: Truncate the safe head db to local-safe on reset",
+      "author": "ajsutton",
+      "number": 22997,
+      "body": "The safedb records local-safe heads, but `onEngineConfirmedReset` truncated it to cross-safe. Derivation resumes from local-safe, so the entries in between were deleted and never recorded again. `L1AtSafeHead` trusts contiguity, so the gap makes it answer with a later L1 block and no error. That shifts `RequiredL1` in `superroot_atTimestamp`, and the safe head op-challenger clamps its honest trace to.\n\nOnly op-supernode is affected. A plain op-node has no SuperAuthority, so `SafeL2Head()` returns `localSafeHead` and the two fields are equal.\n\nAn existing gap does not repair itself.\n\nFound while reviewing ethereum-optimism/optimism#22982. Separate bug, no dependency on it.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-22T23:00:02Z",
+      "mergedAt": "2026-09-24T00:01:48Z",
+      "additions": 117,
+      "deletions": 2
+    }
+  ],
+  "codeChanges": {
+    "additions": 265,
+    "deletions": 22,
+    "files": 8,
+    "commitCount": 2
+  },
+  "completedItems": [
+    {
+      "title": "op-supernode: Prevent local-safe promotion while verified state is stale",
+      "prNumber": 22982,
+      "type": "other",
+      "body": "An L1 reorg can pull local-safe back below the last verified interop timestamp. In that window the supernode never rewinds its verified state, and the node labels blocks as safe that no chain verified. The next round asks for a timestamp ab",
+      "files": [
+        "op-node/rollup/engine/engine_controller.go",
+        "op-node/rollup/engine/engine_controller_test.go",
+        "op-node/rollup/engine/super_authority_safe_head_test.go",
+        "op-supernode/supernode/activity/interop/decide_test.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go"
+      ]
+    },
+    {
+      "title": "op-node: Truncate the safe head db to local-safe on reset",
+      "prNumber": 22997,
+      "type": "other",
+      "body": "The safedb records local-safe heads, but `onEngineConfirmedReset` truncated it to cross-safe. Derivation resumes from local-safe, so the entries in between were deleted and never recorded again. `L1AtSafeHead` trusts contiguity, so the gap ",
+      "files": [
+        "op-node/rollup/driver/sync_deriver.go",
+        "op-node/rollup/driver/sync_deriver_test.go"
+      ]
+    }
+  ],
+  "topContributors": [],
+  "newPRs": 0,
+  "mergedPRs": 2,
+  "newIssues": 0,
+  "closedIssues": 1,
+  "activeContributors": 2
+}
