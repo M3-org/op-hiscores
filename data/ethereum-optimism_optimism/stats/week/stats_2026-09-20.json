@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-20 to 2026-09-27, ethereum-optimism/optimism had 40 new PRs (22 merged), 15 new issues, and 46 active contributors.",
+  "overview": "From 2026-09-20 to 2026-09-27, ethereum-optimism/optimism had 52 new PRs (36 merged), 17 new issues, and 54 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABSa0OyQ",
@@ -56,13 +56,13 @@
       "commentCount": 1
     },
     {
-      "id": "I_kwDODjvEJM8AAAABSeK8uw",
-      "title": "op-supernode: Full rewind deletes backfilled logs and invalidates valid blocks",
-      "author": "ajsutton",
-      "number": 22984,
+      "id": "I_kwDODjvEJM8AAAABSiu4pQ",
+      "title": "Consolidate SDM sanity checks into `check-lagoon` script",
+      "author": "geoknee",
+      "number": 22988,
       "repository": "ethereum-optimism/optimism",
-      "body": "**Claude:** I found this while I reviewed ethereum-optimism/optimism#22846.\n\nA full rewind deletes every chain's logsDB, including the cold-start backfill. The backfill is the history the node needs to verify the timestamps it is about to replay. After the delete, the node invalidates valid blocks.\n\n## Event sequence\n\n1. `buildRewindPlan` returns a plan with a nil `TargetHeads` when `lastTS <= firstVerifiableTimestamp` (`interop.go:953-961`).\n2. `applyRewindPlan` then calls `db.Clear()` on every chain (`interop.go:1065-1070`).\n3. `clearLocked` deletes the whole range and resets `firstBlock` to 0 (`db.go:474-484`).\n4. Verification resumes at the first verifiable timestamp with an empty logsDB.\n5. `verifyExecutingMessage` calls `Contains` for an initiating message that the backfill held (`algo.go:229-231`).\n6. `Contains` returns `interop.ErrFuture` because `hasBlocks` is false (`db.go:287-289`).\n7. `verifyInteropMessages` treats the error as an invalid executing message (`algo.go:129-141`).\n8. The round applies `DecisionInvalidate` and replaces a valid block.\n\n## Why the delete is wrong\n\nThe logsDB holds history below `firstVerifiableTimestamp` on purpose. `runColdStartBackfill` seals one message expiry window of history before the first verified timestamp (`log_backfill.go:100-166`). A rewind of the verified state to that timestamp does not make the backfill invalid. It is exactly the history the node needs to verify that timestamp again.\n\n## Why the node does not recover\n\nCold start runs once, from `Start` (`interop.go:333`). `waitingForSync` never returns to true, so no backfill re-runs in process.\n\nA restart repairs the node only if the verifiedDB also emptied. If any commit survives, `tryInitFromVerifiedDB` resumes and skips backfill (`interop.go:342-350`).\n\n## Reachability\n\nThe window is narrow. A rewind removes one timestamp per round.\n\n`progressInterop` calls `buildRewindPlan(*obs.LastVerifiedTS)` (`interop.go:736`). `observeRound` sets `LastVerifiedTS` from `verifiedDB.LastTimestamp()` (`interop.go:600-603`). So the plan always targets the last verified timestamp, not a reorg depth. The loop then re-checks `SameL1Chain` on the new last entry (`interop.go:635-643`) and repeats.\n\nThe verifiedDB has no pruning. `firstTimestamp` moves only in `Rewind`, and only downward or to empty (`verified_db.go:254-290`). So `first` stays at the first round the node ever verified, for the life of the data directory.\n\nTo reach `lastTS <= first`, the node must walk its verified DB back to the single first entry. The L1 reorg must invalidate the L1 inclusion of every verified timestamp. In practice the reorg depth must exceed the age of the verified DB. That gives two reachable cases:\n\n1. A young verified DB. A node that cold-started minutes ago holds a recent `L1Inclusion` on its first entry. An ordinary one or two block L1 reorg reaches past it. If the node has verified exactly one timestamp, `last == first` and any L1 inconsistency triggers the clear at once.\n2. After an operator wipes the data directory, which is the documented recovery path. That returns the node to case 1.\n\nA mature node is effectively immune. The reorg would have to be deeper than the whole run.\n\nA rewind to the interop activation timestamp is harmless. `runColdStartBackfill` clamps `commonStart` to `activationTimestamp` (`log_backfill.go:122`), so nothing is retained below activation, and a message cannot reference a pre-activation block anyway.\n\nThe damaging case is a node that cold-starts long after activation. `advanceColdStartInit` sets `verificationStartTimestamp` to `max(activation, max_c firstSafeHeadTS)` (`log_backfill.go:31-38`). The backfill below that point is real data, and the clear destroys it.\n\n## Expected behavior\n\nTruncate the logsDB to the last block that backfill sealed, instead of a full delete. Keep every block below `firstVerifiableTimestamp`. Clear the database only when the rewind reaches the interop activation timestamp.\n\nIn process, this is sufficient. After the verifiedDB empties, `observeRound` reads `firstVerifiableTimestamp`, which falls back to the unchanged `verificationStartTimestamp` (`interop.go:235-245`). So verification resumes at the same point that backfill ended.\n\nRe-run backfill if the resume point can ever move later than the backfill end. `verifyCanAddTimestamp` rejects a gap larger than one block time (`logdb.go:193-198`), so a later resume point would wedge the seal path.\n\n## Related\n\n- ethereum-optimism/optimism#20627 added `reconcileLogsDBTail` and the backfill-path clear.\n- ethereum-optimism/optimism#19287 introduced the L1 reorg rewind handling.\n- ethereum-optimism/optimism#22846 covers storage errors that cause invalidation. This issue is a separate cause of the same outcome.\n",
-      "createdAt": "2026-09-22T02:22:28Z",
+      "body": "Can reuse code from :\n\n* kupcake test scripts (bash) https://github.com/ethereum-optimism/kupcake/pull/29 (ideally transcribe to Go)\n* https://github.com/ethereum-optimism/optimism/blob/develop/op-chain-ops/pkg/sdm/workload.go load generator\n\nSso that nontrivial load is generated and postexec transactions are getting included. \n\nAdds some assertions from across the tests we have:\n* l1 fee fields zeroed out\n* format of postexec transaction\n* etc\n",
+      "createdAt": "2026-09-22T12:10:56Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 1
@@ -78,8 +78,8 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-09-21T16:20:20Z",
       "mergedAt": null,
-      "additions": 33547,
-      "deletions": 419
+      "additions": 51751,
+      "deletions": 453
     },
     {
       "id": "PR_kwDODjvEJM8AAAABDFKA3A",
@@ -131,12 +131,105 @@
     }
   ],
   "codeChanges": {
-    "additions": 5167,
-    "deletions": 1918,
-    "files": 132,
-    "commitCount": 223
+    "additions": 12662,
+    "deletions": 4794,
+    "files": 252,
+    "commitCount": 300
   },
   "completedItems": [
+    {
+      "title": "rust: update reth to v2.5.0 and drop the op-rs fork",
+      "prNumber": 22495,
+      "type": "other",
+      "body": "Moves the reth pin from the OP fork `op-rs/reth@aef8d3ef` back to upstream `paradigmxyz/reth`, `tag = \"v2.5.0\"`.\n\n**The fork is droppable.** Its branch is upstream `f2eecc65` plus exactly one cherry-pick, `aef8d3ef92 feat(trie): expose payl",
+      "files": [
+        ".claude/agents/reth-update-reviewer.md",
+        ".claude/skills/update-reth/SKILL.md",
+        "docs/ai/reth-update-review.md",
+        "docs/ai/reth-upstream-mirrors.md",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/UPDATING-RETH.md",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-evm/src/tests.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/justfile",
+        "rust/kona/bin/client/src/fpvm_evm/tx.rs",
+        "rust/kona/crates/protocol/registry/src/l1/mod.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/op-alloy/crates/consensus/src/reth_codec.rs",
+        "rust/op-alloy/crates/consensus/src/reth_core.rs",
+        "rust/op-alloy/crates/rpc-types/src/reth_compat.rs",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/Cargo.toml",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/generator.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/standard/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/mock_tx.rs",
+        "rust/op-reth/crates/consensus/src/validation/isthmus.rs",
+        "rust/op-reth/crates/flashblocks/src/worker.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/node/src/rpc.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/rpc/src/debug.rs",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/rpc/src/witness.rs",
+        "rust/op-reth/crates/trie/src/backfill/changesets.rs",
+        "rust/op-reth/crates/trie/src/backfill/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/engine/buffer/overlay.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/execute_block.rs",
+        "rust/op-reth/crates/trie/src/provider.rs",
+        "rust/op-reth/crates/trie/src/test_utils.rs",
+        "rust/op-reth/crates/trie/tests/live.rs",
+        "rust/op-revm/src/api/exec.rs",
+        "rust/op-revm/src/handler.rs",
+        "rust/op-revm/src/precompiles.rs",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/attributes.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/flashblock/payload.rs",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs",
+        "rust/op-revm/src/evm.rs",
+        "rust/op-revm/src/spec.rs",
+        "rust/op-revm/src/transaction/abstraction.rs",
+        "rust/revm-ee-tests/src/op_revm_tests.rs",
+        "rust/deny.toml",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/provider.rs",
+        "rust/op-reth/crates/node/tests/it/main.rs",
+        "rust/op-reth/crates/node/tests/it/payload_handoff.rs",
+        "rust/alloy-op-evm/src/tx.rs",
+        "rust/op-alloy/crates/consensus/src/receipts/envelope.rs",
+        "rust/op-alloy/crates/consensus/src/receipts/receipt.rs",
+        "rust/op-alloy/crates/consensus/src/transaction/canonical.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/payload/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/proofs.rs",
+        "rust/op-reth/crates/rpc/src/metrics.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "op-core/types/deposit_tx_test.go",
+        "rust/kona/tests/proofs/deposit_gas_test.go",
+        "rust/kona/tests/proofs/helpers/env.go",
+        "rust/kona/tests/proofs/helpers/matrix.go",
+        "rust/op-alloy/crates/consensus/src/transaction/deposit.rs",
+        "rust/op-alloy/crates/rpc-types/src/transaction.rs",
+        "rust/op-reth/crates/rpc/src/state.rs"
+      ]
+    },
     {
       "title": "contracts-bedrock: Improve OPCMv2 migration flow and harden validator checks",
       "prNumber": 22807,
@@ -188,6 +281,19 @@
       ]
     },
     {
+      "title": "kona-sp1-proposer: reject pending game ancestry",
+      "prNumber": 22910,
+      "type": "other",
+      "body": "Known pending parents now make cached descendants ineligible for proving or extension, while unknown historical cache gaps retain the existing fail-open behavior. Stale pending branches are tombstoned and cleared atomically; if one is later",
+      "files": [
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/crates/proposer/src/ports.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs"
+      ]
+    },
+    {
       "title": "kona-sp1-proposer: batch game state RPC reads",
       "prNumber": 22904,
       "type": "other",
@@ -226,6 +332,55 @@
         "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs",
         "rust/kona/sp1/crates/proposer/src/verifier.rs",
         "op-deployer/pkg/deployer/standard/sp1-verifier.json"
+      ]
+    },
+    {
+      "title": "op-reth: count post-exec validation failures by rule",
+      "prNumber": 22932,
+      "type": "other",
+      "body": "A block whose `0x7D` post-exec transaction is structurally invalid — present before the Lagoon activation, duplicated, not the final transaction, or anchored to the wrong block number — is rejected when op-reth builds the block's execution ",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/sdm_metrics.rs",
+        "rust/op-reth/crates/evm/tests/sdm_post_exec_validation_failures.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs"
+      ]
+    },
+    {
+      "title": "op-reth: record SDM refund counters on the import path",
+      "prNumber": 22931,
+      "type": "other",
+      "body": "SDM refund activity is only observable today on the node that produced a block: the payload builder's `reth_optimism_payload_builder_sdm_refund_gas_*` series latch on standby sequencers and say nothing about what the chain actually carries.",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/consensus/Cargo.toml",
+        "rust/op-reth/crates/consensus/src/lib.rs",
+        "rust/op-reth/crates/consensus/src/sdm_metrics.rs",
+        "rust/op-reth/crates/consensus/tests/sdm_import_metrics.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-alloy/crates/consensus/Cargo.toml",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs",
+        "rust/op-reth/crates/payload/src/builder.rs"
+      ]
+    },
+    {
+      "title": "op-reth: export SDM enablement as metrics",
+      "prNumber": 22927,
+      "type": "other",
+      "body": "SDM alerts have no series to gate on, so they can only name the networks where SDM is enabled, and they cannot react when a sequencer operator opts out via the admin RPC. ethereum-optimism/k8s#12872 is blocked on exactly this — it gates on ",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/config.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/sdm_metrics.rs",
+        "rust/op-reth/crates/payload/tests/sdm_effective_gauge.rs",
+        "rust/op-reth/crates/payload/tests/sdm_operator_opt_in_gauge.rs"
       ]
     },
     {
@@ -385,12 +540,39 @@
       ]
     },
     {
+      "title": "op-reth: reuse shared payload EVM environment builder",
+      "prNumber": 22968,
+      "type": "other",
+      "body": "Builds on #22495. Keeping a second payload environment implementation in the reth adapter lets fork, blob, slot, and gas-limit policy drift from the canonical OP implementation.\n\nValid payload behavior is unchanged; an out-of-range base fee",
+      "files": [
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/alloy-op-evm/src/env.rs"
+      ]
+    },
+    {
       "title": "ci: run APKO smoke tests on Docker-capable runners",
       "prNumber": 22964,
       "type": "tests",
       "body": "## What\n\n- Pin all APKO factory stages to `b87283a8bb6c325da0ef18400eb819b5979a9bd3`.\n- Inherit the factory's Docker-capable smoke runners and image pull and architecture preflight.\n\n## Why\n\nThe previous factory revision defaulted amd64 smo",
       "files": [
         ".github/workflows/build-images.apko.yaml"
+      ]
+    },
+    {
+      "title": "alloy-op-evm: normalize sequencer SDM refund outputs",
+      "prNumber": 22963,
+      "type": "other",
+      "body": " - Normalize sequencer refund-policy outputs to supported bounds.\r\n - Ignore refunds for ineligible transaction types.\r\n - Add correction metrics and producer/verifier regression coverage.\r\n\r\n## Testing\r\n\r\n - SDM acceptance tests\r\n - alloy-",
+      "files": [
+        "op-acceptance-tests/tests/sdm/block_test.go",
+        "rust/Cargo.lock",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/alloy-op-evm/src/post_exec/refund.rs",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/sdm-fixture-node/src/lib.rs"
       ]
     },
     {
@@ -401,6 +583,20 @@
       "files": [
         "rust/Cargo.lock",
         "rust/deny.toml"
+      ]
+    },
+    {
+      "title": "op-reth: export the boot-time SDM opt-in as a gauge",
+      "prNumber": 22961,
+      "type": "other",
+      "body": "The operator SDM opt-in is in-memory: `admin_setOperatorSdmOptIn` changes it for the life of the process, and on restart the node returns to whatever `--rollup.operator-sdm-opt-in` / `OP_RETH_OPERATOR_SDM_OPT_IN` says. A runtime toggle that",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/payload/src/config.rs",
+        "rust/op-reth/crates/payload/src/sdm_metrics.rs",
+        "rust/op-reth/crates/payload/tests/sdm_operator_opt_in_gauge.rs"
       ]
     },
     {
@@ -452,6 +648,15 @@
       ]
     },
     {
+      "title": "op-reth: assert l1FeeScalar is absent post-Ecotone",
+      "prNumber": 22987,
+      "type": "other",
+      "body": "Addresses https://github.com/ethereum-optimism/optimism/pull/22941#discussion_r4070493109 (nonblocking nit from @pcw109550); #22941 was already in the merge queue, so it rides here.\n\nEcotone removed `l1FeeScalar`, and `OpReceiptFieldsBuilde",
+      "files": [
+        "rust/op-reth/crates/rpc/src/eth/receipt/tests.rs"
+      ]
+    },
+    {
       "title": "op-node: Bound the EL-sync safe label by the verified head",
       "prNumber": 22986,
       "type": "other",
@@ -460,57 +665,130 @@
         "op-node/rollup/engine/engine_controller.go",
         "op-node/rollup/engine/engine_el_sync_completion_test.go"
       ]
+    },
+    {
+      "title": "op-dispute-mon: count ZK bond distributions only after finality",
+      "prNumber": 23010,
+      "type": "other",
+      "body": "`op_dispute_mon_zk_games_pending_lifecycle_action{action=\"bond_distribution\"}` now counts only ZK games whose bonds can be distributed now: resolved, still undecided, and past the AnchorStateRegistry finality delay (`isGameFinalized` at the",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/dispute_monitor_test.go",
+        "op-challenger/game/fault/contracts/anchorstateregistry.go",
+        "op-challenger/game/fault/contracts/anchorstateregistry_test.go",
+        "op-dispute-mon/mon/extract/extractor.go",
+        "op-dispute-mon/mon/extract/extractor_test.go",
+        "op-dispute-mon/mon/extract/super_permissioned_integration_test.go",
+        "op-dispute-mon/mon/extract/zk_extractor_test.go",
+        "op-dispute-mon/mon/mixed_game_integration_test.go",
+        "op-dispute-mon/mon/service.go",
+        "op-dispute-mon/mon/types/types.go",
+        "op-dispute-mon/mon/zk_lifecycle.go",
+        "op-dispute-mon/mon/zk_lifecycle_test.go"
+      ]
+    },
+    {
+      "title": "op-alloy,op-reth,kona: enforce canonical PostExec entries",
+      "prNumber": 23003,
+      "type": "other",
+      "body": "Aligns version-1 PostExec verification with the Lagoon specification so op-reth and Kona reject empty or non-monotonic refund-entry lists instead of accepting blocks that independent clients may reject. Raw payloads are also bounded by the ",
+      "files": [
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/kona/crates/proof/executor/src/builder/core.rs",
+        "rust/kona/crates/proof/executor/src/builder/core/tests.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/node/tests/it/debug_trace_post_exec.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/evm/src/sdm_metrics.rs"
+      ]
+    },
+    {
+      "title": "docs: add PublicNode to OP Stack RPC directory",
+      "prNumber": 23002,
+      "type": "docs",
+      "body": "## Description\r\n\r\nAdds PublicNode to the Production RPC providers section of the OP Stack RPC directory.\r\n\r\nPublicNode by Allnodes provides fast, free, and privacy-first RPC endpoints for OP Mainnet, Base, Unichain and Soneium. Endpoints: h",
+      "files": [
+        "docs/public-docs/app-developers/reference/rpc-providers.mdx"
+      ]
+    },
+    {
+      "title": "docs: add Goldsky to RPC provider directory",
+      "prNumber": 23021,
+      "type": "docs",
+      "body": "- Adds Goldsky to production RPC providers.\n- OP Mainnet, Base, Unichain, Zora, plus testnets.\n- Adds `<ThirdPartyContent />` per content guide.\n- Docs: https://docs.goldsky.com/edge-rpc/introduction",
+      "files": [
+        "docs/public-docs/app-developers/reference/rpc-providers.mdx"
+      ]
+    },
+    {
+      "title": "op-challenger: warn instead of error when the local node is behind the game L1 head",
+      "prNumber": 23020,
+      "type": "other",
+      "body": "On super root games (e.g. sepolia-devnet-2) op-challenger has no sync validator, so a node that has not yet processed the game's L1 head is detected inside the trace provider and logged at Error as `Failed to calculate all required moves` o",
+      "files": [
+        "op-challenger/game/client/rollup_sync.go",
+        "op-challenger/game/client/rollup_sync_test.go",
+        "op-challenger/game/fault/agent.go",
+        "op-challenger/game/fault/agent_test.go",
+        "op-challenger/game/fault/trace/super/provider.go",
+        "op-challenger/game/fault/trace/super/provider_test.go",
+        "op-challenger/game/types/types.go",
+        "op-challenger/game/zk/actor.go"
+      ]
     }
   ],
   "topContributors": [
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 145.9822433591568,
-      "prScore": 118.4422433591568,
-      "issueScore": 0,
-      "reviewScore": 27,
-      "commentScore": 0.54,
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 253.82913393924775,
+      "prScore": 165.11113393924776,
+      "issueScore": 18.1,
+      "reviewScore": 69.5,
+      "commentScore": 1.1179999999999999,
       "summary": null
     },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 142.7220329029588,
-      "prScore": 78.64603290295881,
+      "totalScore": 197.99558198254135,
+      "prScore": 119.57958198254136,
       "issueScore": 4,
-      "reviewScore": 59,
-      "commentScore": 1.0759999999999998,
+      "reviewScore": 73,
+      "commentScore": 1.416,
       "summary": null
     },
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 137.77879461413505,
-      "prScore": 73.37879461413503,
+      "totalScore": 197.57964289199586,
+      "prScore": 118.83964289199585,
       "issueScore": 0,
-      "reviewScore": 64,
-      "commentScore": 0.4,
+      "reviewScore": 78,
+      "commentScore": 0.74,
       "summary": null
     },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 134.16076955197403,
+      "totalScore": 157.16076955197403,
       "prScore": 105.98076955197402,
       "issueScore": 0,
-      "reviewScore": 27.5,
+      "reviewScore": 50.5,
       "commentScore": 0.6799999999999999,
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 125.10181224951948,
-      "prScore": 47.88381224951947,
-      "issueScore": 16.1,
-      "reviewScore": 60,
-      "commentScore": 1.1179999999999999,
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 151.18224335915681,
+      "prScore": 118.4422433591568,
+      "issueScore": 0,
+      "reviewScore": 32,
+      "commentScore": 0.74,
       "summary": null
     },
     {
@@ -524,6 +802,36 @@
       "summary": null
     },
     {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 90.05071503399199,
+      "prScore": 90.05071503399199,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 81.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 81.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 72.35593411465716,
+      "prScore": 60.81593411465715,
+      "issueScore": 0,
+      "reviewScore": 11,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
       "username": "karlfloersch",
       "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
       "totalScore": 69.9437738965761,
@@ -531,36 +839,6 @@
       "issueScore": 0,
       "reviewScore": 26,
       "commentScore": 0.4,
-      "summary": null
-    },
-    {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 68.4052771215579,
-      "prScore": 68.4052771215579,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 67.35593411465716,
-      "prScore": 60.81593411465715,
-      "issueScore": 0,
-      "reviewScore": 6,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 63,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 63,
-      "commentScore": 0,
       "summary": null
     },
     {
@@ -574,6 +852,16 @@
       "summary": null
     },
     {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 53.278,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 52.5,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
       "totalScore": 51.244237964805166,
@@ -584,22 +872,72 @@
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 38.778,
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 48,
       "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 38,
-      "commentScore": 0.7779999999999999,
+      "issueScore": 2,
+      "reviewScore": 46,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 34.5,
+      "username": "fakedev9999",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/71915289?u=f1984e36786f33ff3043f18e00d59ac51796151a&v=4",
+      "totalScore": 43.60722194324077,
+      "prScore": 43.60722194324077,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 28.23373018052636,
+      "prScore": 27.01773018052636,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.2159999999999997,
+      "summary": null
+    },
+    {
+      "username": "aramalipoor",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1164589?u=785b534783f294da8b070376b2b0ae56b7323cbf&v=4",
+      "totalScore": 27.85405732961526,
+      "prScore": 27.85405732961526,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 25.04,
       "prScore": 0,
-      "issueScore": 2,
-      "reviewScore": 32.5,
+      "issueScore": 0,
+      "reviewScore": 24.5,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 25.0024379124341,
+      "prScore": 25.0024379124341,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 23.574947636399187,
+      "prScore": 6.074947636399186,
+      "issueScore": 4,
+      "reviewScore": 13.5,
       "commentScore": 0,
       "summary": null
     },
@@ -624,16 +962,6 @@
       "summary": null
     },
     {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 20.57725550179559,
-      "prScore": 19.701255501795593,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.8759999999999999,
-      "summary": null
-    },
-    {
       "username": "raffaele-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
       "totalScore": 20,
@@ -654,6 +982,16 @@
       "summary": null
     },
     {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 19,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "asdv23",
       "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
       "totalScore": 18.71419732320115,
@@ -664,6 +1002,16 @@
       "summary": null
     },
     {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 18.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "pauldowman",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
       "totalScore": 15.50243897916644,
@@ -671,36 +1019,6 @@
       "issueScore": 2,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 14.7,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 14.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 14,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 14,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 13.7,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 13.5,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -744,6 +1062,16 @@
       "summary": null
     },
     {
+      "username": "Jordy-Baby",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82444671?u=3de390402be769cca2a0569d7e09dac394fd24c0&v=4",
+      "totalScore": 7.368292546497024,
+      "prScore": 7.368292546497024,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "3eph1r0th",
       "avatarUrl": "https://avatars.githubusercontent.com/u/26237289?u=9fba52e5321448f5484bb43ec09930245a03de68&v=4",
       "totalScore": 6.01061228866811,
@@ -764,6 +1092,26 @@
       "summary": null
     },
     {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ericbrown99",
       "avatarUrl": "https://avatars.githubusercontent.com/u/18172972?u=89230abadda9c87431b68c068c6256c932b79e52&v=4",
       "totalScore": 5,
@@ -774,12 +1122,12 @@
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 4.5,
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 4.5,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -814,9 +1162,9 @@
       "summary": null
     }
   ],
-  "newPRs": 40,
-  "mergedPRs": 22,
-  "newIssues": 15,
-  "closedIssues": 9,
-  "activeContributors": 46
+  "newPRs": 52,
+  "mergedPRs": 36,
+  "newIssues": 17,
+  "closedIssues": 11,
+  "activeContributors": 54
 }

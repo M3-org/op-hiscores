@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-24 to 2026-09-25, ethereum-optimism/optimism had 0 new PRs (2 merged), 0 new issues, and 2 active contributors.",
+  "overview": "From 2026-09-24 to 2026-09-25, ethereum-optimism/optimism had 11 new PRs (15 merged), 2 new issues, and 27 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABQjW-vw",
@@ -18,41 +18,268 @@
       "closedAt": "2026-09-24T00:47:11Z",
       "state": "CLOSED",
       "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABRMx5Bg",
+      "title": "kona-sp1: revm-precompile 42 pulls sha2 0.11, which has no SP1 patch",
+      "author": "sebastianst",
+      "number": 22890,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Situation\n\nrevm-precompile 42 (pulled in by reth v2.5.0, #22495) depends on `sha2 = \"0.11\"`. The SP1 guest workspace accelerates SHA-256 by patching `sha2` with [sp1-patches/RustCrypto-hashes](https://github.com/sp1-patches/RustCrypto-hashes), and a `[patch.crates-io]` entry only replaces the version it names: the guest patches [`sha2 0.10.9`](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/kona/sp1/programs/Cargo.toml#L137). sp1-patches has no `patch-sha2-0.11.*` tag (only mirrors of the upstream `sha2-v0.11.0-*` tags), and Succinct's own zkevm still pins patched 0.10.9.\n\nSo the guest now carries two `sha2` crates: patched 0.10.9 (alloy, kona) and vanilla 0.11.0, whose only dependent is revm-precompile. Two consensus paths hash through the vanilla copy inside the zkVM: the SHA-256 precompile (0x02) and the KZG point-evaluation versioned-hash check. Correctness is unaffected; those hashes run as plain RISC-V cycles instead of the SHA-256 syscalls, i.e. a proving-cost regression. `check-sp1-guest-precompile-patches` caught it.\n\n## Workaround in #22495\n\nrevm 42 routes both hashes through its pluggable `Crypto` trait, so kona's `CustomCrypto` now [implements `sha256`](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/kona/sp1/crates/client/src/precompiles/custom.rs#L24) with the client crate's own `sha2`, which is the patched 0.10 line in the guest. The vanilla 0.11 stays compiled in as dead code (`DefaultCrypto`), so the CI check gained an [exemption](https://github.com/ethereum-optimism/optimism/blob/2191ce5dd2569534fb3016f7a931eabc78cc6f8c/rust/justfile#L298-L318): an unpatched `sha2` is tolerated only while revm-precompile is its sole dependent.\n\nResidual risk: the guard checks the dependency graph, not call sites. A future revm-precompile that hashes with `sha2` directly instead of through `Crypto` would regress silently.\n\n## Follow-up\n\n1. **SP1 (Succinct):** publish a `patch-sha2-0.11.0-sp1-6.x` tag in sp1-patches/RustCrypto-hashes. revm-precompile ≥ 42 (revm 42, reth ≥ v2.5.0) requires sha2 0.11, so every SP1 program executing a current revm is affected, not only kona.\n2. **Here, once the tag exists:** add `sha2 0.11` to the guest's `[patch.crates-io]`, delete the `CustomCrypto::sha256` override and the check exemption, and restore the strict \"every sha2 resolves from sp1-patches\" invariant.\n\n🤖 *Co-created with Claude Fable 5.1*\n",
+      "createdAt": "2026-09-14T12:20:14Z",
+      "closedAt": "2026-09-24T10:34:01Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABTBfFvg",
+      "title": "contracts-bedrock: evaluate eth_estimateGas ",
+      "author": "maurelian",
+      "number": 23023,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2026-09-24T16:45:54Z",
+      "closedAt": "2026-09-24T17:02:29Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABS_D2Dg",
+      "title": "[Tracking] Amsterdam on the OP Stack",
+      "author": "sebastianst",
+      "number": 23015,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Tracking issue for adopting the Amsterdam EIPs on L2, i.e. the first OP fork whose `OpSpecId` maps to `SpecId::AMSTERDAM`. The L1 side (surviving Glamsterdam on L1 while L2 stays on Fusaka) is #20151 / #22698; this issue collects the L2 adaptations that are known to be needed and has no schedule yet.\n\n## Todo\n\n- [ ] **Deposit gas under EIP-8037.** Upstream splits a transaction's gas into regular gas, capped at 2^24, and a state-gas reservoir. Deposits are exempt from the cap: `OpHandler::tx_gas` gives a deposit its whole gas limit as regular gas and an empty reservoir ([`handler.rs#L211`](https://github.com/ethereum-optimism/optimism/blob/9d41f32cef2b14519349a661fb21fb82b0334e42/rust/op-revm/src/handler.rs#L211)), which is only meaningful while no OP fork enables EIP-8037. Decide whether a deposit gets a reservoir like every other transaction or stays uncapped regular gas, adapt `tx_gas` to that, and decide whether `validate_initial_tx_gas` should skip deposits: it is not overridden and under EIP-8037 checks a deposit's intrinsic and floor gas against the cap ([`handler.rs#L209`](https://github.com/ethereum-optimism/optimism/blob/9d41f32cef2b14519349a661fb21fb82b0334e42/rust/op-revm/src/handler.rs#L209)). `validate_env` is already skipped for deposits. Spec first, then op-revm.\n- [ ] **Block gas accounting.** `OpBlockExecutor` tracks a single `gas_used` where upstream tracks regular and state block gas separately and returns `GasOutput::with_state_gas` ([`block/mod.rs#L786`](https://github.com/ethereum-optimism/optimism/blob/9d41f32cef2b14519349a661fb21fb82b0334e42/rust/alloy-op-evm/src/block/mod.rs#L786)); the header and receipt fields for state gas need an L2 decision.\n\n🤖 *Co-created with Claude Fable 5.1*\n",
+      "createdAt": "2026-09-24T13:27:05Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
     }
   ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABEgS3hw",
-      "title": "op-supernode: Prevent local-safe promotion while verified state is stale",
-      "author": "ajsutton",
-      "number": 22982,
-      "body": "An L1 reorg can pull local-safe back below the last verified interop timestamp. In that window the supernode never rewinds its verified state, and the node labels blocks as safe that no chain verified. The next round asks for a timestamp above local-safe, so the readiness check fails with `ethereum.NotFound` and the round returns before it checks the accepted L1 inclusion. Derivation then advances local-safe on the new canonical branch, and the engine controller returned local-safe because the recorded verified head was ahead. The forkchoice update sent that unverified block as the safe hash.\n\nThe supernode now checks the accepted L1 inclusion before the frontier, and a rewind takes priority over a wait. The engine controller now uses the cross-safe fallback, which returns the validated cross-safe cache or finalized state.\n\nOperators see the safe tag hold at the last verified block instead of advancing during this window. The safe tag also holds after a resync until local-safe passes the verified head. The extra L1 call per not-ready round can turn a transient L1 failure into a logged round error, where the round was silent before.\n\nFixes ethereum-optimism/optimism#22845\n",
+      "id": "PR_kwDODjvEJM8AAAABAONPcw",
+      "title": "rust: update reth to v2.5.0 and drop the op-rs fork",
+      "author": "sebastianst",
+      "number": 22495,
+      "body": "Moves the reth pin from the OP fork `op-rs/reth@aef8d3ef` back to upstream `paradigmxyz/reth`, `tag = \"v2.5.0\"`.\n\n**The fork is droppable.** Its branch is upstream `f2eecc65` plus exactly one cherry-pick, `aef8d3ef92 feat(trie): expose payload state root receiver`. That patch is byte-identical (modulo blob hashes and line offsets) to upstream `92cf59e2be`, and `92cf59e2be` is in v2.5.0. `f2eecc65` is an ancestor of v2.5.0. So the fork carries nothing unique and the pin goes back to upstream.\n\nStacked on #22477 — this branch still contains its two commits, so review only `rust: update reth to v2.5.0 and drop the op-rs fork`.\n\n## Shared versions\n\nSynced to what v2.5.0 pins: `revm` 41.0.0 → 42.0.1 (subcrates 42.0.0), `revm-inspectors` 0.41 → 0.42, `alloy-evm` 0.37.0 → 0.38.0, alloy core 1.6.0 → 1.6.1, the alloy main family 2.1.1 → 2.3.0, published reth-core crates 0.5.0 → 0.6.0. All four lockfiles refreshed; no unrelated git-source drift.\n\n## Upstream churn worth reviewing closely\n\n**revm 41 → 42 is a major, not a routine bump.** It reworks the whole `Handler` gas pipeline around `GasTracker` and the EIP-2780 runtime gas phase, so `OpHandler::last_frame_result` is a genuine re-derivation, not a signature patch. The new body settles the frame with upstream's `handle_reservoir_remaining_gas` and applies the pre-Regolith deposit rules on top of the settled result; the EIP-8037 create refund is now upstream's `FrameResult::refundable_state_gas`, which reads a recorded `charged_create_state_gas` flag instead of inferring the condition.\n\n**A mirror had genuinely drifted.** op-revm's `ExecuteEvm::replay` is a `copy` of upstream's `Evm` impl; upstream added an error path that finalizes the journal so a failed transaction does not leak into the next one, and our copy did not have it. Same class as the SDM warm-set leak (#21723). Fixed.\n\n**Trie: `wiped` no longer derived from account status.** reth's `HashedStorage::from_bundle_state` stopped setting it (paradigmxyz/reth#26524); `HashedPostStateProvider::hashed_post_state` now owns destroyed-account handling and returns `ProviderResult`. Two OP consequences:\n- `isthmus::withdrawals_root` builds its `HashedStorage` directly from the `BundleState`, bypassing `hashed_post_state`, so it keeps propagating `wiped` explicitly. Behaviour-preserving; `L2ToL1MessagePasser` is never destroyed in practice, but this is the withdrawals root, so it is preserved rather than dropped.\n- `OpProofsStateProviderRef::hashed_post_state` now materializes the zeroed slots against the proofs storage at the parent block, mirroring upstream's `LatestStateProviderRef`.\n\n**Behaviour change to confirm:** `ExecutionWitnessRecord`'s only public exit is now `into_execution_witness`, which also fills in ancestor headers. The payload-builder witness (`debug_executePayload`) therefore gained a headers provider and now returns headers, which it previously left empty. `debug_executionWitness` on the same server already returned them, so this makes the two consistent — but it is a response change, not just an adaptation.\n\n**Flashblock log stream:** `ReceiptConverter` gained `RpcLog`/`convert_log` and the log-matching helpers convert through it. A flashblock is a payload, not a sealed block, so the header handed to the converter carries only the number, hash and timestamp the log fields need — exactly the values the old API took positionally. OP's `convert_log` is the identity.\n\nSmaller compile-forced items: `from_reverts_auto` → `HashedPostStateSorted::from_reverts`, `ChangesetCache` → `reth_storage_overlay::OverlayManager`, `BuiltPayloadExecutedBlock::changed_paths` and `BuildNewPayload::{cache,state_root_handle}` removed, `validate_block_post_execution_with_hashed_state` gained a parent header (unused by OP), `calculate_initial_tx_gas` gained an EIP-2780 argument, `alloy_genesis::ChainConfig` gained `bogota_time`.\n\n**Latent misdeclaration exposed:** kona-proof now declares `ark-bls12-381`'s `scalar_field` feature. It used to arrive by feature unification with revm-precompile, which moved to ark-bls12-381 0.6 — so `ark_bls12_381::Fr` stopped resolving with no change on our side.\n\n## Mirrors\n\nAll 24 `UPSTREAM-MIRROR` tags re-verified against v2.5.0 / revm 42 / alloy-evm 0.38: 19 current, 5 frozen, none stale, `just mirrors --check` exits 0. Only two mirrors had actually moved upstream (`revm_handler::api`, `revm_handler::Handler::last_frame_result` — plus the mechanically-forced `refund`); the rest were verified unchanged. The frozen `DatabaseMetrics` port's recorded version moved from `rev:aef8d3e` to `rev:f2eecc6` so it names a commit reachable in the remote we now build against.\n\nTwo findings that are **not** fixed here, for a separate decision:\n- `op-reth`'s `DEV_HARDFORKS` omits `EthereumHardfork::Osaka`, which upstream's dev list has had since before the old pin. Pre-existing drift, not introduced by this bump.\n- That tag's prose claims the list \"carries three Glacier forks upstream's does not\" — neither list has them. The prose is wrong; left alone to keep this diff to the bump.\n\n## Review (`reth-update-reviewer`)\n\nRun per `.claude/skills/update-reth/SKILL.md`, following `docs/ai/reth-update-review.md`. It surfaced two HIGH findings; I verified both against upstream sources before acting.\n\n**Fixed in the second commit — `MemoryOverlayOpProofsStateProviderRef::hashed_post_state`.** Same paradigmxyz/reth#26524 change as the Isthmus item above, landing in a place the first commit did not cover. Upstream turned `MemoryOverlayStateProviderRef::hashed_post_state` from a bare delegate into one that also zeroes destroyed accounts' slots from the *unpersisted* in-memory blocks; ours stayed a bare delegate, so only the persisted proofs storage got zeroed. Verified by diffing that function at `f2eecc65` (bare delegate) against `v2.5.0` (zeroing loop). It feeds `state_root_with_updates` in the proofs engine, so the symptom is a wrong state root. No compile error, no diff signal — exactly the class this review exists for.\n\n**Reported, not fixed — the SP1 guest lost its patched SHA-256.** revm-precompile 42 moved `sha2` 0.10.9 → 0.11, and `[patch.crates-io]` only replaces the version it names. Verified in `rust/kona/sp1/programs/Cargo.lock`: before, only patched `sha2 0.10.9`; after, that **plus** an unpatched `sha2 0.11.0` whose sole consumer is `revm-precompile 42.0.1`. The SHA-256 precompile and the KZG versioned-hash check now run unaccelerated in the zkVM guest — a proving-cost regression, not a correctness one. The fix is a second patch entry, but only if `sp1-patches` publishes a sha2-0.11 tag; I have not confirmed one exists, so this needs an owner rather than a guess.\n\nThe reviewer also raised a set of medium/low items I did **not** act on — they are either pre-existing, inert today, or outside a dependency bump's scope. Listing them so they are not lost: engine persistence defaults moved upstream with no op-side override; kona's in-VM bn254 `ecAdd`/`ecMul` backend moved to ark 0.6; `ark-ff`'s `asm` feature lost the same way `scalar_field` was; c-kzg 2.1.7 → 2.1.8 under kona-host with the SP1 guest left on 2.1.7; `ChainConfig`'s new `bogota_time` absorbed by `..Default::default()` in superchain conversion; `OpSpecId::into_eth_spec` having no Amsterdam arm, so a future one-line edit would switch on EIP-2780 wholesale; and `eth_getMultiProof` arriving as a defaulted trait method on the OP namespace. Each wants its own issue rather than a rider on this PR.\n\nOn the deposit gas-cap exemption specifically, the reviewer disagreed with my \"nothing changed\" and was right to: revm 42 moved `initial_gas_and_reservoir` out of `Handler::execution` into a **new defaulted `Handler::tx_gas`** that op-revm does not override. The call site moved; it still reads `cfg().tx_gas_limit_cap()` and still runs inside the exemption window, so the behaviour holds — but it held by luck of a defaulted method landing inside the window, not by design. That is what the new tests pin.\n\n## Verification\n\nRun locally, exit codes observed:\n\n| Check | Result |\n| --- | --- |\n| `cargo check --workspace --tests` (main) | 0 |\n| `cargo check --workspace --tests` (op-rbuilder) | 0 |\n| `cargo check --workspace --tests` (rollup-boost) | 0 |\n| `just fmt-check` | 0 |\n| `just lint` (fmt + clippy + docs + mirrors) | 0 |\n| `cargo nextest run --workspace --all-features` | 0 — 2904/2904 passed, 11 skipped |\n| `just test-docs` | 0 |\n| `just check-no-std` | 0 |\n\nThe unit-test total is two runs: 2805 with `kona-sp1-proposer` excluded, then its 99 tests alone at `--test-threads 1`. Together they cover the same set; splitting was needed only because this box OOMs on the combined run.\n\nNot run locally: op-reth E2E / acceptance suites, and anything needing a devnet.\n\n## Judgement calls a human should confirm\n\n0. **The SP1 sha2 patch loss above** — highest-consequence unfixed item; needs someone who knows whether an sp1-patches sha2-0.11 tag exists.\n1. The `debug_executePayload` witness now includes ancestor headers (see above).\n2. `isthmus::withdrawals_root` preserving `wiped` by hand rather than following upstream's zero-slots approach — the fail-safe reading, but it is a deliberate divergence from how upstream now expresses the same thing.\n3. `OpBuilder::witness` / `OpPayloadBuilder::payload_witness` gained a headers-provider parameter and a `HeaderProvider` bound. Public API churn in op-reth.\n4. `flashblock_receipts_stream` gained `BlockHeader = Header, Receipt = OpReceipt` bounds and yields `RpcLog<Rpc::Network>` instead of `Log` (identical for OP). It has no in-tree callers.\n5. The SP1 guest workspace's declared `revm`/`alloy` versions were bumped too. `rust/UPDATING-RETH.md` only tells you to refresh its lockfile, so those declarations had been lagging silently.\n\n🤖 *Co-created with Claude Opus 5*\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-22T00:09:54Z",
-      "mergedAt": "2026-09-24T00:47:09Z",
-      "additions": 148,
-      "deletions": 20
+      "createdAt": "2026-08-19T01:40:40Z",
+      "mergedAt": "2026-09-24T10:33:59Z",
+      "additions": 3078,
+      "deletions": 1331
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABEqUSJg",
-      "title": "op-node: Truncate the safe head db to local-safe on reset",
-      "author": "ajsutton",
-      "number": 22997,
-      "body": "The safedb records local-safe heads, but `onEngineConfirmedReset` truncated it to cross-safe. Derivation resumes from local-safe, so the entries in between were deleted and never recorded again. `L1AtSafeHead` trusts contiguity, so the gap makes it answer with a later L1 block and no error. That shifts `RequiredL1` in `superroot_atTimestamp`, and the safe head op-challenger clamps its honest trace to.\n\nOnly op-supernode is affected. A plain op-node has no SuperAuthority, so `SafeL2Head()` returns `localSafeHead` and the two fields are equal.\n\nAn existing gap does not repair itself.\n\nFound while reviewing ethereum-optimism/optimism#22982. Separate bug, no dependency on it.",
+      "id": "PR_kwDODjvEJM8AAAABDqWjZg",
+      "title": "kona-sp1-proposer: reject pending game ancestry",
+      "author": "Inphi",
+      "number": 22910,
+      "body": "Known pending parents now make cached descendants ineligible for proving or extension, while unknown historical cache gaps retain the existing fail-open behavior. Stale pending branches are tombstoned and cleared atomically; if one is later promoted to the registry anchor, the proposer performs a bounded in-cycle factory rescan against the same pinned L1 view before planning work.\n\nRegression coverage includes pending ancestry, stale eviction, same-index reorg replacement, and anchor recovery. All 253 `kona-sp1-proposer` tests, nightly Rustfmt, and proposer-local Clippy pass; workspace-wide lint was not completed because the fresh worktree lacks the `superchain-registry` submodule and dependency-inclusive Clippy encounters a pre-existing `kona-derive` warning.\n\nRelated: #22787\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-22T23:00:02Z",
-      "mergedAt": "2026-09-24T00:01:48Z",
-      "additions": 117,
-      "deletions": 2
+      "createdAt": "2026-09-15T19:11:34Z",
+      "mergedAt": "2026-09-24T16:25:05Z",
+      "additions": 1399,
+      "deletions": 276
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABE-uheg",
+      "title": "op-service/log: own the Logger and its slog implementation",
+      "author": "sebastianst",
+      "number": 23024,
+      "body": "`op-service/log` now owns its `Logger`: an immutable interface with upstream go-ethereum's method set, minus `Write`, plus `WithContext`, `LogAttrs` and the `*Context` methods. It is backed by our own slog implementation. `op-service/log`, `logfilter` and `testlog` compile and pass their tests against upstream go-ethereum with the `replace` dropped. Before this, they depended on op-geth's logger methods and would break at the cutover.\n\nOutput is byte-identical to geth's logger for the terminal, logfmt and JSON handlers, which a differential test pins. Level filtering, the `!BADKEY` handling of an odd argument and `Crit` exiting match op-geth. Two things change on purpose, both to simplify:\n- op-geth's mutable `SetContext` is replaced by `WithContext(ctx) Logger`, which returns a derived logger. Every call site already derived a fresh logger and then set its context, so each becomes one call.\n- Every method attributes records to its direct caller. `Write`/`WriteCtx` no longer attribute to the caller's caller, and they are gone from our `Logger` because `Log` covers them.\n\n`testlog` now honours the context; its `SetContext` used to be a no-op. So records from devtest and acceptance-test loggers now carry `scope=…` (and `chainID=…` where set), and context-based logfilter rules apply to them. The set of shown and muted lines doesn't change, because the only rule installed in-tree filters by level.\n\nOur `With`/`New` return our `Logger`, so it can't satisfy geth's `log.Logger` directly, because Go has no covariant return types. `ToGeth` converts a logger for the one go-ethereum API that takes one (discv5 in op-node). `SetDefault` also installs our logger as geth's global logger, so geth code running in-process logs through it. Returning geth's `log.Logger` from `With` instead would break 200+ call sites against upstream. The geth view keeps geth's `Write` semantics so that geth's own `log.Info` still attributes records to the geth call site. Handlers and level helpers stay re-exported from go-ethereum, since they exist upstream. `geth.go` is the only file allowed to import it.\n\nNote: logfilter's `TestThreadSafety` races under `-race` because `testlog.CapturingHandler` has no lock. This is pre-existing, reproduces without this PR, and will be fixed in a follow-up.\n\nStacked on #23017. Part of #22752.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-24T17:46:26Z",
+      "mergedAt": null,
+      "additions": 1133,
+      "deletions": 193
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABDgrbcg",
+      "title": "contracts-bedrock: optimize fork upgrade tests",
+      "author": "maurelian",
+      "number": 22896,
+      "body": "Unreview agentic fixes.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-14T20:30:31Z",
+      "mergedAt": null,
+      "additions": 804,
+      "deletions": 333
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABE7nrog",
+      "title": "op-service/log!: make op-service/log a leaf package and the monorepo's logger surface",
+      "author": "sebastianst",
+      "number": 23013,
+      "body": "Makes `op-service/log` a leaf package (no in-repo imports) and the logging API that op-service logs through, instead of importing `go-ethereum/log` directly. This is the first step toward owning the log layer before the go-ethereum cutover: once everything logs through `oplog`, the geth-backed names can be swapped for an owned implementation in one place. Being a leaf also lets low-level packages such as `logfilter`, `ioutil` and `tls` import the logger, which the old package's CLI and HTTP dependencies prevented.\n\nNo behaviour change. The re-exports are type aliases and variables bound to the geth implementation, not wrappers: a wrapper would shift geth's source-location attribution to `logger.go` (pinned by `logger_test.go`). Migrated and unmigrated packages therefore interoperate. Migrated files import `op-service/log` unaliased, as `log`, so most change only their import line. A depguard test keeps the package a leaf. Reviewing commit by commit is easiest: the package split, then the alias surface with the op-service migration. Each commit builds on its own.\n\nBREAKING CHANGE: Go modules importing `op-service/log` must update imports. The CLI helpers move to `op-service/log/logcli`: `CLIFlags`, `CLIFlagsWithCategory`, `CLIConfig`, `ReadCLIConfig`, `DefaultCLIConfig`, `NewLogger`, `NewLogHandler`, `SetGlobalLogHandler`, `SetupDefaults`, `AppOut`, `LevelFlagValue`, `FormatFlagValue`. `NewLoggingMiddleware` moves to `op-service/httputil`. `oplog.NewLogger` still exists but is now go-ethereum's `NewLogger(slog.Handler)`, so a call with the old `(io.Writer, CLIConfig)` signature fails with an argument error and must switch to `logcli.NewLogger`. CLI flags and env vars are unchanged.\n\nPackages outside op-service still import `go-ethereum/log`; they move in a follow-up. Deferred review findings: the §15 status in `docs/ai/opgeth-decoupling.md` gets updated with that follow-up, and the unused `flags.ReadTestConfig` (unused on develop too) is left for a separate cleanup.\n\nPart of #22752.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-24T12:36:43Z",
+      "mergedAt": null,
+      "additions": 803,
+      "deletions": 543
     }
   ],
   "codeChanges": {
-    "additions": 265,
-    "deletions": 22,
-    "files": 8,
-    "commitCount": 2
+    "additions": 7702,
+    "deletions": 2892,
+    "files": 136,
+    "commitCount": 78
   },
   "completedItems": [
+    {
+      "title": "rust: update reth to v2.5.0 and drop the op-rs fork",
+      "prNumber": 22495,
+      "type": "other",
+      "body": "Moves the reth pin from the OP fork `op-rs/reth@aef8d3ef` back to upstream `paradigmxyz/reth`, `tag = \"v2.5.0\"`.\n\n**The fork is droppable.** Its branch is upstream `f2eecc65` plus exactly one cherry-pick, `aef8d3ef92 feat(trie): expose payl",
+      "files": [
+        ".claude/agents/reth-update-reviewer.md",
+        ".claude/skills/update-reth/SKILL.md",
+        "docs/ai/reth-update-review.md",
+        "docs/ai/reth-upstream-mirrors.md",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/UPDATING-RETH.md",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-evm/src/tests.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/justfile",
+        "rust/kona/bin/client/src/fpvm_evm/tx.rs",
+        "rust/kona/crates/protocol/registry/src/l1/mod.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/op-alloy/crates/consensus/src/reth_codec.rs",
+        "rust/op-alloy/crates/consensus/src/reth_core.rs",
+        "rust/op-alloy/crates/rpc-types/src/reth_compat.rs",
+        "rust/op-rbuilder/Cargo.lock",
+        "rust/op-rbuilder/Cargo.toml",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/flashblocks/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/generator.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/builders/standard/payload.rs",
+        "rust/op-rbuilder/crates/op-rbuilder/src/mock_tx.rs",
+        "rust/op-reth/crates/consensus/src/validation/isthmus.rs",
+        "rust/op-reth/crates/flashblocks/src/worker.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/node/src/rpc.rs",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/rpc/src/debug.rs",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/rpc/src/witness.rs",
+        "rust/op-reth/crates/trie/src/backfill/changesets.rs",
+        "rust/op-reth/crates/trie/src/backfill/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/engine/buffer/overlay.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/execute_block.rs",
+        "rust/op-reth/crates/trie/src/provider.rs",
+        "rust/op-reth/crates/trie/src/test_utils.rs",
+        "rust/op-reth/crates/trie/tests/live.rs",
+        "rust/op-revm/src/api/exec.rs",
+        "rust/op-revm/src/handler.rs",
+        "rust/op-revm/src/precompiles.rs",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/attributes.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/flashblock/payload.rs",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs",
+        "rust/op-revm/src/evm.rs",
+        "rust/op-revm/src/spec.rs",
+        "rust/op-revm/src/transaction/abstraction.rs",
+        "rust/revm-ee-tests/src/op_revm_tests.rs",
+        "rust/deny.toml",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/provider.rs",
+        "rust/op-reth/crates/node/tests/it/main.rs",
+        "rust/op-reth/crates/node/tests/it/payload_handoff.rs",
+        "rust/alloy-op-evm/src/tx.rs",
+        "rust/op-alloy/crates/consensus/src/receipts/envelope.rs",
+        "rust/op-alloy/crates/consensus/src/receipts/receipt.rs",
+        "rust/op-alloy/crates/consensus/src/transaction/canonical.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/payload/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/proofs.rs",
+        "rust/op-reth/crates/rpc/src/metrics.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "op-core/types/deposit_tx_test.go",
+        "rust/kona/tests/proofs/deposit_gas_test.go",
+        "rust/kona/tests/proofs/helpers/env.go",
+        "rust/kona/tests/proofs/helpers/matrix.go",
+        "rust/op-alloy/crates/consensus/src/transaction/deposit.rs",
+        "rust/op-alloy/crates/rpc-types/src/transaction.rs",
+        "rust/op-reth/crates/rpc/src/state.rs"
+      ]
+    },
+    {
+      "title": "kona-sp1-proposer: reject pending game ancestry",
+      "prNumber": 22910,
+      "type": "other",
+      "body": "Known pending parents now make cached descendants ineligible for proving or extension, while unknown historical cache gaps retain the existing fail-open behavior. Stale pending branches are tombstoned and cleared atomically; if one is later",
+      "files": [
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/crates/proposer/src/ports.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs"
+      ]
+    },
+    {
+      "title": "op-reth: count post-exec validation failures by rule",
+      "prNumber": 22932,
+      "type": "other",
+      "body": "A block whose `0x7D` post-exec transaction is structurally invalid — present before the Lagoon activation, duplicated, not the final transaction, or anchored to the wrong block number — is rejected when op-reth builds the block's execution ",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/sdm_metrics.rs",
+        "rust/op-reth/crates/evm/tests/sdm_post_exec_validation_failures.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs"
+      ]
+    },
+    {
+      "title": "op-reth: record SDM refund counters on the import path",
+      "prNumber": 22931,
+      "type": "other",
+      "body": "SDM refund activity is only observable today on the node that produced a block: the payload builder's `reth_optimism_payload_builder_sdm_refund_gas_*` series latch on standby sequencers and say nothing about what the chain actually carries.",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/consensus/Cargo.toml",
+        "rust/op-reth/crates/consensus/src/lib.rs",
+        "rust/op-reth/crates/consensus/src/sdm_metrics.rs",
+        "rust/op-reth/crates/consensus/tests/sdm_import_metrics.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-alloy/crates/consensus/Cargo.toml",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs",
+        "rust/op-reth/crates/payload/src/builder.rs"
+      ]
+    },
+    {
+      "title": "op-reth: export SDM enablement as metrics",
+      "prNumber": 22927,
+      "type": "other",
+      "body": "SDM alerts have no series to gate on, so they can only name the networks where SDM is enabled, and they cannot react when a sequencer operator opts out via the admin RPC. ethereum-optimism/k8s#12872 is blocked on exactly this — it gates on ",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/config.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/sdm_metrics.rs",
+        "rust/op-reth/crates/payload/tests/sdm_effective_gauge.rs",
+        "rust/op-reth/crates/payload/tests/sdm_operator_opt_in_gauge.rs"
+      ]
+    },
     {
       "title": "op-supernode: Prevent local-safe promotion while verified state is stale",
       "prNumber": 22982,
@@ -68,6 +295,47 @@
       ]
     },
     {
+      "title": "op-reth: reuse shared payload EVM environment builder",
+      "prNumber": 22968,
+      "type": "other",
+      "body": "Builds on #22495. Keeping a second payload environment implementation in the reth adapter lets fork, blob, slot, and gas-limit policy drift from the canonical OP implementation.\n\nValid payload behavior is unchanged; an out-of-range base fee",
+      "files": [
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/alloy-op-evm/src/env.rs"
+      ]
+    },
+    {
+      "title": "alloy-op-evm: normalize sequencer SDM refund outputs",
+      "prNumber": 22963,
+      "type": "other",
+      "body": " - Normalize sequencer refund-policy outputs to supported bounds.\r\n - Ignore refunds for ineligible transaction types.\r\n - Add correction metrics and producer/verifier regression coverage.\r\n\r\n## Testing\r\n\r\n - SDM acceptance tests\r\n - alloy-",
+      "files": [
+        "op-acceptance-tests/tests/sdm/block_test.go",
+        "rust/Cargo.lock",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/alloy-op-evm/src/post_exec/refund.rs",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/sdm-fixture-node/src/lib.rs"
+      ]
+    },
+    {
+      "title": "op-reth: export the boot-time SDM opt-in as a gauge",
+      "prNumber": 22961,
+      "type": "other",
+      "body": "The operator SDM opt-in is in-memory: `admin_setOperatorSdmOptIn` changes it for the life of the process, and on restart the node returns to whatever `--rollup.operator-sdm-opt-in` / `OP_RETH_OPERATOR_SDM_OPT_IN` says. A runtime toggle that",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/payload/src/config.rs",
+        "rust/op-reth/crates/payload/src/sdm_metrics.rs",
+        "rust/op-reth/crates/payload/tests/sdm_operator_opt_in_gauge.rs"
+      ]
+    },
+    {
       "title": "op-node: Truncate the safe head db to local-safe on reset",
       "prNumber": 22997,
       "type": "other",
@@ -76,12 +344,299 @@
         "op-node/rollup/driver/sync_deriver.go",
         "op-node/rollup/driver/sync_deriver_test.go"
       ]
+    },
+    {
+      "title": "op-reth: assert l1FeeScalar is absent post-Ecotone",
+      "prNumber": 22987,
+      "type": "other",
+      "body": "Addresses https://github.com/ethereum-optimism/optimism/pull/22941#discussion_r4070493109 (nonblocking nit from @pcw109550); #22941 was already in the merge queue, so it rides here.\n\nEcotone removed `l1FeeScalar`, and `OpReceiptFieldsBuilde",
+      "files": [
+        "rust/op-reth/crates/rpc/src/eth/receipt/tests.rs"
+      ]
+    },
+    {
+      "title": "op-dispute-mon: count ZK bond distributions only after finality",
+      "prNumber": 23010,
+      "type": "other",
+      "body": "`op_dispute_mon_zk_games_pending_lifecycle_action{action=\"bond_distribution\"}` now counts only ZK games whose bonds can be distributed now: resolved, still undecided, and past the AnchorStateRegistry finality delay (`isGameFinalized` at the",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/dispute_monitor_test.go",
+        "op-challenger/game/fault/contracts/anchorstateregistry.go",
+        "op-challenger/game/fault/contracts/anchorstateregistry_test.go",
+        "op-dispute-mon/mon/extract/extractor.go",
+        "op-dispute-mon/mon/extract/extractor_test.go",
+        "op-dispute-mon/mon/extract/super_permissioned_integration_test.go",
+        "op-dispute-mon/mon/extract/zk_extractor_test.go",
+        "op-dispute-mon/mon/mixed_game_integration_test.go",
+        "op-dispute-mon/mon/service.go",
+        "op-dispute-mon/mon/types/types.go",
+        "op-dispute-mon/mon/zk_lifecycle.go",
+        "op-dispute-mon/mon/zk_lifecycle_test.go"
+      ]
+    },
+    {
+      "title": "op-alloy,op-reth,kona: enforce canonical PostExec entries",
+      "prNumber": 23003,
+      "type": "other",
+      "body": "Aligns version-1 PostExec verification with the Lagoon specification so op-reth and Kona reject empty or non-monotonic refund-entry lists instead of accepting blocks that independent clients may reject. Raw payloads are also bounded by the ",
+      "files": [
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/kona/crates/proof/executor/src/builder/core.rs",
+        "rust/kona/crates/proof/executor/src/builder/core/tests.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/node/tests/it/debug_trace_post_exec.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/evm/src/sdm_metrics.rs"
+      ]
+    },
+    {
+      "title": "docs: add PublicNode to OP Stack RPC directory",
+      "prNumber": 23002,
+      "type": "docs",
+      "body": "## Description\r\n\r\nAdds PublicNode to the Production RPC providers section of the OP Stack RPC directory.\r\n\r\nPublicNode by Allnodes provides fast, free, and privacy-first RPC endpoints for OP Mainnet, Base, Unichain and Soneium. Endpoints: h",
+      "files": [
+        "docs/public-docs/app-developers/reference/rpc-providers.mdx"
+      ]
+    },
+    {
+      "title": "docs: add Goldsky to RPC provider directory",
+      "prNumber": 23021,
+      "type": "docs",
+      "body": "- Adds Goldsky to production RPC providers.\n- OP Mainnet, Base, Unichain, Zora, plus testnets.\n- Adds `<ThirdPartyContent />` per content guide.\n- Docs: https://docs.goldsky.com/edge-rpc/introduction",
+      "files": [
+        "docs/public-docs/app-developers/reference/rpc-providers.mdx"
+      ]
     }
   ],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 2,
-  "newIssues": 0,
-  "closedIssues": 1,
-  "activeContributors": 2
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 128.72732168972829,
+      "prScore": 117.22732168972829,
+      "issueScore": 2,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 59.800848277860815,
+      "prScore": 45.46084827786081,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 55.27354907958255,
+      "prScore": 40.93354907958255,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "fakedev9999",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/71915289?u=f1984e36786f33ff3043f18e00d59ac51796151a&v=4",
+      "totalScore": 31.7102021276788,
+      "prScore": 31.7102021276788,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aramalipoor",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1164589?u=785b534783f294da8b070376b2b0ae56b7323cbf&v=4",
+      "totalScore": 27.85405732961526,
+      "prScore": 27.85405732961526,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 25.0024379124341,
+      "prScore": 25.0024379124341,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 23,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 21.6454379124341,
+      "prScore": 21.6454379124341,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 19.074947636399187,
+      "prScore": 6.074947636399186,
+      "issueScore": 4,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 18.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 14.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 10.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.656474678730769,
+      "prScore": 7.316474678730769,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Jordy-Baby",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82444671?u=3de390402be769cca2a0569d7e09dac394fd24c0&v=4",
+      "totalScore": 7.368292546497024,
+      "prScore": 7.368292546497024,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 11,
+  "mergedPRs": 15,
+  "newIssues": 2,
+  "closedIssues": 3,
+  "activeContributors": 27
 }
