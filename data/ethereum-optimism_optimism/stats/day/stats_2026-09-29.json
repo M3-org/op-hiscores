@@ -5,35 +5,475 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-09-29 to 2026-09-30, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 2 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-09-29 to 2026-09-30, ethereum-optimism/optimism had 23 new PRs (14 merged), 6 new issues, and 31 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABKs1iNg",
+      "title": "op-reth: update reth dependency to 2.4.2 / 2.5.0",
+      "author": "sebastianst",
+      "number": 22115,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Placeholder issue to bump the reth dependency to its next release.",
+      "createdAt": "2026-07-29T19:41:56Z",
+      "closedAt": "2026-09-29T14:05:00Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABNiVYjg",
+      "title": "op-node: SimpleAsyncGossiper.Clear() blocks the sequencer for the duration of a remote-signer HTTP call, shortening the next block's build window",
+      "author": "hdcesario-op",
+      "number": 22554,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`SimpleAsyncGossiper` performs the `SignAndPublishL2Payload` network call **inline in its select loop**, while all of its channels are **unbuffered**. When a remote signer is configured (`OP_NODE_SIGNER_ENDPOINT`), the sequencer's call to `Clear()` — issued 1–2 ms after `Gossip()` — blocks for the entire remaining duration of the signer's HTTPS round-trip.\n\nBecause op-node computes the next block's build-window start as a residual, that stall is subtracted **1:1** from the next block's building time. On a chain using subblocks this deterministically costs subblocks.\n\nThe worst case is more severe than a slow block: the signing call has **no deadline** (see Impact below), so a hung signer connection doesn't just shorten build windows — it **halts block production** until the connection dies on its own.\n\nConfirmed with the Go execution tracer on a live sequencer: **5 out of 5** occurrences, with the sequencer's stall tracking signer latency to within ~1.5 ms.\n\n## The code\n\n`op-node/rollup/async/asyncgossiper.go`:\n\n```go\nset:   make(chan *eth.ExecutionPayloadEnvelope)   // unbuffered\nget:   make(chan chan *eth.ExecutionPayloadEnvelope)\nclear: make(chan struct{})                        // unbuffered\n\n// Clear ... blocks until the signal to clear is picked up by the async routine\nfunc (p *SimpleAsyncGossiper) Clear() { p.clear <- struct{}{} }\n\n// Start()'s loop:\nfor {\n    select {\n    case payload := <-p.set:\n        p.gossip(p.ctx, payload)   // ← blocking network call, INLINE in the loop\n    case c := <-p.get:\n        p.getPayload(c)\n    case <-p.clear:\n        p.clearPayload()\n    case <-p.stop:\n        return\n    }\n}\n```\n\n`gossip()` calls `net.SignAndPublishL2Payload(...)`, which with a remote signer becomes\n`RemoteSigner.SignBlockV1` → `SignerClient.SignBlockPayload` → HTTPS round-trip to op-signer.\n\nWhile that round-trip is in flight the goroutine is **not** in its `select`, so nothing on `clear`, `get` or `set` can be received. The type's own doc comment is explicit that \"exposed functions are synchronous, and block until the async routine is able to start handling the request\".\n\nThe problem is that one of those callers is the sequencer's hot path between sealing block N and opening the build window for block N+1 (`op-node/rollup/sequencing/sequencer.go`):\n\n```go\ns.asyncGossip.Gossip(envelope)          // hands the payload to the gossiper,\n                                        // which immediately enters the signer round-trip\n// ... s.eng.ProcessPayload(...)        // local insert of our own block: ~1–2 ms\ns.asyncGossip.Clear()                   // ← blocks until the round-trip finishes\ns.scheduleNextAction(sealResult.Ref)    // ← runs late by exactly the blocked time\n```\n\n`scheduleNextAction` starts the next build \"instantly\" (`nextAction = now`) whenever less than a full block time remains — and the next block's deadline is fixed by chain timestamp. So every millisecond spent blocked in `Clear()` comes straight out of the next build window.\n\n## Evidence\n\nExecution traces from a sequencer with a remote signer, 2 s blocks and 200 ms subblocks. Goroutine 447 is the gossiper loop, 448 the sequencer.\n\nGossiper blocking stack:\n\n```\nasync.(*SimpleAsyncGossiper).Start.func1          asyncgossiper.go:112\n  → p2p.(*publisher).SignAndPublishL2Payload\n    → signer.(*RemoteSigner).SignBlockV1          remote_signer.go:41\n      → signer.(*SignerClient).SignBlockPayload   client.go:122\n        → net/http.(*Transport).RoundTrip         ← blocks here\n```\n\nSequencer, ~1 ms later:\n\n```\nGoID=448  Running -> Waiting  Reason=\"chan send\"\n  runtime.chansend1 <- async.(*SimpleAsyncGossiper).Clear <- sequencing.(*Sequencer).RunAction\n```\n\nTimeline of one occurrence:\n\n```\n17.958  gossiper enters signer HTTP round-trip\n17.959  sequencer blocks on chan send in Clear()\n        ╎  642 ms\n18.601  signer response arrives; gossiper returns to select\n18.602  sequencer unblocks\n18.634  sequencer enters Sequencer.RunLoop        ← 636 ms late\n```\n\nFive occurrences, measured three independent ways:\n\n| signer round-trip | sequencer blocked on `Clear()` | build window lost |\n|---|---|---|\n| 642.6 ms | 642.1 ms | 635.6 ms |\n| 695.6 ms | 694.8 ms | 657.4 ms |\n| 194.6 ms | 193.1 ms | 187.3 ms |\n| 904.8 ms | 904.1 ms | 866.4 ms |\n| 301.5 ms | 300.3 ms | 263.7 ms |\n\n`Clear()` was reached 1.1–2.0 ms after the signer call began in all five, so the sequencer is **always** inside the in-flight window. This makes the behaviour deterministic rather than occasional: any signer response slower than the available margin costs build time.\n\n## Impact\n\n- **Deterministic**, not probabilistic. Every slow sign becomes a shortened build window.\n- **Scales the wrong way with subblocks.** With 2 s blocks, a 50 ms seal reserve and a 200 ms subblock interval, the spare margin is roughly 139 ms — so even the *fastest* signer latency we captured (194 ms) costs a subblock. Shorter subblock intervals shrink the margin further.\n- **No deadline → a hung signer halts sequencing entirely.** `gossip()` runs on the gossiper's node-lifetime context, and the signer client's HTTP transport has no timeout (`op-service/signer/client.go`). A signer connection that hangs (rather than erroring) blocks `Clear()` indefinitely — and since the sequencer blocks while holding its state mutex, `NextAction()`/`Building()` wedge with it. Block production stops until TCP gives up.\n- **Only affects remote-signer deployments.** A comparison chain with no signer configured showed none of this, which is what isolated the cause.\n- **Hard to attribute from metrics.** The signer client dials a plain go-ethereum `rpc.Client` without the metrics recorder that op-node's instrumented clients get, so these calls do not appear in `op_node_default_rpc_client_request_duration_seconds`. A chain can show zero slow RPCs by that metric while the sequencer is being stalled by signing.\n\n## Fix\n\nThe two obvious one-line patches **don't work** — spelling out why, so nobody reaches for them:\n\n**Rejected: reorder — call `Clear()` before `Gossip()`.** The `Clear()` on the hot path exists to empty the reuse buffer *after* the block was successfully inserted (`gossip()` stores `currentPayload` on publish success so a payload that was gossiped but not inserted can be recovered). At `Gossip()` time the buffer is already empty, so a preceding `Clear()` is a no-op — and the inserted block then *stays* buffered, so the next `RunAction` finds it via `Get()`, takes the \"resuming previously gossiped payload\" path, and re-processes the current head instead of building a new block.\n\n**Rejected: make `Clear()` non-blocking.** Two independent problems:\n\n1. A `select`/`default` send drops the clear signal exactly when the gossiper is busy publishing — which is the common case here — leaving the same stale payload behind as above. (A buffered cap-1 channel avoids that particular failure, but:)\n2. **It saves no time.** Every `RunAction` *begins* with `s.asyncGossip.Get()` — another synchronous rendezvous with the same goroutine. With `Clear()` unblocked, `scheduleNextAction` sets `nextAction = now`, the next `RunAction` fires within milliseconds, and `Get()` blocks for the remainder of the very same signer round-trip. The stall just moves from `Clear()` to `Get()`; build time lost is identical.\n\n**The actual fix: take the network call out of the loop body.** Hand the payload to a dedicated publish goroutine so the loop stays responsive in its `select` — the fix that matches the type's name and stated intent. Design points to get right:\n\n- `currentPayload` is currently stored only on publish *success*; decoupling requires choosing store-before-publish vs. store-on-success and synchronizing access to it.\n- The blocking `Clear()` today guarantees the buffer is empty before the next `Get()`. The replacement must preserve that invariant, or make the reuse path tolerant of finding the already-inserted head payload.\n- Overlapping publishes (block N+1 gossiped while block N's publish is still in flight) need defined behaviour.\n\n**Independent hardening, worth doing regardless: put a deadline on the signing call.** The missing timeout is what turns a hung signer into a halted sequencer, and it's a one-line context change that stands on its own.\n\nHappy to put up a PR along these lines.\n\n## Reproducing\n\n1. Run a sequencer with `OP_NODE_SIGNER_ENDPOINT` set (remote signer) and subblocks enabled.\n2. Add latency to the signer endpoint, or observe naturally when the signer's p99 exceeds the build-window margin.\n3. Observe `build_time` on `Inserted new L2 unsafe block` dropping by approximately the signer latency, and the subblock count for that block falling short of target.\n4. `/debug/pprof/trace` shows goroutine 448 (sequencer) in `Waiting Reason=\"chan send\"` inside `Gossiper.Clear` for the duration of the gossiper's `SignBlockPayload` round-trip.\n",
+      "createdAt": "2026-08-20T12:27:46Z",
+      "closedAt": "2026-09-29T12:37:31Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABUAUZSw",
+      "title": "contracts-bedrock: Lagoon activation bricks any chain whose genesis contracts are newer than the frozen NUT bundle",
+      "author": "jelias2",
+      "number": 23097,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nA chain whose genesis contracts are newer than the **frozen Lagoon NUT bundle** is guaranteed to brick at Lagoon activation: the L2ProxyAdmin upgrade deposit reverts with `L2ContractsManager_DowngradeNotAllowed`, the interop predeploys (CrossL2Inbox `0x…0022`, L2ToL2CrossDomainMessenger `0x…0023`, SuperchainETHBridge `0x…0024`) never receive implementations, ETHLiquidity is never funded, and there is no retry mechanism. The chain keeps sequencing with no halt and no alert.\n\nThis happened on the `interop-sdm` devnet (chains 420120246/420120247) at its Lagoon activation, 2026-09-29 21:00 UTC. All interop messaging on both chains now reverts with `Proxy: implementation not initialized`. Discovered ~30 minutes later only because `check-lagoon roundtrip` failed.\n\nNo node version fixes or causes this — every recent op-node, kona-node and op-supernode release (and current develop) embeds the identical frozen bundle.\n\n## Root cause\n\nTwo design decisions collide:\n\n1. **NUT bundles are frozen at fork-definition time.** The Lagoon bundle at `op-core/nuts/bundles/lagoon_nut_bundle.json` (go:embed'd by op-node via `nutBundleForFork`, codegen'd by kona from the same file) was frozen ~June 2026 with **L2ContractsManager 1.9.1 / SequencerFeeVault 1.6.1**. Freezing is correct: it guarantees deterministic activation bytes and stable deposit source hashes across clients, for chains whose on-chain state is *older* than the bundle — which is what production networks look like.\n   - Do not confuse it with `packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json` (currently LCM 1.14.0 / SFV 1.7.0) — that is the *rolling* bundle for the next fork and is not what ships for Lagoon. This confusion produced the original, wrong root cause in this issue.\n2. **Genesis is generated from current contract artifacts.** The interop-sdm genesis (op-deployer 0.8.0-rc.2) has **SequencerFeeVault 1.7.0** at `0x4200…0011`. Note the trigger is the *artifact* versions, not the op-deployer binary: interop-priv-1 was deployed with op-deployer 0.7.1 and its genesis also carries SequencerFeeVault 1.7.0 — it avoids the bug only because it runs Lagoon at genesis.\n\nAt activation, `L2ContractsManager._apply()` upgrades ~20 predeploys sequentially inside one deposit tx. For each, `L2ContractsManagerUtils` runs a downgrade guard ([`upgradeTo`, src/libraries/L2ContractsManagerUtils.sol#L56-L68](https://github.com/ethereum-optimism/optimism/blob/develop/packages/contracts-bedrock/src/libraries/L2ContractsManagerUtils.sol#L56-L68); [`upgradeToAndCall`, #L139-L148](https://github.com/ethereum-optimism/optimism/blob/develop/packages/contracts-bedrock/src/libraries/L2ContractsManagerUtils.sol#L139-L148)):\n\n```solidity\nif (\n    implementation.code.length != 0\n        && SemverComp.gt(ISemver(_proxy).version(), ISemver(_implementation).version())\n) {\n    revert L2ContractsManager_DowngradeNotAllowed(address(_proxy));\n}\n```\n\nOn-chain SequencerFeeVault 1.7.0 > bundle's 1.6.1 → the first fee-vault upgrade reverts the **entire** `_apply`, including the interop predeploy wiring in its `isInterop` branch. The deposits that already executed earlier in the activation block persist. Result: a permanently half-upgraded chain.\n\n## Evidence (interop-sdm-0; interop-sdm-1 identical)\n\n- `lagoon_time: 1790715600`; activation block **8820** (`0x2274`) contains the expected 31 deposits: L1-attributes, `setFeature(INTEROP)` → L1Block, 27 × ConditionalDeployer deploys, L2ProxyAdmin upgrade, ETHLiquidity `fund()`.\n- Receipts: 29 succeeded, 2 failed — tx 29 (L2ProxyAdmin upgrade, `0xdcc91ddea2ce19ff790c296f524216a1d5fe44f99063bb17824bd47ec5401ef3`, 642k gas of 3.7M) and tx 30 (ETHLiquidity funding, consequential).\n- `debug_traceTransaction` (callTracer) on tx 29: the delegatecall into the LCM at `0x82c0bb44c86bbb1620583890b2af560382aa83c8` reverts with selector `0xf8ce5d16` = `L2ContractsManager_DowngradeNotAllowed(address)` for `0x4200…0011`; the L2ProxyAdmin wraps it in `0x1c0a89cc` (delegatecall-failed).\n- On-chain `SequencerFeeVault.version()` = **1.7.0**; on-chain LCM `version()` = **1.9.1**; the LCM's `getImplementations()` SequencerFeeVault impl reports **1.6.1**.\n- Sequencer verified in-cluster: `op-node v1.19.8-rc.1-9f76a9d2`, commit matches the release tag; that commit's `op-core/nuts/bundles/lagoon_nut_bundle.json` carries LCM 1.9.1 / SFV 1.6.1 — as does develop today. The running node was exactly what the manifest pinned; version skew between op-node / kona-node / op-supernode is ruled out (all embed the same frozen file).\n- Terminal state: EIP-1967 impl slots at `0x…0022/0023/0024` are zero, no code at `0xc0d3…0024`, `isFeatureEnabled(INTEROP)` = true, ETHLiquidity unfunded.\n\n## Why this is a bug, not an ops mistake\n\n1. **Guaranteed by construction.** A fresh chain genesis'd from any monorepo state newer than the bundle freeze, with a Lagoon transition scheduled, *always* bricks. Genesis-newer-than-frozen-bundle is the default state of every new devnet.\n2. **No recovery path.** Activation fires once at the fork boundary. Removing or re-timing `lagoon_time` changes derivation, so reconfigured nodes derive a different block 8820 and split from the batches already posted to L1. A devnet can be redeployed; a long-lived chain could not.\n3. **Partial terminal state.** The guard protects one fee vault by bricking interop chain-wide, while earlier deposits in the same activation block persist.\n4. **Silent.** Sequencer, batcher, proposer and challenger all continued past a failed network upgrade. Nothing asserts deposit receipt statuses in activation blocks.\n5. **Transition path validated only for bundle-era genesis.** The dev-preview devnets (genesis SequencerFeeVault **1.6.1**, equal to the bundle's) had `lagoon_time` in early August 2026 and show no sign of this failure — consistent with the transition working when on-chain versions ≤ bundle versions (the guard cannot trip). Their RPCs are no longer reachable, so the activation receipts were not re-verified. Production chains (contracts predating the freeze) should therefore pass, but each target's on-chain versions should be checked against the bundle before its activation rather than assumed.\n\n## Current workarounds (new networks only)\n\n| Goal | Setup |\n|---|---|\n| Interop working; don't care about the transition | Lagoon active at genesis (`l2GenesisLagoonTimeOffset: \"0x0\"`). The genesis deploy path (`LCM.deploy()`) applies current contracts directly; no NUT runs. Supported by op-contracts/v8.0.0 (`L2Genesis.s.sol` Fork.LAGOON + `_isGenesisInteropEnabled`), op-deployer 0.8.0-rc.2, and netchef override pass-through. **Field-validated:** interop-priv-1/2/3 and zk-proofs-1 run `lagoon_time=0`; interop-priv-1's genesis alloc has the SuperchainETHBridge impl slot pre-set to `0xc0d3…0024` *with* SequencerFeeVault 1.7.0 contracts. |\n| Rehearse the Lagoon *transition* | Genesis must use pre-freeze contract artifacts (SequencerFeeVault ≤ 1.6.1, ~June 2026 era) — also the production-faithful shape. |\n| Current genesis contracts + later Lagoon transition | Impossible today — this is the bug. |\n\n## Proposed fixes\n\n### 1. Contracts (primary): skip-on-newer in `L2ContractsManagerUtils`\n\nWhen the on-chain contract is strictly newer than the bundle's implementation, reverting protects nothing — skipping that one contract downgrades nothing. Replace the revert with a skip + event in both `upgradeTo` and `upgradeToAndCall`:\n\n```solidity\nevent L2ContractsManager_UpgradeSkipped(address indexed target, string onchainVersion, string bundleVersion);\n\nfunction _skipAsNewer(address _proxy, address _implementation) private returns (bool) {\n    address implementation = IL2ProxyAdmin(Predeploys.PROXY_ADMIN).getProxyImplementation(_proxy);\n    if (implementation.code.length == 0) return false; // newly introduced predeploy\n    string memory onchain = ISemver(_proxy).version();\n    string memory next = ISemver(_implementation).version();\n    if (!SemverComp.gt(onchain, next)) return false;\n    emit L2ContractsManager_UpgradeSkipped(_proxy, onchain, next);\n    return true;\n}\n```\n\nProperties: deterministic (consensus-safe); skipping `upgradeToAndCall` also skips the initializer re-run, which is correct since the newer contract was already initialized; equal versions still re-upgrade and re-initialize (initializers must be idempotent per contracts-bedrock/AGENTS.md); the event gives monitoring a pageable signal for production networks where on-chain-newer *is* unexpected — it pages on a live chain instead of bricking a stuck one; the skip path is cheaper, so the bundle's fixed gas reservation still covers it. `L2ContractsManager_DowngradeNotAllowed` becomes unused and is removed.\n\n**Constraint:** this must ship *inside the frozen Lagoon bundle* (new LCM creation code → new deposit source hashes), so the bundle must be regenerated and the fix must land **before Lagoon activates on any network that matters**. The window closes at first real activation. No client code changes: op-node and kona pick up the regenerated JSON together.\n\nAlternative considered: making the whole activation atomic (deploys + upgrade in one deposit) fixes the partial state but not the no-retry brick, and is a much larger bundle-format change. Rejected.\n\n### 2. Tooling: deploy-time gate\n\nop-deployer / netchef must refuse to launch a network whose genesis contract versions exceed the versions in the **frozen bundle of any fork scheduled after genesis** (not the rolling current bundle). This would have made interop-sdm undeployable instead of time-bombed.\n\n### 3. Monitoring\n\nAlert on any failed deposit receipt in a hardfork activation block, and on `L2ContractsManager_UpgradeSkipped` once fix 1 lands.\n\n### 4. Related cleanup\n\n`netchef pkg/interactive_add_hardfork.go` maps `forks.Lagoon` to `interop_time`/`interopTime` config keys while generated rollup configs use `lagoon_time` — likely stale from the Interop→Lagoon rename; unverified whether any flow hits it.\n\n## Status\n\n- interop-sdm is unrecoverable and will be replaced by a Lagoon-at-genesis devnet (draft PR: ethereum-optimism/devnets-private#1887, chains 420120248/420120249). Post-deploy sanity check: the generated genesis.json alloc must have the EIP-1967 impl slot set for `0x4200…0024` (as interop-priv-1's does) before pointing traffic at it.\n- Fix 1 draft is ready to become a PR pending contracts-team sign-off on the approach (tests: newer-on-chain → skipped + event + rest of `_apply` completes; equal → upgraded; fresh proxy → upgraded).\n\nRelated: #19239 (NUT bundle migration), #20402 (interop activation plan), #22460 (bundle intent rename).\n\n\n\n",
+      "createdAt": "2026-09-29T21:43:26Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABT_oTEw",
+      "title": "Drop `SUPER_ASTERISC_KONA` from `isSuperGame`",
+      "author": "0xiamflux",
+      "number": 23094,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Context\n`OPContractsManagerMigrator._assertValidDisputeGameConfig` accepts any type where `GameTypes.isSuperGame` is true, including `SUPER_CANNON` and `SUPER_ASTERISC_KONA`. Eventually `getGameImpl` reverts `UnsupportedGameType` in the install loop, after every chain has been mutated.\n\n## Proposed Fix\nDrop `SUPER_ASTERISC_KONA` from `isSuperGame` as it was never shipped, and for `SUPER_CANNON` resolve the implementation during validation and reject a zero address, as the upgrade path does (`OPContractsManagerV2.sol:987-990`). Do not remove `SUPER_CANNON` from `isSuperGame` as deployed games rely on it.\n\nRelated to #22731, which covers the validator side.\n\nFrom https://github.com/ethereum-optimism/specs/pull/943#discussion_r4129120105",
+      "createdAt": "2026-09-29T20:41:16Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABT_b19g",
+      "title": "op-reth: txpool OP fee reservation is never re-priced, so an L1 fee rise can leave unaffordable txs pending",
+      "author": "geoknee",
+      "number": 23093,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nAfter #23076, op-reth's pool prices the L1 data fee and operator fee **once, at admission**, and stores them in `PoolTransaction::cost()`. Nothing re-prices them later.\n\nIf the L1 fee rises after a transaction is admitted, a sender's later nonce can stay **pending** even though execution now rejects it for insufficient funds. When that happens:\n\n- the payload builder skips it on every block (`mark_invalid` for that payload only);\n- lifetime eviction never removes it, because `max_tx_lifetime` only scans the queued and basefee subpools.\n\nIt leaves the pool only if the sender tops up or replaces it, the L1 fee falls back, the pending subpool fills and evicts it, or the node restarts.\n\nThis is the residual case of the Ink mainnet stuck-pending cohort (2026-09-29), which #23076 fixed for transactions that were already unaffordable when submitted. Review thread: https://github.com/ethereum-optimism/optimism/pull/23076#discussion_r4132909124\n\n## How it happens\n\n1. A sender submits nonces N and N+1. Their combined cost fits the balance at the current L1 fee, so reth marks both pending with their admission-time `cost()`.\n2. The L1 fee rises: new L1 base or blob fee, or new scalars.\n3. Nonce N is mined, and the account change triggers reth's cumulative re-check. That re-check uses the **stored** `cost()`, which is now too low, so N+1 stays pending.\n4. op-revm charges the current L1 fee, so N+1 fails with insufficient funds on every build.\n\nFor this to happen, the sender must have several pending nonces and a balance within the fee move of their total cost, and the L1 fee must rise before inclusion. The L1 fee moves at most about 12.5% per L1 block, and inclusion is normally a block or two, so the case is rare. Unlike the pre-#23076 bug, nobody can trigger it on demand. On 2026-09-29 the L1 fee Ink senders paid rose about 5× over roughly 11 hours (1.27e10 to about 6.5e10 wei for the same `mint()`), so large moves do happen for transactions that wait.\n\n## How others handle it\n\n- **op-geth:**\n  - At admission it rejects a transaction outright when `pending totalcost + this tx's full cost (L1 fee included) > balance` (`core/txpool/validation.go`, `ExistingExpenditure`).\n  - On each reset, `demoteUnexecutables` → `list.Filter` re-prices each pending transaction on its own with the current `rollupCostFn` and drops the ones the balance no longer covers. It short-circuits while `costcap <= balance`, so it runs once a balance drop pushes the balance below the account's cost cap, for example when an earlier nonce is mined. A fee rise on an unchanged balance isn't caught.\n  - Its miner doesn't evict on insufficient funds: `SetRejected` is only for failed conditionals and the interop failsafe.\n- **Upstream reth:** there's no re-pricing, because an Ethereum transaction's worst-case cost is fixed at signing. Its maintenance only reloads changed accounts and re-sorts using the stored `cost()`.\n\n## Options\n\n- **Parked draft: #23078.** A txpool maintenance task that, on every canonical block, re-prices **every** pending transaction at the tip's L1 block info and calls `remove_transactions_and_descendants` on the first one per sender that's no longer affordable. It shares `op_fee_reservation` with the validator and includes tests. It was parked because it's heavy for the benefit:\n  - it re-prices up to `--txpool.pending-max-count` transactions per block (5,000 on Ink), each with a FastLZ pass, plus an account read per sender;\n  - it's spawned with `spawn_critical_task`, so a panic takes the node down.\n- **Suggested narrowing (op-geth parity):** only re-price senders whose account changed in the committed block. That covers the realistic trigger, an earlier nonce being mined, at a fraction of the per-block cost. Run it as a non-critical task.\n- **Builder-side eviction** (remove from the pool when payload execution returns insufficient funds): rejected for now. `OpPayloadBuilderCtx` has no pool handle, and op-reth-premium builds that context itself for its subblocks producer, so this needs a coordinated premium change and only cleans the sequencer's pool.\n\n## Out of scope\n\n**The L1 fee falls after admission.** The reservation stays high, so a descendant can sit in queued until lifetime eviction removes it. That errs in the safe direction, and the pool can't lower `cost()` in place.\n",
+      "createdAt": "2026-09-29T20:24:37Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABFmf7tg",
-      "title": "op-core,kona: model super-root dispute game and EthLockbox addresses",
-      "author": "pauldowman",
-      "number": 23072,
-      "body": "The superchain-registry `Addresses` struct is mirrored by `op-core/superchain`'s `AddressesConfig` and kona's `AddressList`. Both had drifted from it: `EthLockboxProxy` was never added, and superchain-registry#1353 adds `SuperFaultDisputeGame` and `SuperPermissionedDisputeGame` for chains that have moved to Upgrade 20 super-root games.\n\n`op-core/superchain` decodes registry chain configs with `DecodeTOMLStrict` and no allowed-unknown keys, so a key the struct does not model is a hard load failure; kona silently drops one instead. Keeping the mirrors complete is the invariant `op-core/superchain/chain.go` documents.\n\n- `AddressesConfig` and `AddressList` gain `SuperFaultDisputeGame`, `SuperPermissionedDisputeGame` and `EthLockboxProxy`.\n- The two super-root game impls join `AddressList::zero_proof_addresses`; `EthLockboxProxy` does not, since it is a core rather than a fault-proof contract.\n- `rust/kona/crates/protocol/registry/etc/configs.json` is regenerated, as `kona-registry-snapshot-check` requires. `AddressList` serializes `None`, so this is 3 null lines per chain across 53 chains and no other change.\n\nScope: this is schema only. Both mirrors read the per-chain TOML `[addresses]` tables, which carry only the essential addresses, so the new fields stay null until the registry publishes them there. No consumer gains data today.\n\nFollow-up, not done here: `AddressList` is the only nested kona chain-config struct without `#[serde(deny_unknown_fields)]` — `roles.rs`, `altda.rs`, `hardfork.rs` and `ChainConfig` all have it. That asymmetry is why kona drops an unmodeled registry key silently where Go fails loudly, and it is the reason this kind of drift goes unnoticed on the Rust side.",
+      "id": "PR_kwDODjvEJM8AAAABEc6xMw",
+      "title": "op-private-interop!: establish the private-chain PoC reference",
+      "author": "karlfloersch",
+      "number": 22966,
+      "body": "Establishes an upstream draft reference for the private-chain interop PoC, including private execution, deterministic public projection, message-position resolution before publication, and persistent LightCL recovery. This is experimental work intended for eventual upstreaming after substantial review and refinement.\n\nProjection spans are admitted as a whole before derivation releases their first new block. A pure Go/Kona validator enforces the transaction grammar, claim framing, per-block private OutputV0 records, and the span proof statement. After invalidation or sequencing-window expiry, publication binds to the canonical public parent and the last surviving private checkpoint, including a commitment to intervening replacement inputs. LightCL checks the local private output against the surviving record before adopting it, then retains its rewind, deposit-only replacement, and restart safeguards.\n\nThe verifier remains an explicitly configured insecure stub: publication is operator-attested, and private execution correspondence is not cryptographically verified. Protocol fallback blocks need no publisher proof; a future real proof must cover private execution through their recovery interval. This profile requires fresh deployments with interop and Isthmus active at genesis. Published spans cannot cross future activation blocks under the current rules. Initiating messages retain upstream's strict earlier-timestamp rule; same-timestamp dependencies remain unsupported. Private execution proofs, complete fault-proof execution support, and native ETH bridging/withdrawal settlement remain outside the supported profile.\n\nValidation: targeted Go suites and repository Go lint pass; 662 affected Rust tests, strict clippy, no-std, feature propagation and SP1 guest lock checks pass; 31 private-profile Solidity tests plus three cross-language claim-vector tests pass. A fresh op-up private-interop smoke run passes. The full devstack/sysgo private-interop acceptance run passes all 13 enabled tests in 37m23s, including outage/expiry, invalidation, L1 reorgs, interrupted recovery, and restart after newer valid history. Changed registry artifacts and its interface pass scoped verification. Repository-wide contract tooling also encounters unchanged dispute-game interface mismatches and conflicting duplicate ZK-game build artifacts; those unrelated files are outside this update. The optional production-cadence soaks have not been repeated for this change. Two independent scoped reviews covered derivation parity, recovery, and public-source publication; broader production/security and full-feature reviews remain necessary.\n\nKnown existing CI issue: broad acceptance shards previously exposed the ordinary-follow finality guard rejecting stock EL-sync bootstrap snapshots whose follower finalized label is ahead of its source. That guard is unchanged by this update and remains an open issue for the recovery stack. Prior CI results do not establish that this revision is green.\n\nThis reference excludes atomic coordinator/shared-block builder work and local deployment artifacts. It does not update running devnet images.\n\n**BREAKING CHANGE:** the new claim wire format, per-block output records, contract bytecode and private genesis-output configuration require matching clients/contracts and fresh databases. Preserve the private recovery journal alongside the private execution database. Unsupported private native bridge routes must remain disabled.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-29T00:20:11Z",
+      "createdAt": "2026-09-21T16:20:20Z",
       "mergedAt": null,
-      "additions": 189,
+      "additions": 51751,
+      "deletions": 453
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABFvzvmw",
+      "title": "op-reth!: demonstrate optimistic parallel execution PoC",
+      "author": "teddyknox",
+      "number": 23085,
+      "body": "This PoC explores reducing op-reth execution latency by speculating on independent transactions while preserving canonical transaction order, state, receipts, fees, and SDM settlement. It covers Engine validation, historical execution, forced transactions, pool sequencing, and subblock continuation. **Sequential execution remains the default; parallel and rolling execution are opt-in.**\n\nThe [PoC write-up](https://github.com/ethereum-optimism/optimism/blob/codex/optimistic-parallel-execution/rust/op-reth/crates/parallel/POC.md) covers the high-level architecture, low-level decisions, results, and production gates. The [README](https://github.com/ethereum-optimism/optimism/blob/codex/optimistic-parallel-execution/rust/op-reth/crates/parallel/README.md) documents configuration and reproduction commands.\n\nThe central choice is bounded speculation against immutable snapshots of **committed state only**. One coordinator validates dependencies and commits in order; stale or failed attempts execute once canonically. This avoids speculative worker-to-worker dependencies and cascading rollback. Independent worker-local readers remove coordinator read messages, and optional rolling scheduling overlaps ordered commit with further execution. Broker windows remain the compatibility fallback.\n\nProtocol fee credits are settled in order without manufacturing dependencies between otherwise independent transactions. SDM observation is transaction-local; refund evaluation and policy updates remain ordered and commit-only. The authoritative selector controls inclusion, with `on_commit` before its next `next()`. Resource limits cover outstanding attempts, speculative gas, dependencies, outputs, and retained snapshot versions. Shared worker permits, generation checks, and reader-teardown barriers govern cancellation and competing operations.\n\n| Synthetic comparison | Result |\n| --- | --- |\n| Final rolling vs sequential: independent compute | 3.1x at 4 workers; 4.4x at 8 |\n| Final rolling vs sequential: stock BN254 pairings | 3.7x at 4 workers; 6.3x at 8 |\n| Independent readers vs broker windows: storage | 5-6x at 4 workers |\n| Rolling vs direct windows | 14-35% lower storage latency; 13% lower expensive-policy latency at 4 workers |\n\nThese are separate local in-memory experiments using an optimized test profile; their ratios are not cumulative. Cheap storage often remains faster sequentially. Contention, read amplification, retained snapshots, serial policy work, and tail latency limit the gains. No production database or end-to-end replay speedup is claimed. See the [performance report and raw data](https://github.com/ethereum-optimism/optimism/blob/codex/optimistic-parallel-execution/rust/op-reth/crates/parallel/benchmarks/session-summary.md).\n\nThis draft depends on [ethereum-optimism/reth#10](https://github.com/ethereum-optimism/reth/pull/10). Before production: land reviewed source hooks; independently review and fuzz consensus-sensitive paths; replay representative chain ranges against known roots; measure release-build latency, memory, database I/O, and competing builds; integrate the real SDM policy; and complete shadow soak and canary rollout. Upstream borrowed/Arc configuration wrappers currently retain broker reads, and opaque Engine precompile-cache wrappers require canonical precompile fallback. Both remain documented compatibility limitations.\n\nBREAKING CHANGE: Downstream Rust integrations constructing `OpBlockExecutionCtx` must supply `parallel_candidates` (empty for sequential execution) or use `..Default::default()`. Runtime-bearing executor factories and `OpExecutorBuilder` require explicit cloning instead of `Copy`; custom `OpTxEnv` implementations need `Clone`; generic `OpBlockExecutor` users must carry its `Evm` bound. Construct `OpHandler` with `OpHandler::new()` instead of external struct literals. No Engine API wire or database migration is introduced.\n\nValidation: 603 affected execution/integration/txpool/CLI tests pass (3 skipped), including the rebased txpool affordability changes. The saved 121-configuration rolling benchmark checks output parity. Formatting, scoped Clippy with warnings denied, rustdoc, affected `no_std` builds, and the upstream-mirror check pass.\n\nRust correctness, deletion/write-preservation, and reth dependency/mirror reviews completed. Provider-failure propagation has regression coverage through actual EVM errors and cancellation races. The reth wrapper limitation above remains an open production follow-up. Full workspace `just lint` is blocked in the unchanged `gmp-mpfr-sys` dependency by missing `m4`; scoped checks are reported separately above.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-29T17:50:50Z",
+      "mergedAt": null,
+      "additions": 9020,
+      "deletions": 384
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABD_v7_Q",
+      "title": "contracts-bedrock: add opt-in atomic ETH bridging PoC",
+      "author": "opsuperchain",
+      "number": 22929,
+      "body": "Ordinary ETH bridging irreversibly locks the source before destination delivery. This PoC adds an optional safe mode that keeps native ETH refundable until the destination reserves mint capacity and the source commits. Existing `sendETH`/`relayETH` remain available; callers choose the three-message safe path through `initiateTransfer`.\n\nSafe reservations have priority over ordinary relays, which must retry if unreserved capacity is insufficient. Both modes pay native ETH using existing ETHLiquidity. The acceptance fixture installs the experimental implementation behind the existing bridge predeploy on fresh test chains; production bridge code, messenger, inbox, and network upgrade bundles remain unchanged.\n\nThis demonstrates atomic asynchronous settlement, not synchronous execution or unconditional availability. Safety assumes canonical Interop histories, matching peer logic, and upgrades that preserve reservations. Committed transfers cannot be refunded if a chain disappears permanently. Live migration, reservation griefing, reorg/fault-proof testing, and expiry-resend integration remain production work. See the [design note](https://github.com/karlfloersch/optimism/blob/poc/safe-eth-bridge/packages/contracts-bedrock/docs/safe-eth-bridge.md) and [validation report](https://github.com/karlfloersch/optimism/blob/poc/safe-eth-bridge/packages/contracts-bedrock/docs/safe-eth-bridge-validation.md).\n\nGo, contract/security, and documentation/coverage reviews completed; their actionable findings were fixed. No applicable review was skipped and no finding was dismissed.\n\nFinal validation: 35 new Foundry tests, 86 broader Interop tests, all three real two-L2 acceptance scenarios, and full Go lint pass. Earlier full contract runs pass (2,337 development / 2,397 optimized). The pre-PR runner passes 15 checks; its missing upgrade-script artifact is resolved by building scripts and rerunning that check successfully. The validation report records artifact/profile caveats, Slither advisories, and the reused op-reth binary.\n\nCI: title, dependency review, and Wiz scanners pass. The [ARM image job](https://github.com/ethereum-optimism/optimism/actions/runs/35276843548/job/105389902427) builds the package successfully, then fails provenance attestation with `missing \"id-token\" permission`; the x86 job is cancelled by the workflow. No CI configuration is changed here. The main fork CI suite still requires human authorization under repository policy.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-17T21:28:12Z",
+      "mergedAt": null,
+      "additions": 2027,
       "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABFyyw3g",
+      "title": "docs: add gen-cli, one generator for the versioned component CLI reference",
+      "author": "sbvegan",
+      "number": 23102,
+      "body": "The docs have three generators for component flags with three page shapes (gen-flags from Go source for five services, gen-op-reth-cli from op-reth's `--help`, gen-deploy-config for the deploy schema) and none at all for kona-node, op-supernode or op-deployer. The content guide's \"Component reference\" section (#23091) specifies one shape for every component, versioned by release line under a Reference tab. This is the generator that produces it; without it the convention is a document with nothing enforcing it.\n\n`scripts/gen-cli/` walks a release artifact's `--help` tree (`--image` runs the published Docker image, `--bin` a local binary such as op-deployer's release tarball, `--help-json` a recording for tests), parses clap and op-service's urfave/cli help template into one model, and emits one release line of one component: an index page, one page per top-level command with nested subcommands as headings (so `db#checksum-mdbx` still deep-links), and a global-options page for the option sections at least half the commands print identically, which the per-command verbatim help then omits. It splices the Reference tab, the component dropdown and the Mintlify version entry into `docs.json`, records a manifest keyed by tag (or commit for the `develop` line) with a tree hash, and `--check` fails on any drift or hand edit. On the committed op-reth help tree, 72 commands become 15 pages.\n\nEffect on users: none yet. No pages are generated here; the per-component migrations follow, starting with op-reth at v2.4.4 from its published image, each with redirects built from the generator's `--page-map`. Effect on maintainers: one tool and one page shape to learn instead of three; gen-flags and gen-op-reth-cli stay until their components have migrated.\n\nVerified: 61 tests replaying pruned recordings of the op-reth and op-node help trees (both parsers, hoisting, page tree and anchors, escaping, determinism, nav ordering, write-then-`--check` round trip); rendered with `mint dev` against a full op-reth v2.4 and op-node develop generation (tables, anchors, Accordion, develop banner, version switcher); the nav, redirect and reference lints from #23091 pass against that generated tree. Two things this surfaced: Mintlify serves a folder's `index.mdx` at `/folder/index`, matching this site's existing convention, so the root page URL carries `index`; and reth's help text already backslash-escapes `<IP>`, which a naive table escaper doubles into a JSX tag.\n\nRejected alternative: parsing flag definitions from source per framework (what gen-flags does). It renders richer tables for Go but needs a toolchain per language and drifts from what the released binary accepts; `--help` from the artifact is the one surface every component exposes identically and is what the convention names as the source of truth.\n\nReview: a code-review agent exercised the generator against the fixtures, a freshly built develop op-node, and probe inputs, and reported eight groups of findings; all are fixed here and none dismissed. The two that mattered most: clap's `--flag[=<VALUE>]` shape (op-reth's `--logs-otlp`, `--tracing-otlp`) was not recognised, so those flags vanished and their text leaked into the previous flag's row; and the hoist-strip on verbatim help matched clap headers only, so it would have been a no-op for any Go service. Also fixed: `--verbosity...` absorbing its ellipsis, aliases dropped from both frameworks, parenthesised urfave defaults truncated, a bare `OPTIONS` header lower-cased, silent skips of unparseable Commands lines (now errors), backticks inside code spans, the anchor slug algorithm (now github-slugger's), reserved page names, `--check` missing nav default/tag drift, the op-node chain list surviving line wrapping, percent-encoded paths, locale-dependent sorting, and `pnpm test:gen-cli` crashing under tsx. Pre-existing and left as is: a nested command whose name equals a section title would get a de-duplicated heading slug the page map does not predict; no component has one.\n\nRefs ethereum-optimism/solutions#1518 (Phase 2). Depends on #23091 for the lint that guards the generated tree; independent of #23100.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-29T23:27:22Z",
+      "mergedAt": null,
+      "additions": 1985,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABEdhewA",
+      "title": "op-node: publish blocks after inserting them, not before",
+      "author": "geoknee",
+      "number": 22967,
+      "body": "Explores the design in #22585's follow-up direction: keep the async publish queue, but trigger it *after* the local insert rather than before.\n\nDesign write-up behind this: the archaeology, the cost analysis, and what each ordering deletes.\n\n## Why the current order exists\n\nIt is not the original design. Before #8905 (Jan 2024) op-node inserted and *then* gossiped, synchronously in the driver state loop. #8905 — titled \"op-node: Gossip Before Import\" — reversed it, and this is the entire stated rationale:\n\n> There is interest in gossiping earlier in the derivation pipeline. … We would like to insert the gossiping of the block between the receiving and reinserting of the block to **avoid waiting any longer than needed before gossiping**.\n\nNo linked issue, no design doc, no measurement. The reuse buffer `Get()` exposes was never a goal either — it is cleanup after the reordering, in the author's words: *\"we want to avoid regenerating a new block at the same height if we've already begun gossiping this one.\"*\n\nTwo maintainers have since designed away from it:\n\n- **#14580** (protolambda, still open): *\"Blocks are currently 'async-gossiped'. This becomes obsolete with flash-blocks, and **never won us that much time**. It did however **add fragility**…\"*\n- **op-test-sequencer** `fullseq.Next()` runs `Seal → Sign → Commit → Publish`, where `Commit` is `apis.CommitAPI.CommitBlock` — *\"processes the block, and sets it as canonical block of the chain.\"*\n- **#22545** states lokahi has *\"no reliance on publish-after-insert gossip ordering\"* — kona's sequencer already inserts first.\n\n## What the ordering costs today\n\nPublishing before adopting means op-node can hand peers a block it never makes canonical. Verifiers adopt a gossiped unsafe payload as their head on arrival, so if the insert then fails and the sequencer seals a sibling at that height, every verifier reorgs.\n\nThe sharpest case is the denylist: `ErrPayloadDenied` is checked **inside** `ProcessPayload`, so a block on the SuperAuthority denylist is broadcast to the network *before* the sequencer consults the denylist.\n\n## The invariant this buys\n\n| | invariant |\n|---|---|\n| before | op-node may publish a block it never adopts |\n| after | anything peers receive is already the sequencer's canonical head |\n\nA queued block can be **late**, but never one the sequencer has to **take back**. That is what makes the queue safe to be aggressive with — retry, queue deeper, batch, delay; none of it can produce a reorg. The publish queue stops being a correctness surface and becomes a pure liveness surface.\n\n## The queue\n\n`SimpleAsyncGossiper` now holds a bounded queue drained by a dedicated goroutine. `Gossip` and `Clear` only take a mutex, so neither waits for the network.\n\nPreviously the publish ran inline in the gossiper's select loop over unbuffered channels, so with a remote signer the sequencer's `Clear()` — issued 1–2 ms after `Gossip()` — blocked for the rest of an HTTPS round-trip, and that stall came 1:1 out of the next block's build window (#22554). A publish also now carries a deadline of its own, which the signer round-trip did not.\n\nA failed publish is retried at the **front**: peers follow the chain block by block, so a gap they cannot cross is worse than a delay. Retries are paced at 1s, because `Topic.Publish` runs op-node's own block validator inline and synchronously on the publishing node and so can fail in about a millisecond.\n\n`maxPublishAttempts` bounds head-of-line blocking **without** needing the permanent-vs-transient error classification of #22798 — giving up after a fixed number of paced attempts bounds the stall directly. Queue overflow evicts the oldest block.\n\n## What the interface loses\n\n`Get()` is gone. It existed only to let the sequencer re-insert a block it had already gossiped. With it go the reuse buffer, the resume-from-buffer branch in `RunAction`, the `toBlockRef` hook, and four of the six `Clear()` call sites — `handleInvalid`, `onPayloadSuccess` and both stale paths no longer need to unpublish anything, because nothing was published.\n\nThe interface is now `Gossip` / `Clear` / `Start` / `Stop`. Net **−60 lines** in `sequencer.go`.\n\n## What is deliberately kept\n\n`BuildingState.Envelope` holds the sealed block from the moment it is committed to the conductor. **This guards the conductor invariant, not the gossip one** — I initially thought insert-first made it removable and that was wrong. Re-sealing after a temporary insert failure would stake recovery on the engine still holding the build job, and losing it would abandon a block the conductor has already committed and build a different one at that height.\n\nA nice consequence: because the envelope now lives in the build state, a forkchoice update onto a competing branch drops it automatically, with no explicit discard. `TestSequencerDropsRetainedBlockOnCompetingHead` pins that.\n\nThis does **not** fix the other half of #14580 — the conductor is still committed before the block is published. Unchanged here.\n\n## Reviewer note\n\n`insertAndPublish` keeps a re-plan guard (`ref.ParentHash != s.unsafeHead.Hash`) that I believe is now **unreachable**: `onForkchoiceUpdate` clears the build job whenever the head leaves `building.Onto`, and a sealed `Ref` always extends `Onto`. It is kept, and labelled as such at the call site, because the cost of being wrong is a halted sequencer. Happy to drop it if a reviewer agrees it is dead.\n\n## The number that decides how far to take this\n\nThe latency peers lose is exactly `insert_time` in the `\"Inserted new L2 unsafe block\"` log line. Some findings on actually getting it, because it is less straightforward than it looks:\n\n- **There is no Prometheus metric for it.** Despite the name, `logBlockProcessingMetrics` only logs. `sequencer_sealing_seconds` covers `engine_getPayload`, not the insert. So today this is a log-parsing question, not a dashboard question.\n- **`insert_time` is an upper bound**, not the figure for the variant that publishes after `newPayload`: it is measured to `updateEngineFinish`, so it includes the concluding forkchoice update.\n- **The split already exists on the follower path.** `insertUnsafePayload` logs `\"Inserted new L2 unsafe block (synchronous)\"` with separate `newpayload_time` and `fcu2_time`. A follower re-executing a gossiped block is an upper bound on the sequencer's own `newPayload` cost (the sequencer's EL has caches warm from building it), so this gives a usable bound today with no code change.\n- **Isolating the sequencer is harder than it looks**, and three separate traps bite:\n  - `|= \"Inserted new L2 unsafe block\"` substring-matches *both* lines, since the follower line only appends `(synchronous)`. Use `| logfmt | msg = \"Inserted new L2 unsafe block\"` instead, which is immune by construction.\n  - Filtering `| build_time != \"0s\"` looks like it selects sequencer-built blocks. It does not, in **either** direction. Derivation-built blocks have non-zero `build_time` and log the *non-synchronous* line — `onBuildSealed` emits `PayloadProcessEvent` whenever `DerivedFrom != zero`, reaching the same `logBlockProcessingMetrics`. And genuine sequencer blocks can have `build_time == \"0s\"`, because the insert-retry path passes a zero `buildStarted` — so that filter silently drops exactly the retries, which are the slow tail this PR cares about.\n  - The log line carries no field distinguishing a sequencer insert from a derivation insert, so the query has to be pinned to the confirmed sequencer **pod**. On a conductor set only the current leader emits it.\n- Values are `common.PrettyDuration` strings (`521.23µs`, `1.234ms`), so `| unwrap duration(insert_time)`, never `| unwrap insert_time`.\n\nAlso, one correction to my own #22554: the ~1–2 ms figure there is probably too low. op-geth's `newPayload` does **not** short-circuit for the sequencer's own block — `GetBlockByHash` misses because `getPayload` never inserts into the chain, so it falls through to `InsertBlockWithoutSetHead`, a full re-execution against warm caches, proportional to gas used. There is no sequencer fast path in `miner/payload_building.go`.\n\nIf that cost turns out to matter, there is a cheaper variant: publish after `newPayload` returns VALID but before the forkchoice write (safety is identical — a nil `ProcessPayload` already tolerates a transient forkchoice failure), or after only the stale and denylist checks, which are pure in-memory and cost nothing.\n\nAdding an insert-time histogram next to `sequencer_sealing_seconds` would make this measurable properly, before and after. Deliberately left out to keep this PR small — happy to split it out if reviewers want the baseline. Two notes for whoever picks it up: the wiring cost is near zero (`EngineController` already holds `opmetrics.Metricer` and already calls `RecordSequencerSealingTime`), but pricing the newPayload-only variant needs one real change — `processNewPayload` must also return the instant `engine_newPayload` returned, since the sequencer path currently fuses newPayload and the FCU into a single `insert_time`. Buckets should start well under the sealing histogram's 5ms floor; a `521µs` insert falls entirely inside its first bucket, which cannot tell \"nearly free\" from \"5ms\" — the exact distinction at issue here.\n\n## Metrics (second commit)\n\nThe reorder trades sequencer-side latency for a guarantee about what peers hold, and none of that trade was measurable. Five metrics, one per question:\n\n| Metric | Answers |\n|---|---|\n| `sequencer_insert_seconds{stage=\"newpayload\"\\|\"forkchoice\"\\|\"total\"}` | What does the reorder cost, and is the newPayload-only variant worth it? |\n| `sequencer_publish_handoff_seconds` | Is the hot path actually free? (regression guard for #22554) |\n| `publish_queue_len` | Is the queue healthy? Should be 0 in steady state. |\n| `publish_delay_seconds` | Queued-to-published — added to insert time, what the ordering costs peers. |\n| `unsafe_payload_arrival_delay_seconds` | **What peers actually experience**, measured on the receiving node. |\n\nThat last one is the one that matters most: how far behind its own timestamp a gossiped block arrives. It is the only metric that shows the end-to-end effect, and the only thing that directly measures what #8905 claimed to be optimising without ever measuring it. It depends on sequencer↔receiver clock skew, so read it in aggregate or as before/after on one node, not as an absolute. No new call site — it folds into the existing `RecordReceivedUnsafePayload` hook on the gossip receipt path.\n\nTwo details worth a reviewer's eye:\n\n- **`total` is observed in its own right**, not derived. Summing buckets across label values pools the observations rather than convolving the distributions, so it would not give the p99 of the sum.\n- **Buckets start at 50µs.** A sub-millisecond insert sits entirely inside the first bucket of `sequencer_sealing_seconds` (5ms), which cannot tell \"nearly free\" from \"5ms\" — exactly the distinction this PR turns on.\n\n`sequencer_insert_seconds` is recorded only from `ProcessPayload`, whose sole production caller is the sequencer, so the derivation and follower paths are untouched and the metric name stays honest. It needed `processNewPayload` to also return the instant `engine_newPayload` came back.\n\n**No op-reth change.** Its engine API comes from the external `op-rs/reth` dependency rather than this repo, and reth already exposes per-method `engine.rpc` latency histograms including `new_payload_v*`. Subtracting those from `sequencer_insert_seconds{stage=\"newpayload\"}` isolates RPC overhead from EL execution, which is a better split than anything we could add here.\n\nThis also supersedes the \"adding a histogram would make this measurable\" note above — it is now in the PR.\n\n## Testing\n\nEvery behaviour has a test verified by reverting the code rather than assumed:\n\n- inlining the publish in `Gossip` → `TestAsyncGossiperDoesNotBlockOnPublish` fails\n- dropping instead of retrying → `TestAsyncGossiperRetriesAtFront` fails\n- unbounded attempts → `TestAsyncGossiperGivesUpAfterMaxAttempts` fails\n- moving `Gossip` back before `ProcessPayload` → `TestSequencer_StaleBuild`, all three `TestSequencerProcessPayloadErrors` cases and `TestSequencerStopAfterStaleProcess` fail\n\nPlus seal-order publishing, queue overflow eviction, `Clear` against an in-flight publish, prompt `Stop` during a retry pause, `Start`/`Stop` idempotency, and a concurrency hammer.\n\n`go build ./...` clean, `./op-node/...` green under `-race`, `op-golangci-lint run ./op-node/rollup/...` reports 0 issues, `go mod tidy -diff` clean.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-21T17:34:09Z",
+      "mergedAt": "2026-09-29T12:37:30Z",
+      "additions": 1136,
+      "deletions": 363
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 2428,
+    "deletions": 815,
+    "files": 96,
+    "commitCount": 81
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "op-node: publish blocks after inserting them, not before",
+      "prNumber": 22967,
+      "type": "other",
+      "body": "Explores the design in #22585's follow-up direction: keep the async publish queue, but trigger it *after* the local insert rather than before.\n\nDesign write-up behind this: the archaeology, the cost analysis, and what each ordering deletes.",
+      "files": [
+        "op-node/metrics/metrics.go",
+        "op-node/rollup/async/asyncgossiper.go",
+        "op-node/rollup/async/asyncgossiper_test.go",
+        "op-node/rollup/driver/interfaces.go",
+        "op-node/rollup/engine/payload_process.go",
+        "op-node/rollup/sequencing/sequencer.go",
+        "op-node/rollup/sequencing/sequencer_test.go",
+        "op-node/node/node.go",
+        "op-node/p2p/gossip.go"
+      ]
+    },
+    {
+      "title": "docs: Add a safedb review guide and reviewer agent",
+      "prNumber": 22998,
+      "type": "docs",
+      "body": "The safe head database has no specification, and its failures are silent. A gap in recorded history makes the backward walk answer with a later L1 block and no error. Local-safe and cross-safe also hold the same block in the modes most unit",
+      "files": [
+        ".claude/agents/safedb-reviewer.md",
+        "AGENTS.md",
+        "docs/ai/safedb-review.md"
+      ]
+    },
+    {
+      "title": "op-deployer: update SCR dep and CurrentTag for op-contracts/v8.0.0",
+      "prNumber": 23047,
+      "type": "other",
+      "body": "Bumps `github.com/ethereum-optimism/superchain-registry/validation` to the commit that adds the final `op-contracts/v8.0.0` standard versions (ethereum-optimism/superchain-registry#1340), and sets `CurrentTag` to `op-contracts/v8.0.0`.\n\nDev",
+      "files": [
+        "go.mod",
+        "go.sum",
+        "op-deployer/pkg/deployer/standard/standard.go"
+      ]
+    },
+    {
+      "title": "op-service/testlog!: make CapturingHandler safe for concurrent use",
+      "prNumber": 23065,
+      "type": "tests",
+      "body": "`testlog.CapturingHandler` kept captured records in a slice shared by every derived handler, with no lock. Tests poll it with `FindLog`/`FindLogs`, usually inside `require.Eventually`, while service goroutines append to it. Those reads can ",
+      "files": [
+        "op-batcher/batcher/sync_actions_test.go",
+        "op-chain-ops/script/console_test.go",
+        "op-service/event/system_test.go",
+        "op-service/testlog/capturing.go",
+        "op-service/testlog/capturing_test.go"
+      ]
+    },
+    {
+      "title": "all!: replace the legacy Lvl* log levels with Level*",
+      "prNumber": 23064,
+      "type": "other",
+      "body": "The legacy `Lvl*` level spellings (`LvlTrace`, `LvlDebug`, `LvlInfo`) are replaced by `Level*` across the tree, and the aliases are removed from `op-service/log`. They were go-ethereum's pre-slog names for the same values, so behaviour is u",
+      "files": [
+        "op-batcher/batcher/channel_builder_test.go",
+        "op-challenger/game/fault/claims/claimer_test.go",
+        "op-challenger/game/fault/claims/scheduler_test.go",
+        "op-challenger/game/fault/register_task_test.go",
+        "op-challenger/game/fault/trace/super/provider_test.go",
+        "op-challenger/game/fault/trace/super/split_adapter_test.go",
+        "op-challenger/game/fault/trace/vm/op_program_server_executor_test.go",
+        "op-challenger/game/keccak/verifier_test.go",
+        "op-challenger/game/zk/actor_test.go",
+        "op-challenger/runner/game_inputs_test.go",
+        "op-devstack/sysgo/multichain_proofs.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-dispute-mon/mon/bonds/monitor_test.go",
+        "op-dispute-mon/mon/claims_test.go",
+        "op-dispute-mon/mon/different_roots_test.go",
+        "op-dispute-mon/mon/extract/extractor_test.go",
+        "op-dispute-mon/mon/extract/output_agreement_enricher_test.go",
+        "op-dispute-mon/mon/extract/super_agreement_enricher_test.go",
+        "op-dispute-mon/mon/extract/super_permissioned_integration_test.go",
+        "op-dispute-mon/mon/extract/zk_agreement_enricher_test.go",
+        "op-dispute-mon/mon/extract/zk_extractor_test.go",
+        "op-dispute-mon/mon/forecast_test.go",
+        "op-dispute-mon/mon/l2_challenges_test.go",
+        "op-dispute-mon/mon/mixed_availability_test.go",
+        "op-dispute-mon/mon/mixed_game_integration_test.go",
+        "op-dispute-mon/mon/mixed_safety_test.go",
+        "op-dispute-mon/mon/monitor_test.go",
+        "op-dispute-mon/mon/node_endpoint_error_count_test.go",
+        "op-dispute-mon/mon/node_endpoint_errors_test.go",
+        "op-dispute-mon/mon/node_endpoint_out_of_sync_test.go",
+        "op-dispute-mon/mon/resolutions_test.go",
+        "op-dispute-mon/mon/withdrawals_test.go",
+        "op-dispute-mon/monitor_test.go",
+        "op-e2e/actions/altda/altda_test.go",
+        "op-e2e/actions/helpers/engineapi/l2_engine_api_test.go",
+        "op-e2e/actions/sync/sync_test.go",
+        "op-e2e/actions/upgrades/fjord_fork_test.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-node/node/safedb/safedb_test.go",
+        "op-node/rollup/derive/blob_data_source_test.go",
+        "op-node/rollup/driver/sync_deriver_test.go",
+        "op-node/rollup/engine/payloads_queue_test.go",
+        "op-node/rollup/types_test.go",
+        "op-proposer/proposer/source/source_superroot_test.go",
+        "op-service/log/geth.go",
+        "op-service/rpc/jwt_test.go",
+        "op-supernode/supernode/chain_container/engine_controller/rewind_test.go",
+        "rust/kona/tests/proofs/isthmus_fork_test.go"
+      ]
+    },
+    {
+      "title": "ci: build the op-deployer release without CI caches",
+      "prNumber": 23062,
+      "type": "other",
+      "body": "Human summary: Adds a `use_cache` parameter to CI jobs which are involved in building op-deployer. It defaults to true, and is only used on jobs that contribute to the `op-deployer` release.\r\n\r\n---\r\nThe op-deployer release now builds from s",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/config.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
+      "title": "docs: clarify CGT fee vault withdrawal configuration",
+      "prNumber": 23099,
+      "type": "docs",
+      "body": "Document that CGT v2 fee vaults must withdraw on L2, including when configured at deployment. L1 withdrawals with native token value revert in the CGT MessagePasser. Also use “native token” for the historical withdrawal counter.\n\nChecked ag",
+      "files": [
+        "docs/public-docs/chain-operators/guides/management/fee-vaults.mdx"
+      ]
+    },
+    {
+      "title": "kona-sp1-proposer: export SPN request, nonce and requester metrics",
+      "prNumber": 23088,
+      "type": "other",
+      "body": "The kona-sp1-proposer dashboard needs three signals the proposer does not export today:\n\n- `proof_requests{kind,state}`: SPN request progress of games being proven (range, consolidation and aggregation requests that are submitting, submitte",
+      "files": [
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/host/src/network.rs",
+        "rust/kona/sp1/crates/proposer/src/adapters.rs",
+        "rust/kona/sp1/crates/proposer/src/bin/kona-sp1-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/ports.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs",
+        "rust/kona/sp1/crates/proposer/src/proving.rs"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests: cover non-interop ZK proposer and challenger",
+      "prNumber": 23083,
+      "type": "tests",
+      "body": "ZK acceptance coverage now exercises a single chain with interop disabled and no supernode: the real kona-sp1-proposer creates a valid proposal, and the real op-challenger challenges an invalid proposal submitted by a separate account. ZK i",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/non_interop_test.go",
+        "op-devstack/sysgo/singlechain_runtime.go"
+      ]
+    },
+    {
+      "title": "op-batcher: derive Amsterdam status from the L1 head header",
+      "prNumber": 23081,
+      "type": "other",
+      "body": "Stacked on #22996. Implements [this suggestion](https://github.com/ethereum-optimism/optimism/pull/22996#discussion_r4133683909): `l1Tip` returns the L1 head header and `TxData` takes it, so the channel manager derives the Amsterdam status ",
+      "files": [
+        "op-batcher/batcher/channel_config_provider.go",
+        "op-batcher/batcher/channel_manager.go",
+        "op-batcher/batcher/channel_manager_memory_test.go",
+        "op-batcher/batcher/channel_manager_test.go",
+        "op-batcher/batcher/driver.go",
+        "op-batcher/batcher/test_batch_submitter.go"
+      ]
+    },
+    {
+      "title": "op-reth: address review nits on txpool OP fee reservation",
+      "prNumber": 23077,
+      "type": "other",
+      "body": "Follow-up to #23076, applying its non-blocking review nits. No behaviour change.\n\n- Rename `OpPooledTransaction::cost` to `op_cost` ([review](https://github.com/ethereum-optimism/optimism/pull/23076#discussion_r4132929342)).\n- Update the `O",
+      "files": [
+        "rust/op-reth/crates/txpool/src/transaction.rs"
+      ]
+    },
+    {
+      "title": "op-reth: include OP fees in txpool cost for sender affordability",
+      "prNumber": 23076,
+      "type": "other",
+      "body": "## Why\r\n\r\n- `OpTransactionValidator::apply_op_checks` checks `L2 cost + L1 data fee + operator fee <= balance`, but only for **one transaction at a time**, against the on-chain balance.\r\n- reth's pool decides which of a sender's consecutive",
+      "files": [
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/txpool/src/transaction.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs"
+      ]
+    },
+    {
+      "title": "op-chain-ops!: rename sdm-devnet to sdm-workload",
+      "prNumber": 23075,
+      "type": "other",
+      "body": "`sdm-devnet` generates SDM load and validates the resulting PostExec block; nothing about it is devnet-specific. It is renamed to `sdm-workload`, after the `pkg/sdm` workload it drives. Flags and behavior are unchanged.\n\nBREAKING CHANGE: `g",
+      "files": [
+        "op-chain-ops/cmd/sdm-workload/main.go"
+      ]
+    },
+    {
+      "title": "docs: regroup the Protocol tab from eleven top-level groups to five",
+      "prNumber": 23073,
+      "type": "docs",
+      "body": "The Protocol tab's sidebar has 11 top-level groups sorted on several axes at once: subject, artifact type, release history, configuration and doc type. A reader looking for how a withdrawal finalizes has to pick between Bridging and Transac",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/scripts/hardfork-registry.md"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 236.5083779644193,
+      "prScore": 221.80837796441932,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 179.5792303756692,
+      "prScore": 95.23923037566918,
+      "issueScore": 2,
+      "reviewScore": 82,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 126.30358484211551,
+      "prScore": 93.60358484211551,
+      "issueScore": 0,
+      "reviewScore": 32.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 124.91664349096808,
+      "prScore": 76.91664349096808,
+      "issueScore": 2,
+      "reviewScore": 46,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 112.33490951584196,
+      "prScore": 102.33490951584196,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 58.643306144334055,
+      "prScore": 22.643306144334055,
+      "issueScore": 4,
+      "reviewScore": 32,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 55.517486767702295,
+      "prScore": 55.517486767702295,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "oplabs-renovate",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 32.39789527279837,
       "prScore": 32.39789527279837,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 31.72695507452766,
+      "prScore": 22.22695507452766,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 25.585306144334055,
+      "prScore": 20.585306144334055,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 24.5,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 24.089436932086656,
+      "prScore": 24.089436932086656,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -48,11 +488,131 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 19.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 18.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 13.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "fakedev9999",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/71915289?u=f1984e36786f33ff3043f18e00d59ac51796151a&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wesleysmyth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6476956?u=5717a8ddac065a0c6f5595eceef8b4721020ef49&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 2
+  "newPRs": 23,
+  "mergedPRs": 14,
+  "newIssues": 6,
+  "closedIssues": 3,
+  "activeContributors": 31
 }
