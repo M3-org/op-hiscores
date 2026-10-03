@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-01 to 2026-10-02, ethereum-optimism/optimism had 21 new PRs (6 merged), 2 new issues, and 27 active contributors.",
+  "overview": "From 2026-10-01 to 2026-10-02, ethereum-optimism/optimism had 21 new PRs (6 merged), 2 new issues, and 26 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABIvEDwg",
@@ -78,8 +78,8 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-10-01T20:51:58Z",
       "mergedAt": null,
-      "additions": 5547,
-      "deletions": 642
+      "additions": 14037,
+      "deletions": 666
     },
     {
       "id": "PR_kwDODjvEJM7-SgLj",
@@ -92,6 +92,18 @@
       "mergedAt": null,
       "additions": 1641,
       "deletions": 366
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABGMlqIQ",
+      "title": "rust: update reth to v2.7.0",
+      "author": "joshklop",
+      "number": 23156,
+      "body": "Starts the next execution-client dependency update, stacked on #23046 so the parent bump remains independently reviewable. The selected upstream release supersedes the fork's release-version changes; its only other patch is fork-local CI support, so no runtime backports are dropped by returning to the upstream release tag. Published OP crate versions are unchanged.\n\nThis is an initial draft, not merge-ready. Dependency resolution, formatting, mirror-tag contract checks, and the slot-preimage API check pass; workspace compilation currently fails at `op-reth/crates/trie/src/engine/tasks/execute_block.rs:129` because the state-provider database now requires the explicit EVM-state adapter. API adaptations, the CLI snapshot and operator migration notes, build/lint/unit/doc/no_std/acceptance verification, and the full Rust/security/reth-update reviews (including the partitioned upstream sweep) remain pending. The 54 newly stale mirror tags are deliberately not advanced before their audit.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-01T23:28:16Z",
+      "mergedAt": null,
+      "additions": 1414,
+      "deletions": 795
     },
     {
       "id": "PR_kwDODjvEJM8AAAABGIa9xw",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 1287,
       "deletions": 0
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABGIZtnA",
-      "title": "kona: reload mTLS client certificates across rotations",
-      "author": "wwared",
-      "number": 23140,
-      "body": "kona-sp1-proposer now reloads the mTLS client certificate it uses for op-signer when cert-manager rotates it. Before this PR, the SPN requester read its certificate once at startup. After a rotation, SPN request signing failed until the pod restarted. #22953 noted this limitation, but it was overlooked. Reported in https://github.com/ethereum-optimism/optimism-charts/pull/262#discussion_r4156024225.\n\nkona-sp1 now uses kona-node's reload code, moved into a shared `kona_sources::ReloadingRpcClient`. That code had its own bug: it picked up only the first rotation on a Kubernetes Secret volume. It watched the certificate file paths, and inotify follows those symlinks into the timestamped secret directory. kubelet deletes that directory on rotation, which drops the watch, so every later rotation was missed. The shared client fixes this the same way op-service's certman does: it watches the directories that hold the files and reloads after the `..data` symlink swap. kona-node gets this fix as well.\n\nOther differences fixed while comparing the two implementations:\n- kona-node now watches the CA file, as its docs already said it did.\n- kona-node passes the aws-lc-rs provider explicitly. Before, it relied on rustls choosing a process default, which panics when both the `ring` and `aws_lc_rs` features are enabled and no default is installed.\n- kona-node trusts platform roots when no CA is configured. Before, the root store was empty, so no server could verify.\n- Both reject CA and client certificate files that contain no certificates.\n- A reload that fails (for example, on a partially written file) keeps the current client and is retried every two seconds until it succeeds. An inotify queue overflow also triggers a reload. Before, kona-node waited for the next file event in both cases.\n- The kona-sp1 L1 Web3Signer already survived rotation, because it rebuilt its client on every transaction. It now uses the same shared client, so invalid TLS material fails at startup instead of on the first transaction. The retry above keeps the self-healing it had.\n\n**Trust-policy change for kona-sp1.** kona-sp1's op-signer connections now trust only the configured CA, not platform roots plus the CA. This matches kona-node and the Go op-signer client (`RootCAs: caCertPool`). Only `eth_signTransaction` and `opsigner_signMessage` to op-signer use this client. L1 RPC, SPN network and the other clients keep their platform trust store. If an op-signer handshake fails with an unknown-issuer or certificate-verification error after rollout, raise it: it means op-signer's certificate does not chain to the mounted `ca.crt`. This is not expected, because kona-node and the Go clients already trust only that CA when they connect to the same op-signer endpoints.\n\nkona-node-service and the kona-node binary now declare the tokio `signal` feature that they use. They used to get it through kona-sources, which no longer depends on tokio.\n\nThe PR has one commit per step, so it can be reviewed commit by commit:\n1. `kona-sources`: the shared reloading client, plus the kona-node migration and fixes.\n2. `kona-sp1-host`: the SPN requester uses it.\n3. `kona-sp1-proposer`: the L1 Web3Signer uses it, and the old `ClientTls` helpers are removed.\n4. `kona-sources`: a regression test that rotates a real mTLS client certificate the way kubelet does. With the old file watch, it fails at the second rotation. It also covers a rotation that cannot be loaded: the client keeps its certificate, then recovers through the retry.\n\nReviews run: `rust-code-reviewer`, `deletion-reviewer`, and a flake-risk review of the new tests against the CircleCI setup (about 530 runs, including under heavy CPU starvation in Docker, with no failures). Intentional omissions and changes:\n- **Watcher setup failure is fatal at startup.** The kona-sp1 clients now refuse to start if inotify cannot be set up (instance or watch limits, missing directory). This is intentional fail-fast: without a watcher, the next rotation would break signing silently. kona-node already behaved this way.\n- **`is_local` is now `false` for kona-node's signer client.** It affects only alloy's default poll interval, and the signer only sends requests.\n- **A panic in the reload thread stops reloads.** Rebuilding the client has no panicking path in our code; a panic would come from a bug in rustls or reqwest.\n- **No README note about reload or CA-only trust** for the kona-sp1 `*_TLS_*` variables. The README documents them as file paths only, and none of its rows say what is trusted.\n- **The \"broken rotation keeps the old client\" check relies on a 4s sleep.** It cannot false-fail. It can false-pass if the reload thread stalls, but the next step, which only the retry can satisfy, still catches a missing retry. Making it stronger would need a test-only counter in production code.\n- **The reload test takes about 10s because of the 2s debounce.** That is well under nextest's 30s slow mark. A test-only shorter debounce would change the code under test.\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-01T16:18:40Z",
-      "mergedAt": "2026-10-01T19:42:40Z",
-      "additions": 851,
-      "deletions": 364
     }
   ],
   "codeChanges": {
     "additions": 1763,
     "deletions": 699,
     "files": 66,
-    "commitCount": 150
+    "commitCount": 151
   },
   "completedItems": [
     {
@@ -461,6 +461,16 @@
       "summary": null
     },
     {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "Jordy-Baby",
       "avatarUrl": "https://avatars.githubusercontent.com/u/82444671?u=3de390402be769cca2a0569d7e09dac394fd24c0&v=4",
       "totalScore": 0.2,
@@ -475,5 +485,5 @@
   "mergedPRs": 6,
   "newIssues": 2,
   "closedIssues": 9,
-  "activeContributors": 27
+  "activeContributors": 26
 }
