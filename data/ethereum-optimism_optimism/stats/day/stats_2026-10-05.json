@@ -5,17 +5,364 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-05 to 2026-10-06, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 2 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-10-05 to 2026-10-06, ethereum-optimism/optimism had 16 new PRs (4 merged), 10 new issues, and 23 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABVOdjZg",
+      "title": "kona-sp1: an omitted L2 header makes Holocene derivation skip a valid span batch",
+      "author": "Inphi",
+      "number": 23206,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWhen a span batch starts before the safe head, the batch stage reads the batch's parent block and the overlapped blocks through the L2 provider. If a read fails, `check_batch_prefix` or `check_batch_overlap` returns `Undecided`. Holocene's `BatchStream` has already consumed the batch, so it skips it.\n\nIn the SP1 guest, the prover controls whether a header is in the witness. The prover can omit the header of the batch's parent and make the guest skip a valid batch. No later batch covers those blocks. After the sequencing window ends, the pipeline makes empty batches, and the guest proves deposit-only blocks in place of the real ones.\n\n## Where\n\n- `rust/kona/crates/protocol/protocol/src/batch/span.rs:735-741` (prefix) and `span.rs:555-560` (overlap): a fetch error returns `Undecided`.\n- `rust/kona/crates/protocol/derive/src/stages/batch/batch_stream.rs:189-193`: the span batch is skipped, not retried.\n- `rust/kona/sp1/crates/client/src/witness/preimage_store.rs:80-88`: a missing key returns `Err`.\n\n## Impact\n\nA forged L2 history that removes all user transactions after the proof's start block. After that, a double withdrawal through an L1 deposit is possible.\n\n- It affects every Holocene chain, with or without interop, and it does not need a malicious batcher.\n- It requires a batch whose parent is older than the guest's reset walk-back. That is usual when one batch covers more than about 10 minutes of L2 blocks.\n- EIP-2935 does not stop it.\n\nThe FPVM is not affected, because a Cannon preimage read cannot fail for missing data.\n\n## Fix\n\nUse the same guest wrapper as the ZK-01 issue: a missing preimage key panics. The retain-and-retry change in #22629 fixes op-node liveness only. It does not fix this, because a retry in the guest gets the same missing key again.\n\n## Test\n\nAdd a regression test: a range witness without the parent header must stop the guest. Today the guest commits the output root of a deposit-only block.",
+      "createdAt": "2026-10-05T21:52:15Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVOlI7A",
+      "title": "kona-interop: the proof cost of message validation grows as executing messages × initiating-block receipts",
+      "author": "Inphi",
+      "number": 23209,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nFor each executing message, `MessageGraph` walks to the initiating block's header and decodes all of that block's receipts. Nothing is cached, and identical messages are not deduplicated. `CrossL2Inbox.validateMessage` costs about 3.5k gas after the first call, so one transaction can emit about 11k messages that all point to one log in a block with large receipts.\n\n## Measurements\n\nSP1 executor, real guest ELF:\n\n| Receipts | Messages | Cycles |\n|---|---|---|\n| 64 | 1 | 7.0M |\n| 512 | 64 | 443M |\n| 2048 | 256 | 6.94B |\n\nThe rate is about 13k cycles for each (message × receipt). An attack with about 11k messages against about 1 MB of receipts is about 4e11 cycles for one timestamp. One timestamp cannot be split across consolidation proofs.\n\n## Where\n\n- `rust/kona/crates/protocol/interop/src/graph.rs:198-211`: one header walk and one receipts decode for each message.\n- `rust/kona/crates/proof/proof-interop/src/provider.rs:106-132`: a full receipts decode, with no cache.\n\n## Impact\n\nLiveness in interop clusters. For a few dollars of L2 gas, an attacker can make the proof for one timestamp too expensive to finish in `maxProveDuration`. The attacker then challenges each honest game that covers that timestamp and takes the bonds. The FPVM uses the same algorithm, but it has no prove deadline.\n\n## Fix\n\n1. Cache headers by number and decoded receipts by block hash, across messages and across consolidation iterations.\n2. Validate each distinct identifier once.\n3. Index logs so that each lookup costs a fixed amount, not a full walk.",
+      "createdAt": "2026-10-05T22:04:07Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVOh7FA",
+      "title": "ZKDisputeGame: a respected game can use an unrespected game as its parent",
+      "author": "Inphi",
+      "number": 23208,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nA ZK game can start from its parent's claim. Its proof shows only that the transition from that claim is correct. `initialize()` checks that the parent did not lose, is not blacklisted or retired, has the same game type, and is above the anchor. It does not check the parent's `wasRespectedGameTypeWhenCreated`. `isGameClaimValid` checks only the child's flag.\n\nSo a claim that does not count, and that challengers may not watch, can become the start of a claim that counts.\n\n## Where\n\n- `packages/contracts-bedrock/src/dispute/zk/ZKDisputeGame.sol:346-368`: the parent checks.\n- `packages/contracts-bedrock/src/dispute/AnchorStateRegistry.sol:331-353`: `isGameClaimValid`.\n\n## Scenarios\n\n1. **Rollout.** ZK is registered before it is respected. An attacker creates a ZK game with a forged root, and nobody challenges it. After ZK becomes respected, a respected child proves a correct transition from that forged root and becomes a valid claim.\n2. **Incident.** A prestate bug forces a fallback to another game type. During the fallback, an attacker creates a ZK game that uses the bug. It is not retired, because it was created after the retirement time. After the switch back to ZK, a respected child of that game becomes a valid claim.\n\nThe FPVM games are not affected. They have no parents and always start from the anchor.\n\n## Fix\n\nCompute the child's respected flag first in `initialize()`. Then add:\n\n```solidity\nif (wasRespectedGameTypeWhenCreated && !parent.wasRespectedGameTypeWhenCreated()) revert InvalidParentGame();\n```\n\nUnrespected children can still use any parent, so proposal chains can continue after a switch away from ZK. Update the spec (`game-mechanics.md:124-126`) to match.",
+      "createdAt": "2026-10-05T21:58:57Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVOgpOQ",
+      "title": "kona-sp1: the guest reads chain configs from unverified preimages for chains not in the embedded registry",
+      "author": "Inphi",
+      "number": 23207,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nIf a chain ID is not in the `kona-registry` copy built into the guest, the guest reads the rollup config, the L1 config, and the dependency set from `Local` preimage keys. The prover writes those keys, and the guest does not verify them. The public values contain no config hash, so the game cannot detect which config the guest used.\n\nA prover can supply a rollup config whose `deposit_contract_address` points at an attacker contract. The guest then derives a block that mints ETH from a fake deposit, and the proof is valid.\n\n## Where\n\n- `rust/kona/sp1/crates/client/src/witness/preimage_store.rs:62`: `Local` keys are not verified.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:105-135`: dependency set; it looks up only the first chain ID.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:138-163`: rollup configs; all or nothing.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:210-242`: L1 config.\n\n## Impact\n\nThe prover chooses the chain rules for any non-registry chain. A PoC minted 1,000,000 ETH.\n\n- If one chain in a set is not in the registry, the prover also chooses the configs of the registry chains in that set.\n- All embedded dependency sets have one chain, so every multi-chain cluster uses the fallback today.\n\nChains in the registry with a matching single-chain dependency set are not affected. Cannon is not affected, because a game cannot load local keys 6 to 8 on chain.\n\n## Fix\n\nRemove the `Local`-key fallback from production builds. Keep it only behind a compile-time test flag that is off by default, and make `build-prestates.sh` reject that flag.",
+      "createdAt": "2026-10-05T21:56:59Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVOaJSg",
+      "title": "kona-sp1: an omitted witness preimage lets the prover mark a valid interop message invalid",
+      "author": "Inphi",
+      "number": 23204,
+      "repository": "ethereum-optimism/optimism",
+      "body": "In the SP1 super-range guest, the prover can leave a preimage out of the witness. `PreimageStore::get` then returns `Err(InvalidPreimageKey)`. `MessageGraph::resolve` treats every error from `check_single_dependency` as \"invalid message\". This includes a failed header or receipts lookup. The consolidator then replaces the executing block with a deposit-only block, and the guest proves the resulting super root.\n\nSo a prover can drop a valid executing message by omitting one receipts-trie node or one header of the initiating block. The proof is valid, so a ZK game accepts the forged super root.\n\n## Where\n\n- rust/kona/crates/protocol/interop/src/graph.rs:134-145: every `Err` goes into `invalid_messages`.\n- rust/kona/crates/protocol/interop/src/graph.rs:198-211: lookup errors come out through `?`.\n- rust/kona/sp1/crates/client/src/witness/preimage_store.rs:80-88: a missing key returns `Err`.\n\n## Impact\n\nA forged super root in a ZK game. After that, a double withdrawal through an L1 deposit is possible. This needs a multi-chain dependency set and one valid executing message in the range.\n\nThe FPVM is not affected. A Cannon preimage read cannot fail for missing data, so the same shared code has no attack path there.\n\n## Fix\n\nIn the guest, wrap the preimage store so that a missing key panics. Use the wrapper only in programs/super-range/src/main.rs, and do not change `PreimageStore::get` itself, because `SeededOracle` in the witness host depends on its `Err`. The wrapper also closes the same class of bug elsewhere, including the Holocene span-batch skip.\n\nOptional, as a separate change: in kona-interop, treat provider errors as fatal, not as \"invalid\". op-supernode already does this in op-supernode/supernode/activity/interop/algo.go:136-145.\n\n## Test\n\nAdd a regression test: a witness with one receipts-trie node removed must stop the guest. Today the guest commits a forged super root.",
+      "createdAt": "2026-10-05T21:47:01Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABGuPcKw",
+      "title": "Glamsterdam L1 Upgrade Compatibility",
+      "author": "max-sanchez",
+      "number": 23192,
+      "body": " Sepolia activates Glamsterdam (\"Amsterdam\" on the execution layer) on\r\n  2026-10-06 13:53:36 UTC. This PR keeps op-node, op-batcher and op-proposer\r\n  working when the L1 under them forks. The L2 does not activate any Amsterdam\r\n  feature.\r\n\r\n  Depends on hemilabs/op-geth#111, pinned here at f5c491e251ce, which adds the\r\n  two new L1 header fields with codecs identical to upstream v1.17.7.\r\n\r\n  ## Changes\r\n\r\n  - **Pin op-geth f5c491e251ce** and adapt to its API (gas-limit-aware\r\n    `ValidateOptimismExtraData` at every call site, `SetCode`/`SetBalance`\r\n    reasons, `ChainContext` stubs, `NewBlockChain` signature).\r\n  - **`RPCHeader` carries `blockAccessListHash` and `slotNumber`**, so op-node's\r\n    L1 block hash verification (and the head subscription) keeps working from\r\n    the fork block on. Without this every post-fork block fails verification and\r\n    derivation stops.\r\n  - **Batcher calldata gas limit** is the larger of the old and the Amsterdam\r\n    floor (15000 + 64 gas/byte), valid on both sides of the fork. Blob\r\n    transactions are unaffected.\r\n  - **Beacon spec**: read `SLOT_DURATION_MS` with a fallback to\r\n    `SECONDS_PER_SLOT` (port of upstream #23138).\r\n  - A guard in `RPCBlock.ExecutionPayloadEnvelope` against blocks with the new\r\n    fields, tests for the gas-limit wiring, and fixed stale test call sites.\r\n\r\n  Receipts, deposits, the L1 attributes deposit and the proposer were traced and\r\n  tested and need no change.\r\n\r\n  ## Verification\r\n  \r\n  - Unit tests with an upstream v1.17.7 header fixture; all 53,300 Amsterdam\r\n    headers from execution-spec-tests through every L1 header path, 0 mismatches.\r\n  - The op-node L1 client with full verification against the live Glamsterdam\r\n    devnet: 472 blocks across its fork boundary, 26,071 receipts, tx types 0 to 4.\r\n  - Every batcher transaction shape accepted by upstream v1.17.7 under Amsterdam\r\n    rules and by Hemi's op-geth under Osaka rules.\r\n  - Six review rounds (three on this branch, three cross-cutting).\r\n  - The heminetwork localnet (branch `max/glamsterdam-l1-migration-e2e`) now\r\n    forks the L1 while the stack runs, with hash verification on, in blob and\r\n    calldata mode. It passes with this branch.\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-05T14:03:19Z",
+      "mergedAt": null,
+      "additions": 524941,
+      "deletions": 167629
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABE8GB-g",
+      "title": "op-node: invalidate pending gossip on unsafe-chain changes",
+      "author": "nonsense",
+      "number": 23014,
+      "body": "Stacked on #22967; intentionally targets `insert-then-gossip`, not `develop`. This draft separates the correctness follow-up from optional improvements still included for review.\n\nQueued unsafe blocks can become obsolete after local insertion. This prevents continued publication of abandoned work without putting signer/network latency back on the sequencer's hot path.\n\n### Required for queue correctness\n- **Invalidate at the authoritative head transition:** wire the publisher into `EngineController.SetUnsafeHead`; preserve unchanged heads/direct extensions and clear on rewinds, siblings, or unproven jumps. Reset requests also clear pending work. Do **not** infer reorgs from delayed forkchoice notifications: my initial implementation discarded valid blocks on delayed parent-head echoes, leaving conductor followers beyond its one-block backfill limit. That implementation is removed.\n- **Make invalidation effective across concurrency boundaries:** cancel in-flight attempts without waiting for them; register cancellation/recheck queue membership under the mutex; give each enqueue its own identity so an old completion cannot remove a newly queued copy; check cancellation before pubsub handoff. Already-sent messages cannot be retracted.\n- **Regression coverage:** exercise the real queue and engine head setter, delayed echoes, invalidation before notification delivery, cancellation/re-enqueue races, and preservation of slow-but-working publishes during overflow.\n\n### Optional / independent of the correctness fix\n- Serialize queue-depth metric updates; count invalidated entries and avoid reporting deliberate cancellation as a publish failure.\n- Exit the publisher loop promptly when its context is canceled.\n- Clarify comments: unsafe acceptance is not finality or guaranteed successful EL forkchoice adoption; publish delay excludes insertion time.\n- **Draft cleanup candidate:** the additional clear on reset *confirmation* is redundant for actual reorgs now handled by the engine hook. It remains in this draft; a minimal version should remove it and revalidate the reset coverage.\n- **Separate test-helper backport:** #22989 handles Raft's advisory leadership-transfer timeout by observing the actual outcome, retaining the existing settle budget and final assertions. This is already on `develop` and should be omitted when integrating onto a base that contains it.\n\nThe original PR's insert-before-publish/conductor ordering, queue capacity, timeout, retry interval, age budget, and permanent-error classification are unchanged.\n\nValidation: full `lint-go` and `op-node` race-detector tests pass. Each of the three conductor failover/leadership-transfer acceptance tests passed **100/100** locally (op-node/op-reth, Fusaka; four shards × 25 repetitions). [Branch CI passed on the current head](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/134904).\n\nReview performed directly using repository guidance; no independent subagent review. The optional reset-confirmation cleanup above remains open, not dismissed.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-24T13:23:43Z",
+      "mergedAt": null,
+      "additions": 1652,
+      "deletions": 376
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABGwMBbw",
+      "title": "op-reth-test-engine: reorgs, side-chain state and EL-sync import",
+      "author": "sebastianst",
+      "number": 23197,
+      "body": "Make op-reth-test-engine follow op-node's forkchoice the way a real EL does, so the action tests' reorg, reset and EL-sync scenarios can run on it.\n\n- **Reorgs and side chains**: `new_payload` validates and records a block without canonicalizing it. Every validated block is retained and executes on its parent's state, canonical or not; a forkchoice update reorgs onto it, onto an alternate fork, or back onto an abandoned one. A build can open on a side head.\n- **Forkchoice checks**: safe/finalized must be the head or one of its ancestors (`-38002`). An unknown head reports `SYNCING`, with or without attributes. Invalid attributes, including an unappliable forced transaction, are `-38003` and leave the chain untouched; malformed ones get op-reth's engine-API codes. An evicted payload id is `-38001`. op-node keys its reset and deposits-only-replacement paths on these codes.\n- **Transaction parking**: `eth_sendRawTransaction` parks transactions per sender and nonce; `optest_includeNextTx` includes the next one, standing in for `ActL2IncludeTx` against op-geth's pool.\n- **EL-sync import**: `optest_syncTarget`, `optest_blockPayloadByNumber` and `optest_importBlock` let the harness backfill an engine from a peer engine, since the engine has no devp2p.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-05T16:46:31Z",
+      "mergedAt": null,
+      "additions": 1474,
+      "deletions": 188
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABGwMFgQ",
+      "title": "op-reth-test-engine: serve the eth_ reads op-node and the action tests need",
+      "author": "sebastianst",
+      "number": 23198,
+      "body": "Serve the `eth_` reads that op-node's client stack and the action tests make against the L2 EL, the way op-reth serves them.\n\n- **Blocks**: `eth_getBlockBy*` with full OP transactions (deposit nonce and receipt version included) and the withdrawals list. op-node's `EthClient` rebuilds the payload from this JSON and checks the block hash.\n- **Receipts and transactions**: `eth_getBlockReceipts` and `eth_getTransactionReceipt` with the OP fields, through op-reth's receipt converter, so op-node's receipts-root validation passes; `eth_getTransactionByHash`.\n- **State**: `eth_getProof`, `eth_getBalance`, `eth_getCode`, `eth_getStorageAt` and `eth_getTransactionCount` at any known block or block hash; `pending` counts parked transactions. op-node verifies withdrawals proofs against a past block's state root.\n- **Calls**: `eth_call` and `eth_estimateGas`, following op-geth's estimator so that estimated gas, and therefore transaction and block hashes, match op-geth's; reverts return geth-shaped errors.\n\n`op-e2e/actions/helpers/enginetest` runs op-node's `EthClient` against the engine binary to check block decoding and historical proofs.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-05T16:46:36Z",
+      "mergedAt": null,
+      "additions": 1161,
+      "deletions": 35
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABGvbAEg",
+      "title": "op-core: add the genesis JSON type and the chain config JSON codec",
+      "author": "sebastianst",
+      "number": 23194,
+      "body": "Adds `op-core/genesis.Genesis`, one L2 genesis JSON encoding: go-ethereum's `core.Genesis` envelope (header fields, alloc) with a `config` object in `op-core/params.ChainConfig`'s own JSON encoding, which this PR also adds. Upstream go-ethereum's chain config has no OP fork fields, so this is where an OP genesis file gets read and written; `GethGenesis()` bridges to `core.Genesis` for `ToBlock()` and state commitment.\n\nThe `ChainConfig` codec encodes through a struct that embeds the go-ethereum config `GethChainConfig()` derives and declares the OP fields directly, so they take precedence over op-geth's duplicate keys today and keep working once upstream's config has none (#23200 simplifies it after the cutover). Decoding re-derives the Ethereum fork keys and rejects one that contradicts the OP schedule; unknown keys are ignored, and op-geth's `stateHash` is rejected since `Genesis` doesn't represent it.\n\nUsers: the op-reth test-engine helpers in #22632 write their genesis through it; `op-chain-ops/genesis` is meant to move onto it in #21281.\n\nop-geth compatibility: the encoding equals, as parsed JSON, what op-geth's `core.Genesis` writes for an op-chain-ops-style config, except that `osakaTime` is added for Karst chains. Key order is op-geth's with the OP keys moved to the end. Decoding op-geth's output gives back the same `Genesis`, and `GethGenesis().ToBlock()` produces op-geth's genesis header pre-Isthmus, at Isthmus (message-passer withdrawals root) and at Karst.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-05T15:38:20Z",
+      "mergedAt": null,
+      "additions": 1160,
+      "deletions": 106
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 754,
+    "deletions": 145,
+    "files": 22,
+    "commitCount": 55
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "docs: add pause and confirmation guidance for exchanges and bridges",
+      "prNumber": 23068,
+      "type": "docs",
+      "body": "Updating docs to clarify the pause mechanism, what Centralized Exchanges & Bridges should do when they see a pause, and what transaction confirmation level they should act on\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/contribute/style-guide.mdx",
+        "docs/public-docs/op-stack/security/exchanges-and-bridges.mdx",
+        "docs/public-docs/op-stack/security/pause.mdx",
+        "docs/public-docs/op-stack/transactions/transaction-finality.mdx"
+      ]
+    },
+    {
+      "title": "op-alloy,op-reth: count SDM post-exec validations by result and register the counters at zero",
+      "prNumber": 23124,
+      "type": "other",
+      "body": "`reth_op_sdm_post_exec_validation_failure_total` registered its Prometheus series lazily, per `reason` label, on the first failure — so the series has never existed on any network, and worse: `increase()` cannot count a series birth, so the",
+      "files": [
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/sdm_metrics.rs"
+      ]
+    },
+    {
+      "title": "op-reth: address review on proofs v1 removal",
+      "prNumber": 23203,
+      "type": "other",
+      "body": "Addresses the review on https://github.com/ethereum-optimism/optimism/pull/23067, one commit per comment, for merging into that PR's branch.\n\nThe main behaviour change is in the first commit. Opening a proofs database that still holds v1 da",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/op-challenger-config-guide.mdx",
+        "docs/public-docs/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "docs/public-docs/node-operators/tutorials/reth-historical-proofs.mdx",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/init.rs",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/trie/src/db/store/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store/tests.rs",
+        "rust/op-reth/crates/trie/src/error.rs",
+        "rust/op-reth/crates/trie/src/test_utils.rs",
+        "rust/op-reth/tests/proofs/utils/preset.go"
+      ]
+    },
+    {
+      "title": "op-service: write Untar output through os.Root",
+      "prNumber": 23187,
+      "type": "other",
+      "body": "- `Untar` writes via `os.OpenRoot(outDir)`. `outDir` must already exist; all callers pass a fresh temp dir.\n- `sanitizeTarPath` uses an absolute-path prefix check, so names like `foo..bar` are no longer rejected.\n- Adds tests.\n\n🤖 Generated",
+      "files": [
+        "op-service/ioutil/tar.go",
+        "op-service/ioutil/tar_test.go"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 139.25445268462101,
+      "prScore": 98.55445268462103,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 138.95905735178263,
+      "prScore": 91.95905735178265,
+      "issueScore": 6,
+      "reviewScore": 41,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 93.03207712855229,
+      "prScore": 93.03207712855229,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 86.11323375970258,
+      "prScore": 83.91323375970258,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 48.67146929623173,
+      "prScore": 38.37146929623172,
+      "issueScore": 10.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "max-sanchez",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1361464?u=8836d254fb633b0eb1d05502ff0283efcaaf04ae&v=4",
+      "totalScore": 40.203773896576095,
+      "prScore": 40.203773896576095,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 35.34684712728546,
+      "prScore": 35.34684712728546,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "somasoil",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/262555387?u=31f4f655410c6156631228df2c122f4e43bbb3a2&v=4",
+      "totalScore": 26.164785973923514,
+      "prScore": 24.164785973923514,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 15.361147180559946,
+      "prScore": 6.3611471805599455,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 15.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 15.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 12.836766166719345,
+      "prScore": 12.398766166719344,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "kenny-ish",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/114967656?u=2dad5f6b3f8c355d787bd21f7237c15aa992271f&v=4",
+      "totalScore": 11.683348061489413,
+      "prScore": 11.683348061489413,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 11,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 10.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "studiokvc",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/180499652?v=4",
+      "totalScore": 7.969955074527657,
+      "prScore": 7.969955074527657,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "wiz-0f98cca50a",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
@@ -25,11 +372,31 @@
       "reviewScore": 4.5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
+  "newPRs": 16,
+  "mergedPRs": 4,
+  "newIssues": 10,
   "closedIssues": 0,
-  "activeContributors": 2
+  "activeContributors": 23
 }

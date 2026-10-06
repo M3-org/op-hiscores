@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 35 new PRs (17 merged), 12 new issues, and 43 active contributors.",
+  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 51 new PRs (21 merged), 22 new issues, and 51 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABIvEDwg",
@@ -70,6 +70,18 @@
   ],
   "topPRs": [
     {
+      "id": "PR_kwDODjvEJM8AAAABGuPcKw",
+      "title": "Glamsterdam L1 Upgrade Compatibility",
+      "author": "max-sanchez",
+      "number": 23192,
+      "body": " Sepolia activates Glamsterdam (\"Amsterdam\" on the execution layer) on\r\n  2026-10-06 13:53:36 UTC. This PR keeps op-node, op-batcher and op-proposer\r\n  working when the L1 under them forks. The L2 does not activate any Amsterdam\r\n  feature.\r\n\r\n  Depends on hemilabs/op-geth#111, pinned here at f5c491e251ce, which adds the\r\n  two new L1 header fields with codecs identical to upstream v1.17.7.\r\n\r\n  ## Changes\r\n\r\n  - **Pin op-geth f5c491e251ce** and adapt to its API (gas-limit-aware\r\n    `ValidateOptimismExtraData` at every call site, `SetCode`/`SetBalance`\r\n    reasons, `ChainContext` stubs, `NewBlockChain` signature).\r\n  - **`RPCHeader` carries `blockAccessListHash` and `slotNumber`**, so op-node's\r\n    L1 block hash verification (and the head subscription) keeps working from\r\n    the fork block on. Without this every post-fork block fails verification and\r\n    derivation stops.\r\n  - **Batcher calldata gas limit** is the larger of the old and the Amsterdam\r\n    floor (15000 + 64 gas/byte), valid on both sides of the fork. Blob\r\n    transactions are unaffected.\r\n  - **Beacon spec**: read `SLOT_DURATION_MS` with a fallback to\r\n    `SECONDS_PER_SLOT` (port of upstream #23138).\r\n  - A guard in `RPCBlock.ExecutionPayloadEnvelope` against blocks with the new\r\n    fields, tests for the gas-limit wiring, and fixed stale test call sites.\r\n\r\n  Receipts, deposits, the L1 attributes deposit and the proposer were traced and\r\n  tested and need no change.\r\n\r\n  ## Verification\r\n  \r\n  - Unit tests with an upstream v1.17.7 header fixture; all 53,300 Amsterdam\r\n    headers from execution-spec-tests through every L1 header path, 0 mismatches.\r\n  - The op-node L1 client with full verification against the live Glamsterdam\r\n    devnet: 472 blocks across its fork boundary, 26,071 receipts, tx types 0 to 4.\r\n  - Every batcher transaction shape accepted by upstream v1.17.7 under Amsterdam\r\n    rules and by Hemi's op-geth under Osaka rules.\r\n  - Six review rounds (three on this branch, three cross-cutting).\r\n  - The heminetwork localnet (branch `max/glamsterdam-l1-migration-e2e`) now\r\n    forks the L1 while the stack runs, with hash verification on, in blob and\r\n    calldata mode. It passes with this branch.\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-05T14:03:19Z",
+      "mergedAt": null,
+      "additions": 524941,
+      "deletions": 167629
+    },
+    {
       "id": "PR_kwDODjvEJM8AAAABGLSe0A",
       "title": "ci: pilot RWX with shared routing and shadow tests",
       "author": "teddyknox",
@@ -78,8 +90,20 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-10-01T20:51:58Z",
       "mergedAt": null,
-      "additions": 311134,
-      "deletions": 854
+      "additions": 45440,
+      "deletions": 1096
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABE8GB-g",
+      "title": "op-node: invalidate pending gossip on unsafe-chain changes",
+      "author": "nonsense",
+      "number": 23014,
+      "body": "Stacked on #22967; intentionally targets `insert-then-gossip`, not `develop`. This draft separates the correctness follow-up from optional improvements still included for review.\n\nQueued unsafe blocks can become obsolete after local insertion. This prevents continued publication of abandoned work without putting signer/network latency back on the sequencer's hot path.\n\n### Required for queue correctness\n- **Invalidate at the authoritative head transition:** wire the publisher into `EngineController.SetUnsafeHead`; preserve unchanged heads/direct extensions and clear on rewinds, siblings, or unproven jumps. Reset requests also clear pending work. Do **not** infer reorgs from delayed forkchoice notifications: my initial implementation discarded valid blocks on delayed parent-head echoes, leaving conductor followers beyond its one-block backfill limit. That implementation is removed.\n- **Make invalidation effective across concurrency boundaries:** cancel in-flight attempts without waiting for them; register cancellation/recheck queue membership under the mutex; give each enqueue its own identity so an old completion cannot remove a newly queued copy; check cancellation before pubsub handoff. Already-sent messages cannot be retracted.\n- **Regression coverage:** exercise the real queue and engine head setter, delayed echoes, invalidation before notification delivery, cancellation/re-enqueue races, and preservation of slow-but-working publishes during overflow.\n\n### Optional / independent of the correctness fix\n- Serialize queue-depth metric updates; count invalidated entries and avoid reporting deliberate cancellation as a publish failure.\n- Exit the publisher loop promptly when its context is canceled.\n- Clarify comments: unsafe acceptance is not finality or guaranteed successful EL forkchoice adoption; publish delay excludes insertion time.\n- **Draft cleanup candidate:** the additional clear on reset *confirmation* is redundant for actual reorgs now handled by the engine hook. It remains in this draft; a minimal version should remove it and revalidate the reset coverage.\n- **Separate test-helper backport:** #22989 handles Raft's advisory leadership-transfer timeout by observing the actual outcome, retaining the existing settle budget and final assertions. This is already on `develop` and should be omitted when integrating onto a base that contains it.\n\nThe original PR's insert-before-publish/conductor ordering, queue capacity, timeout, retry interval, age budget, and permanent-error classification are unchanged.\n\nValidation: full `lint-go` and `op-node` race-detector tests pass. Each of the three conductor failover/leadership-transfer acceptance tests passed **100/100** locally (op-node/op-reth, Fusaka; four shards × 25 repetitions). [Branch CI passed on the current head](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/134904).\n\nReview performed directly using repository guidance; no independent subagent review. The optional reset-confirmation cleanup above remains open, not dismissed.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-24T13:23:43Z",
+      "mergedAt": null,
+      "additions": 1652,
+      "deletions": 376
     },
     {
       "id": "PR_kwDODjvEJM7-SgLj",
@@ -104,37 +128,13 @@
       "mergedAt": "2026-10-02T21:59:41Z",
       "additions": 1547,
       "deletions": 1881
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABGMlqIQ",
-      "title": "rust: update reth to v2.7.0",
-      "author": "joshklop",
-      "number": 23156,
-      "body": "Starts the next execution-client dependency update, stacked on #23046 so the parent bump remains independently reviewable. The selected upstream release supersedes the fork's release-version changes; its only other patch is fork-local CI support, so no runtime backports are dropped by returning to the upstream release tag. Published OP crate versions are unchanged.\n\nThis is an initial draft, not merge-ready. Dependency resolution, formatting, mirror-tag contract checks, and the slot-preimage API check pass; workspace compilation currently fails at `op-reth/crates/trie/src/engine/tasks/execute_block.rs:129` because the state-provider database now requires the explicit EVM-state adapter. API adaptations, the CLI snapshot and operator migration notes, build/lint/unit/doc/no_std/acceptance verification, and the full Rust/security/reth-update reviews (including the partitioned upstream sweep) remain pending. The 54 newly stale mirror tags are deliberately not advanced before their audit.\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-01T23:28:16Z",
-      "mergedAt": null,
-      "additions": 1414,
-      "deletions": 795
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABGIa9xw",
-      "title": "ci: pilot RWX alongside CircleCI",
-      "author": "teddyknox",
-      "number": 23141,
-      "body": "Begins the CircleCI migration with optional RWX Go lint and Rust formatting checks, backed by the same workflow-selection policy as CircleCI. Existing merge requirements, fork authorization, schedules, and publishers retain their current owners while the pilot establishes parity; there is no change to rollup behavior.\n\nRouting and Git-history fixtures cover docs-only changes, mixed code changes, local patches, merge queues, and missing or mismatched metadata. All 34 routing scenarios and 11 metadata tests pass, both CircleCI configurations validate with every workflow enabled, and the [hosted RWX pilot](https://cloud.rwx.com/optimism/runs/ff857fd1d85146fd837ecf44830a634a) passes. A same-commit comparison confirms tool-layer reuse with fresh verdict execution; terminal checks retain logs while skipping unused filesystem uploads. Independent CI and integration reviews found no actionable issues.\n\nNative GitHub triggering still needs verification after the app connection is enabled. All CircleCI checks, including the four required gates, and dependency review pass on the current commit.\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-01T16:20:25Z",
-      "mergedAt": null,
-      "additions": 1404,
-      "deletions": 642
     }
   ],
   "codeChanges": {
-    "additions": 5049,
-    "deletions": 3067,
-    "files": 186,
-    "commitCount": 243
+    "additions": 5803,
+    "deletions": 3212,
+    "files": 206,
+    "commitCount": 299
   },
   "completedItems": [
     {
@@ -310,6 +310,19 @@
       ]
     },
     {
+      "title": "docs: add pause and confirmation guidance for exchanges and bridges",
+      "prNumber": 23068,
+      "type": "docs",
+      "body": "Updating docs to clarify the pause mechanism, what Centralized Exchanges & Bridges should do when they see a pause, and what transaction confirmation level they should act on\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/contribute/style-guide.mdx",
+        "docs/public-docs/op-stack/security/exchanges-and-bridges.mdx",
+        "docs/public-docs/op-stack/security/pause.mdx",
+        "docs/public-docs/op-stack/transactions/transaction-finality.mdx"
+      ]
+    },
+    {
       "title": "op-challenger: challenge ZK games with locally invalid parent proposals",
       "prNumber": 23128,
       "type": "other",
@@ -321,6 +334,18 @@
         "op-challenger/game/zk/actor.go",
         "op-challenger/game/zk/actor_test.go",
         "op-challenger/game/zk/register.go"
+      ]
+    },
+    {
+      "title": "op-alloy,op-reth: count SDM post-exec validations by result and register the counters at zero",
+      "prNumber": 23124,
+      "type": "other",
+      "body": "`reth_op_sdm_post_exec_validation_failure_total` registered its Prometheus series lazily, per `reason` label, on the first failure — so the series has never existed on any network, and worse: `increase()` cannot count a series birth, so the",
+      "files": [
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/sdm_metrics.rs"
       ]
     },
     {
@@ -512,9 +537,48 @@
         "rust/op-reth/crates/chainspec/src/superchain/configs.rs",
         "rust/op-reth/crates/chainspec/src/superchain/mod.rs"
       ]
+    },
+    {
+      "title": "op-reth: address review on proofs v1 removal",
+      "prNumber": 23203,
+      "type": "other",
+      "body": "Addresses the review on https://github.com/ethereum-optimism/optimism/pull/23067, one commit per comment, for merging into that PR's branch.\n\nThe main behaviour change is in the first commit. Opening a proofs database that still holds v1 da",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/op-challenger-config-guide.mdx",
+        "docs/public-docs/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "docs/public-docs/node-operators/tutorials/reth-historical-proofs.mdx",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/init.rs",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/trie/src/db/store/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store/tests.rs",
+        "rust/op-reth/crates/trie/src/error.rs",
+        "rust/op-reth/crates/trie/src/test_utils.rs",
+        "rust/op-reth/tests/proofs/utils/preset.go"
+      ]
+    },
+    {
+      "title": "op-service: write Untar output through os.Root",
+      "prNumber": 23187,
+      "type": "other",
+      "body": "- `Untar` writes via `os.OpenRoot(outDir)`. `outDir` must already exist; all callers pass a fresh temp dir.\n- `sanitizeTarPath` uses an absolute-path prefix check, so names like `foo..bar` are no longer rejected.\n- Adds tests.\n\n🤖 Generated",
+      "files": [
+        "op-service/ioutil/tar.go",
+        "op-service/ioutil/tar_test.go"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 292.48142188361663,
+      "prScore": 185.54342188361665,
+      "issueScore": 6,
+      "reviewScore": 100.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
     {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
@@ -523,6 +587,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 227.36165073860408,
+      "prScore": 162.1616507386041,
+      "issueScore": 0,
+      "reviewScore": 65,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -536,13 +610,23 @@
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 153.522364531834,
-      "prScore": 93.58436453183401,
-      "issueScore": 0,
-      "reviewScore": 59.5,
-      "commentScore": 0.43799999999999994,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 170.36599798733613,
+      "prScore": 167.62599798733612,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.74,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 130.46631499402332,
+      "prScore": 91.32631499402332,
+      "issueScore": 10.1,
+      "reviewScore": 28.5,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -566,33 +650,13 @@
       "summary": null
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 88.10719805398305,
-      "prScore": 63.607198053983055,
-      "issueScore": 0,
-      "reviewScore": 24.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 84.25276422763356,
-      "prScore": 83.71276422763356,
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 93.03207712855229,
+      "prScore": 93.03207712855229,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 81.7948456977916,
-      "prScore": 52.9548456977916,
-      "issueScore": 0,
-      "reviewScore": 28.5,
-      "commentScore": 0.33999999999999997,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -616,6 +680,16 @@
       "summary": null
     },
     {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 62.08426254125705,
+      "prScore": 38.884262541257044,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
       "totalScore": 51.88727588020243,
@@ -626,33 +700,63 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 46.72311536069709,
-      "prScore": 32.5231153606971,
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 49.03822457733622,
+      "prScore": 42.69822457733622,
       "issueScore": 0,
-      "reviewScore": 14,
-      "commentScore": 0.2,
+      "reviewScore": 6,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
-      "username": "pauldowman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 42.69822457733622,
-      "prScore": 42.69822457733622,
+      "username": "max-sanchez",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1361464?u=8836d254fb633b0eb1d05502ff0283efcaaf04ae&v=4",
+      "totalScore": 40.203773896576095,
+      "prScore": 40.203773896576095,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 40.1000974479161,
+      "prScore": 14.7600974479161,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 34.039207690345485,
+      "totalScore": 38.539207690345485,
       "prScore": 29.839207690345482,
       "issueScore": 4,
-      "reviewScore": 0,
+      "reviewScore": 4.5,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 35.34684712728546,
+      "prScore": 35.34684712728546,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 32.54695294114438,
+      "prScore": 19.206952941144383,
+      "issueScore": 4,
+      "reviewScore": 9,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -676,33 +780,33 @@
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 24.760097447916102,
-      "prScore": 14.7600974479161,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "mds1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 22.5,
+      "totalScore": 27,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 22.5,
+      "reviewScore": 27,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "0xOneTony",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 21.546952941144383,
-      "prScore": 19.206952941144383,
+      "username": "somasoil",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/262555387?u=31f4f655410c6156631228df2c122f4e43bbb3a2&v=4",
+      "totalScore": 26.164785973923514,
+      "prScore": 24.164785973923514,
       "issueScore": 2,
       "reviewScore": 0,
-      "commentScore": 0.33999999999999997,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 20.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -726,6 +830,36 @@
       "summary": null
     },
     {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 15.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 12.836766166719345,
+      "prScore": 12.398766166719344,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "kenny-ish",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/114967656?u=2dad5f6b3f8c355d787bd21f7237c15aa992271f&v=4",
+      "totalScore": 11.683348061489413,
+      "prScore": 11.683348061489413,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ajit2903",
       "avatarUrl": "https://avatars.githubusercontent.com/u/97722590?v=4",
       "totalScore": 11.209999999999999,
@@ -736,13 +870,13 @@
       "summary": null
     },
     {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 11,
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 10.34,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 11,
-      "commentScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -771,6 +905,16 @@
       "totalScore": 8,
       "prScore": 0,
       "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "studiokvc",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/180499652?v=4",
+      "totalScore": 7.969955074527657,
+      "prScore": 7.969955074527657,
+      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -826,6 +970,16 @@
       "summary": null
     },
     {
+      "username": "wjmelements",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/799573?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "Jordy-Baby",
       "avatarUrl": "https://avatars.githubusercontent.com/u/82444671?u=3de390402be769cca2a0569d7e09dac394fd24c0&v=4",
       "totalScore": 0.2,
@@ -846,9 +1000,9 @@
       "summary": null
     }
   ],
-  "newPRs": 35,
-  "mergedPRs": 17,
-  "newIssues": 12,
+  "newPRs": 51,
+  "mergedPRs": 21,
+  "newIssues": 22,
   "closedIssues": 13,
-  "activeContributors": 43
+  "activeContributors": 51
 }
