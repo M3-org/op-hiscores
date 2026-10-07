@@ -1,0 +1,195 @@
+{
+  "interval": {
+    "intervalStart": "2026-10-07T00:00:00.000Z",
+    "intervalEnd": "2026-10-08T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-10-07 to 2026-10-08, ethereum-optimism/optimism had 2 new PRs (2 merged), 0 new issues, and 7 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABVOgpOQ",
+      "title": "kona-sp1: the guest reads chain configs from unverified preimages for chains not in the embedded registry",
+      "author": "Inphi",
+      "number": 23207,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nIf a chain ID is not in the `kona-registry` copy built into the guest, the guest reads the rollup config, the L1 config, and the dependency set from `Local` preimage keys. The prover writes those keys, and the guest does not verify them. The public values contain no config hash, so the game cannot detect which config the guest used.\n\nA prover can supply a rollup config whose `deposit_contract_address` points at an attacker contract. The guest then derives a block that mints ETH from a fake deposit, and the proof is valid.\n\n## Where\n\n- `rust/kona/sp1/crates/client/src/witness/preimage_store.rs:62`: `Local` keys are not verified.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:105-135`: dependency set; it looks up only the first chain ID.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:138-163`: rollup configs; all or nothing.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:210-242`: L1 config.\n\n## Impact\n\nThe prover chooses the chain rules for any non-registry chain. A PoC minted 1,000,000 ETH.\n\n- If one chain in a set is not in the registry, the prover also chooses the configs of the registry chains in that set.\n- All embedded dependency sets have one chain, so every multi-chain cluster uses the fallback today.\n\nChains in the registry with a matching single-chain dependency set are not affected. Cannon is not affected, because a game cannot load local keys 6 to 8 on chain.\n\n## Fix\n\nRemove the `Local`-key fallback from production builds. Keep it only behind a compile-time test flag that is off by default, and make `build-prestates.sh` reject that flag.",
+      "createdAt": "2026-10-05T21:56:59Z",
+      "closedAt": "2026-10-07T01:53:37Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVKGuFQ",
+      "title": "contracts-bedrock: prevent re-migration of interop set members",
+      "author": "0xOneTony",
+      "number": 23193,
+      "repository": "ethereum-optimism/optimism",
+      "body": "`migrate()` relies on `Features.INTEROP` to reject chains that already belong to an interop set. `SystemConfig.setFeature` allows the flag to be disabled, so a member can be migrated again. That moves the set's shared `ETHLockbox` balance to that chain and leaves the other members unable to withdraw.\n\nThe migration runbook should also cover operating a set after migration and independently verifying the values signed into `migrate()`, since they cannot be checked on-chain.\n\n**Definition of done**\n\n- Prevent `INTEROP` from being disabled in `SystemConfig.setFeature`, and test that a migrated member cannot be migrated again.\n- Bound the migration gas test by the EIP-7825 per-transaction cap.\n- Correct the `StandardValidator` docstring, which says it can be used before an upgrade.\n- Add post-migration operational cautions and a signing checklist to the runbook.",
+      "createdAt": "2026-10-05T15:37:41Z",
+      "closedAt": "2026-10-07T01:41:14Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABG-780w",
+      "title": "kona-sp1: reject untrusted chain configs in production guests",
+      "author": "Inphi",
+      "number": 23236,
+      "body": "Production SP1 proofs must use the chain rules embedded in the guest. Accepting configs from unverified preimages lets a prover change the deposit contract and derive fake deposits. Range and consolidation reject chains whose complete configs are missing from the embedded registry.\n\nNative execution receives trusted deployment configs directly. The executor, proposer, and canary retain their config-file overrides for witness collection; the SP1 guest independently enforces its embedded registry. Full-ELF tests use the opt-in `test-config-fallback` feature so synthetic chains can share one test ELF without rebuilding for each deployment. Production prestate builds reject an enabled test feature, a test-marked build SHA, or the dedicated unsafe-config marker embedded in the ELF. Custom registry inputs currently support only Mainnet, Sepolia, and Holesky as L1s.\n\nOrdinary CircleCI and scheduled smoke tests share the same test-feature ELF build. The local and CI guest lint recipe also checks the feature-free production path, without another ELF build. Cargo and local build defaults remain feature-free. Prestate reproducibility rebuilds released tags rather than the PR head.\n\nThe acceptance runner extracts the L1 chain config from its genesis file before passing it to the executor. Passing the whole genesis previously made custom L1 chain IDs default to 1 and fail native witness collection. A focused regression checks the actual executor argument file preserves the chain ID and fork activation times. Config validation, resolver coverage, and synthetic-chain build instructions also address the review feedback.\n\nLocal validation passed: 41 host and core Rust tests, six guest tests, guest lint in both feature modes, scoped Rust Clippy, the acceptance argument regression, full custom Go lint and module checks, and CI wiring checks. The acceptance regression and empty-consolidation diagnostic failed before their fixes and passed afterward. Real native ELF builds earlier confirmed the unsafe marker is present with the test feature and absent without it. Full devnet acceptance was not run locally. CI is running for the current head.\n\nFixes #23207.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-06T19:24:30Z",
+      "mergedAt": "2026-10-07T01:53:36Z",
+      "additions": 991,
+      "deletions": 361
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHB_Gyw",
+      "title": "release-notes: Support op-contracts and op-deployer",
+      "author": "ajsutton",
+      "number": 23244,
+      "body": "The `release-notes` skill supports only the binary components. We want op-contracts and op-deployer release notes in the same house style as op-node and op-reth. Before this change the tooling did not work for them:\n\n- `pr-facts.sh` tagged every op-contracts PR `?`.\n- The op-deployer draft missed changes in `op-chain-ops`, the shared Go code and the contract deploy scripts that op-deployer runs.\n- The op-contracts draft advertised a Docker image that does not exist.\n\nWith this change, `pr-facts.sh` marks a contract change under `src/` or in the L2 upgrade bundle as shipped for op-contracts. For op-deployer, it also counts the deploy scripts as shipped. A new `contract-versions.sh` script makes the contract version table for an op-contracts note. The house style adds a section for the two components. The main differences are an Overview sentence that names the upgrade, and an op-deployer note that links to its op-contracts release and does not repeat its contract changes.\n\nThe triage guide gets a new rule for backports. When the previous tag is not an ancestor of the new one, the draft lists PRs that the previous release already shipped as cherry-picks. For example, the `op-contracts/v8.0.0` draft lists ethereum-optimism/optimism#20919, which v7.0.0 shipped.\n\nThere is no effect on users. A known, earlier problem stays: git-cliff can use an RC tag as the compare base. An anchored tag pattern removed the op-node compare link, so this PR keeps the hand fix that the house style already gives.\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-07T01:45:11Z",
+      "mergedAt": null,
+      "additions": 235,
+      "deletions": 10
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHBSXuA",
+      "title": "op-challenger: create ZK games and parse game type names in create-game",
+      "author": "digorithm",
+      "number": 23243,
+      "body": "`create-game` could not create ZK dispute games: with `--game-type 10` it sent output-root `extraData` and the factory reverted with `BadExtraData`. It also read `--game-type` as a number, so a name such as `zk` silently parsed to 0 and created a cannon game, forfeiting the bond.\n\nZK games now get `uint32 parentIndex || super root proof` as `extraData`, with the root claim over the proof only, matching `ZKDisputeGame` and the devstack `StartZKGame` helper. A new `--parent-index` flag (`OP_CHALLENGER_ZK_PARENT_INDEX`) defaults to uint32 max, which builds on the anchor state, so existing invocations that add `--game-type 10` need no other change. `--game-type` accepts a decimal number or a game type name and rejects anything else before any RPC call. Super and ZK games now require a non-zero `--l2-chain-id`: a missing value used to read as 0, and the contracts do not check the chain ID in the proof, so the game was created with a root that honest actors dispute. Non-ZK `create()` calldata is unchanged.\n\nThe `op-challenger-invalid-proposal` CronJob in ethereum-optimism/k8s calls this command. Its arguments are not visible from this repo; anyone passing a non-numeric or out-of-range `--game-type`, or no `--l2-chain-id` for a super game, now gets an error instead of a silently wrong game.\n\nPart of https://github.com/ethereum-optimism/optimism/issues/23009.\n\nReview notes: go-code-reviewer and security-reviewer (approve) ran; both flagged the zero chain ID, now rejected. Not done: moving the game type name list next to `GameType.String()` in `game/types`; an unlisted new type fails loudly by name and still parses by number.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-07T00:08:23Z",
+      "mergedAt": null,
+      "additions": 171,
+      "deletions": 13
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABF-zfrw",
+      "title": "contracts-bedrock: stop INTEROP from being disabled after migration",
+      "author": "0xiamflux",
+      "number": 23131,
+      "body": "## Description\r\n\r\n`migrate()` treats `INTEROP` as the marker that a chain already belongs to an interop set. Before this PR, the ProxyAdmin owner could clear that flag on one member and migrate it again. That moved the set's whole shared `ETHLockbox` balance to that chain alone and left the other members unable to withdraw. `SystemConfig.setFeature` now refuses to disable `INTEROP`, as it already does for `ETH_LOCKBOX`.\r\n\r\nAlso corrects the StandardValidator docstring, which claimed it works on chains that have not been upgraded. It bounds the migration test's gas at the EIP-7825 per-transaction cap, and adds operational cautions to the merge runbook.\r\n\r\n**Review agents not run.**",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-30T21:44:56Z",
+      "mergedAt": "2026-10-07T01:41:12Z",
+      "additions": 115,
+      "deletions": 25
+    }
+  ],
+  "codeChanges": {
+    "additions": 1106,
+    "deletions": 386,
+    "files": 39,
+    "commitCount": 9
+  },
+  "completedItems": [
+    {
+      "title": "contracts-bedrock: stop INTEROP from being disabled after migration",
+      "prNumber": 23131,
+      "type": "other",
+      "body": "## Description\r\n\r\n`migrate()` treats `INTEROP` as the marker that a chain already belongs to an interop set. Before this PR, the ProxyAdmin owner could clear that flag on one member and migrate it again. That moved the set's whole shared `E",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OPContractsManagerStandardValidator.sol",
+        "packages/contracts-bedrock/src/L1/SystemConfig.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/test/L1/SystemConfig.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol"
+      ]
+    },
+    {
+      "title": "kona-sp1: reject untrusted chain configs in production guests",
+      "prNumber": 23236,
+      "type": "other",
+      "body": "Production SP1 proofs must use the chain rules embedded in the guest. Accepting configs from unverified preimages lets a prover change the deposit contract and derive fake deposits. Range and consolidation reject chains whose complete confi",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "op-acceptance-tests/README.md",
+        "op-acceptance-tests/tests/superfaultproofs/proof_runner.go",
+        "op-acceptance-tests/tests/superfaultproofs/proof_runner_test.go",
+        "ops/prestate-reproducibility/build-prestates.sh",
+        "ops/prestate-reproducibility/test-build-prestates.sh",
+        "rust/Cargo.lock",
+        "rust/justfile",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/build-info/build.rs",
+        "rust/kona/sp1/crates/build-info/src/lib.rs",
+        "rust/kona/sp1/crates/build-info/src/sha.rs",
+        "rust/kona/sp1/crates/elfs/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/Cargo.toml",
+        "rust/kona/sp1/crates/ethereum/client/src/chain_config.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_consolidation.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/test_utils.rs",
+        "rust/kona/sp1/crates/proposer/src/proving.rs",
+        "rust/kona/sp1/crates/super-range-executor/Cargo.toml",
+        "rust/kona/sp1/crates/super-range-executor/src/lib.rs",
+        "rust/kona/sp1/crates/zkvm-canary/src/execution.rs",
+        "rust/kona/sp1/justfile",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/src/main.rs",
+        "rust/kona/sp1/programs/super-range/src/test_config.rs",
+        "rust/kona/tests/justfile"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 40.76332614372945,
+      "prScore": 35.56332614372945,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 29.596067475234975,
+      "prScore": 29.596067475234975,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 2,
+  "newIssues": 0,
+  "closedIssues": 2,
+  "activeContributors": 7
+}

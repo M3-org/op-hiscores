@@ -15,8 +15,8 @@
       "repository": "ethereum-optimism/optimism",
       "body": "## Summary\n\nWhen a span batch starts before the safe head, the batch stage reads the batch's parent block and the overlapped blocks through the L2 provider. If a read fails, `check_batch_prefix` or `check_batch_overlap` returns `Undecided`. Holocene's `BatchStream` has already consumed the batch, so it skips it.\n\nIn the SP1 guest, the prover controls whether a header is in the witness. The prover can omit the header of the batch's parent and make the guest skip a valid batch. No later batch covers those blocks. After the sequencing window ends, the pipeline makes empty batches, and the guest proves deposit-only blocks in place of the real ones.\n\n## Where\n\n- `rust/kona/crates/protocol/protocol/src/batch/span.rs:735-741` (prefix) and `span.rs:555-560` (overlap): a fetch error returns `Undecided`.\n- `rust/kona/crates/protocol/derive/src/stages/batch/batch_stream.rs:189-193`: the span batch is skipped, not retried.\n- `rust/kona/sp1/crates/client/src/witness/preimage_store.rs:80-88`: a missing key returns `Err`.\n\n## Impact\n\nA forged L2 history that removes all user transactions after the proof's start block. After that, a double withdrawal through an L1 deposit is possible.\n\n- It affects every Holocene chain, with or without interop, and it does not need a malicious batcher.\n- It requires a batch whose parent is older than the guest's reset walk-back. That is usual when one batch covers more than about 10 minutes of L2 blocks.\n- EIP-2935 does not stop it.\n\nThe FPVM is not affected, because a Cannon preimage read cannot fail for missing data.\n\n## Fix\n\nUse the same guest wrapper as the ZK-01 issue: a missing preimage key panics. The retain-and-retry change in #22629 fixes op-node liveness only. It does not fix this, because a retry in the guest gets the same missing key again.\n\n## Test\n\nAdd a regression test: a range witness without the parent header must stop the guest. Today the guest commits the output root of a deposit-only block.",
       "createdAt": "2026-10-05T21:52:15Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-10-06T22:22:41Z",
+      "state": "CLOSED",
       "commentCount": 1
     },
     {
@@ -39,8 +39,8 @@
       "repository": "ethereum-optimism/optimism",
       "body": "## Summary\n\nA ZK game can start from its parent's claim. Its proof shows only that the transition from that claim is correct. `initialize()` checks that the parent did not lose, is not blacklisted or retired, has the same game type, and is above the anchor. It does not check the parent's `wasRespectedGameTypeWhenCreated`. `isGameClaimValid` checks only the child's flag.\n\nSo a claim that does not count, and that challengers may not watch, can become the start of a claim that counts.\n\n## Where\n\n- `packages/contracts-bedrock/src/dispute/zk/ZKDisputeGame.sol:346-368`: the parent checks.\n- `packages/contracts-bedrock/src/dispute/AnchorStateRegistry.sol:331-353`: `isGameClaimValid`.\n\n## Scenarios\n\n1. **Rollout.** ZK is registered before it is respected. An attacker creates a ZK game with a forged root, and nobody challenges it. After ZK becomes respected, a respected child proves a correct transition from that forged root and becomes a valid claim.\n2. **Incident.** A prestate bug forces a fallback to another game type. During the fallback, an attacker creates a ZK game that uses the bug. It is not retired, because it was created after the retirement time. After the switch back to ZK, a respected child of that game becomes a valid claim.\n\nThe FPVM games are not affected. They have no parents and always start from the anchor.\n\n## Fix\n\nCompute the child's respected flag first in `initialize()`. Then add:\n\n```solidity\nif (wasRespectedGameTypeWhenCreated && !parent.wasRespectedGameTypeWhenCreated()) revert InvalidParentGame();\n```\n\nUnrespected children can still use any parent, so proposal chains can continue after a switch away from ZK. Update the spec (`game-mechanics.md:124-126`) to match.",
       "createdAt": "2026-10-05T21:58:57Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-10-06T20:55:38Z",
+      "state": "CLOSED",
       "commentCount": 0
     },
     {
@@ -51,8 +51,8 @@
       "repository": "ethereum-optimism/optimism",
       "body": "## Summary\n\nIf a chain ID is not in the `kona-registry` copy built into the guest, the guest reads the rollup config, the L1 config, and the dependency set from `Local` preimage keys. The prover writes those keys, and the guest does not verify them. The public values contain no config hash, so the game cannot detect which config the guest used.\n\nA prover can supply a rollup config whose `deposit_contract_address` points at an attacker contract. The guest then derives a block that mints ETH from a fake deposit, and the proof is valid.\n\n## Where\n\n- `rust/kona/sp1/crates/client/src/witness/preimage_store.rs:62`: `Local` keys are not verified.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:105-135`: dependency set; it looks up only the first chain ID.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:138-163`: rollup configs; all or nothing.\n- `rust/kona/sp1/crates/ethereum/client/src/super_range.rs:210-242`: L1 config.\n\n## Impact\n\nThe prover chooses the chain rules for any non-registry chain. A PoC minted 1,000,000 ETH.\n\n- If one chain in a set is not in the registry, the prover also chooses the configs of the registry chains in that set.\n- All embedded dependency sets have one chain, so every multi-chain cluster uses the fallback today.\n\nChains in the registry with a matching single-chain dependency set are not affected. Cannon is not affected, because a game cannot load local keys 6 to 8 on chain.\n\n## Fix\n\nRemove the `Local`-key fallback from production builds. Keep it only behind a compile-time test flag that is off by default, and make `build-prestates.sh` reject that flag.",
       "createdAt": "2026-10-05T21:56:59Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-10-07T01:53:37Z",
+      "state": "CLOSED",
       "commentCount": 0
     },
     {
@@ -63,8 +63,8 @@
       "repository": "ethereum-optimism/optimism",
       "body": "In the SP1 super-range guest, the prover can leave a preimage out of the witness. `PreimageStore::get` then returns `Err(InvalidPreimageKey)`. `MessageGraph::resolve` treats every error from `check_single_dependency` as \"invalid message\". This includes a failed header or receipts lookup. The consolidator then replaces the executing block with a deposit-only block, and the guest proves the resulting super root.\n\nSo a prover can drop a valid executing message by omitting one receipts-trie node or one header of the initiating block. The proof is valid, so a ZK game accepts the forged super root.\n\n## Where\n\n- rust/kona/crates/protocol/interop/src/graph.rs:134-145: every `Err` goes into `invalid_messages`.\n- rust/kona/crates/protocol/interop/src/graph.rs:198-211: lookup errors come out through `?`.\n- rust/kona/sp1/crates/client/src/witness/preimage_store.rs:80-88: a missing key returns `Err`.\n\n## Impact\n\nA forged super root in a ZK game. After that, a double withdrawal through an L1 deposit is possible. This needs a multi-chain dependency set and one valid executing message in the range.\n\nThe FPVM is not affected. A Cannon preimage read cannot fail for missing data, so the same shared code has no attack path there.\n\n## Fix\n\nIn the guest, wrap the preimage store so that a missing key panics. Use the wrapper only in programs/super-range/src/main.rs, and do not change `PreimageStore::get` itself, because `SeededOracle` in the witness host depends on its `Err`. The wrapper also closes the same class of bug elsewhere, including the Holocene span-batch skip.\n\nOptional, as a separate change: in kona-interop, treat provider errors as fatal, not as \"invalid\". op-supernode already does this in op-supernode/supernode/activity/interop/algo.go:136-145.\n\n## Test\n\nAdd a regression test: a witness with one receipts-trie node removed must stop the guest. Today the guest commits a forged super root.",
       "createdAt": "2026-10-05T21:47:01Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-10-06T22:22:40Z",
+      "state": "CLOSED",
       "commentCount": 0
     }
   ],
@@ -106,6 +106,18 @@
       "deletions": 188
     },
     {
+      "id": "PR_kwDODjvEJM8AAAABGvbAEg",
+      "title": "op-core: add the genesis JSON type and the chain config JSON codec",
+      "author": "sebastianst",
+      "number": 23194,
+      "body": "Adds `op-core/genesis.Genesis`, one L2 genesis JSON encoding: go-ethereum's `core.Genesis` envelope (header fields, alloc) with a `config` object in `op-core/params.ChainConfig`'s own JSON encoding, which this PR also adds. Upstream go-ethereum's chain config has no OP fork fields, so this is where an OP genesis file gets read and written; `GethGenesis()` bridges to `core.Genesis` for `ToBlock()` and state commitment.\n\nThe `ChainConfig` codec encodes through a struct that embeds the go-ethereum config `GethChainConfig()` derives and declares the OP fields directly, so they take precedence over op-geth's duplicate keys today and keep working once upstream's config has none (#23200 simplifies it after the cutover). Decoding re-derives the Ethereum fork keys and rejects one that contradicts the OP schedule; unknown keys are ignored, and op-geth's `stateHash` is rejected since `Genesis` doesn't represent it.\n\nUsers: the op-reth test-engine helpers in #22632 write their genesis through it; `op-chain-ops/genesis` is meant to move onto it in #21281.\n\nop-geth compatibility: the encoding equals, as parsed JSON, what op-geth's `core.Genesis` writes for an op-chain-ops-style config, except that `osakaTime` is added for Karst chains. Key order is op-geth's with the OP keys moved to the end. Decoding op-geth's output gives back the same `Genesis`, and `GethGenesis().ToBlock()` produces op-geth's genesis header pre-Isthmus, at Isthmus (message-passer withdrawals root) and at Karst.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-05T15:38:20Z",
+      "mergedAt": null,
+      "additions": 1193,
+      "deletions": 107
+    },
+    {
       "id": "PR_kwDODjvEJM8AAAABGwMFgQ",
       "title": "op-reth-test-engine: serve the eth_ reads op-node and the action tests need",
       "author": "sebastianst",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 1161,
       "deletions": 35
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABGvbAEg",
-      "title": "op-core: add the genesis JSON type and the chain config JSON codec",
-      "author": "sebastianst",
-      "number": 23194,
-      "body": "Adds `op-core/genesis.Genesis`, one L2 genesis JSON encoding: go-ethereum's `core.Genesis` envelope (header fields, alloc) with a `config` object in `op-core/params.ChainConfig`'s own JSON encoding, which this PR also adds. Upstream go-ethereum's chain config has no OP fork fields, so this is where an OP genesis file gets read and written; `GethGenesis()` bridges to `core.Genesis` for `ToBlock()` and state commitment.\n\nThe `ChainConfig` codec encodes through a struct that embeds the go-ethereum config `GethChainConfig()` derives and declares the OP fields directly, so they take precedence over op-geth's duplicate keys today and keep working once upstream's config has none (#23200 simplifies it after the cutover). Decoding re-derives the Ethereum fork keys and rejects one that contradicts the OP schedule; unknown keys are ignored, and op-geth's `stateHash` is rejected since `Genesis` doesn't represent it.\n\nUsers: the op-reth test-engine helpers in #22632 write their genesis through it; `op-chain-ops/genesis` is meant to move onto it in #21281.\n\nop-geth compatibility: the encoding equals, as parsed JSON, what op-geth's `core.Genesis` writes for an op-chain-ops-style config, except that `osakaTime` is added for Karst chains. Key order is op-geth's with the OP keys moved to the end. Decoding op-geth's output gives back the same `Genesis`, and `GethGenesis().ToBlock()` produces op-geth's genesis header pre-Isthmus, at Isthmus (message-passer withdrawals root) and at Karst.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-05T15:38:20Z",
-      "mergedAt": null,
-      "additions": 1160,
-      "deletions": 106
     }
   ],
   "codeChanges": {
     "additions": 754,
     "deletions": 145,
     "files": 22,
-    "commitCount": 55
+    "commitCount": 59
   },
   "completedItems": [
     {

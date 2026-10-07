@@ -5,8 +5,20 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 51 new PRs (21 merged), 22 new issues, and 51 active contributors.",
+  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 77 new PRs (37 merged), 26 new issues, and 60 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABVOh7FA",
+      "title": "ZKDisputeGame: a respected game can use an unrespected game as its parent",
+      "author": "Inphi",
+      "number": 23208,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nA ZK game can start from its parent's claim. Its proof shows only that the transition from that claim is correct. `initialize()` checks that the parent did not lose, is not blacklisted or retired, has the same game type, and is above the anchor. It does not check the parent's `wasRespectedGameTypeWhenCreated`. `isGameClaimValid` checks only the child's flag.\n\nSo a claim that does not count, and that challengers may not watch, can become the start of a claim that counts.\n\n## Where\n\n- `packages/contracts-bedrock/src/dispute/zk/ZKDisputeGame.sol:346-368`: the parent checks.\n- `packages/contracts-bedrock/src/dispute/AnchorStateRegistry.sol:331-353`: `isGameClaimValid`.\n\n## Scenarios\n\n1. **Rollout.** ZK is registered before it is respected. An attacker creates a ZK game with a forged root, and nobody challenges it. After ZK becomes respected, a respected child proves a correct transition from that forged root and becomes a valid claim.\n2. **Incident.** A prestate bug forces a fallback to another game type. During the fallback, an attacker creates a ZK game that uses the bug. It is not retired, because it was created after the retirement time. After the switch back to ZK, a respected child of that game becomes a valid claim.\n\nThe FPVM games are not affected. They have no parents and always start from the anchor.\n\n## Fix\n\nCompute the child's respected flag first in `initialize()`. Then add:\n\n```solidity\nif (wasRespectedGameTypeWhenCreated && !parent.wasRespectedGameTypeWhenCreated()) revert InvalidParentGame();\n```\n\nUnrespected children can still use any parent, so proposal chains can continue after a switch away from ZK. Update the spec (`game-mechanics.md:124-126`) to match.",
+      "createdAt": "2026-10-05T21:58:57Z",
+      "closedAt": "2026-10-06T20:55:38Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
     {
       "id": "I_kwDODjvEJM8AAAABIvEDwg",
       "title": "opgeth-decoupling: own the log layer; re-home the RPC metrics hooks",
@@ -54,18 +66,6 @@
       "closedAt": "2026-10-01T13:25:38Z",
       "state": "CLOSED",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABUmFiVA",
-      "title": "L2 fee math, proven to the wei",
-      "author": "ceedot-rock",
-      "number": 23160,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Every OP transaction pays L1 data plus L2 execution. The fee formula has to equal the law to the wei, or users overpay silently on every single transaction.\n\nCuNi states the fee formula as `.cuni` and proves the implementation byte-identical — same output or refuse, exit code ready for CI.\n\nAsk: would you take a PR proving the fee formula against a CuNi law? forget trust. Prove.\n\nSlid Phi Labs accepts donations to keep the lab independent: https://www.patreon.com/SlidPhiLabs\n",
-      "createdAt": "2026-10-02T12:01:23Z",
-      "closedAt": "2026-10-02T12:40:17Z",
-      "state": "CLOSED",
-      "commentCount": 1
     }
   ],
   "topPRs": [
@@ -90,8 +90,20 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-10-01T20:51:58Z",
       "mergedAt": null,
-      "additions": 45440,
-      "deletions": 1096
+      "additions": 43889,
+      "deletions": 1163
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABG4YAcw",
+      "title": "contracts-bedrock: Per-chain Review Period",
+      "author": "0xarktos",
+      "number": 23215,
+      "body": "Closes [#686](https://github.com/ethereum-optimism/optimism-private/issues/686)\r\n\r\n## Description\r\n\r\nMakes the withdrawal review period configurable per chain. `PROOF_MATURITY_DELAY_SECONDS` (OptimismPortal2) and `DISPUTE_GAME_FINALITY_DELAY_SECONDS` (AnchorStateRegistry) move from constructor immutables on the shared implementations to per-chain proxy storage, set at `initialize()` and changeable through an L1PAO-only setter. The implementations keep a min/max pair of constructor immutables that bound every write.\r\n\r\nOPCM carries each chain's live value forward on upgrade. The Migrator preserves each portal's and legacy registry's value and gives the shared AnchorStateRegistry the value the legacy registries agree on. op-deployer takes the delays as per-chain inputs and the bounds as implementation inputs.\r\n\r\nOf the ~2,000 lines added, 786 are Solidity tests, 183 are regenerated snapshots, and most of the 576 Go lines are gofmt realignment of struct literals that gained the longer bound field names. The reviewable contract change is ~460 lines.\r\n\r\n## Design decisions\r\n\r\n- Storage, not immutables: `proofMaturityDelaySeconds` lands in portal slot 64 and `disputeGameFinalityDelaySeconds` in registry slot 7, both tagged `@custom:network-specific`. The existing getters keep their selectors, so every reader of the delays is unaffected.\r\n\r\n- `initialize()` and the setter share one internal `_set…` that bounds-checks, stores and emits the `…Set` event, following `SystemConfig._setGasLimit`.\r\n\r\n- Bounds are constructor immutables with getters, standard `[1 d, 7 d]` for proof maturity and `[12 h, 3.5 d]` for the finality delay. The constructor and `DeployImplementations` reject `min == 0` and `min > max`; there is no chain-id floor in the deploy script, since VerifyOPCM checks the bound immutables at release and the StandardValidator pins the implementation.\r\n\r\n- No `upgrade` override for the delays due to the contract size limit on the OPCM. `_loadFullConfig` reads the live getters and passes them back to `initialize()`; `overrides.cfg.proofMaturityDelaySeconds` / `…disputeGameFinalityDelaySeconds` are not allow-listed and are rejected as unknown instructions. The setters are the only write path after deployment; For atomic upgrade and delay setting batch the calls in the same superchain-ops batch.\r\n\r\n- Due to the contract size limit, OPCM does not validate the delays and the values are checked directly on the implementation.\r\n\r\n- It is assumed that on the time of interop migration, chains will share the same delays. The shared ASR is initialized with the finality delay every chain's registry reports, or `migrate()` reverts with `OPContractsManagerMigrator_DisputeGameFinalityDelayMismatch` before any portal is touched. The shared-registry `initialize` moved into `_initializeSharedAnchorStateRegistry` because evaluating the agreement check inline in `migrate()` hits stack-too-deep.\r\n\r\n- `StandardValidator` gains range checks (`PORTAL-100`, `…-ANCHORP-80`): \"standard\" now means within the sanctioned range. `VerifyOPCM` verifies the bound immutables on the implementations (`EXPECTED_MIN_/MAX_…` env vars with standard defaults) instead of a delay value the implementation no longer holds.\r\n\r\n- op-deployer: the delays move from `SuperchainProofParams` to `ChainProofParams` under the same JSON keys, so existing `globalDeployOverrides` keep working and per-chain `deployOverrides` can differ; the bounds take their place as implementation inputs. `op-devstack` and `op-e2e` widen the bounds for their short devnet delays.\r\n\r\n- Versions: OptimismPortal2 6.0.0, AnchorStateRegistry 5.0.0 (constructor and `initialize` ABI change, reinit versions bumped), OPContractsManagerStandardValidator 4.1.0, OPCM V2 9.0.3 (lands in the in-development 9.x release).\r\n\r\n## Tests\r\n\r\nContracts, from `packages/contracts-bedrock`:\r\n\r\n- `just pr` — build, lint, snapshots, semver-lock, interfaces, spacers, semgrep, size check.\r\n- `just test-dev --match-contract 'OptimismPortal2_|AnchorStateRegistry_|OPContractsManagerV2_Deploy_Test|OPContractsManagerStandardValidator_|DeployImplementations_|DeployOPChain_|VerifyOPCM_|Initializable_|SetDisputeGameImpl'` — setter and `initialize` matrix (access control, bounds, events), delay changes applied to already-proven withdrawals and already-resolved games, deploy stores the delays in proxy storage, bounds errors on deploy, rejected override keys, StandardValidator range codes, VerifyOPCM bound checks.\r\n- `DEV_FEATURE__OPTIMISM_PORTAL_INTEROP=true just test-dev --match-contract OPContractsManagerV2_Migrate_Test` — portal and legacy-registry delays preserved, shared registry inherits the agreed value, mismatch reverts.\r\n- `just test-dev --match-path test/invariants/OptimismPortal2.t.sol` — the ProxyAdmin owner is excluded as a sender so the fuzzer cannot move the window under the invariants.\r\n- `just test-upgrade` (needs `ETH_RPC_URL`) — `test_upgrade_withdrawalDelaysUnchangedWithoutOverride_succeeds` proves the 7 d / 3.5 d carry-forward through the real upgrade path.\r\n\r\nGo, from the repo root:\r\n\r\n- `just lint-go` passes.\r\n- `go test ./op-deployer/pkg/deployer/opcm/... ./op-deployer/pkg/deployer/pipeline/... ./op-deployer/pkg/deployer/state/... ./op-deployer/pkg/deployer/bootstrap/ ./op-chain-ops/interopgen/...` — struct mirrors load against the current script ABIs on both the script-host and forge paths, `ResolveChainProofParams` defaults and per-chain overrides, bootstrap `Check()` bound cases.\r\n- `go test ./op-deployer/pkg/deployer/integration_test/ -run TestProofParamOverrides` — bounds verified as implementation immutables, delays verified in portal slot 64 and registry slot 7 of the deployed proxies.\r\n\r\n## Additional context\r\n\r\n`op-deployer bootstrap implementations` replaces `--proof-maturity-delay-seconds` and `--dispute-game-finality-delay-seconds` with `--min-/--max-proof-maturity-delay-seconds` and `--min-/--max-dispute-game-finality-delay-seconds` (env `…_MIN_/MAX_…`). Operators who set the delays through `globalDeployOverrides` are unaffected; the keys now configure the chain rather than the implementation. Chains whose live delay is outside the bounds cannot upgrade until they redeploy; every production chain is at 7 d / 3.5 d.\r\n\r\n- [Design doc](https://app.notion.com/p/oplabs/Per-chain-airgap-and-DelayedWETH-delay-proposed-changes-and-design-3e5f153ee162809ca7ebc1cf92d1e2ab)\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-06T09:22:27Z",
+      "mergedAt": null,
+      "additions": 2002,
+      "deletions": 559
     },
     {
       "id": "PR_kwDODjvEJM8AAAABE8GB-g",
@@ -104,18 +116,6 @@
       "mergedAt": null,
       "additions": 1652,
       "deletions": 376
-    },
-    {
-      "id": "PR_kwDODjvEJM7-SgLj",
-      "title": "kona-node: run conductor acceptance coverage",
-      "author": "joshklop",
-      "number": 22405,
-      "body": "## Overview\n\nStacked on #22244.\n\nRun the full conductor acceptance suite added by the base PR against real kona-node processes as well as op-node. The commits are split by the acceptance behaviors they unlock:\n\n1. **Cluster lifecycle** — configure conductor integration through backend-neutral `L2CLConfig`, launch stopped Kona candidates behind stable RPC proxies, and enable startup, failover, proxy, and membership coverage.\n2. **Sequencer handoffs** — validate the expected unsafe head when starting Kona sequencing and enable both leadership-transfer tests.\n3. **Disaster recovery** — require normal starts to have conductor leadership, make the node-side override local, and enable disaster-recovery coverage.\n\nEach commit removes only the Kona skips for the tests it unlocks. The tests and assertions remain shared between op-node and kona-node; there are no client-specific test branches.\n\n## Testing\n\n- At commit 1: all five newly enabled Kona lifecycle tests passed.\n- At commit 2: both newly enabled Kona leadership-transfer tests passed.\n- At commit 3: the newly enabled Kona disaster-recovery test passed.\n- `DEVSTACK_L2CL_KIND=kona-node DEVSTACK_L2EL_KIND=op-reth RUST_JIT_BUILD=1 go test -count=1 -parallel=1 -timeout 90m -v ./op-acceptance-tests/tests/base/conductor/` (8 passed)\n- `DEVSTACK_L2CL_KIND=op-node DEVSTACK_L2EL_KIND=op-reth go test -count=1 -parallel=1 -timeout 45m -run '^(TestConductorClusterStartsWithOneActiveSequencer|TestLeadershipTransferMovesActiveSequencer)$' -v ./op-acceptance-tests/tests/base/conductor/`\n- `just lint-go`\n- `cargo test -p kona-rpc -p kona-node-service`\n- `cargo clippy -p kona-rpc -p kona-node-service --all-targets --all-features -- -D warnings`\n- `go test ./op-devstack/sysgo ./op-acceptance-tests/tests/base/conductor -run '^$'`\n\nCloses #22262\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-12T21:51:13Z",
-      "mergedAt": null,
-      "additions": 1641,
-      "deletions": 366
     },
     {
       "id": "PR_kwDODjvEJM8AAAABDyZvsw",
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 5803,
-    "deletions": 3212,
-    "files": 206,
-    "commitCount": 299
+    "additions": 12325,
+    "deletions": 11952,
+    "files": 369,
+    "commitCount": 439
   },
   "completedItems": [
     {
@@ -323,6 +323,79 @@
       ]
     },
     {
+      "title": "op-reth!: remove historical proofs v1",
+      "prNumber": 23067,
+      "type": "other",
+      "body": "Historical proofs v1 has been deprecated, and retaining both formats keeps duplicate storage and version-selection paths alive. This removes v1 and makes the existing v2 schema the sole, unversioned historical-proofs implementation; the gen",
+      "files": [
+        "docs/ai/acceptance-tests.md",
+        "docs/public-docs/chain-operators/guides/configuration/op-challenger-config-guide.mdx",
+        "docs/public-docs/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "docs/public-docs/node-operators/tutorials/reth-historical-proofs.mdx",
+        "docs/public-docs/node-operators/tutorials/run-node-from-source.mdx",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-e2e/e2eutils/reth/reth.go",
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/backfill.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/init.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/prune.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/snapshot/drop.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/snapshot/init.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/unwind.rs",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/trie/src/api.rs",
+        "rust/op-reth/crates/trie/src/backfill/job.rs",
+        "rust/op-reth/crates/trie/src/backfill/tests.rs",
+        "rust/op-reth/crates/trie/src/db/cursor.rs",
+        "rust/op-reth/crates/trie/src/db/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/change_set.rs",
+        "rust/op-reth/crates/trie/src/db/models/kv.rs",
+        "rust/op-reth/crates/trie/src/db/models/mod.rs",
+        "rust/op-reth/crates/trie/src/db/models/storage.rs",
+        "rust/op-reth/crates/trie/src/db/models/value.rs",
+        "rust/op-reth/crates/trie/src/db/models/version.rs",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/db/store/backfill.rs",
+        "rust/op-reth/crates/trie/src/db/store/cursor/account.rs",
+        "rust/op-reth/crates/trie/src/db/store/cursor/account_trie.rs",
+        "rust/op-reth/crates/trie/src/db/store/cursor/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store/cursor/snapshot.rs",
+        "rust/op-reth/crates/trie/src/db/store/cursor/snapshot_tests.rs",
+        "rust/op-reth/crates/trie/src/db/store/cursor/storage.rs",
+        "rust/op-reth/crates/trie/src/db/store/cursor/storage_trie.rs",
+        "rust/op-reth/crates/trie/src/db/store/cursor/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store/init.rs",
+        "rust/op-reth/crates/trie/src/db/store/metrics.rs",
+        "rust/op-reth/crates/trie/src/db/store/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store/provider_ro.rs",
+        "rust/op-reth/crates/trie/src/db/store/provider_rw.rs",
+        "rust/op-reth/crates/trie/src/db/store/read.rs",
+        "rust/op-reth/crates/trie/src/db/store/snapshot_init.rs",
+        "rust/op-reth/crates/trie/src/db/store/snapshot_read.rs"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: stop INTEROP from being disabled after migration",
+      "prNumber": 23131,
+      "type": "other",
+      "body": "## Description\r\n\r\n`migrate()` treats `INTEROP` as the marker that a chain already belongs to an interop set. Before this PR, the ProxyAdmin owner could clear that flag on one member and migrate it again. That moved the set's whole shared `E",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OPContractsManagerStandardValidator.sol",
+        "packages/contracts-bedrock/src/L1/SystemConfig.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/test/L1/SystemConfig.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol"
+      ]
+    },
+    {
       "title": "op-challenger: challenge ZK games with locally invalid parent proposals",
       "prNumber": 23128,
       "type": "other",
@@ -334,6 +407,36 @@
         "op-challenger/game/zk/actor.go",
         "op-challenger/game/zk/actor_test.go",
         "op-challenger/game/zk/register.go"
+      ]
+    },
+    {
+      "title": "kona-node: recover from RPC failures without cascading across chains",
+      "prNumber": 23125,
+      "type": "other",
+      "body": "A transient L1 RPC failure in the watcher currently escapes as an actor error and shuts down the host, including unrelated chains. Simply logging and skipping the failed block is insufficient: if that block contains a signer rotation, the n",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/bin/node/src/flags/p2p.rs",
+        "rust/kona/crates/node/engine/Cargo.toml",
+        "rust/kona/crates/node/engine/src/client.rs",
+        "rust/kona/crates/node/engine/src/sync/forkchoice.rs",
+        "rust/kona/crates/node/engine/src/sync/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/task.rs",
+        "rust/kona/crates/node/engine/src/test_utils/engine_client.rs",
+        "rust/kona/crates/node/service/Cargo.toml",
+        "rust/kona/crates/node/service/src/actors/engine/actor.rs",
+        "rust/kona/crates/node/service/src/actors/engine/mod.rs",
+        "rust/kona/crates/node/service/src/actors/engine/tests.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/actor.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/chain.rs",
+        "rust/kona/crates/node/service/src/actors/network/actor.rs",
+        "rust/kona/crates/node/service/src/actors/network/mod.rs",
+        "rust/kona/crates/node/service/src/actors/network/signing.rs",
+        "rust/kona/crates/providers/providers-alloy/src/lib.rs",
+        "rust/kona/crates/providers/providers-alloy/src/runtime_config.rs"
       ]
     },
     {
@@ -389,6 +492,20 @@
       "body": "Stacked on #23143; merge that PR first. Makes the attributes-versus-block fee comparisons easier to audit without having to decode two-letter variable names. The misleading invalid-parameter diagnostic now describes zero elasticity with a n",
       "files": [
         "rust/kona/crates/node/engine/src/attributes.rs"
+      ]
+    },
+    {
+      "title": "op-alloy,op-reth: count post-exec preflight rejections on the Engine API path",
+      "prNumber": 23149,
+      "type": "other",
+      "body": "**Stacks on #23124** — do not merge first; this branch builds on its zero-registration and result counters, and its diff here shows only this change.\n\nOn the Engine API (`newPayload`) path, the encoded-transaction preflight rejected three f",
+      "files": [
+        "rust/kona/crates/proof/executor/src/builder/core/tests.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec.rs",
+        "rust/op-alloy/crates/consensus/src/post_exec/tests.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/sdm_metrics.rs",
+        "rust/op-reth/crates/payload/src/payload.rs"
       ]
     },
     {
@@ -476,6 +593,19 @@
       ]
     },
     {
+      "title": "Update release docs: op-node, op-reth, op-batcher, kona-node",
+      "prNumber": 23139,
+      "type": "other",
+      "body": "## Summary\nAdds the October 1, 2026 GitHub releases to the release notes pages.\n\n## Changes\n- Added op-node v1.19.8, op-reth v2.5.0, op-batcher v1.17.1, and kona-node v1.7.1 as `Latest`/`Stable` entries; the previous latest entries are now ",
+      "files": [
+        "docs/public-docs/releases/index.mdx",
+        "docs/public-docs/releases/kona-node.mdx",
+        "docs/public-docs/releases/op-batcher.mdx",
+        "docs/public-docs/releases/op-node.mdx",
+        "docs/public-docs/releases/op-reth.mdx"
+      ]
+    },
+    {
       "title": "op-service,kona: read beacon slot duration from SLOT_DURATION_MS",
       "prNumber": 23138,
       "type": "other",
@@ -515,6 +645,17 @@
       ]
     },
     {
+      "title": "contracts-bedrock: fix standard validation of migrated interop members",
+      "prNumber": 23134,
+      "type": "bugfix",
+      "body": "Fixes `StandardValidator` reverting on every member of a migrated interop set except the first, even with `allowFailure` set. Migration keeps each member's ProxyAdmin, but the shared `DisputeGameFactory`, `AnchorStateRegistry`, `ETHLockbox`",
+      "files": [
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OPContractsManagerStandardValidator.sol",
+        "packages/contracts-bedrock/test/L1/OPContractsManagerStandardValidator.t.sol"
+      ]
+    },
+    {
       "title": "docs: sweep upstream fixes after the reth update target",
       "prNumber": 23132,
       "type": "bugfix",
@@ -539,6 +680,82 @@
       ]
     },
     {
+      "title": "rust: depend on released libp2p 0.57 instead of a git pin",
+      "prNumber": 23163,
+      "type": "other",
+      "body": "kona's libp2p stack comes from the crates.io release again, not from a git commit. #22714 pinned an unreleased rust-libp2p commit to clear the yamux (GHSA-vxx9-2994-q338) and hickory-proto (GHSA-3v94-mw7p-v465) advisories, and #22737 allowe",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/deny.toml",
+        "rust/kona/bin/node/Cargo.toml",
+        "rust/kona/bin/node/src/flags/p2p.rs",
+        "rust/kona/crates/node/disc/Cargo.toml",
+        "rust/kona/crates/node/disc/src/builder.rs",
+        "rust/kona/crates/node/disc/src/driver.rs",
+        "rust/kona/crates/node/disc/src/handler.rs",
+        "rust/kona/crates/node/gossip/Cargo.toml",
+        "rust/kona/crates/node/gossip/src/rpc/request.rs",
+        "rust/kona/crates/node/peers/Cargo.toml",
+        "rust/kona/crates/node/peers/src/any.rs",
+        "rust/kona/crates/node/peers/src/boot.rs",
+        "rust/kona/crates/node/peers/src/enr.rs",
+        "rust/kona/crates/node/peers/src/nodes.rs",
+        "rust/kona/crates/node/peers/src/utils.rs",
+        "rust/kona/crates/node/service/Cargo.toml",
+        "rust/kona/crates/node/service/src/actors/network/builder.rs",
+        "rust/kona/crates/node/service/src/actors/network/driver.rs",
+        "rust/kona/crates/node/service/tests/actors/network/mocks/builder.rs",
+        "rust/kona/examples/discovery/Cargo.toml",
+        "rust/kona/examples/discovery/src/main.rs",
+        "rust/kona/examples/gossip/Cargo.toml",
+        "rust/kona/examples/gossip/src/main.rs",
+        "rust/kona/crates/node/service/src/actors/network/README.md",
+        "rust/kona/crates/node/service/src/actors/network/config.rs"
+      ]
+    },
+    {
+      "title": "op-reth: execute streamed post-exec tx in flashblocks consumer",
+      "prNumber": 23157,
+      "type": "other",
+      "body": "## Summary\n\nFixes SDM-M2 (ethereum-optimism/protocol-team#372). The op-reth flashblocks consumer built pending blocks with `PostExecMode::Disabled` and never read `diff.post_exec_tx`. As a result:\n\n- **Pending view was wrong:** receipts and",
+      "files": [
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/src/cache.rs",
+        "rust/op-reth/crates/flashblocks/src/consensus.rs",
+        "rust/op-reth/crates/flashblocks/src/sequence.rs",
+        "rust/op-reth/crates/flashblocks/src/service.rs",
+        "rust/op-reth/crates/flashblocks/src/test_utils.rs",
+        "rust/op-reth/crates/flashblocks/src/worker.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs"
+      ]
+    },
+    {
+      "title": "contracts: reject unrespected parents for respected ZK games",
+      "prNumber": 23210,
+      "type": "other",
+      "body": "A respected ZK game can currently extend a claim made while ZK was not respected, allowing rollout or fallback claims to become withdrawal-eligible through a respected child. Respected children require parents that were respected at creatio",
+      "files": [
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/dispute/zk/ZKDisputeGame.sol",
+        "packages/contracts-bedrock/test/dispute/zk/ZKDisputeGame.t.sol"
+      ]
+    },
+    {
+      "title": "docs: archive u20 notice page",
+      "prNumber": 23205,
+      "type": "docs",
+      "body": "Archive the u20 notice page",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/notices/archive/index.mdx",
+        "docs/public-docs/notices/archive/upgrade-20.mdx",
+        "docs/public-docs/notices/index.mdx",
+        "docs/public-docs/op-stack/protocol/network-upgrades.mdx",
+        "docs/public-docs/scripts/lint/nav-allowlist.json"
+      ]
+    },
+    {
       "title": "op-reth: address review on proofs v1 removal",
       "prNumber": 23203,
       "type": "other",
@@ -558,6 +775,55 @@
       ]
     },
     {
+      "title": "kona-node!: bound engine RPCs at the transport and add a SignerActor",
+      "prNumber": 23202,
+      "type": "other",
+      "body": "Stacked on #23125 as a proposed simplification of its engine RPC deadlines. Draft while we iterate.\n\n#23125 bounds engine RPCs in three separate places:\n- `rpc_timeout` around individual call sites\n- a timeout inside `record_call_time`\n- an",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/design/intro.mdx",
+        "docs/public-docs/node-operators/kona-node/design/sequencer.mdx",
+        "docs/public-docs/node-operators/kona-node/run/sequencer.mdx",
+        "rust/kona/bin/node/src/commands/net.rs",
+        "rust/kona/bin/node/src/commands/node.rs",
+        "rust/kona/crates/node/engine/Cargo.toml",
+        "rust/kona/crates/node/engine/src/client.rs",
+        "rust/kona/crates/node/engine/src/sync/forkchoice.rs",
+        "rust/kona/crates/node/engine/src/sync/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs",
+        "rust/kona/crates/node/gossip/src/builder.rs",
+        "rust/kona/crates/node/gossip/src/driver.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/chain.rs",
+        "rust/kona/crates/node/service/src/actors/mod.rs",
+        "rust/kona/crates/node/service/src/actors/network/actor.rs",
+        "rust/kona/crates/node/service/src/actors/network/builder.rs",
+        "rust/kona/crates/node/service/src/actors/network/config.rs",
+        "rust/kona/crates/node/service/src/actors/network/driver.rs",
+        "rust/kona/crates/node/service/src/actors/network/gossip.rs",
+        "rust/kona/crates/node/service/src/actors/network/handler.rs",
+        "rust/kona/crates/node/service/src/actors/network/mod.rs",
+        "rust/kona/crates/node/service/src/actors/network/signing.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/actor.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/tests/actor_test.rs",
+        "rust/kona/crates/node/service/src/actors/signer/actor.rs",
+        "rust/kona/crates/node/service/src/actors/signer/mod.rs",
+        "rust/kona/crates/node/service/src/lib.rs",
+        "rust/kona/crates/node/service/src/service/node.rs",
+        "rust/kona/crates/node/service/tests/actors/network/mocks/builder.rs",
+        "rust/kona/crates/node/service/tests/actors/network/mocks/mod.rs",
+        "rust/kona/examples/gossip/src/main.rs",
+        "rust/Cargo.lock",
+        "rust/kona/crates/node/sources/Cargo.toml",
+        "rust/kona/crates/node/sources/src/signer/mod.rs",
+        "rust/kona/crates/node/sources/src/signer/remote/client.rs",
+        "rust/kona/crates/node/sources/src/signer/remote/handler.rs",
+        "rust/kona/crates/node/sources/src/tls.rs",
+        "rust/kona/sp1/crates/host/src/tls.rs"
+      ]
+    },
+    {
       "title": "op-service: write Untar output through os.Root",
       "prNumber": 23187,
       "type": "other",
@@ -566,17 +832,129 @@
         "op-service/ioutil/tar.go",
         "op-service/ioutil/tar_test.go"
       ]
+    },
+    {
+      "title": "op-reth,alloy-op-evm,op-alloy!: classify malformed PostExec as invalid blocks",
+      "prNumber": 23186,
+      "type": "other",
+      "body": "Malformed PostExec data, including transaction-envelope decoding failures, is now rejected as an invalid block. Before, it produced an internal RPC error on `newPayload`, and a fatal engine error when a buffered child was connected. Valid-b",
+      "files": [
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/op-alloy/crates/consensus/src/eip1559.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/evm/src/sdm_metrics.rs",
+        "rust/op-reth/crates/node/tests/it/invalid_post_exec.rs",
+        "rust/op-reth/crates/node/tests/it/main.rs"
+      ]
+    },
+    {
+      "title": "kona-sp1: reject untrusted chain configs in production guests",
+      "prNumber": 23236,
+      "type": "other",
+      "body": "Production SP1 proofs must use the chain rules embedded in the guest. Accepting configs from unverified preimages lets a prover change the deposit contract and derive fake deposits. Range and consolidation reject chains whose complete confi",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "op-acceptance-tests/README.md",
+        "op-acceptance-tests/tests/superfaultproofs/proof_runner.go",
+        "op-acceptance-tests/tests/superfaultproofs/proof_runner_test.go",
+        "ops/prestate-reproducibility/build-prestates.sh",
+        "ops/prestate-reproducibility/test-build-prestates.sh",
+        "rust/Cargo.lock",
+        "rust/justfile",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/build-info/build.rs",
+        "rust/kona/sp1/crates/build-info/src/lib.rs",
+        "rust/kona/sp1/crates/build-info/src/sha.rs",
+        "rust/kona/sp1/crates/elfs/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/Cargo.toml",
+        "rust/kona/sp1/crates/ethereum/client/src/chain_config.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_consolidation.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/test_utils.rs",
+        "rust/kona/sp1/crates/proposer/src/proving.rs",
+        "rust/kona/sp1/crates/super-range-executor/Cargo.toml",
+        "rust/kona/sp1/crates/super-range-executor/src/lib.rs",
+        "rust/kona/sp1/crates/zkvm-canary/src/execution.rs",
+        "rust/kona/sp1/justfile",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/src/main.rs",
+        "rust/kona/sp1/programs/super-range/src/test_config.rs",
+        "rust/kona/tests/justfile"
+      ]
+    },
+    {
+      "title": "kona-sp1: abort the guest when the witness is missing a preimage",
+      "prNumber": 23235,
+      "type": "other",
+      "body": "The SP1 super-range guest could be made to prove a false super root by leaving a preimage out of the witness. Shared kona code turns some oracle errors into protocol outcomes. `MessageGraph::resolve` marks an executing message invalid when ",
+      "files": [
+        ".circleci/continue/rust-e2e.yml",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/client/src/witness/mod.rs",
+        "rust/kona/sp1/crates/client/src/witness/preimage_store.rs",
+        "rust/kona/sp1/crates/ethereum/client/Cargo.toml",
+        "rust/kona/sp1/crates/ethereum/client/src/super_consolidation.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/kona/sp1/crates/super-range-executor/src/lib.rs",
+        "rust/kona/sp1/crates/super-range-executor/src/main.rs",
+        "rust/kona/sp1/programs/super-range/src/main.rs",
+        "rust/kona/tests/proofs/helpers/env.go",
+        "rust/kona/tests/proofs/helpers/runner.go"
+      ]
+    },
+    {
+      "title": "kona-node: reject malformed admin unsafe payloads",
+      "prNumber": 23224,
+      "type": "other",
+      "body": "Superseded by #23227, the second PR in the reordered stack: #23220 → #23227 → #23223 → #23229.\n\nDuring the reorder, pushing the rewritten heads before updating the PR bases made this head an ancestor of its old base. GitHub automatically ma",
+      "files": []
+    },
+    {
+      "title": "ci: fix change detection for large diffs and non-develop targets",
+      "prNumber": 23218,
+      "type": "bugfix",
+      "body": "Two fixes to the setup job's change detection, which decides which workflows a push runs. Together they could skip every test on a code PR.\n\n**Large file lists flipped the result.** `collect-params.sh` piped the changed-file list into `grep",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/scripts/collect-params.sh"
+      ]
     }
   ],
   "topContributors": [
     {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 393.26081753545304,
+      "prScore": 313.12281753545307,
+      "issueScore": 0,
+      "reviewScore": 79.5,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 292.48142188361663,
+      "totalScore": 327.48142188361663,
       "prScore": 185.54342188361665,
-      "issueScore": 6,
-      "reviewScore": 100.5,
+      "issueScore": 8,
+      "reviewScore": 133.5,
       "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 284.0328338334789,
+      "prScore": 194.99283383347887,
+      "issueScore": 4,
+      "reviewScore": 84.5,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -590,43 +968,43 @@
       "summary": null
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 227.36165073860408,
-      "prScore": 162.1616507386041,
-      "issueScore": 0,
-      "reviewScore": 65,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "teddyknox",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
-      "totalScore": 172.6884850212865,
-      "prScore": 172.6884850212865,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 170.36599798733613,
-      "prScore": 167.62599798733612,
+      "totalScore": 232.39002480163208,
+      "prScore": 197.21202480163205,
       "issueScore": 2,
-      "reviewScore": 0,
-      "commentScore": 0.74,
+      "reviewScore": 32,
+      "commentScore": 1.178,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 130.46631499402332,
-      "prScore": 91.32631499402332,
+      "totalScore": 214.47008889059944,
+      "prScore": 147.3920888905994,
       "issueScore": 10.1,
-      "reviewScore": 28.5,
-      "commentScore": 0.54,
+      "reviewScore": 56,
+      "commentScore": 0.978,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 177.6884850212865,
+      "prScore": 172.6884850212865,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 139.37199421015103,
+      "prScore": 118.87199421015103,
+      "issueScore": 0,
+      "reviewScore": 20.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -640,23 +1018,23 @@
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 108.7437738965761,
-      "prScore": 59.5437738965761,
-      "issueScore": 2,
-      "reviewScore": 47,
-      "commentScore": 0.2,
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 111.03207712855229,
+      "prScore": 93.03207712855229,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 93.03207712855229,
-      "prScore": 93.03207712855229,
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 80.86342359164556,
+      "prScore": 50.32342359164555,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "reviewScore": 30,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -670,13 +1048,33 @@
       "summary": null
     },
     {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 73.28344558501865,
+      "prScore": 64.38344558501865,
+      "issueScore": 4,
+      "reviewScore": 4.5,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
       "username": "wiz-0f98cca50a",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 63.438,
+      "totalScore": 68.27799999999999,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 63,
-      "commentScore": 0.43799999999999994,
+      "reviewScore": 67.5,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 66.84684712728546,
+      "prScore": 35.34684712728546,
+      "issueScore": 0,
+      "reviewScore": 31.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -687,6 +1085,26 @@
       "issueScore": 0,
       "reviewScore": 23,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 54.782483430440365,
+      "prScore": 34.44248343044036,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 52.468347486856075,
+      "prScore": 47.968347486856075,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -710,6 +1128,16 @@
       "summary": null
     },
     {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 46.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 46.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "max-sanchez",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1361464?u=8836d254fb633b0eb1d05502ff0283efcaaf04ae&v=4",
       "totalScore": 40.203773896576095,
@@ -720,30 +1148,20 @@
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 40.1000974479161,
-      "prScore": 14.7600974479161,
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 35.54,
+      "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 25,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 35,
+      "commentScore": 0.54,
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 38.539207690345485,
-      "prScore": 29.839207690345482,
-      "issueScore": 4,
-      "reviewScore": 4.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "zkfrov",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
-      "totalScore": 35.34684712728546,
-      "prScore": 35.34684712728546,
+      "username": "studiokvc",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/180499652?v=4",
+      "totalScore": 33.117760823346906,
+      "prScore": 33.117760823346906,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -760,28 +1178,28 @@
       "summary": null
     },
     {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 28.429612288668107,
+      "prScore": 27.651612288668108,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 27.65226019735752,
+      "totalScore": 27.85226019735752,
       "prScore": 27.01426019735752,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.6379999999999999,
+      "commentScore": 0.838,
       "summary": null
     },
     {
       "username": "wei3erHase",
       "avatarUrl": "https://avatars.githubusercontent.com/u/84595958?u=4a25fbc8b1e1f5d9b118e24d64fcc0b2fdb8f764&v=4",
-      "totalScore": 27,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 27,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
       "totalScore": 27,
       "prScore": 0,
       "issueScore": 0,
@@ -800,12 +1218,22 @@
       "summary": null
     },
     {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 20.5,
-      "prScore": 0,
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 23.036766166719346,
+      "prScore": 12.398766166719344,
       "issueScore": 0,
-      "reviewScore": 20.5,
+      "reviewScore": 10,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "Kshot3000",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/318831680?u=5c191a758ae0f34380b9c9256e158aa61cf51315&v=4",
+      "totalScore": 20.870480365792417,
+      "prScore": 20.870480365792417,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -830,23 +1258,13 @@
       "summary": null
     },
     {
-      "username": "OptimismBot",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 15.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 15,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 12.836766166719345,
-      "prScore": 12.398766166719344,
-      "issueScore": 0,
+      "username": "tuan-phan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29539892?u=999bed60ce8486d341ae1c49695b0e0f731d5446&v=4",
+      "totalScore": 14.483641396489094,
+      "prScore": 12.283641396489095,
+      "issueScore": 2,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -867,16 +1285,6 @@
       "issueScore": 2,
       "reviewScore": 4.5,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "pcw109550",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
-      "totalScore": 10.34,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -910,32 +1318,22 @@
       "summary": null
     },
     {
-      "username": "studiokvc",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/180499652?v=4",
-      "totalScore": 7.969955074527657,
-      "prScore": 7.969955074527657,
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 5,
+      "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 5.506306144334054,
-      "prScore": 5.068306144334055,
+      "username": "FlashWayne",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/332458478?u=c4e80af0ab1ae468e5c69ce74123d72759b56d66&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 4.424573590279973,
-      "prScore": 4.424573590279973,
-      "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 4.5,
       "commentScore": 0,
       "summary": null
     },
@@ -960,13 +1358,23 @@
       "summary": null
     },
     {
+      "username": "ariescodescream",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/12948118?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "methakon",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3263074?u=38f286e09d8e2349c34db2014d2c37bb64663ea6&v=4",
-      "totalScore": 0.4,
+      "totalScore": 0.6000000000000001,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.4,
+      "commentScore": 0.6000000000000001,
       "summary": null
     },
     {
@@ -1000,9 +1408,9 @@
       "summary": null
     }
   ],
-  "newPRs": 51,
-  "mergedPRs": 21,
-  "newIssues": 22,
-  "closedIssues": 13,
-  "activeContributors": 51
+  "newPRs": 77,
+  "mergedPRs": 37,
+  "newIssues": 26,
+  "closedIssues": 21,
+  "activeContributors": 60
 }
