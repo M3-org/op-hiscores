@@ -5,8 +5,44 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-07 to 2026-10-08, ethereum-optimism/optimism had 2 new PRs (2 merged), 0 new issues, and 7 active contributors.",
+  "overview": "From 2026-10-07 to 2026-10-08, ethereum-optimism/optimism had 17 new PRs (14 merged), 5 new issues, and 28 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABBrRbHg",
+      "title": "Interop status page integration",
+      "author": "karlfloersch",
+      "number": 20607,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2026-05-08T15:21:57Z",
+      "closedAt": "2026-10-07T21:33:47Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVponnA",
+      "title": "op-node, op-supernode: superroot_atTimestamp returns data beyond CurrentL1 after a derivation reset",
+      "author": "pauldowman",
+      "number": 23247,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nAfter a derivation-pipeline reset, `superroot_atTimestamp` can return a response that contradicts itself. `Data.VerifiedRequiredL1` (and the `RequiredL1` of optimistic outputs) can be at or above `CurrentL1`. The safety horizons (`CurrentLocalSafeTimestamp`, `CurrentSafeTimestamp`, `CurrentFinalizedTimestamp`) can also cover L2 blocks that the L1 below `CurrentL1` doesn't yet back.\n\nThe documented contract (`op-service/eth/superroot_at_timestamp.go:55-58`) is that every L1 block strictly below `CurrentL1` has been fully processed, and consumers gate on `CurrentL1 > X`. These responses break it. The window lasts until re-derivation catches up, which can take up to about one channel timeout.\n\n## Observed\n\nOn an OP Sepolia op-node (v1.19.9-rc.1), a routine node restart left the execution client 41 blocks behind. The op-node then reset its pipeline several times (`forkchoice update returned unexpected status SYNCING, need reset to re-sync with engine`), and each reset rewound the pipeline origin. A `superroot_atTimestamp` call during that window returned:\n\n- `current_l1` = 11863591\n- `data.verified_required_l1` = 11863624, for a block that was still reported as finalized\n\nThe kona zkVM canary rejects this response as inconsistent, and the next run, after re-derivation, succeeded.\n\nThe safe head database was correct. The block really did become safe at L1 11863624, and the reset truncated the database at the point where derivation resumes.\n\n## Cause\n\nThe response combines two values that a reset affects differently:\n\n- `CurrentL1` is the derivation pipeline origin (`op-node/rollup/status/status.go:71`). A reset deliberately rewinds it to collect channel data again (`op-node/rollup/derive/pipeline.go:225-265`).\n- Local-safe, safe and finalized keep their values through the engine reset, and so do the safedb entries at or below local-safe.\n\nAffected:\n\n- **op-node:** `op-node/node/superroot_api.go`. `Data` comes from local-safe plus `safeDB.L1AtSafeHead`, with no comparison against `CurrentL1`, and the horizons come straight from the sync status.\n- **op-supernode, while interop is not active** (also below the first verifiable timestamp, and before Start): `op-supernode/supernode/activity/superroot/superroot.go:104-108` (`composeHandoffDataFromOptimistic`). `RequiredL1` comes from each chain's safedb (`chain_container.go:638-661`), while `CurrentL1` is the lowest of each chain's derivation `CurrentL1`, which also rewinds on reset. This is from reading the code; it hasn't been reproduced.\n\nNot affected:\n\n- **op-supernode while interop is active.** It reports the lower of the aggregate `CurrentL1` and the verifier's `CurrentL1`, read at the same moment as the verified result, and leaves `Data` nil until the result is verified.\n- **Output-root games.** They query safedb at the game's own L1 head after checking `CurrentL1 > l1Head`.\n\n## Impact\n\n- **op-challenger super trace provider:** no change in its answers. Any affected block has `RequiredL1 ≥ CurrentL1 > l1Head`, so it already resolves to `InvalidTransition`.\n- **Consumers that check consistency** (kona zkVM canary, possibly the kona-sp1 proposer): they fail until re-derivation catches up.\n\n## Proposed fix\n\nCap the response at the L2 safe head that safedb recorded as of L1 `CurrentL1 − 1`:\n\n- Omit `Data` and the optimistic output for any block above `min(local-safe, cap)`.\n- Cap each horizon timestamp at the cap's timestamp.\n\nWithin recorded history, `n ≤ SafeHeadAtL1(CurrentL1 − 1)` holds exactly when `L1AtSafeHead(n) < CurrentL1`, so this one cap makes the whole response consistent. Apply the same cap per chain in the op-supernode path that runs while interop is not active.\n\nOpen question: on nodes with safedb disabled, this cap makes every call return `ErrNotEnabled`, including op-proposer's sync-status query. Is that acceptable as a breaking change?\n",
+      "createdAt": "2026-10-07T15:56:53Z",
+      "closedAt": "2026-10-07T21:24:01Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABUOK_7A",
+      "title": "Rename kona-sp1-proposer to op-zk-proposer",
+      "author": "wwared",
+      "number": 23126,
+      "repository": "ethereum-optimism/optimism",
+      "body": "We'll rename to `op-zk-proposer` everywhere: monorepo, binary name, release tags, docs, internal charts and skills, etc. Close this issue when the full rename is done and `kona-sp1-proposer` is not present anywhere in our repos anymore.\n\n`kona-sp1-program` remains the tag for the SP1-based on-chain prestate (RISC-V binaries built for the SP1 ZKVM). Renaming it is out of scope.",
+      "createdAt": "2026-09-30T19:37:37Z",
+      "closedAt": "2026-10-07T17:06:07Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
     {
       "id": "I_kwDODjvEJM8AAAABVOgpOQ",
       "title": "kona-sp1: the guest reads chain configs from unverified preimages for chains not in the embedded registry",
@@ -34,61 +70,83 @@
   ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABG-780w",
-      "title": "kona-sp1: reject untrusted chain configs in production guests",
-      "author": "Inphi",
-      "number": 23236,
-      "body": "Production SP1 proofs must use the chain rules embedded in the guest. Accepting configs from unverified preimages lets a prover change the deposit contract and derive fake deposits. Range and consolidation reject chains whose complete configs are missing from the embedded registry.\n\nNative execution receives trusted deployment configs directly. The executor, proposer, and canary retain their config-file overrides for witness collection; the SP1 guest independently enforces its embedded registry. Full-ELF tests use the opt-in `test-config-fallback` feature so synthetic chains can share one test ELF without rebuilding for each deployment. Production prestate builds reject an enabled test feature, a test-marked build SHA, or the dedicated unsafe-config marker embedded in the ELF. Custom registry inputs currently support only Mainnet, Sepolia, and Holesky as L1s.\n\nOrdinary CircleCI and scheduled smoke tests share the same test-feature ELF build. The local and CI guest lint recipe also checks the feature-free production path, without another ELF build. Cargo and local build defaults remain feature-free. Prestate reproducibility rebuilds released tags rather than the PR head.\n\nThe acceptance runner extracts the L1 chain config from its genesis file before passing it to the executor. Passing the whole genesis previously made custom L1 chain IDs default to 1 and fail native witness collection. A focused regression checks the actual executor argument file preserves the chain ID and fork activation times. Config validation, resolver coverage, and synthetic-chain build instructions also address the review feedback.\n\nLocal validation passed: 41 host and core Rust tests, six guest tests, guest lint in both feature modes, scoped Rust Clippy, the acceptance argument regression, full custom Go lint and module checks, and CI wiring checks. The acceptance regression and empty-consolidation diagnostic failed before their fixes and passed afterward. Real native ELF builds earlier confirmed the unsafe marker is present with the test feature and absent without it. Full devnet acceptance was not run locally. CI is running for the current head.\n\nFixes #23207.\n",
+      "id": "PR_kwDODjvEJM8AAAABHOGfdw",
+      "title": "contracts-bedrock,op-core,op-supernode,kona: formal models and differential tests for interop message expiry",
+      "author": "karlfloersch",
+      "number": 23263,
+      "body": "Adds formal models, symbolic checks and differential tests for interop message expiry and `SuperchainETHBridge` refunds (#23259). They give reviewers machine-checked evidence that the shipped design cannot pay ETH twice: a message is never both relayed on its destination and refunded on its source. These models found the pre-staged-withdrawal double spend in the earlier design, where L1 trusted the L2ToL2CrossDomainMessenger as the sender. That finding is why exports now come from the `UndeliveredMessageExporter` predeploy. They check that the landed design closes the gap. Without them, the safety argument rests on prose and unit tests.\n\nNo effect on users: everything is test or verification code. The Solidity under `test/formal/` compiles into the forge test build, and its Foundry invariant and fuzz suites run in contracts-bedrock CI with inline budgets. The Lean, Quint, Dafny, Halmos, Kontrol, hevm and EVMLean harnesses are not wired into CI; each directory's README says how to run it. The three Go/Rust tests run the real window-rule implementations against shared vectors.\n\nThe files live in a new `test/formal/expiry/` tree rather than `test/invariants/` and `test/kontrol/` because one argument spans several tools. `test/formal/expiry/README.md` maps each property to the tools that check it, and lists what is proved and what is assumed. The one-line `test-validation` exclusion is needed because these files have no matching `src/` path, as for `test/invariants/`.\n\nRelated: #23259.\n\nReviews: each layer was audited by a fresh-context reviewer and by two independent model reviewers; the outcomes are in each README's review log. `go-code-reviewer` and `rust-code-reviewer` are pending for the differential tests. `interop-reviewer` and `/security-review` are not run because this diff changes no production code; they apply to #23259.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-06T19:24:30Z",
-      "mergedAt": "2026-10-07T01:53:36Z",
-      "additions": 991,
-      "deletions": 361
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABHB_Gyw",
-      "title": "release-notes: Support op-contracts and op-deployer",
-      "author": "ajsutton",
-      "number": 23244,
-      "body": "The `release-notes` skill supports only the binary components. We want op-contracts and op-deployer release notes in the same house style as op-node and op-reth. Before this change the tooling did not work for them:\n\n- `pr-facts.sh` tagged every op-contracts PR `?`.\n- The op-deployer draft missed changes in `op-chain-ops`, the shared Go code and the contract deploy scripts that op-deployer runs.\n- The op-contracts draft advertised a Docker image that does not exist.\n\nWith this change, `pr-facts.sh` marks a contract change under `src/` or in the L2 upgrade bundle as shipped for op-contracts. For op-deployer, it also counts the deploy scripts as shipped. A new `contract-versions.sh` script makes the contract version table for an op-contracts note. The house style adds a section for the two components. The main differences are an Overview sentence that names the upgrade, and an op-deployer note that links to its op-contracts release and does not repeat its contract changes.\n\nThe triage guide gets a new rule for backports. When the previous tag is not an ancestor of the new one, the draft lists PRs that the previous release already shipped as cherry-picks. For example, the `op-contracts/v8.0.0` draft lists ethereum-optimism/optimism#20919, which v7.0.0 shipped.\n\nThere is no effect on users. A known, earlier problem stays: git-cliff can use an RC tag as the compare base. An anchored tag pattern removed the op-node compare link, so this PR keeps the hand fix that the house style already gives.\n\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-07T01:45:11Z",
+      "createdAt": "2026-10-07T23:01:19Z",
       "mergedAt": null,
-      "additions": 235,
-      "deletions": 10
+      "additions": 66941,
+      "deletions": 1
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABHBSXuA",
-      "title": "op-challenger: create ZK games and parse game type names in create-game",
-      "author": "digorithm",
-      "number": 23243,
-      "body": "`create-game` could not create ZK dispute games: with `--game-type 10` it sent output-root `extraData` and the factory reverted with `BadExtraData`. It also read `--game-type` as a number, so a name such as `zk` silently parsed to 0 and created a cannon game, forfeiting the bond.\n\nZK games now get `uint32 parentIndex || super root proof` as `extraData`, with the root claim over the proof only, matching `ZKDisputeGame` and the devstack `StartZKGame` helper. A new `--parent-index` flag (`OP_CHALLENGER_ZK_PARENT_INDEX`) defaults to uint32 max, which builds on the anchor state, so existing invocations that add `--game-type 10` need no other change. `--game-type` accepts a decimal number or a game type name and rejects anything else before any RPC call. Super and ZK games now require a non-zero `--l2-chain-id`: a missing value used to read as 0, and the contracts do not check the chain ID in the proof, so the game was created with a root that honest actors dispute. Non-ZK `create()` calldata is unchanged.\n\nThe `op-challenger-invalid-proposal` CronJob in ethereum-optimism/k8s calls this command. Its arguments are not visible from this repo; anyone passing a non-numeric or out-of-range `--game-type`, or no `--l2-chain-id` for a super game, now gets an error instead of a silently wrong game.\n\nPart of https://github.com/ethereum-optimism/optimism/issues/23009.\n\nReview notes: go-code-reviewer and security-reviewer (approve) ran; both flagged the zero chain ID, now rejected. Not done: moving the game type name list next to `GameType.String()` in `game/types`; an unlisted new type fails loudly by name and still parses by number.\n",
+      "id": "PR_kwDODjvEJM7-QxXY",
+      "title": "op-deployer: share one bootstrapped L1 across PCD test cases",
+      "author": "maurelian",
+      "number": 22404,
+      "body": "`TestCLIPCDResume` ran a full Anvil + `bootstrap superchain` + `bootstrap implementations` for each of its nine cases, and `TestCLIPCDJourney` for each of its two. The bootstrap pair is the slowest op-deployer operation and nothing under test mutates it, so it now runs once per test function.\n\n`pcdBootstrappedL1` holds the bootstrapped L1 and hands each case a fresh CLI runner and workdir on it. `newJourney` first reverts the L1 to a post-bootstrap snapshot, restoring the deployer nonce, block height, and any injected code — so the existing absolute-nonce assertions and `postBootstrapL1State` baseline hold unchanged, and rerunning a failed case is now idempotent.\n\n`TestCLIPCDBoot` keeps its own L1; it needs a Prague-specific Anvil.\n\nMeasured locally, same synthetic prestate for both runs:\n\n| | before | after |\n|---|---|---|\n| `TestCLIPCDResume` | 398.9s | 95.6s |\n| `TestCLIPCDJourney` | 89.7s | 51.1s |\n\nThat is ~5.7 min off the `go-tests` shard, which runs this package under a 40m budget.\n\nTargets `test/pcd-e2e-integration` (#22356).\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-07T00:08:23Z",
+      "createdAt": "2026-08-12T20:34:49Z",
       "mergedAt": null,
-      "additions": 171,
-      "deletions": 13
+      "additions": 2587,
+      "deletions": 29
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABF-zfrw",
-      "title": "contracts-bedrock: stop INTEROP from being disabled after migration",
-      "author": "0xiamflux",
-      "number": 23131,
-      "body": "## Description\r\n\r\n`migrate()` treats `INTEROP` as the marker that a chain already belongs to an interop set. Before this PR, the ProxyAdmin owner could clear that flag on one member and migrate it again. That moved the set's whole shared `ETHLockbox` balance to that chain alone and left the other members unable to withdraw. `SystemConfig.setFeature` now refuses to disable `INTEROP`, as it already does for `ETH_LOCKBOX`.\r\n\r\nAlso corrects the StandardValidator docstring, which claimed it works on chains that have not been upgraded. It bounds the migration test's gas at the EIP-7825 per-transaction cap, and adds operational cautions to the merge runbook.\r\n\r\n**Review agents not run.**",
+      "id": "PR_kwDODjvEJM8AAAABHMBDAg",
+      "title": "contracts-bedrock,op-core,op-interop-filter,kona!: per-message interop expiry and SuperchainETHBridge refunds",
+      "author": "karlfloersch",
+      "number": 23259,
+      "body": "## Summary\n\nInterop executing messages can't be forced in through deposits, so a destination sequencer that refuses to relay a message can keep it from ever being delivered. For `SuperchainETHBridge.sendETH`, that strands the ETH: it is burned on the source chain and never minted on the destination.\n\nThis PR lets the source chain learn, through censorship-resistant paths only, that a message can never be delivered. It exposes that per message as `L2ToL2CrossDomainMessenger.expiredMessages(messageHash)`. `SuperchainETHBridge.refundETH` uses it to give the ETH back.\n\nIt replaces #22601, rebuilt on current `develop`. There is no registry, no admin setter, no app callback and no configurable window.\n\nBREAKING CHANGE: `L2ToL2CrossDomainMessenger.resendMessage` is removed, and the messenger now rejects messages whose target is the `L2CrossDomainMessenger` or the `L2ToL1MessagePasser` (`MessageTargetUnsafe`).\n- **Who is affected:** applications and relayers that resend unrelayed interop messages, and anyone sending cross-chain messages to those two targets.\n- **What breaks:** a message that isn't relayed within the expiry window can no longer be revived.\n- **Configuration:** op-core and kona now refuse to load a dependency set whose `overrideMessageExpiryWindow` exceeds 604800 seconds (7 days), and `op-interop-filter` refuses `--message-expiry-window` above 168h. Operators with a longer override must lower it.\n- **Migration:** treat an unrelayed message as expired, and undo the send on the source chain after `expiredMessages(messageHash)` is set, as `SuperchainETHBridge.refundETH` does. To reach L1 or the L2 messenger from a relayed message, go through your own contract.\n\n## The protocol fact it builds on\n\nAn executing message is invalid when its block is more than the message expiry window (7 days) after its initiating message's block. Both cross-safety (op-supernode) and the fault proof (kona) enforce this, comparing the same two timestamps.\n\nSo once a destination's clock passes `sendTime + window` and the message is still unrelayed, no valid block can relay it. This PR carries that fact back to the source chain over a withdrawal followed by a deposit.\n\n## How it works\n\nFor a message `H` sent from A to B and never relayed on B:\n\n1. **On A, at send time:** `sendMessage` stores `sentMessageTimestamps[H] = block.timestamp`.\n2. **On B, export:** anyone calls `UndeliveredMessageExporter.exportUndeliveredMessage(sourceMessenger, source, nonce, sender, target, message, minGasLimit)`. This is a new predeploy at `0x…0030`.\n   - It hashes the message with **B's own chain ID as the destination**, so a chain can only speak for messages addressed to it.\n   - It requires `!L2ToL2CrossDomainMessenger.successfulMessages(H)`.\n   - It sends `relayUndeliveredMessage(H, block.timestamp)` to `sourceMessenger`, which is A's `L1CrossDomainMessenger`, through the `L2CrossDomainMessenger`.\n   - This is not an executing message, so if B censors it, it can be forced in as a deposit. The acceptance test does exactly that.\n3. **On L1:** B's `L1CrossDomainMessenger` relays the withdrawal into A's `L1CrossDomainMessenger.relayUndeliveredMessage`. The function first requires that A has the `INTEROP` feature enabled. It then accepts the call only if:\n   - the caller is a real `L1CrossDomainMessenger`: its portal's `SystemConfig` names it as that chain's messenger;\n   - the caller's portal is authorized by **A's `ETHLockbox`**, meaning it is in A's cluster;\n   - the L2 sender of the withdrawal is the **`UndeliveredMessageExporter`**.\n\n   It then sends `expireMessage(H, undeliveredAt)` to A's `L2ToL2CrossDomainMessenger` as a deposit.\n4. **On A, expire:** `expireMessage` accepts only the `L2CrossDomainMessenger` relaying from A's own `L1CrossDomainMessenger`, which is `otherMessenger()`, so L2 needs no new address. If `undeliveredAt > sentMessageTimestamps[H] + EXPIRY_PERIOD`, it sets `expiredMessages[H] = true`.\n5. **On A, refund:** anyone calls `SuperchainETHBridge.refundETH(destination, nonce, from, to, amount)`. It rebuilds `H` from those arguments, requires `expiredMessages[H]`, and refunds `from` exactly once with a forced send.\n\n**Why a refund can't double-spend:** B attests that H was unrelayed at a time past the window, and from then on the protocol rejects any relay of H. A acts only on a fact dated past `EXPIRY_PERIOD`, measured from a send time that is written once and never changes.\n\n### Why the trusted sender is a new predeploy\n\nThe L1 side trusts withdrawals from the `UndeliveredMessageExporter` at `0x…0030`. It does not trust the `L2ToL2CrossDomainMessenger`.\n- **No forged withdrawal can predate the upgrade.** The proxy at `0x…0030` had no implementation until this upgrade, so no withdrawal from it exists from before.\n- **It can't be impersonated.** The exporter makes exactly one kind of call, so nothing can make it say something it didn't check.\n\nThe messenger, by contrast, has a history of relaying messages to arbitrary targets. Trusting it would let forged withdrawals created before the upgrade wait in unfinalized withdrawals or failed messages and be replayed afterwards. It would also open a window during any L1-before-L2 rollout.\n\n### What prevents each attack\n- **Forged facts from other chains:** every chain whose portal A's lockbox authorizes can already withdraw A's ETH, so trusting its facts adds no trust.\n- **A forged messenger borrowing a real portal:** it fails the reverse binding.\n- **Governance of another cluster chain:** that chain's governance could upgrade its own exporter and forge facts about any destination. That is the same trust as the shared `ETHLockbox` already places in it, since lockbox portals must share one proxy admin owner.\n- **Something else sending the deposit as A's L1 messenger:** `L1CrossDomainMessenger` already refuses to relay messages that target itself, so only `relayUndeliveredMessage` can make it the sender.\n- **The L1 call runs out of gas:** it lands in the calling messenger's failed messages, and anyone can replay it.\n- **The wrong source messenger is named:** the deposit reverts on a chain that never sent `H`, and anyone can export again.\n- **A fact that arrives too early:** it fails on A with `MessageNotExpired`. It can never succeed later, because its timestamp is fixed.\n\n## Behavior changes (please review these closely)\n\n- **`resendMessage` is removed** (`L2ToL2CrossDomainMessenger` 2.0.0).\n  - **Why:** resending lets a message be relayed for another window, which conflicts with expiry: a sender could resend, take a refund, and then have the resent event relayed. And letting anyone resend would let anyone stop a message from ever expiring.\n  - **What happens instead:** an unrelayed message expires, and the app undoes the send.\n  - **Who loses out:** apps without a refund, such as `SuperchainTokenBridge` today, lose the ability to revive an unrelayed message until they add one. See follow-ups.\n- **The messenger refuses unsafe targets.** It won't send or relay messages whose target is the `L2CrossDomainMessenger` or the `L2ToL1MessagePasser` (`MessageTargetUnsafe`).\n  - **This is defense in depth:** expiry's safety doesn't depend on it.\n  - **What it guarantees:** the messenger never starts a withdrawal. Nothing that trusts it as a withdrawal sender, today or in future L1 contracts, can be fooled by a relayed message.\n- **The expiry window can't exceed 7 days.** op-core and kona both reject a dependency-set message expiry window override above 7 days, and `op-interop-filter` caps its `--message-expiry-window` flag the same way. A window longer than the contract's period would allow a refund followed by a valid relay.\n- **`EXPIRY_PERIOD = 8 days`:** the protocol's 7-day window plus a 1-day safety margin.\n- **Every message costs more gas:** `sendMessage` stores a timestamp, about 22k more gas per message.\n- **Old messages can't expire:** messages sent before this upgrade have no timestamp.\n\n## Contract changes\n\n- **`L2ToL2CrossDomainMessenger` 1.3.2 → 2.0.0:**\n  - new constant `EXPIRY_PERIOD`;\n  - new storage at slots 3–4: `sentMessageTimestamps` and `expiredMessages`;\n  - new function `expireMessage`, the unsafe-target helper, and `resendMessage` removed;\n  - no initializer, so it is still upgraded with plain `upgradeTo`.\n- **New `UndeliveredMessageExporter` 1.0.0 at `0x…0030`:** gated on interop like the other interop predeploys, and wired through `Predeploys`, `L2Genesis`, `L2ContractsManager` (now 1.15.0), the Go predeploy registry and the NUT bundle.\n- **`L1CrossDomainMessenger` 2.11.1 → 2.12.0:** adds `relayUndeliveredMessage`, with no new storage and an `INTEROP` gate. `EXPIRE_MESSAGE_GAS_LIMIT = 100_000`, which a cold-storage relay test exercises.\n- **`SuperchainETHBridge` 1.0.1 → 1.1.0:** `sendETH` is unchanged. Adds `refundETH` and a `refunded` mapping.\n- **Off-chain:** the window cap in op-core (Go), kona (Rust) and `op-interop-filter`.\n- **Docs:** `message-expiration.mdx` and the interop overview now describe expiry instead of resend.\n\n## Launch checklist\n\n- **The window cap is live before expiry is relied on.** Every node and the accepted proof program must enforce the dependency-set window cap of 7 days or less. With an older prestate that accepts a longer override, a refund could be followed by a valid relay.\n- **The dependency set and the lockbox agree.** Every chain in a cluster's dependency set must also be authorized in the cluster's `ETHLockbox` and run the exporter, in the same fork. Otherwise sends to it can't be refunded.\n- **Embed each cluster's dependency set in the prestate.** It must be in the registry and the absolute prestate: kona falls back to a host-supplied dependency set for clusters that aren't in the registry.\n- **Re-snapshot Lagoon after merge.** Lagoon's NUT bundle (`op-core/nuts/fork_lock.toml`) still locks the old messenger. It must be re-snapshotted once this merges, together with kona's bundle counts, and the exporter added back to op-core's `Predeploys` map at that snapshot. It is deliberately left out until then, so the frozen fork state stays unchanged.\n- **Rules every future upgrade must keep:**\n  - nothing may re-emit `SentMessage` for a message that already has a timestamp: no resend, and no rollback to an implementation that has `resendMessage`;\n  - every way of relaying on the destination must set `successfulMessages`;\n  - any change to message hashing or nonce versioning must be mirrored in the exporter.\n\n  Breaking any of these allows a refund followed by a relay.\n- **Use enough L1 gas when finalizing an export,** at least 1M. Because a failed relay is stored rather than reverted, `eth_estimateGas` under-estimates.\n\n## Limitations\n\n- **Messages sent before the upgrade can't be recovered.** They have no send timestamp, so they can never expire, and with `resendMessage` gone they can't be resent either. In production this ships with interop's launch, so no messages predate it.\n- **`refundETH` always pays `from`,** which is `sendETH`'s `msg.sender`. A router that sent ETH on someone's behalf needs its own way to pass a refund on. If `sendETH` was itself called from a relayed interop message, `from` is the `L2ToL2CrossDomainMessenger`, and a refund would be stuck there.\n- **An early export is harmless.** It fails on the source with `MessageNotExpired`. Export again after `EXPIRY_PERIOD`.\n\n## Testing\n\n- **Forge:**\n  - messenger: send timestamps, the unsafe-target rule on send and on relay, `expireMessage` auth and the exact boundary, and `expireMessage` through a real `L2CrossDomainMessenger` relay with cold storage, including an out-of-gas run then a replay;\n  - exporter: hashing, the delivered check, and an export forced in from a deposit;\n  - `L1CrossDomainMessenger`: an integration test with real contracts; rejection of a forged messenger, another lockbox, the wrong L2 sender (including `0x…23`), interop disabled, and the chain's own messenger;\n  - bridge: refund after expiry pays exactly once; a forged refund through a direct `sendMessage` reverts; wrong-preimage fuzzing;\n  - one end-to-end test of send → export → L1 → expire → refund, using `vm.warp`.\n- **Acceptance (`op-acceptance-tests/tests/interop/expiry`, two-chain interop devnet):** every leg runs for real:\n  - `sendETH` from A, never relayed on B;\n  - an export **forced in as an L1 deposit** on B;\n  - prove and finalize, then A's L1 messenger relays and the deposit lands on A.\n\n  The devnet can't advance L2 time 8 days, so the test then asserts the exact `MessageNotExpired` rejection, the carried hash and the timestamp. Forge covers the expired path. The acceptance test also checks ordinary relays and that exporting a delivered message is refused.\n- **Go and Rust:** tests for the window cap, and tests pinning the constants.\n\n## Follow-ups (not in this PR)\n\n- A spec section.\n- Refunds in `SuperchainTokenBridge`, using the same `expiredMessages` check.\n- Formal models and proofs, in a stacked draft PR: Lean, Quint, Kontrol, Halmos and invariant fuzzing.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-09-30T21:44:56Z",
-      "mergedAt": "2026-10-07T01:41:12Z",
-      "additions": 115,
-      "deletions": 25
+      "createdAt": "2026-10-07T19:17:24Z",
+      "mergedAt": null,
+      "additions": 2380,
+      "deletions": 323
+    },
+    {
+      "id": "PR_kwDODjvEJM7-SgLj",
+      "title": "kona-node: run conductor acceptance coverage",
+      "author": "joshklop",
+      "number": 22405,
+      "body": "## Overview\n\nStacked on #22244.\n\nRun the full conductor acceptance suite added by the base PR against real kona-node processes as well as op-node. The commits are split by the acceptance behaviors they unlock:\n\n1. **Cluster lifecycle** — configure conductor integration through backend-neutral `L2CLConfig`, launch stopped Kona candidates behind stable RPC proxies, and enable startup, failover, proxy, and membership coverage.\n2. **Sequencer handoffs** — validate the expected unsafe head when starting Kona sequencing and enable both leadership-transfer tests.\n3. **Disaster recovery** — require normal starts to have conductor leadership, make the node-side override local, and enable disaster-recovery coverage.\n\nEach commit removes only the Kona skips for the tests it unlocks. The tests and assertions remain shared between op-node and kona-node; there are no client-specific test branches.\n\n## Testing\n\n- At commit 1: all five newly enabled Kona lifecycle tests passed.\n- At commit 2: both newly enabled Kona leadership-transfer tests passed.\n- At commit 3: the newly enabled Kona disaster-recovery test passed.\n- `DEVSTACK_L2CL_KIND=kona-node DEVSTACK_L2EL_KIND=op-reth RUST_JIT_BUILD=1 go test -count=1 -parallel=1 -timeout 90m -v ./op-acceptance-tests/tests/base/conductor/` (8 passed)\n- `DEVSTACK_L2CL_KIND=op-node DEVSTACK_L2EL_KIND=op-reth go test -count=1 -parallel=1 -timeout 45m -run '^(TestConductorClusterStartsWithOneActiveSequencer|TestLeadershipTransferMovesActiveSequencer)$' -v ./op-acceptance-tests/tests/base/conductor/`\n- `just lint-go`\n- `cargo test -p kona-rpc -p kona-node-service`\n- `cargo clippy -p kona-rpc -p kona-node-service --all-targets --all-features -- -D warnings`\n- `go test ./op-devstack/sysgo ./op-acceptance-tests/tests/base/conductor -run '^$'`\n\nCloses #22262\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-12T21:51:13Z",
+      "mergedAt": null,
+      "additions": 1642,
+      "deletions": 366
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHK1nYA",
+      "title": "op-reth!: add eth_sendBundle with revert protection",
+      "author": "trianglesphere",
+      "number": 23254,
+      "body": "Add the `eth_sendBundle` RPC to op-reth, served alongside `eth_sendRawTransactionConditional` when `--rollup.enable-tx-conditional` is set, following the public Unichain docs:\r\n\r\n- a bundle holds exactly one raw transaction plus an execution window, either a block number range (hex quantities) or a timestamp range (JSON numbers), the two being mutually exclusive;\r\n- without `maxBlockNumber` the bundle expires 10 blocks after submission; a timestamp-ranged bundle expires at `maxTimestamp`, at most 10 minutes ahead; ranges whose maximum is already in the past are rejected;\r\n- unless its hash is listed in `revertingTxHashes`, the transaction is revert protected: the payload builder only commits it when it succeeds, so a revert costs the sender nothing;\r\n- the response carries the transaction hash as `bundleHash`, and once the bundle's window has passed without inclusion, `eth_getTransactionReceipt` for it answers with `-32602: the transaction was dropped from the pool`, also on a replica that forwarded the bundle to its sequencer.\r\n\r\nThe window is carried by the pool transaction's existing conditional. Two gaps in conditional handling are closed because bundles rely on them: the payload builder now skips a conditional transaction whose window does not cover the block being built (the minimum bounds were never enforced before), and the conditional expiry sweep now covers `Private`-origin transactions, which is how conditional transactions and bundles enter the pool (they never expired before).\r\n\r\nRevert protection is a new flag on `OpPooledTransaction` (`MaybeRevertProtectedTransaction`, now part of `OpPooledTx`) which `execute_best_transactions` honours via the executor's commit condition.\r\n\r\nBREAKING CHANGE: `OpPooledTx` gains the `MaybeRevertProtectedTransaction` supertrait. Downstream crates with their own pool transaction type implementing `OpPooledTx` must implement it too, delegating to the wrapped `OpPooledTransaction`. Node operators are unaffected.\r\n\r\n\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-07T17:24:49Z",
+      "mergedAt": null,
+      "additions": 1329,
+      "deletions": 68
     }
   ],
   "codeChanges": {
-    "additions": 1106,
-    "deletions": 386,
-    "files": 39,
-    "commitCount": 9
+    "additions": 2196,
+    "deletions": 725,
+    "files": 83,
+    "commitCount": 108
   },
   "completedItems": [
+    {
+      "title": "release-notes: resolve every binary a component's image ships",
+      "prNumber": 23045,
+      "type": "other",
+      "body": "`pr-facts.sh` resolved a component's dependency set with **either** `go list -deps` **or** `cargo tree`, dispatched on the component name: `kona-*` and `op-reth` took the Rust path, everything else took Go.\n\nop-challenger's image ships thre",
+      "files": [
+        ".claude/skills/release-notes/SKILL.md",
+        ".claude/skills/release-notes/scripts/pr-facts.sh"
+      ]
+    },
     {
       "title": "contracts-bedrock: stop INTEROP from being disabled after migration",
       "prNumber": 23131,
@@ -102,6 +160,91 @@
         "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
         "packages/contracts-bedrock/test/L1/SystemConfig.t.sol",
         "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests: exercise super fault proofs after Glamsterdam",
+      "prNumber": 23152,
+      "type": "tests",
+      "body": "Depends on [op-geth#814](https://github.com/ethereum-optimism/op-geth/pull/814), a constants-only library backport. The Go dependency is pinned to that reviewed commit so the L1 queues use ordinary `params` definitions rather than an embedd",
+      "files": [
+        "go.mod",
+        "go.sum",
+        "mise.toml",
+        "op-acceptance-tests/tests/glamsterdam_test.go",
+        "op-deployer/pkg/deployer/pipeline/preinstall_l1_dev_genesis.go",
+        "op-deployer/pkg/deployer/pipeline/preinstall_l1_dev_genesis_test.go",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-deployer/pkg/deployer/opcm/preinstalls.go"
+      ]
+    },
+    {
+      "title": "release-notes: Support op-contracts and op-deployer",
+      "prNumber": 23244,
+      "type": "other",
+      "body": "The `release-notes` skill supports only the binary components. We want op-contracts and op-deployer release notes in the same house style as op-node and op-reth. Before this change the tooling did not work for them:\n\n- `pr-facts.sh` tagged ",
+      "files": [
+        ".claude/skills/release-notes/SKILL.md",
+        ".claude/skills/release-notes/reference/house-style.md",
+        ".claude/skills/release-notes/reference/triage.md",
+        ".claude/skills/release-notes/scripts/contract-versions.sh",
+        ".claude/skills/release-notes/scripts/pr-facts.sh",
+        ".github/cliff.toml",
+        "justfile",
+        "packages/contracts-bedrock/book/src/policies/release-process.md"
+      ]
+    },
+    {
+      "title": "op-challenger: create ZK games and parse game type names in create-game",
+      "prNumber": 23243,
+      "type": "other",
+      "body": "`create-game` could not create ZK dispute games: with `--game-type 10` it sent output-root `extraData` and the factory reverted with `BadExtraData`. It also read `--game-type` as a number, so a name such as `zk` silently parsed to 0 and cre",
+      "files": [
+        "op-challenger/README.md",
+        "op-challenger/cmd/create_game.go",
+        "op-challenger/cmd/create_game_test.go",
+        "op-challenger/game/fault/contracts/gamefactory.go",
+        "op-challenger/game/fault/contracts/gamefactory_test.go",
+        "op-challenger/tools/create_game.go",
+        "op-challenger/game/types/game_type.go"
+      ]
+    },
+    {
+      "title": "kona-sp1: remove single-chain proving leftovers",
+      "prNumber": 23240,
+      "type": "other",
+      "body": "#22393 removed the single-chain output-root SP1 programs, but some of their supporting code stayed in the client crates. This PR removes it:\n- `get_inputs_for_pipeline`, which no longer has a caller. It wrapped `kona_proof::BootInfo::load`,",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/client/Cargo.toml",
+        "rust/kona/sp1/crates/client/src/boot.rs",
+        "rust/kona/sp1/crates/client/src/lib.rs",
+        "rust/kona/sp1/crates/client/src/witness/executor.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/executor.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_range.rs",
+        "rust/kona/sp1/programs/Cargo.lock"
+      ]
+    },
+    {
+      "title": "ci: keep sccache read-only outside the public repo",
+      "prNumber": 23238,
+      "type": "other",
+      "body": "The sccache GCS bucket is shared by every repo that runs this CI config, but GCP grants the writer service account only to `develop` of `ethereum-optimism/optimism`. A copy of this config on another repo's `develop` tries to impersonate the",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "op-challenger: reject ZK games in resolve-claim and drop fake claim counts in list-games",
+      "prNumber": 23237,
+      "type": "other",
+      "body": "ZK dispute games have no claim tree, but two CLI commands treated them as if they did.\n\n`resolve-claim` on a ZK game failed with `unsupported game type: zk` from the contract constructor. It now detects the game type before building any tra",
+      "files": [
+        "op-challenger/cmd/list_games.go",
+        "op-challenger/cmd/list_games_test.go",
+        "op-challenger/cmd/resolve_claim.go",
+        "op-challenger/cmd/resolve_claim_test.go"
       ]
     },
     {
@@ -143,9 +286,114 @@
         "rust/kona/sp1/programs/super-range/src/test_config.rs",
         "rust/kona/tests/justfile"
       ]
+    },
+    {
+      "title": "op-challenger: limit run-trace to game types the runner can execute",
+      "prNumber": 23222,
+      "type": "other",
+      "body": "`op-challenger run-trace` accepted `--run zk/...` (and alphabet, fast, permissioned) because it parsed the game type with `PlayableGameTypes`, but the runner only has executors for cannon, cannon-kona and super-cannon-kona. Those runs never",
+      "files": [
+        "op-challenger/cmd/run_trace.go",
+        "op-challenger/cmd/run_trace_test.go",
+        "op-challenger/game/types/game_type.go",
+        "op-challenger/game/types/game_type_test.go",
+        "op-challenger/runner/factory_test.go",
+        "op-challenger/README.md"
+      ]
+    },
+    {
+      "title": "op-reth: generalize Storage V1 removal date to January 2027",
+      "prNumber": 23219,
+      "type": "other",
+      "body": "Follow-up to #23042. Changes the Storage V1 deprecation warning to say the removal happens in \"January 2027\" instead of naming the exact date (2027-01-04), so the message stays accurate if the exact day moves.\n\n🤖 Generated with [Claude Cod",
+      "files": [
+        "rust/op-reth/crates/node/src/node.rs"
+      ]
+    },
+    {
+      "title": "op-supernode: only return denied output at the replaced block's own timestamp",
+      "prNumber": 23257,
+      "type": "other",
+      "body": "Fixes #23256\n\n## Bug\n\n`OptimisticOutputAtTimestamp` maps a timestamp to the latest block at or before it (`TargetBlockNumber`). It then returns the deny-list output whenever that height has an entry. The deny list is keyed only by height.\n\n",
+      "files": [
+        "op-supernode/supernode/chain_container/chain_container.go",
+        "op-supernode/supernode/chain_container/chain_container_test.go"
+      ]
+    },
+    {
+      "title": "ci: allow project-level token override for PR base lookup",
+      "prNumber": 23249,
+      "type": "other",
+      "body": "Lets a CircleCI project-level `REPO_GITHUB_TOKEN` variable take precedence over any other token when resolving a PR's base branch, in both the setup and continuation configs. Projects that do not set it keep the current behavior. When set, ",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "ci: run publish and schedule-check workflows only in the public repo",
+      "prNumber": 23246,
+      "type": "other",
+      "body": "Repos that mirror this CircleCI config fail every `develop` push on three workflows they can't run:\n- the contract artifact upload and the kona/kona-sp1 prestate uploads, which don't have GCP publish access there;\n- the schedule trigger che",
+      "files": [
+        ".circleci/routing.yml",
+        ".circleci/scripts/compute-workflow-conditions.sh",
+        ".circleci/scripts/test-decision-tree.sh",
+        ".circleci/scripts/workflow-helpers.sh"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 112.3642566198418,
+      "prScore": 112.3642566198418,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 57.30466347352052,
+      "prScore": 48.30466347352052,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 51.799943051537056,
+      "prScore": 51.59994305153705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 51.1587738965761,
+      "prScore": 39.7207738965761,
+      "issueScore": 2,
+      "reviewScore": 9,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 47.80297230568284,
+      "prScore": 37.80297230568284,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
@@ -154,6 +402,46 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "trianglesphere",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/11803341?v=4",
+      "totalScore": 39.5257738965761,
+      "prScore": 39.5257738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 37.7484379124341,
+      "prScore": 22.5484379124341,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 33.72539689678899,
+      "prScore": 27.18739689678899,
+      "issueScore": 6.1,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 31.97446221909562,
+      "prScore": 20.97446221909562,
+      "issueScore": 6,
+      "reviewScore": 5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -167,8 +455,78 @@
       "summary": null
     },
     {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 27.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 16.409238105123396,
+      "prScore": 15.971238105123398,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 10.537474678730767,
+      "prScore": 10.337474678730768,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 10.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -185,11 +543,61 @@
       "reviewScore": 5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "kansas1295",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31484605?u=f6206f21f36e613d793db6f2e79ba187694aed63&v=4",
+      "totalScore": 4.299377389657611,
+      "prScore": 4.299377389657611,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "alezvillo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/204168614?u=8bfca7863a83706e866fb80ae002144c3a57e251&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 2,
-  "mergedPRs": 2,
-  "newIssues": 0,
-  "closedIssues": 2,
-  "activeContributors": 7
+  "newPRs": 17,
+  "mergedPRs": 14,
+  "newIssues": 5,
+  "closedIssues": 6,
+  "activeContributors": 28
 }
