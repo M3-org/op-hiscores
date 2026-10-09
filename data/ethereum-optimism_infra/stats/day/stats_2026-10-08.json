@@ -5,23 +5,193 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-10-08 to 2026-10-09, ethereum-optimism/infra had 0 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "overview": "From 2026-10-08 to 2026-10-09, ethereum-optimism/infra had 6 new PRs (5 merged), 0 new issues, and 19 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ88AAAABHYeLxw",
+      "title": "proxyd: add opt-in rate limiting by authenticated alias",
+      "author": "bitwiseguy",
+      "number": 761,
+      "body": "## Summary\r\n\r\nAddresses task 3 of this [RPC Hardening notion doc](https://app.notion.com/p/oplabs/RPC-Hardening-Work-Planning-3e6f153ee16280ea8fb8c3bc66ea4789).\r\n\r\nAdd opt-in `[rate_limit] use_auth_alias` so authenticated consumers sharing an egress IP get independent rate-limit buckets.\r\n\r\nBase and method limits use the configured alias across HTTP requests, batch elements, and mapped WebSocket calls, with isolated buckets in memory and Redis. Unauthenticated requests retain IP-based limits. Default behavior and existing exemptions remain unchanged.\r\n\r\n## Tests\r\n\r\nNew tests added that cover...\r\n\r\n- Independent quotas for different aliases sharing an IP.\r\n- Shared quotas across IPs and credentials using the same alias.\r\n- Disabled-mode compatibility and alias/IP bucket isolation.\r\n- Redis quota sharing across replicas.\r\n- Batch rejection handling and HTTP/WS quota sharing.\r\n- Rejection metrics attributed by alias.\r\n\r\nThe full proxyd test suite and focused race checks passed.\r\n\r\n## Related Issues\r\n\r\n* Closes https://github.com/ethereum-optimism/core-team/issues/3251\r\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-08T17:18:54Z",
+      "mergedAt": null,
+      "additions": 458,
+      "deletions": 12
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABHVL5RA",
+      "title": "proxyd: add metrics for tx validation middleware",
+      "author": "yashvardhan-kukreja",
+      "number": 758,
+      "body": "## Summary\n\nThe tx validation middleware currently has no metrics. The only signal is `proxyd_rpc_errors_total{error_code=\"-32100\"}`, which misses fail-open errors entirely (a down service or bad API key is invisible) and can't distinguish real rejections from fail-closed service errors.\n\nThis adds:\n\n- `proxyd_tx_validation_results_total{method,result}`: outcome of every middleware check: `passed`, `rejected`, `error_fail_open`, `error_fail_closed`, `invalid`, `internal_error`.\n- `proxyd_tx_validation_http_responses_total{status_code}`: HTTP status codes from the service. `Validate` ignores status codes, so this is the easiest way to spot 401/403s from a bad `api_key`.\n- `proxyd_tx_validation_duration_seconds`: latency of service calls.\n\n## Logs\n\n- New `Info` log `transactions passed validation middleware` (`req_id`, `tx_count`, `duration`), so every validated submission has an outcome line. Validation only runs on tx submission methods, which already log at `Info` per tx (`processing sendRawTransaction`, `sendRawTransaction forwarded`), so the added volume is small.\n- New `Debug` log `validating transactions with middleware` when the service call starts.\n- Existing rejection and fail-open/fail-closed logs now include `method` and `duration` (rejection also gets `tx_count`). The exact service error is already in the fail-open/fail-closed `Warn` line, so there is no separate per-reason error metric.\n\n## Example queries\n\n```promql\n# screening skipped because the service failed (fail_open=true)\nsum(rate(proxyd_tx_validation_results_total{result=\"error_fail_open\"}[5m]))\n\n# rejection rate\nsum(rate(proxyd_tx_validation_results_total{result=\"rejected\"}[5m]))\n  / sum(rate(proxyd_tx_validation_results_total[5m]))\n\n# p99 service latency\nhistogram_quantile(0.99, sum by (le) (rate(proxyd_tx_validation_duration_seconds_bucket[5m])))\n```\n\n## Testing\n\n`go test ./...` in `proxyd` passes. No request handling changes.\n\nMade with [Cursor](https://cursor.com)\n\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-08T12:41:20Z",
+      "mergedAt": "2026-10-08T13:32:31Z",
+      "additions": 69,
+      "deletions": 9
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABHVkCJQ",
+      "title": "proxyd: treat non-2xx and malformed tx validation responses as errors",
+      "author": "yashvardhan-kukreja",
+      "number": 759,
+      "body": "Stacked on #758.\n\n## Problem\n\n`TxValidationClient.Validate` never checks the HTTP status code, and only detects an error if the body fails to unmarshal or has `errorCode`/`errorMessage` set. Any other JSON body unmarshals into an empty result, which is treated as **\"all transactions authorized\"**:\n\n| Response | Before | After |\n|---|---|---|\n| `403 {\"message\":\"Forbidden\"}` (e.g. bad `api_key` at a gateway) | passed | error |\n| `429 {\"error\":\"rate limited\"}` | passed | error |\n| `200 {\"message\":\"ok\"}` / `200 null` | passed | error |\n| `200 {\"unauthorized\":{}}` | passed | passed |\n| `200 {\"unauthorized\":{\"0x…\":true}}` | rejected | rejected |\n\nSo a misconfigured or expired API key silently disables screening: no `fail_open` warning, the result is counted as `passed`, and `fail_open = false` doesn't help because no error is ever detected.\n\n## Change\n\n- Non-2xx responses return an error that includes the status code and the first 256 bytes of the body.\n- A 2xx response without an `unauthorized` field returns an error. All existing fixtures and tests include the field, and an empty object is still a valid \"nothing flagged\" response.\n\nThese errors go through the normal fail-open/fail-closed path, so they show up in the existing `Warn` log and as `error_fail_open`/`error_fail_closed` in `proxyd_tx_validation_results_total`.\n\n## Behavior change\n\nWith `fail_open = false`, these responses now **reject** transactions instead of silently passing them. With `fail_open = true` (default), transactions still go through but are now logged and counted as service errors. Worth confirming the production service always returns `unauthorized` on success before rolling out to a fail-closed deployment.\n\n## Testing\n\n`go test ./...` in `proxyd` passes.\n\nMade with [Cursor](https://cursor.com)",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-08T13:13:27Z",
+      "mergedAt": "2026-10-08T13:32:32Z",
+      "additions": 8,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ87aWc1I",
+      "title": "chore(deps): bump urllib3 from 2.6.3 to 2.7.0 in /op-conductor-ops",
+      "author": "dependabot",
+      "number": 620,
+      "body": "Bumps [urllib3](https://github.com/urllib3/urllib3) from 2.6.3 to 2.7.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/urllib3/urllib3/releases\">urllib3's releases</a>.</em></p>\n<blockquote>\n<h2>2.7.0</h2>\n<h2>🚀 urllib3 is fundraising for HTTP/2 support</h2>\n<p><a href=\"https://sethmlarson.dev/urllib3-is-fundraising-for-http2-support\">urllib3 is raising ~$40,000 USD</a> to release HTTP/2 support and ensure long-term sustainable maintenance of the project after a sharp decline in financial support. If your company or organization uses Python and would benefit from HTTP/2 support in Requests, pip, cloud SDKs, and thousands of other projects <a href=\"https://opencollective.com/urllib3\">please consider contributing financially</a> to ensure HTTP/2 support is developed sustainably and maintained for the long-haul.</p>\n<p>Thank you for your support.</p>\n<h2>Security</h2>\n<p>Addressed high-severity security issues. Impact was limited to specific use cases detailed in the accompanying advisories; overall user exposure was estimated to be marginal.</p>\n<ul>\n<li>\n<p>Decompression-bomb safeguards of the streaming API were bypassed:</p>\n<ol>\n<li>When <code>HTTPResponse.drain_conn()</code> was called after the response had been read and decompressed partially. (Reported by <a href=\"https://github.com/Cycloctane\"><code>@​Cycloctane</code></a>)</li>\n<li>During the second <code>HTTPResponse.read(amt=N)</code> or <code>HTTPResponse.stream(amt=N)</code> call when the response was decompressed using the official <a href=\"https://pypi.org/project/brotli/\">Brotli</a> library. (Reported by <a href=\"https://github.com/kimkou2024\"><code>@​kimkou2024</code></a>)</li>\n</ol>\n<p>See GHSA-mf9v-mfxr-j63j for details.</p>\n</li>\n<li>\n<p>HTTP pools created using <code>ProxyManager.connection_from_url</code> did not strip sensitive headers specified in <code>Retry.remove_headers_on_redirect</code> when redirecting to a different host. (GHSA-qccp-gfcp-xxvc reported by <a href=\"https://github.com/christos-spearbit\"><code>@​christos-spearbit</code></a>)</p>\n</li>\n</ul>\n<h2>Deprecations and Removals</h2>\n<ul>\n<li>Used <code>FutureWarning</code> instead of <code>DeprecationWarning</code> for better visibility of existing deprecation notices. Rescheduled the removal of deprecated features to version 3.0. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3763\">urllib3/urllib3#3763</a>)</li>\n<li>Removed support for end-of-life Python 3.9. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3720\">urllib3/urllib3#3720</a>)</li>\n<li>Removed support for end-of-life PyPy3.10. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4979\">urllib3/urllib3#4979</a>)</li>\n<li>Bumped the minimum supported pyOpenSSL version to 19.0.0. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3777\">urllib3/urllib3#3777</a>)</li>\n</ul>\n<h2>Bugfixes</h2>\n<ul>\n<li>Fixed a bug where <code>HTTPResponse.read(amt=None)</code> was ignoring decompressed data buffered from previous partial reads. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3636\">urllib3/urllib3#3636</a>)</li>\n<li>Fixed a bug where <code>HTTPResponse.read()</code> could cache only part of the response after a partial read when <code>cache_content=True</code>. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4967\">urllib3/urllib3#4967</a>)</li>\n<li>Fixed <code>HTTPResponse.stream()</code> and <code>HTTPResponse.read_chunked()</code> to handle <code>amt=0</code>. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3793\">urllib3/urllib3#3793</a>)</li>\n<li>Updated <code>_TYPE_BODY</code> type alias to include missing <code>Iterable[str]</code>, matching the documented and runtime behavior of chunked request bodies. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3798\">urllib3/urllib3#3798</a>)</li>\n<li>Fixed <code>LocationParseError</code> when paths resembling schemeless URIs were passed to <code>HTTPConnectionPool.urlopen()</code>. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3352\">urllib3/urllib3#3352</a>)</li>\n<li>Fixed <code>BaseHTTPResponse.readinto()</code> type annotation to accept <code>memoryview</code> in addition to <code>bytearray</code>, matching the <code>io.RawIOBase.readinto</code> contract and enabling use with <code>io.BufferedReader</code> without type errors. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3764\">urllib3/urllib3#3764</a>)</li>\n</ul>\n</blockquote>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a href=\"https://github.com/urllib3/urllib3/blob/main/CHANGES.rst\">urllib3's changelog</a>.</em></p>\n<blockquote>\n<h1>2.7.0 (2026-05-07)</h1>\n<h2>Security</h2>\n<p>Addressed high-severity security issues.\nImpact was limited to specific use cases detailed in the accompanying\nadvisories; overall user exposure was estimated to be marginal.</p>\n<ul>\n<li>\n<p>Decompression-bomb safeguards of the streaming API were bypassed:</p>\n<ol>\n<li>When <code>HTTPResponse.drain_conn()</code> was called after the response had been\nread and decompressed partially.</li>\n<li>During the second <code>HTTPResponse.read(amt=N)</code> or\n<code>HTTPResponse.stream(amt=N)</code> call when the response was decompressed\nusing the official <code>Brotli &lt;https://pypi.org/project/brotli/&gt;</code>__ library.</li>\n</ol>\n<p>See <code>GHSA-mf9v-mfxr-j63j &lt;https://github.com/urllib3/urllib3/security/advisories/GHSA-mf9v-mfxr-j63j&gt;</code>__\nfor details.</p>\n</li>\n<li>\n<p>HTTP pools created using <code>ProxyManager.connection_from_url</code> did not strip\nsensitive headers specified in <code>Retry.remove_headers_on_redirect</code> when\nredirecting to a different host.\n(<code>GHSA-qccp-gfcp-xxvc &lt;https://github.com/urllib3/urllib3/security/advisories/GHSA-qccp-gfcp-xxvc&gt;</code>__)</p>\n</li>\n</ul>\n<h2>Deprecations and Removals</h2>\n<ul>\n<li>Used <code>FutureWarning</code> instead of <code>DeprecationWarning</code> for better\nvisibility of existing deprecation notices. Rescheduled the removal of\ndeprecated features to version 3.0.\n(<code>[#3763](https://github.com/urllib3/urllib3/issues/3763) &lt;https://github.com/urllib3/urllib3/issues/3763&gt;</code>__)</li>\n<li>Removed support for end-of-life Python 3.9.\n(<code>[#3720](https://github.com/urllib3/urllib3/issues/3720) &lt;https://github.com/urllib3/urllib3/issues/3720&gt;</code>__)</li>\n<li>Removed support for end-of-life PyPy3.10.\n(<code>[#4979](https://github.com/urllib3/urllib3/issues/4979) &lt;https://github.com/urllib3/urllib3/issues/4979&gt;</code>__)</li>\n<li>Bumped the minimum supported pyOpenSSL version to 19.0.0.\n(<code>[#3777](https://github.com/urllib3/urllib3/issues/3777) &lt;https://github.com/urllib3/urllib3/issues/3777&gt;</code>__)</li>\n</ul>\n<h2>Bugfixes</h2>\n<ul>\n<li>Fixed a bug where <code>HTTPResponse.read(amt=None)</code> was ignoring decompressed\ndata buffered from previous partial reads.\n(<code>[#3636](https://github.com/urllib3/urllib3/issues/3636) &lt;https://github.com/urllib3/urllib3/issues/3636&gt;</code>__)</li>\n<li>Fixed a bug where <code>HTTPResponse.read()</code> could cache only part of the\nresponse after a partial read when <code>cache_content=True</code>.</li>\n</ul>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/9a950b92d999f906b6020bb2d1076ee56cddd5d2\"><code>9a950b9</code></a> Release 2.7.0</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/5ec0de499b9166ca71c65ab04f2a7e4eb0d66fcc\"><code>5ec0de4</code></a> Merge commit from fork</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/2bdcc44d1e163fb5cc48a8662425e35e15adfe6a\"><code>2bdcc44</code></a> Merge commit from fork</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/f45b0df09d8620ac6ed0491eb9362c8c87b7bc2c\"><code>f45b0df</code></a> Fix a misleading example for <code>ProxyManager</code> (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4970\">#4970</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/577193ca029872384f82c133449e0935f6d8a64b\"><code>577193c</code></a> Switch to nightly PyPy3.11 in CI for now (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4984\">#4984</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/e90af45bb006c3a452a3a21644a2681523f5c7fc\"><code>e90af45</code></a> Avoid infinite loop in <code>HTTPResponse.read_chunked</code> when <code>amt=0</code> (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4974\">#4974</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/67ed74fdaec6659a6534621ec8e3aaaa6f976210\"><code>67ed74f</code></a> Bump dev dependencies (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4972\">#4972</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/3abd481097b54d87b574ac7ea593c3f40938a84d\"><code>3abd481</code></a> Upgrade mypy to version 1.20.2 (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4978\">#4978</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/2b8725dfcac4f21d4d93cc0cc3a64a33af08f890\"><code>2b8725d</code></a> Drop support for EOL PyPy3.10 (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4979\">#4979</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/2944b2a0a6c573f5548a39cfd17196f98ee21b33\"><code>2944b2a</code></a> Upgrade <code>setup-chrome</code> and <code>setup-firefox</code> to fix warnings (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4973\">#4973</a>)</li>\n<li>Additional commits viewable in <a href=\"https://github.com/urllib3/urllib3/compare/2.6.3...2.7.0\">compare view</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=urllib3&package-manager=pip&previous-version=2.6.3&new-version=2.7.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop Dependabot creating any more for this major version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop Dependabot creating any more for this minor version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop Dependabot creating any more for this dependency (unless you reopen the PR or upgrade to it yourself)\nYou can disable automated security fix PRs for this repo from the [Security Alerts page](https://github.com/ethereum-optimism/infra/network/alerts).\n\n</details>",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-05-11T17:17:41Z",
+      "mergedAt": null,
+      "additions": 4,
+      "deletions": 4
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABHTNOUQ",
+      "title": "chore(deps): bump urllib3 from 2.7.0 to 2.8.0 in /op-conductor-ops",
+      "author": "dependabot",
+      "number": 757,
+      "body": "Bumps [urllib3](https://github.com/urllib3/urllib3) from 2.7.0 to 2.8.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/urllib3/urllib3/releases\">urllib3's releases</a>.</em></p>\n<blockquote>\n<h2>2.8.0</h2>\n<h2>🚀 urllib3 is fundraising for HTTP/2 support</h2>\n<p><a href=\"https://sethmlarson.dev/urllib3-is-fundraising-for-http2-support\">urllib3 is raising ~$40,000 USD</a> to release HTTP/2 support and ensure long-term sustainable maintenance of the project. If your company or organization uses Python and would benefit from HTTP/2 support in Requests, pip, cloud SDKs, and thousands of other projects <a href=\"https://opencollective.com/urllib3\">please consider contributing financially</a> to ensure HTTP/2 support is developed sustainably and maintained for the long-haul.</p>\n<p>Thank you for your support.</p>\n<h2>Security</h2>\n<p>Fixed the following security issues:</p>\n<ul>\n<li>The TLS configuration for HTTPS proxies could be ignored or overridden. (High severity, GHSA-8988-9cw3-xx77)</li>\n<li><code>HTTPResponse.stream()</code> and <code>read_chunked()</code> could buffer a chunk-size line of unbounded length in memory. (High severity, GHSA-vxq7-64xx-v4gw)</li>\n<li>Chunked Deflate streaming could enter an infinite loop. (Medium severity, GHSA-gh4c-6fx4-qh6g)</li>\n</ul>\n<blockquote>\n<p>[!IMPORTANT]\nurllib3 2.8.0 fixes HTTPS proxy TLS configuration being ignored or overridden by destination settings. Configurations relying on that behavior may require changes.</p>\n<p>Configure proxy CA certificates and client certificates in <code>proxy_ssl_context</code>, and proxy identity checks with <code>proxy_assert_hostname</code> or <code>proxy_assert_fingerprint</code>. Destination client certificates and identity overrides no longer apply to HTTPS forwarding proxy connections.</p>\n</blockquote>\n<blockquote>\n<p>[!NOTE]\nCVE IDs had not yet been assigned to these advisories at the time of release due to a backlog at GitHub's CNA.</p>\n</blockquote>\n<h2>Deprecations &amp; Removals</h2>\n<ul>\n<li>Deprecated using an empty collection as the <code>Retry</code> option <code>allowed_methods</code> to retry any verb. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5044\">#5044</a>)</li>\n</ul>\n<h2>Features</h2>\n<ul>\n<li>Added <code>Url.auth_decoded</code> and <code>Url.auth_decoded_joined</code> convenience properties to the result of <code>parse_url()</code>. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/4945\">#4945</a>)</li>\n<li>Added <code>basic_auth_encoding</code> and <code>proxy_basic_auth_encoding</code> parameters to <code>urllib3.util.make_headers()</code>. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5092\">#5092</a>)</li>\n</ul>\n<h2>Bugfixes</h2>\n<ul>\n<li>\n<p>Fixed response header handling to replace obsolete folded header lines (<code>obs-fold</code>) with spaces in accordance with RFC 9112, preventing raw CRLF sequences from appearing in header values such as <code>Set-Cookie</code>. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/1362\">#1362</a>)</p>\n</li>\n<li>\n<p>Fixed usage of <code>proxy_ssl_context</code> with <code>ProxyManager</code> when <code>use_forwarding_for_https=True</code>. Passing <code>ssl_context</code> instead of <code>proxy_ssl_context</code> for HTTPS proxies in this configuration now emits a <code>FutureWarning</code> and will raise an error in v3.0. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/2577\">#2577</a>)</p>\n</li>\n<li>\n<p>Changed behavior of the default <code>ConnectionPool.pool</code> initialization. <code>LifoQueue</code> is now resolved from the <code>queue</code> module after the <code>ConnectionPool</code> is instantiated instead of using the default cached <code>QueueCls</code> class property. This is done because sometimes the <code>queue.LifoQueue</code> is monkey-patched late in the program, such as by gevent. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3289\">#3289</a>)</p>\n</li>\n<li>\n<p>Raised <code>UnrewindableBodyError</code> instead of <code>ValueError</code> when retrying a request whose body had <code>tell()</code> but not <code>seek()</code>. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3779\">#3779</a>)</p>\n</li>\n<li>\n<p>Decoded percent-encoded SOCKS proxy credentials before authenticating with the proxy server. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/3785\">#3785</a>)</p>\n</li>\n<li>\n<p>Fixed <code>HTTPResponse.drain_conn()</code> to discard unread response data in 64 KiB chunks (same as the default <code>amt</code> when doing <code>HTTPResponse.stream(...)</code>). (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5019\">#5019</a>)</p>\n</li>\n<li>\n<p>Fixed <code>is_ipaddress()</code> to detect non-standard IPv4 forms accepted by <code>socket.connect</code>, such as hex (<code>0x7f000001</code>), octal (<code>0177.0.0.1</code>), and decimal integers (<code>2130706433</code>), ensuring SSL certificate verification uses the correct mode for these addresses. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5029\">#5029</a>)</p>\n</li>\n<li>\n<p>Fixed <code>HTTPConnectionPool.urlopen</code> raising a misleading <code>FullPoolError</code> instead of <code>ValueError</code> when called with an invalid <code>timeout</code> argument on a pool created with <code>block=True</code>. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5059\">#5059</a>)</p>\n</li>\n<li>\n<p>Fixed port-zero handling to preserve explicit <code>:0</code> values instead of substituting the default ports 80 or 443 in URL parsing, pool selection, proxy configuration, <code>connection_from_url()</code>, and HTTP/2 request authority. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5071\">#5071</a>, <a href=\"https://redirect.github.com/urllib3/urllib3/issues/5101\">#5101</a>)</p>\n</li>\n<li>\n<p>Fixed a bug where <code>PoolManager</code> passed the <code>assert_hostname</code> and <code>assert_fingerprint</code> parameters to HTTP connection pools. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5077\">#5077</a>)</p>\n</li>\n<li>\n<p>Fixed <code>HTTPConnectionPool.urlopen()</code> and HTTP proxy forwarding to strip URL fragments from absolute request targets before sending requests. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5079\">#5079</a>)</p>\n</li>\n<li>\n<p>Added safeguards to the proxy tunneling code to prevent potential security issues when handling invalid characters in the proxy host and HTTP headers. This change affects users of Python 3.10, Python 3.11, and Python 3.12 when the standard library does not contain the fix; those on newer Python versions should upgrade to 3.13.14+ or 3.14.5+ to get the same security fixes. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5091\">#5091</a>)</p>\n</li>\n<li>\n<p>Fixed <code>HTTPSConnection.connect()</code> overriding <code>ProxyConfig.ssl_context</code>'s certificate policy and proxy identity checks with the target connection's TLS settings when forwarding through an HTTPS proxy.</p>\n<p><code>HTTPSConnection</code> no longer applies target SNI, assertions, or client credentials to forwarding proxy handshakes and continues to use its <code>ssl_context</code> as a fallback when an HTTPS proxy forwards an HTTP target. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5093\">#5093</a>)</p>\n</li>\n<li>\n<p>Fixed URL parsing to more strictly enforce RFC 3986 host syntax, rejecting invalid host input such as raw spaces and control characters, malformed percent-encodings, and percent-encoded control characters in HTTP(S) hosts and IPv6 zone identifiers, including proxy CONNECT tunnel targets. Host normalization now also follows RFC 3986 normalization rules for percent-encoded octets by decoding percent-encoded unreserved characters and uppercasing the hexadecimal digits of retained percent-encoded octets. (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5095\">#5095</a>)</p>\n</li>\n</ul>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Changelog</summary>\n<p><em>Sourced from <a href=\"https://github.com/urllib3/urllib3/blob/main/CHANGES.rst\">urllib3's changelog</a>.</em></p>\n<blockquote>\n<h1>2.8.0 (2026-09-15)</h1>\n<h2>Security</h2>\n<p>Fixed the following security issues:</p>\n<ul>\n<li>The TLS configuration for HTTPS proxies could be ignored or overridden.\n(High severity, <code>GHSA-8988-9cw3-xx77 &lt;https://github.com/urllib3/urllib3/security/advisories/GHSA-8988-9cw3-xx77&gt;</code>__)</li>\n<li><code>HTTPResponse.stream()</code> and <code>read_chunked()</code> could buffer a chunk-size\nline of unbounded length in memory. (High severity,\n<code>GHSA-vxq7-64xx-v4gw &lt;https://github.com/urllib3/urllib3/security/advisories/GHSA-vxq7-64xx-v4gw&gt;</code>__)</li>\n<li>Chunked Deflate streaming could enter an infinite loop. (Medium severity,\n<code>GHSA-gh4c-6fx4-qh6g &lt;https://github.com/urllib3/urllib3/security/advisories/GHSA-gh4c-6fx4-qh6g&gt;</code>__)</li>\n</ul>\n<p>.. caution::</p>\n<pre><code>urllib3 2.8.0 fixes HTTPS proxy TLS configuration being ignored or\noverridden by destination settings. Configurations relying on that\nbehavior may require changes.\n<p>Configure proxy CA certificates and client certificates in\n<code>proxy_ssl_context</code>, and proxy identity checks with\n<code>proxy_assert_hostname</code> or <code>proxy_assert_fingerprint</code>.\nDestination client certificates and identity overrides no longer\napply to HTTPS forwarding proxy connections.\n</code></pre></p>\n<h2>Deprecations &amp; Removals</h2>\n<ul>\n<li>Deprecated using an empty collection as the <code>Retry</code> option\n<code>allowed_methods</code> to retry any verb.\n(<code>[#5044](https://github.com/urllib3/urllib3/issues/5044) &lt;https://github.com/urllib3/urllib3/issues/5044&gt;</code>__)</li>\n</ul>\n<h2>Features</h2>\n<ul>\n<li>Added <code>Url.auth_decoded</code> and <code>Url.auth_decoded_joined</code> convenience\nproperties to the result of <code>parse_url()</code>.\n(<code>[#4945](https://github.com/urllib3/urllib3/issues/4945) &lt;https://github.com/urllib3/urllib3/issues/4945&gt;</code>__)</li>\n<li>Added <code>basic_auth_encoding</code> and <code>proxy_basic_auth_encoding</code> parameters to\n<code>urllib3.util.make_headers()</code>.\n(<code>[#5092](https://github.com/urllib3/urllib3/issues/5092) &lt;https://github.com/urllib3/urllib3/issues/5092&gt;</code>__)</li>\n</ul>\n<h2>Bugfixes</h2>\n<!-- raw HTML omitted -->\n</blockquote>\n<p>... (truncated)</p>\n</details>\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/b1d30ab61fe0db8f11092805e8c5ac43e091064a\"><code>b1d30ab</code></a> Release 2.8.0</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/9016d7e8afc68185496ef07f3c3a4a743d04922e\"><code>9016d7e</code></a> Skip <code>test_read_chunked_with_trailing_data_does_not_hang</code> for brotlicffi (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5258\">#5258</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/9101f581a8b3659af23b6ff335ae77200ca33533\"><code>9101f58</code></a> Fix <code>nox -s docs</code> warning (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5256\">#5256</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/cd770b059b543be29298ea5c52afb0b1b090f5ed\"><code>cd770b0</code></a> Merge commit from fork</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/ea2ad7b21a80da3632f80016526a18864586077f\"><code>ea2ad7b</code></a> Merge commit from fork</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/0716e31534345dc1599ea95d903c79f276239bd8\"><code>0716e31</code></a> Fix loading unencrypted client keys with a password in pyOpenSSL (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5255\">#5255</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/43c68c8b43a9dcb44ed2cf4ec91384ca0d46b37d\"><code>43c68c8</code></a> Test pickling of <code>InvalidChunkLength</code> (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5247\">#5247</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/308b279b3fb28e7bee952e152ec5baeb5bfd0817\"><code>308b279</code></a> Share security policy between GitHub and Read the Docs (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5253\">#5253</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/53fa0731b27d4b71ab0755ea5b896422d005d706\"><code>53fa073</code></a> Add policy on duplicate pull requests (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5252\">#5252</a>)</li>\n<li><a href=\"https://github.com/urllib3/urllib3/commit/5f2a6a843d0100d1351c3f94d58581ca98d17267\"><code>5f2a6a8</code></a> Assert on the ALPN extension in test_tunnel_sets_http_11_alpn (<a href=\"https://redirect.github.com/urllib3/urllib3/issues/5232\">#5232</a>)</li>\n<li>Additional commits viewable in <a href=\"https://github.com/urllib3/urllib3/compare/2.7.0...2.8.0\">compare view</a></li>\n</ul>\n</details>\n<br />\n\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=urllib3&package-manager=pip&previous-version=2.7.0&new-version=2.8.0)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates#about-compatibility-scores)\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself. You can also trigger a rebase manually by commenting `@dependabot rebase`.\n\n[//]: # (dependabot-automerge-start)\n[//]: # (dependabot-automerge-end)\n\n---\n\n<details>\n<summary>Dependabot commands and options</summary>\n<br />\n\nYou can trigger Dependabot actions by commenting on this PR:\n- `@dependabot rebase` will rebase this PR\n- `@dependabot recreate` will recreate this PR, overwriting any edits that have been made to it\n- `@dependabot show <dependency name> ignore conditions` will show all of the ignore conditions of the specified dependency\n- `@dependabot ignore this major version` will close this PR and stop Dependabot creating any more for this major version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this minor version` will close this PR and stop Dependabot creating any more for this minor version (unless you reopen the PR or upgrade to it yourself)\n- `@dependabot ignore this dependency` will close this PR and stop Dependabot creating any more for this dependency (unless you reopen the PR or upgrade to it yourself)\nYou can disable automated security fix PRs for this repo from the [Security Alerts page](https://github.com/ethereum-optimism/infra/network/alerts).\n\n</details>",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-08T09:46:17Z",
+      "mergedAt": "2026-10-08T10:01:28Z",
+      "additions": 4,
+      "deletions": 4
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 87,
+    "deletions": 19,
+    "files": 6,
+    "commitCount": 13
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "proxyd: treat non-2xx and malformed tx validation responses as errors",
+      "prNumber": 759,
+      "type": "other",
+      "body": "Stacked on #758.\n\n## Problem\n\n`TxValidationClient.Validate` never checks the HTTP status code, and only detects an error if the body fails to unmarshal or has `errorCode`/`errorMessage` set. Any other JSON body unmarshals into an empty resu",
+      "files": [
+        "proxyd/tx_validation_middleware.go"
+      ]
+    },
+    {
+      "title": "proxyd: add metrics for tx validation middleware",
+      "prNumber": 758,
+      "type": "other",
+      "body": "## Summary\n\nThe tx validation middleware currently has no metrics. The only signal is `proxyd_rpc_errors_total{error_code=\"-32100\"}`, which misses fail-open errors entirely (a down service or bad API key is invisible) and can't distinguish ",
+      "files": [
+        "proxyd/metrics.go",
+        "proxyd/tx_filter_modules.go",
+        "proxyd/tx_validation_middleware.go",
+        "proxyd/tx_validation_middleware_test.go"
+      ]
+    },
+    {
+      "title": "chore(deps): bump urllib3 from 2.7.0 to 2.8.0 in /op-conductor-ops",
+      "prNumber": 757,
+      "type": "other",
+      "body": "Bumps [urllib3](https://github.com/urllib3/urllib3) from 2.7.0 to 2.8.0.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/urllib3/urllib3/releases\">urllib3's releases</a>.</em></p>\n<blockquote>\n<h2>",
+      "files": [
+        "op-conductor-ops/poetry.lock"
+      ]
+    },
+    {
+      "title": "chore(deps): bump source-map-js from 1.2.1 to 1.2.2 in /replica-healthcheck",
+      "prNumber": 756,
+      "type": "other",
+      "body": "Bumps [source-map-js](https://github.com/7rulnik/source-map-js) from 1.2.1 to 1.2.2.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/7rulnik/source-map-js/releases\">source-map-js's releases</a>.</e",
+      "files": [
+        "replica-healthcheck/yarn.lock"
+      ]
+    },
+    {
+      "title": "chore(deps): bump proxy-addr from 2.0.7 to 2.0.8 in /replica-healthcheck",
+      "prNumber": 755,
+      "type": "other",
+      "body": "Bumps [proxy-addr](https://github.com/jshttp/proxy-addr) from 2.0.7 to 2.0.8.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://github.com/jshttp/proxy-addr/releases\">proxy-addr's releases</a>.</em></p>\n<blockq",
+      "files": [
+        "replica-healthcheck/yarn.lock"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 132.82341026132627,
+      "prScore": 114.82341026132627,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 69.8698941956196,
+      "prScore": 16.869894195619587,
+      "issueScore": 0,
+      "reviewScore": 53,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 61.34750799360215,
+      "prScore": 61.14750799360215,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 58.42191014905532,
+      "prScore": 28.081910149055314,
+      "issueScore": 0,
+      "reviewScore": 30,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 52.80412521556153,
+      "prScore": 42.866125215561524,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
       "totalScore": 39.2697738965761,
       "prScore": 37.2697738965761,
       "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 36.86843237606567,
+      "prScore": 36.86843237606567,
+      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -37,6 +207,16 @@
       "summary": null
     },
     {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 27.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
       "totalScore": 26.408735590425668,
@@ -44,6 +224,46 @@
       "issueScore": 0,
       "reviewScore": 9,
       "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 15.5,
+      "prScore": 0,
+      "issueScore": 6,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 14.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 13.627295203420116,
+      "prScore": 13.287295203420117,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -75,11 +295,81 @@
       "reviewScore": 5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "atenalt",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/207357267?u=72dcaa012434cc0411ebe81a6fd162529cc7701c&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "swiftnodes",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275502250?u=67d8a6266dfbc7500bbf26931126f3d3b620d193&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 6,
+  "mergedPRs": 5,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 3
+  "activeContributors": 19
 }

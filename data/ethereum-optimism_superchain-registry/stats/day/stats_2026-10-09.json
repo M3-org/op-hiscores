@@ -1,0 +1,80 @@
+{
+  "interval": {
+    "intervalStart": "2026-10-09T00:00:00.000Z",
+    "intervalEnd": "2026-10-10T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/superchain-registry",
+  "overview": "From 2026-10-09 to 2026-10-10, ethereum-optimism/superchain-registry had 2 new PRs (0 merged), 0 new issues, and 2 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOJ_r-bs8AAAABHdDnJA",
+      "title": "feat(ops): add read-only check of chain TOML roles/addresses against onchain state",
+      "author": "OptimismBot",
+      "number": 1362,
+      "body": "## Problem\n\nNothing checks that the hand-maintained `[roles]` and `[addresses]` in `superchain/configs/<superchain>/<chain>.toml` still match the chain's actual onchain state. The daily-codegen job fetches onchain data, but it only writes `superchain/extra/addresses/addresses.json` and `chainList.*`. When the two disagree, nothing fails.\n\nExample: Unichain's L1 ProxyAdmin owner changed onchain on 2026-09-13 from `0x6d5B183F538ABB8572F5cD17109c617b994D5833` to `0x5a0Aae59D09fccBdDb6C6CcEB07B7279367C3d2A`. Daily codegen picked up the new owner in `addresses.json` (#1335). `superchain/configs/mainnet/unichain.toml` still has the old owner, and no check caught it.\n\n## Design\n\n- New tool `ops/cmd/check_onchain_configs`. It uses the same path as codegen to fetch data: `manage.FetchChains` (op-fetcher) and then `config.CreateAddressesWithRolesFromFetcher`. It then compares each chain's TOML against that data with `manage.DiffChainAgainstOnchain`.\n- The tool only reads. It never writes TOML or any other file.\n- It compares only fields that are present in the TOML, in both `[roles]` and `[addresses]`. Many configs list only some fields (for example, most list only `ProxyAdminOwner` under `[roles]`), and missing fields are skipped.\n- Each mismatch prints one line per chain and field, for example:\n  `[NOTOK] mainnet/unichain (chain 130): [roles] ProxyAdminOwner: toml=0x6d5B… onchain=0x5a0A…`\n  The tool exits non-zero if any chain has a mismatch.\n- If the fetcher returns the zero address for a field the TOML sets, the tool prints `[ WARN]` and does not fail. A zero address means the fetcher could not find the field, not that the TOML is wrong. Today this happens with `DisputeGameFactoryProxy` on several chains whose fault-proof wiring the fetcher doesn't detect.\n- CI: the new `check-onchain-configs` job runs in the scheduled `daily-codegen` workflow. It runs alongside codegen, uses the same contexts and RPC secrets, and sends a Slack alert to `#notify-ci` and @protocol-oncall on failure, the same way `daily-codegen` does. I did not add it to per-PR CI. Onchain state changes without any PR, and right now the check would fail every PR (see below). Once the existing mismatches are fixed, it can also go into the `main` workflow.\n- You can run it locally with `just check-onchain-configs <sepolia_rpc>,<mainnet_rpc>`. It also accepts `--chain-ids` and `--superchains`.\n\n## Current state on main: this check will fail\n\nI ran the check against public RPCs (publicnode). It reports 14 chains that disagree with onchain state, including mainnet/unichain. A separate PR fixes `unichain.toml`. The other chains need their own fixes, so this job will fail until all of them are updated. I spot-checked a few results by calling `owner()` directly on the ProxyAdmin. The onchain values also match what `addresses.json` already has.\n\n| chain | field | toml | onchain |\n|---|---|---|---|\n| mainnet/unichain (130) | ProxyAdminOwner | 0x6d5B183F538ABB8572F5cD17109c617b994D5833 | 0x5a0Aae59D09fccBdDb6C6CcEB07B7279367C3d2A |\n| mainnet/hashkeychain (177) | ProxyAdminOwner | 0x441F31C4cdf772558D4EA31f3114de59aE145E7c | 0x3228F00FbFD0e1F4c282601c489664B10932C40f |\n| mainnet/metal (1750) | ProxyAdminOwner | 0x5a0Aae59D09fccBdDb6C6CcEB07B7279367C3d2A | 0x4a4962275DF8C60a80d3a25faEc5AA7De116A746 |\n| mainnet/mint (185) | ProxyAdminOwner | 0x4a4962275DF8C60a80d3a25faEc5AA7De116A746 | 0x3c54Be307E15258E51d42E585831bD7E04BBc03b |\n| mainnet/mode (34443) | ProxyAdminOwner | 0x5a0Aae59D09fccBdDb6C6CcEB07B7279367C3d2A | 0x4a4962275DF8C60a80d3a25faEc5AA7De116A746 |\n| mainnet/polynomial (8008) | ProxyAdminOwner | 0x4a4962275DF8C60a80d3a25faEc5AA7De116A746 | 0x1b99D8a4CE6883FA9Fc3538Ea518a4628aaC6135 |\n| mainnet/zora (7777777) | ProxyAdminOwner | 0x5a0Aae59D09fccBdDb6C6CcEB07B7279367C3d2A | 0x4a4962275DF8C60a80d3a25faEc5AA7De116A746 |\n| mainnet/cyber (7560) | DisputeGameFactoryProxy | 0xbF4676f21a7889E0Fd61BcDc9b98E60b01C1B36F | 0xaCc66304d26a01A9bd60d0584dCEdbaCeC8e10e0 |\n| mainnet/funki (33979) | DisputeGameFactoryProxy | 0x2Dc9d2Cb1Ba0b8A46AE252ab4FBE1ad5C5c3B795 | 0xc371fD8C4AB7F585BDCA7aA19c2A680a70920c98 |\n| sepolia/celo-sep (11142220) | ProxyAdminOwner | 0x5e60d897Cd62588291656b54655e98ee73f0aabF | 0x009A6Ac23EeBe98488ED28A52af69Bf46F1C18cb |\n| sepolia/metal (1740) | ProxyAdminOwner | 0x1Eb2fFc903729a0F03966B917003800b145F56E2 | 0x34478c2eB9018d5A6487BF0440838Cd4238e8cf2 |\n| sepolia/mode (919) | ProxyAdminOwner | 0x1Eb2fFc903729a0F03966B917003800b145F56E2 | 0x34478c2eB9018d5A6487BF0440838Cd4238e8cf2 |\n| sepolia/unichain (1301) | ProxyAdminOwner | 0xd363339eE47775888Df411A163c586a8BdEA9dbf | 0x1Eb2fFc903729a0F03966B917003800b145F56E2 |\n| sepolia/zora (999999999) | ProxyAdminOwner | 0x1Eb2fFc903729a0F03966B917003800b145F56E2 | 0x34478c2eB9018d5A6487BF0440838Cd4238e8cf2 |\n\nWarnings only (`DisputeGameFactoryProxy` is set in the TOML, but the fetcher returned the zero address): mainnet automata, ethernity, redstone, swan, tbn, xterio-eth; sepolia camp, cyber, funki, lisk, ozean, pivotal, tbn.\n\n## Testing\n\n- `go build ./...`, `go vet`, and `golangci-lint` (v1.64.8) pass on the changed packages in `ops`. The `go test ./internal/manage/ ./internal/config/` tests pass, including the new `TestDiffChainAgainstOnchain`.\n- I ran `go run ./cmd/check_onchain_configs` against public Sepolia and mainnet RPCs. It produced the results above, and `--chain-ids` filtering works.\n- I have not run the new CircleCI job. It will first run on the next `build_daily` schedule or a `daily_codegen_dispatch` trigger.\n\nPrompted by: @mds1\n",
+      "repository": "ethereum-optimism/superchain-registry",
+      "createdAt": "2026-10-09T02:30:12Z",
+      "mergedAt": null,
+      "additions": 299,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOJ_r-bs8AAAABHc_RuA",
+      "title": "fix(unichain): update mainnet ProxyAdminOwner to the OP-governed L1PAO",
+      "author": "OptimismBot",
+      "number": 1361,
+      "body": "Updates `[roles].ProxyAdminOwner` in `superchain/configs/mainnet/unichain.toml` from the Unichain 3-of-3 (`0x6d5B183F538ABB8572F5cD17109c617b994D5833`) to the standard OP-governed L1PAO (`0x5a0Aae59D09fccBdDb6C6CcEB07B7279367C3d2A`).\n\n- [superchain-ops eth/069](https://github.com/ethereum-optimism/superchain-ops/blob/main/src/tasks/eth/069-unichain-l1-ownership-transfers/README.md) (executed) transferred the L1 `ProxyAdmin` and `DisputeGameFactoryProxy` to the L1PAO. [eth/070](https://github.com/ethereum-optimism/superchain-ops/blob/main/src/tasks/eth/070-unichain-l2pao-transfer/README.md) moved the L2 `ProxyAdmin` to its alias.\n- Verified on-chain on 2026-10-09: `owner()` on `ProxyAdmin` `0x3B73Fa8d82f511A3caE17B5a26E4E1a2d5E2f2A4` and `DisputeGameFactoryProxy` `0x2F12d621a16e2d3285929C9996f478508951dFe4` returns `0x5a0Aae59D09fccBdDb6C6CcEB07B7279367C3d2A`.\n- `superchain/extra/addresses/addresses.json` already has this value from the daily codegen run ([#1335](https://github.com/ethereum-optimism/superchain-registry/pull/1335)). Only the hand-maintained TOML was stale, and no CI check compares the two.\n\nNo codegen run needed; generated files are unchanged.\n\nPrompted by: @mds1\n",
+      "repository": "ethereum-optimism/superchain-registry",
+      "createdAt": "2026-10-09T02:20:06Z",
+      "mergedAt": null,
+      "additions": 1,
+      "deletions": 1
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 2
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 69.46697502522935,
+      "prScore": 64.46697502522935,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 45.80646082854713,
+      "prScore": 45.80646082854713,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 5.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    }
+  ],
+  "newPRs": 2,
+  "mergedPRs": 0,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 2
+}

@@ -5,8 +5,32 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-08 to 2026-10-09, ethereum-optimism/optimism had 3 new PRs (1 merged), 1 new issues, and 7 active contributors.",
+  "overview": "From 2026-10-08 to 2026-10-09, ethereum-optimism/optimism had 18 new PRs (9 merged), 4 new issues, and 28 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABVyDNdg",
+      "title": "op-node: origin prefetch ordering regression on 10-second L2 chains since v1.19.5",
+      "author": "atenalt",
+      "number": 23271,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWe observed persistent L1-origin lag on a custom OP Stack rollup with **10-second L2 blocks** after upgrading op-node to **v1.19.9**. L2 block timestamps remain fresh and derivation stays at the configured L1 confirmation distance, but the unsafe L2 head's L1 origin falls approximately 148–149 L1 blocks behind the observed L1 head, near the Fjord 1,800-second drift limit.\n\nSource-history analysis and controlled component tests identify an ordering change introduced by **#22241 / `4c3d0d3da6`**, first included in stable **v1.19.5**: the direct sequencer path can schedule its next build before the shared event dispatcher runs the next-origin prefetch triggered by `ForkchoiceUpdateEvent`.\n\nThis report concerns origin advancement, not a failure to produce L2 blocks. We would appreciate confirmation of whether this is an unintended regression and guidance on preserving timely origin adoption without reintroducing derivation-induced sequencer starvation.\n\n## Environment and observations\n\n- Observed deployed version: op-node v1.19.9; execution client op-reth v2.6.0.\n- L1: Sepolia, approximately 12-second blocks.\n- L2 block time: 10 seconds.\n- Sequencer and verifier L1 confirmations: 15.\n- Consensus-layer sync; Fjord, Granite and Holocene active; Isthmus not activated.\n- CPU was not saturated during this investigation.\n\nAt a representative sample:\n\n| Measurement | Value |\n| --- | --- |\n| `head_l1.number - current_l1.number` | 15 |\n| `head_l1.number - unsafe_l2.l1origin.number` | 149 |\n| Unsafe L2 timestamp age | approximately 3 seconds |\n| Unsafe-to-safe L2 distance | approximately 20–24 blocks |\n\nSafe/finalized progress and L1 transaction confirmations continued. Sequencing logs repeatedly showed the same origin used for two consecutive 10-second L2 blocks, for example:\n\n```text\nL2 parent  N     -> origin O\nL2 parent  N+1   -> origin O\nL2 parent  N+2   -> origin O+1\nL2 parent  N+3   -> origin O+1\n```\n\nReverting **only op-node** to the previously deployed v1.17.0 restored one origin advance per L2 block while behind, and the observed head-to-origin lag began decreasing (146 → 144 → 143, later 122). Execution client, batcher, RPC provider, fork schedule and confirmation settings were unchanged. This rollback was diagnostic, **not a recommendation to run an old client after Sepolia's L1 fork**; we are aware of the v1.19.5+ requirement.\n\n## Suspected mechanism\n\n1. The selector has cached current origin `O` and next origin `O+1`.\n2. A newly inserted L2 block adopts `O+1`.\n3. The direct sequencer path completes `ProcessPayload` and calls `scheduleNextAction` without requiring the shared dispatcher to finish the corresponding forkchoice-prefetch handler.\n4. If the next `FindL1Origin` runs first, `CurrentAndNextOrigin` promotes cached `O+1` to current and clears the next-origin cache.\n5. With no next origin cached and drift still below its limit, the selector reuses `O+1`, despite `O+2` being available and having a valid timestamp/confirmation distance.\n6. The later forkchoice handler prefetches `O+2`, but the missed adoption opportunity can repeat as origins advance.\n\nWith 10-second L2 blocks, advancing an origin only once per two L2 blocks means approximately 20 seconds per origin, slower than L1's approximately 12-second block interval. Once drift approaches the limit, the synchronous-fetch fallback constrains the lag rather than restoring the intended confirmation-distance target. Faster 2-second chains can still keep up despite the missed opportunities, so the effect is more visible with a longer L2 block time.\n\nRelevant source:\n\n- [Sequencer concurrency change #22241](https://github.com/ethereum-optimism/optimism/pull/22241)\n- [Introduction commit](https://github.com/ethereum-optimism/optimism/commit/4c3d0d3da6c9b2edd9ac93756aef5629b8a97b44)\n- [v1.19.9 origin selector](https://github.com/ethereum-optimism/optimism/blob/op-node/v1.19.9/op-node/rollup/sequencing/origin_selector.go)\n- [v1.19.9 sequencer](https://github.com/ethereum-optimism/optimism/blob/op-node/v1.19.9/op-node/rollup/sequencing/sequencer.go)\n\n## Controlled source-boundary tests\n\nWe tested isolated production-source snapshots with their original module pins and checksum-verified superchain bundles, using Go 1.26.6 and test-only overlays. The probes use each snapshot's **actual Sequencer and L1OriginSelector**, existing attribute/conductor test fixtures, and a mocked successful engine insertion with deliberately controlled forkchoice-dispatch timing. Each boundary test was repeated 20 times.\n\nThe setup has current origin 818, prefetched origin 819, and origin 820 already available with a valid timestamp. The inserted child adopts 819. The question is whether the next build can run before the selector handles the child's forkchoice update.\n\n| Source snapshot | Before prefetch fanout | Result |\n| --- | --- | --- |\n| `4c3d0d3^` (`20818c5b`) | Payload success alone does not arm the next build; shared forkchoice processing precedes the next action | selects 820 |\n| `4c3d0d3` | Direct insertion arms the next build independently | delayed prefetch selects 819; prefetch-first control selects 820 |\n| stable v1.19.4 | same as the parent | selects 820 |\n| stable v1.19.5 | same as the child | delayed prefetch selects 819; prefetch-first control selects 820 |\n\nThese are **controlled component tests, not an end-to-end historical-binary/network bisect**. They reproduce the call-site ordering change; the production v1.19.9 versus node-only rollback comparison provides separate operational evidence. Tests with Isthmus disabled and enabled both reproduced the same origin-selection outcome.\n\n### Minimal selector-order reproducer\n\nThe following self-contained program models the triggering event order using the real selector. Run it from an upstream module checkout, for example v1.19.5, with its normal dependencies available:\n\n```bash\ngo run /tmp/origin-order-repro.go\n```\n\n```go\npackage main\n\nimport (\n    \"context\"\n    \"fmt\"\n    \"io\"\n    \"log/slog\"\n    \"math/big\"\n\n    \"github.com/ethereum-optimism/optimism/op-node/rollup\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup/engine\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup/sequencing\"\n    \"github.com/ethereum-optimism/optimism/op-service/eth\"\n    \"github.com/ethereum/go-ethereum\"\n    \"github.com/ethereum/go-ethereum/common\"\n    \"github.com/ethereum/go-ethereum/log\"\n)\n\ntype source struct {\n    sequencing.L1Blocks // Unused additional methods, if present, must not be called.\n    now uint64\n}\n\nfunc block(n uint64) eth.L1BlockRef {\n    return eth.L1BlockRef{\n        Number: n, Time: n * 12,\n        Hash: common.BigToHash(new(big.Int).SetUint64(n)),\n        ParentHash: common.BigToHash(new(big.Int).SetUint64(n - 1)),\n    }\n}\n\nfunc (s *source) L1BlockRefByNumber(_ context.Context, n uint64) (eth.L1BlockRef, error) {\n    if n + 15 > s.now / 12 {\n        return eth.L1BlockRef{}, ethereum.NotFound\n    }\n    return block(n), nil\n}\n\nfunc (s *source) L1BlockRefByHash(_ context.Context, h common.Hash) (eth.L1BlockRef, error) {\n    return block(h.Big().Uint64()), nil\n}\n\nfunc run(prefetchFirst bool, blockTime uint64) {\n    ctx := context.Background()\n    src := &source{now: 10000}\n    cfg := &rollup.Config{BlockTime: blockTime, MaxSequencerDrift: 1800}\n    logger := log.NewLogger(slog.NewTextHandler(io.Discard, nil))\n    sel := sequencing.NewL1OriginSelector(ctx, logger, cfg, src)\n    head := eth.L2BlockRef{Number: 100, Time: src.now, L1Origin: block(src.now/12 - 15).ID()}\n    for i := 0; i < 600; i++ {\n        src.now = head.Time\n        ev := engine.ForkchoiceUpdateEvent{UnsafeL2Head: head}\n        if prefetchFirst { sel.OnEvent(ctx, ev) }\n        origin, err := sel.FindL1Origin(ctx, head)\n        if err != nil { panic(err) }\n        if !prefetchFirst { sel.OnEvent(ctx, ev) }\n        head = eth.L2BlockRef{Number: head.Number + 1, Time: head.Time + blockTime, L1Origin: origin.ID()}\n    }\n    fmt.Printf(\"prefetchFirst=%v blockTime=%d originLag=%d drift=%d\\n\",\n        prefetchFirst, blockTime, head.Time/12-head.L1Origin.Number,\n        head.Time-block(head.L1Origin.Number).Time)\n}\n\nfunc main() {\n    run(true, 10)\n    run(false, 10)\n    run(false, 2)\n}\n```\n\nObserved output:\n\n```text\nprefetchFirst=true  blockTime=10 originLag=16  drift=196\nprefetchFirst=false blockTime=10 originLag=149 drift=1792\nprefetchFirst=false blockTime=2  originLag=15  drift=184\n```\n\nThe selector-only model deliberately chooses the event order; it does not itself simulate the full driver. The separate actual-Sequencer probes above establish that the new direct-call path permits that order, while the old path required forkchoice processing before scheduling the next action.\n\n## Downstream impact\n\nWith batcher's unchanged `max-channel-duration=100`, a large gap between current L1 head and the last submitted L1 origin causes newly opened channels to expire immediately. We observed single-L2-block channels and a higher number of small L1 submissions while origin lag exceeded that threshold. This appears to be downstream amplification, not the initiating batcher fault.\n\n## Expected behavior / questions\n\n- When the immediate next origin is available, confirmed and timestamp-valid, the new scheduling path should not systematically miss its adoption opportunity because the prefetch event is queued behind the next direct build.\n- Can next-origin readiness be established independently of the shared dispatcher, while retaining confirmation-depth, immediate-child, timestamp and max-drift constraints and avoiding unbounded L1 RPC blocking?\n- Is there an existing supported mitigation or fix for long-block-time chains that should retain post-Glamsterdam compatibility?\n\nWe searched related reports including #11960, #19263, #22821 and the receipts-prefetch changes #22861/#22863, but did not find an exact report of this long-block-time origin-progression regression. Latest stable checked on 2026-10-08 was v1.19.9. Please let us know if this should be linked to an existing issue.\n",
+      "createdAt": "2026-10-08T05:58:10Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABIRojLQ",
+      "title": "bug(alloy-op-evm): eth_createAccessList reports gasUsed of the run without the discovered access list",
+      "author": "milando12",
+      "number": 21682,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nOn op-reth, `eth_createAccessList` returns a `gasUsed` that corresponds to executing the request **without** the access list it just discovered, instead of the intended \"exact gas used\" of a re-run **with** the list attached. Ethereum reth returns the with-list gas for the identical request shape, and geth/op-geth's `AccessList` implementation also returns the with-list gas — op-reth is the odd one out.\n\nThe root cause is a 3-line wrapper impl in `alloy-op-evm` that assigns the access-list field directly instead of delegating to `TxEnv::set_access_list`, silently dropping the Legacy→EIP-2930 tx-type upgrade that makes the list effective in revm.\n\n## Reproduction (any public op-reth OP-mainnet endpoint)\n\n```bash\nURL=https://optimism-rpc.publicnode.com   # reth/v2.3.0 as of writing\nREQ='{\"to\":\"0x94b008aA00579c1307B0EF2c499aD98a8ce58e58\",\"data\":\"0x70a0823100000000000000000000000000000000000000000000000000000000deadbeef\"}'\n\n# 1) createAccessList discovers a 1-address/1-key list and reports gasUsed = 23759 (0x5ccf)\ncurl -s $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_createAccessList\",\"params\":['$REQ',\"latest\"]}'\n\n# 2) eth_estimateGas WITHOUT the list ≈ 24097; WITH the returned accessList attached ≈ 26401.\n#    Executing with the list genuinely costs ~2300 more (2400/addr + 1900/key EIP-2930 intrinsic\n#    minus a 2000 warm-SLOAD saving) — yet createAccessList reports the without-list number.\n\n# 3) Smoking gun: add a semantically-empty \"accessList\":[] to the SAME request. The only effect\n#    is that the request-derived tx type becomes EIP-2930 instead of Legacy — and the reported\n#    gasUsed flips from 23759 to 26059 (the correct with-list value):\nREQ2='{\"to\":\"0x94b008aA00579c1307B0EF2c499aD98a8ce58e58\",\"data\":\"0x70a0823100000000000000000000000000000000000000000000000000000000deadbeef\",\"accessList\":[]}'\ncurl -s $URL -H 'Content-Type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_createAccessList\",\"params\":['$REQ2',\"latest\"]}'\n```\n\nOn nodes with `debug` enabled, `debug_traceCall` of the same request with/without the returned `accessList` shows the two numbers directly: the reported `gasUsed` always equals the **without-list** execution. (Values above move slightly with state; the structure — \"reported = without-list, flips when the request carries any accessList field\" — is stable and reproduces on every op-reth v2.3.x endpoint we tried. Ethereum-mainnet reth of the same version reports the with-list value.)\n\n## Root cause\n\n`eth_createAccessList` goes through reth's generic `create_access_list_with`, which after the inspection pass does:\n\n```rust\ntx_env.set_access_list(access_list.clone());\n...\n// transact again to get the exact gas used\nlet result = this.transact(&mut db, evm_env, tx_env)?;\n```\n\nFor a list-less request the first-pass tx env derives `TxType::Legacy` (`minimal_tx_type()`). The base implementation `TransactionEnvMut for TxEnv` (alloy-evm 0.36.0, `src/env.rs`) handles this by upgrading the type:\n\n```rust\nfn set_access_list(&mut self, access_list: AccessList) {\n    self.access_list = access_list;\n    if self.tx_type == TransactionType::Legacy as u8 {\n        self.tx_type = TransactionType::Eip2930 as u8;\n    }\n}\n```\n\nbut the OP wrapper impl bypasses it ([`rust/alloy-op-evm/src/tx.rs#L271-L273`](https://github.com/ethereum-optimism/optimism/blob/b40d2ce097b928fe1a4ec79a8a1925eb231c675e/rust/alloy-op-evm/src/tx.rs#L271-L273)):\n\n```rust\nfn set_access_list(&mut self, access_list: alloy_eips::eip2930::AccessList) {\n    self.0.base.access_list = access_list;\n}\n```\n\nrevm treats an access list on a Legacy-typed transaction as fully inert — no EIP-2930 intrinsic pricing (revm-context-interface 19.0.3, `gas_params.rs`, `initial_tx_gas_for_tx`: \"Legacy is the only tx type that does not have an access list\") and no prewarming (revm-handler 20.0.3, `pre_execution.rs`, same gate). So the \"transact again\" re-run is a byte-for-byte repeat of the first run, and the reported `gasUsed` is the without-list gas.\n\nThe exact-gas re-run semantics were introduced deliberately in paradigmxyz/reth#10416 / paradigmxyz/reth#10422. Before the `TransactionEnvMut` migration, reth carried a correct **delegating** impl for this exact wrapper shape (`impl<T: TransactionEnv> TransactionEnv for op_revm::OpTransaction<T>` delegated to `self.base.set_access_list(...)`; removed in paradigmxyz/reth#23218) — so this is a regression relative to the previously-established pattern, not a design choice. The in-repo example `rust/op-reth/examples/custom-node/src/evm/env.rs` also delegates for its wrapper type.\n\n## Expected behavior\n\n`eth_createAccessList.gasUsed` should be \"the gas the transaction consumes if submitted with the returned access list\" — matching geth/op-geth (`internal/ethapi/api.go`, `AccessList` attaches the list to the message each iteration and returns that execution's `UsedGas`) and matching reth's behavior on Ethereum mainnet.\n\n## Proposed fix\n\nOne line — delegate to the base impl so the type upgrade applies (deposit transactions are unaffected; the upgrade only fires for Legacy):\n\n```rust\nfn set_access_list(&mut self, access_list: alloy_eips::eip2930::AccessList) {\n    self.0.base.set_access_list(access_list);\n}\n```\n\nPR with the fix + regression tests: https://github.com/ethereum-optimism/optimism/pull/21683\n",
+      "createdAt": "2026-07-09T22:21:01Z",
+      "closedAt": "2026-10-08T16:28:58Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
     {
       "id": "I_kwDODjvEJM8AAAABVvE42Q",
       "title": "kona-node: support conductor disaster recovery",
@@ -15,6 +39,30 @@
       "repository": "ethereum-optimism/optimism",
       "body": "Kona needs conductor disaster recovery support so an operator can resume sequencing after quorum loss and run `TestDisasterRecoveryLeaderOverride` against Kona/op-reth.\n\nMake Kona's `admin_overrideLeader` bypass conductor commits locally, matching op-node's recovery override. The separate `conductor_overrideLeader(true)` remains necessary for leader-gated proxy traffic. This builds on the publication gate in #23229, which prevents canonicalization and gossip after a failed conductor commit.\n\nUpdate the shared recovery test to drop its startup-RPC rejection expectation while retaining the override, resumed sequencing, proxy access, and proxy refusal assertions.\n\nAcceptance criteria:\n\n- [ ] `admin_overrideLeader` allows local sequencing to resume after conductor quorum loss.\n- [ ] Conductor proxy access remains controlled by the separate conductor leader override.\n- [ ] `TestDisasterRecoveryLeaderOverride` runs and passes against Kona/op-reth.\n- [ ] The complete Kona/op-reth conductor suite passes all 12 tests with zero skips, and the revised recovery scenario passes against op-node/op-reth.\n- [ ] Engine/service/RPC tests, Rust lint, and Go lint pass.\n\nImplementation: https://github.com/ethereum-optimism/optimism/pull/23223\n\nPrerequisite: https://github.com/ethereum-optimism/optimism/issues/23264 (PR #23229).\n",
       "createdAt": "2026-10-08T00:00:43Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVqdKhQ",
+      "title": "withdrawal tool: support ZK dispute games",
+      "author": "Inphi",
+      "number": 23253,
+      "repository": "ethereum-optimism/optimism",
+      "body": "The `withdrawal` tool in `op-chain-ops/cmd/withdrawal` cannot prove withdrawals when the portal's respected game type is the ZK dispute game (type 10). `prove` fails with `unsupported game type`.\n\nThe shared withdrawal helpers only know about the Cannon, permissioned, and super-root game types:\n\n- `op-node/withdrawals/utils.go` (`ProveWithdrawalParametersFaultProofs` and its helpers)\n- `op-e2e/e2eutils/wait/withdrawals.go` (`ForGamePublished`)\n\nAdd `ZKDisputeGameType` to these switches. ZK games use super roots, with a 4-byte parent index in front of the super root in `extraData`. `bridgeGameSequenceAndOutputRoot` in `op-devstack/dsl/bridge.go` already decodes this and can serve as the reference.\n\nRelated: #23009 covers ZK support in the op-challenger CLI.\n",
+      "createdAt": "2026-10-07T17:05:14Z",
+      "closedAt": "2026-10-08T15:23:16Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABV8X_pA",
+      "title": "op-devstack: sysgo super games use the non-interop kona prestate",
+      "author": "sebastianst",
+      "number": 23285,
+      "repository": "ethereum-optimism/optimism",
+      "body": "sysgo's interop migration registers the SuperCannonKona game type (9) with the **non-interop** kona cannon prestate, while the honest challenger runs the **interop** prestate. The mismatch is hidden because devstack challengers run with `AllowInvalidPrestate = true`, so no test fails today. Any sysgo test that steps at trace index 0 of a super game (where the on-chain absolute prestate is used) would exercise the wrong prestate.\n\n- `migrateSuperRootsWithProposal` takes the game args for type 9 from `getCannonKonaAbsolutePrestate`, which reads `rust/kona/prestate-artifacts-cannon/prestate-proof.json`: [`superroot.go#L197`](https://github.com/ethereum-optimism/optimism/blob/ad594c8f67c6f2ad76c6c88bb490865c750d4dd4/op-devstack/sysgo/superroot.go#L197), [`#L227-L228`](https://github.com/ethereum-optimism/optimism/blob/ad594c8f67c6f2ad76c6c88bb490865c750d4dd4/op-devstack/sysgo/superroot.go#L227-L228), [`#L277-L279`](https://github.com/ethereum-optimism/optimism/blob/ad594c8f67c6f2ad76c6c88bb490865c750d4dd4/op-devstack/sysgo/superroot.go#L277-L279).\n- `PrestateForGameType(SuperCannonKonaGameType)` already returns the interop prestate (`prestate-artifacts-cannon-interop`): [`add_game_type.go#L213-L218`](https://github.com/ethereum-optimism/optimism/blob/ad594c8f67c6f2ad76c6c88bb490865c750d4dd4/op-devstack/sysgo/add_game_type.go#L213-L218).\n- The interop challenger runs `prestate-artifacts-cannon-interop/prestate.bin.gz`: [`challenger.go#L112-L116`](https://github.com/ethereum-optimism/optimism/blob/ad594c8f67c6f2ad76c6c88bb490865c750d4dd4/op-devstack/shared/challenger/challenger.go#L112-L116), with `AllowInvalidPrestate = true` at [`#L254`](https://github.com/ethereum-optimism/optimism/blob/ad594c8f67c6f2ad76c6c88bb490865c750d4dd4/op-devstack/shared/challenger/challenger.go#L254).\n\n**Fix:** use `PrestateForGameType(t, gameTypes.SuperCannonKonaGameType)` for the type-9 game args in the migration. Then check whether the super-game tests can run with prestate validation enabled, so a regression like this fails loudly.\n\nFound while assessing on-chain super-game coverage for porting the op-e2e super fault-proof tests to sysgo. Those tests play games down to the MIPS step, so they need this fixed.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "createdAt": "2026-10-08T19:16:48Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 0
@@ -30,53 +78,88 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-10-08T00:26:26Z",
       "mergedAt": null,
-      "additions": 1564,
-      "deletions": 3076
+      "additions": 3252,
+      "deletions": 5556
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABHAW79w",
-      "title": "contracts-bedrock: harden ZKDisputeGame pause check and OPCM ZK config validation",
-      "author": "wwared",
-      "number": 23239,
-      "body": "- `ZKDisputeGame.closeGame` returned early on a closed game before checking the pause, so `claimCredit` could still unlock bonds in DelayedWETH while the system was paused. It now reverts, matching `SuperFaultDisputeGame`.\n- OPCM (upgrade and migrator) accepted ZK configs with a zero or uint64-overflowing challenge/prove duration or a zero challenger bond, making the game trivially winnable or challenges free. It now rejects them, matching StandardValidator ZKDG-90/100/110 and op-deployer.\n",
+      "id": "PR_kwDODjvEJM8AAAABHZ95aQ",
+      "title": "contracts-bedrock!: expire undelivered interop messages",
+      "author": "karlfloersch",
+      "number": 23286,
+      "body": "Interop executing messages can't be forced in through deposits, so a destination sequencer can keep a message from ever being relayed. This PR lets the source chain learn, through censorship-resistant paths only, that a message can never be delivered. Applications can then undo the send. The commits step through the three pieces in order, then the snapshots, then the tests.\n\n1. **The source messenger marks a message expired.** `L2ToL2CrossDomainMessenger` records each message's send timestamp. It marks a message expired when its own `L1CrossDomainMessenger` brings word that the destination had not relayed it more than `EXPIRY_PERIOD` after the send. That period is 8 days: the 7-day protocol window plus a day of margin. From then on the protocol rejects any relay of the message, so expiry and delivery exclude each other. Applications read `expiredMessages(messageHash)`.\n2. **L1 forwards the fact.** `L1CrossDomainMessenger.relayUndeliveredMessage` deposits `expireMessage` into its own chain's `L2ToL2CrossDomainMessenger`. It does so only when all of these hold:\n   - this chain runs interop;\n   - the caller is a real `L1CrossDomainMessenger`, whose portal's `SystemConfig` names it;\n   - the caller's portal is authorized by this chain's `ETHLockbox`;\n   - the caller is relaying a withdrawal from the `UndeliveredMessageExporter`.\n\n   L2 trusts the deposit because its sender is the `otherMessenger()` it already knows. Every chain in the lockbox can already withdraw this chain's ETH, so trusting its word adds no trust.\n3. **The exporter produces the fact.**\n   - The new `UndeliveredMessageExporter` predeploy at `0x…0030` hashes a message with its own chain as the destination and refuses one its chain relayed. It then sends the fact through the withdrawal path to the source chain's `L1CrossDomainMessenger`, which the caller names.\n   - It isn't an executing message, so it can be forced in as a deposit.\n   - Its proxy had no implementation before, so no earlier withdrawal from it exists. Every withdrawal it sends carries only that calldata, for a message it checked.\n\n**The expiry period.** The period is an immutable set by a constructor argument (`uint256 internal immutable EXPIRY_PERIOD`, read through `expiryPeriod()`), so a test network can use a shorter one. The constructor rejects 0. Production gets 8 days from `Constants.L2_TO_L2_MESSAGE_EXPIRY_PERIOD` on both install paths:\n- **The NUT bundle.** `GenerateNUTBundle` deploys the implementation with that constructor argument, and its CREATE2 address includes it.\n- **Genesis.** `L2Genesis` deploys the messenger with `new`, then etches the code into its implementation slot, the way it already does for `EAS`. The `Input.l2ToL2MessageExpiryPeriod` field, added in #23277 where non-zero values are refused, now overrides the period; 0 means 8 days.\n\nThe repo's semgrep rule `sol-safety-no-immutable-variables` bans immutables in `src` unless a contract is listed in its excludes. The messenger is added to that list beside the other contracts that need one, because a predeploy implementation can't take the period from storage without an initializer.\n\n**Shorter periods, for tests only:**\n- **op-deployer** (plumbing added in #23277) passes an `l2ToL2MessageExpiryPeriod` global or per-chain override to `L2Genesis`. It refuses the override for `standard` and `standard-overrides` intents and on mainnet, Sepolia, Holesky and Hoodi. The caller must pair it with a shorter message expiry window on every node and in the proof program, which op-deployer can't check. It affects genesis only; a later upgrade installs 8 days again.\n- **devstack** has a `WithL2ToL2MessageExpiryPeriod` preset option (added in #23277). It requires interop at genesis and refuses a period that isn't longer than the network's expiry window.\n\n**Tests that pin production at 8 days:**\n- the bundle's deployment transaction (`GenerateNUTBundle.t.sol`);\n- the messenger after a forked upgrade executes the bundle (`L2GenesisForkUpgrade.t.sol`);\n- the genesis default (`L2Genesis.t.sol`, `L2ToL2CrossDomainMessenger.t.sol`);\n- `TestUnrelayedMessageCannotExpireBeforeExpiryPeriod`, against the deployed messenger.\n\nThe interop message expiry acceptance tests from #23277, including `TestUnrelayedMessageExpires`, run un-skipped here, end to end. `TestUnrelayedMessageExpires` sets a 12-second window and a 30-second period, lets a message go unrelayed past the period, exports it through a forced deposit, finalizes the withdrawal on L1, and checks `MessageExpired` and `expiredMessages(messageHash)` on the source chain. It takes about 200 seconds; the four expiry tests together take about 3.5 minutes, run in parallel.\n\n**Why this split.** Splitting by layer, L1 then L2, was suggested on #23259. Their ABIs form the cycle anticipated there: the exporter calls L1, and L1 calls the messenger's `expireMessage`. Layer PRs would each add code that nothing calls yet and that no acceptance test covers. Splitting by capability instead gives two PRs that each land with end-to-end coverage:\n- this one, which expires messages;\n- #23284, stacked on it, which lets `SuperchainETHBridge` refund an expired send.\n\n**Notes for reviewers:**\n- **The pause check:** `relayUndeliveredMessage` doesn't check whether the chain is paused. Marking a message expired moves no ETH out of the L1 lockbox, and neither does the L2 refund that #23284 adds.\n- **The cast:** `relayUndeliveredMessage` casts its caller to the concrete `L1CrossDomainMessenger` type, because book/src/contributing/interfaces.md says source contracts shouldn't use their own interfaces. Open to `IL1CrossDomainMessenger` if reviewers prefer the more common pattern.\n- **The predeploys map:** op-core gets the exporter's address but no entry in its `Predeploys` map, because that map decides what the frozen Karst and Lagoon state files contain. #23287, the draft Lagoon re-snapshot, adds the entry.\n- **Messages already in flight** to the `L2CrossDomainMessenger` or the `L2ToL1MessagePasser` can no longer be relayed. Messages sent before the upgrade have no send timestamp and can never expire.\n\n**Launch checklist:**\n- #23276 must be live first: nodes and the proof program reject a dependency-set window longer than 7 days, which `EXPIRY_PERIOD` relies on.\n- The re-snapshotted Lagoon bundle in #23287 must deploy the messenger with the 8-day constructor argument. #23287 pins that with a Go test that decodes the embedded bundle.\n- Re-snapshot the Lagoon NUT bundle once this merges. That is a separate follow-up, because `op-core/nuts/fork_lock.toml` requires the contracts to be on develop first. As locked, the bundle still installs the old messenger, which can resend, and no exporter. No messenger that can resend may ever be live on a chain with expiry. #23287 is the draft.\n- Every chain in a cluster's dependency set must also be authorized in the cluster's `ETHLockbox` and run the exporter.\n- Finalizing an export needs at least 1M L1 gas. A failed L1 call is stored rather than reverted, so `eth_estimateGas` under-estimates.\n\n**Stack and spec:**\n- #23276, the window cap, lands first on its own.\n- This PR is based on #23277, the acceptance tests and DSL.\n- #23284, the `SuperchainETHBridge` refund, is stacked on this PR, and #23287, the draft Lagoon re-snapshot, on that.\n- #23278, the docs, lands last.\n- The spec is ethereum-optimism/specs#960.\n- This PR and #23284 replace #23259, #23280 and #23282.\n\nBREAKING CHANGE: `L2ToL2CrossDomainMessenger.resendMessage` is removed, and messages targeting the `L2CrossDomainMessenger` or the `L2ToL1MessagePasser` revert on send and on relay (`L2ToL2CrossDomainMessenger_MessageTargetUnsafe`).\n- **Who is affected:** applications and relayers that resend unrelayed messages, and senders to those two targets.\n- **What breaks:** an unrelayed message can no longer be revived.\n- **Migration:** treat an unrelayed message as expired, and undo the send once `expiredMessages(messageHash)` is set. To reach L1 or the L2 messenger from a relayed message, go through your own contract.\n- **Messages sent before the upgrade** lose resend but have no send timestamp, so they can't expire either. One left unrelayed past the 7-day window can be neither relayed nor refunded.\n\n**Reviews.** A separate Claude review and two independent model reviews (Codex) were run on each piece. The repo's `deletion-reviewer` method was run on the `resendMessage` removal. It found nothing left in code; the remaining docs references are handled by #23278. It also prompted the note above on messages sent before the upgrade, and a docs fix in #23278 (`CrossL2Inbox` isn't a rejected target). Fixed:\n- an `L2ContractsManager` minor bump, since the messenger's deployment gas is inlined in it;\n- stale `sendMessage` natspec and test comments;\n- tests for word after expiry and for messages without a send timestamp;\n- an out-of-gas replay test that now proves the first relay reaches the deposit;\n- the error notice, narrowed to what callers actually get;\n- the snapshots;\n- the `SuperchainETHBridge` deployment gas limit, which this PR had raised although the bridge's bytecode doesn't change here (the raise moved to #23284);\n- comments wrapped at 100 columns.\n\nNot acted on, with reasons:\n- **The window cap:** it isn't enforced in this branch; #23276 enforces it and must land first.\n- **The predeploys map:** the exporter is missing from it on purpose, as described above.\n- **Accepting word while paused:** deliberate, as described above.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-06T21:57:45Z",
-      "mergedAt": "2026-10-08T01:14:22Z",
-      "additions": 189,
-      "deletions": 17
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABHOqUEQ",
-      "title": "contracts-bedrock: check pause after early return in SuperFaultDisputeGame.closeGame",
-      "author": "wwared",
-      "number": 23267,
-      "body": "Matches FaultDisputeGame and ZKDisputeGame (Spearbit U16 5.3.1): closed games can still unlock credit while paused; DelayedWETH.withdraw still blocks withdrawals. Context: https://github.com/ethereum-optimism/optimism/pull/23239#discussion_r4213295004",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-08T00:24:13Z",
+      "createdAt": "2026-10-08T19:44:07Z",
       "mergedAt": null,
-      "additions": 69,
-      "deletions": 13
+      "additions": 1636,
+      "deletions": 247
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABHPIObg",
-      "title": "alloy-op-evm: apply access lists to legacy transaction simulations",
-      "author": "MarkChen12138",
-      "number": 23270,
-      "body": "Legacy-style `eth_createAccessList` requests retain a legacy transaction type when rerun with the discovered access list, so `gasUsed` reflects execution without that list. The rerun now applies EIP-2930 pricing and warming while preserving existing typed, deposit, and post-exec transaction types.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/21682. Uses the same one-line fix proposed in the unmerged https://github.com/ethereum-optimism/optimism/pull/21683, with regression coverage for all five transaction types.\n\nLocal validation passed the 96 `alloy-op-evm` unit tests, 95 EVM/RPC consumer tests, full Rust lint, and the 19-package no-std check. The consumer suite retains one ignored WS test; one L1-info parsing test was reported as leaky in the combined run, and a focused rerun passed without that warning.\n",
+      "id": "PR_kwDODjvEJM8AAAABHYCgXw",
+      "title": "op-devstack,op-acceptance-tests: add interop message expiry acceptance tests",
+      "author": "karlfloersch",
+      "number": 23277,
+      "body": "Adds the acceptance tests for interop message expiry, and the op-devstack DSL they need, ahead of the contracts.\n\nThe three expiry tests are skipped until #23286 adds the contracts they exercise:\n- `TestUnrelayedMessageCannotExpireBeforeExpiryPeriod`;\n- `TestRelayedMessageCannotBeExportedAsUndelivered`;\n- `TestUnrelayedMessageExpires`, which runs the expiry path to its end with a short expiry period.\n\n#23286 removes the skips, and #23284 adds the refund checks. The spec is ethereum-optimism/specs#960.\n\nThe positive test sets a short expiry period through a new knob in genesis:\n- **op-deployer:** a `l2ToL2MessageExpiryPeriod` genesis override. It is refused for standard intents and on public L1s, and has unit tests.\n- **devstack:** `presets.WithL2ToL2MessageExpiryPeriod`, which refuses a period that doesn't exceed the message expiry window, or that is set when interop isn't active at genesis.\n- **L2Genesis:** the matching `Input` field. op-deployer's input must match the script's struct exactly. Until the messenger can be deployed with a period (#23286), L2Genesis refuses any non-zero override, so the knob can't be used by mistake.\n\nThe DSL additions are covered by tests that run now:\n- **ETH bridge:** `dsl.SendETH` sends ETH through `SuperchainETHBridge`, and `ETHSend.Relay` relays it once the supernode has validated the send. The supernode ETH bridge test uses them in place of its own helpers, and it now also checks that the send and the relay succeed. `SendETH` is a free function because the send involves an EOA, a chain and a destination, not one DSL object.\n- **Messages:** `SentMessageFromReceipt` decodes `SentMessage` and returns an error instead of failing, so callers can tell a receipt without one.\n- **Deposits:** `L2ELNode.TraceCalls`, which `DepositTxExpectRevert` now uses, and a gas option for deposits that may not go below the portal's minimum.\n- **Game clocks:** the deployer options that shorten the game clocks are checked by `TestShortGameClocksReachDeployedGames`, which is not skipped.\n\nSome code is only used by the skipped tests until the contracts land: `WaitForDeposit`, `WithdrawalFromReceipt`, `DisputeGameMaxClockDuration`, and the bindings for functions that don't exist on develop yet (`RefundETH`, `ExpiredMessages`, `SentMessageTimestamps`, `UndeliveredMessageExporter`), plus the exporter's address and the `expiryPeriod` binding. It is here because the skipped tests need it to compile, so the contracts PRs only have to remove the skips and add the refund check.\n\nPart of the change that replaces #23259 (stack: this PR → #23286 → #23284). No effect on users.\n\nReviews: the repo's Claude review agents were not run, because this PR was prepared by a subagent that cannot start other agents; a separate Claude review was run instead. Two independent model reviews (Codex) found two P3 items. Missing diagnostics while waiting for an L1 origin are fixed. I didn't act on the other: they suggested retrying only some errors in two waits, but a failed read there is logged and retried until the timeout, which is the pattern flake-prevention.md asks for.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-08T01:36:18Z",
+      "createdAt": "2026-10-08T16:38:40Z",
       "mergedAt": null,
-      "additions": 23,
-      "deletions": 2
+      "additions": 854,
+      "deletions": 90
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHZJ5iQ",
+      "title": "contracts-bedrock: refund expired SuperchainETHBridge sends",
+      "author": "karlfloersch",
+      "number": 23284,
+      "body": "`SuperchainETHBridge` burns ETH on the source chain and mints it on the destination only when the message is relayed. If the destination never relays it, the ETH is stranded. #23286 lets the source chain mark such a message expired. This PR lets the bridge give the ETH back.\n\n`refundETH(destination, nonce, from, to, amount)` rebuilds the send's message hash and refunds it only when `L2ToL2CrossDomainMessenger.expiredMessages` is set for that hash. The refund:\n- goes once, to the sender (`refunded` records it, and a second call reverts with `SuperchainETHBridge_AlreadyRefunded`);\n- reverts with `SuperchainETHBridge_MessageNotExpired` while the message isn't expired;\n- is a forced send, so a sender that can't receive ETH can't block it;\n- emits `RefundETH`.\n\nThe bridge's bytecode grows, so its deployment gas limit in the upgrade bundle rises with it.\n\nExpiry and relay exclude each other, so the ETH is either minted on the destination or refunded on the source, never both.\n\n**Tests:**\n- forge tests cover each revert, the zero-value refund, and an end-to-end expire-then-refund through the real messenger;\n- the expiry acceptance test also checks that an unexpired send can't be refunded;\n- `TestUnrelayedMessageExpiresAndIsRefunded` extends #23286's end-to-end expiry test. With a 12-second window and a 30-second expiry period, a third party refunds the expired send. The test checks the sender's exact balance change, `refunded(messageHash)`, and that a second refund reverts with `SuperchainETHBridge_AlreadyRefunded`. It takes about 205 seconds.\n\n**Stack:**\n- This PR is stacked on #23286, which expires undelivered messages; together they replace #23259, #23280 and #23282.\n- #23276, the window cap, lands first, and #23277, the acceptance tests and DSL, is under #23286.\n- #23278, the docs, lands last.\n- The spec is ethereum-optimism/specs#960.\n- #23287, a draft that re-snapshots the Lagoon NUT bundle, is stacked on this PR.\n\n**Reviews.** A separate Claude review and two independent model reviews (Codex) covered this code alongside the exporter. They raised no findings on the refund; the exporter finding is answered on #23286.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-08T18:25:08Z",
+      "mergedAt": null,
+      "additions": 572,
+      "deletions": 20
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABEH2l9w",
+      "title": "contracts-bedrock: Glamsterdam pricing probe",
+      "author": "0xiamflux",
+      "number": 22947,
+      "body": "# DO NOT MERGE\r\n\r\nTest with:\r\n```\r\ncd packages/contracts-bedrock/\r\njust test --evm-version amsterdam --match-contract 'StateGas'\r\n```",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-18T18:06:31Z",
+      "mergedAt": null,
+      "additions": 473,
+      "deletions": 61
     }
   ],
   "codeChanges": {
-    "additions": 229,
-    "deletions": 29,
-    "files": 9,
-    "commitCount": 40
+    "additions": 928,
+    "deletions": 525,
+    "files": 28,
+    "commitCount": 198
   },
   "completedItems": [
+    {
+      "title": "op-challenger: check super-root and ZK games against superroot_atTimestamp in game-proposal-outputs",
+      "prNumber": 23242,
+      "type": "other",
+      "body": "`game-proposal-outputs` always asked op-node for `optimism_outputAtBlock` at the game's `l2SequenceNumber`. For super-cannon-kona and super-permissioned games that value is a super-root timestamp, so the command compared each proposal again",
+      "files": [
+        ".claude/agents/dispute-game-investigator.md",
+        ".claude/skills/dispute-game-investigator/SKILL.md",
+        "docs/ai/dispute-game-investigation.md",
+        "op-challenger/cmd/game_proposal_outputs.go",
+        "op-challenger/cmd/game_proposal_outputs_test.go"
+      ]
+    },
+    {
+      "title": "op-challenger: show ZK game state in list-claims",
+      "prNumber": 23241,
+      "type": "other",
+      "body": "`list-claims` failed on ZK dispute games with `unsupported game type: zk`, and no CLI command showed a ZK game's `claimData`: proposal status, challenger, prover and deadline. Those fields are what tell an operator whether a proof landed af",
+      "files": [
+        "op-challenger/cmd/list_claims.go",
+        "op-challenger/cmd/list_claims_test.go"
+      ]
+    },
     {
       "title": "contracts-bedrock: harden ZKDisputeGame pause check and OPCM ZK config validation",
       "prNumber": 23239,
@@ -93,15 +176,137 @@
         "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
         "packages/contracts-bedrock/test/dispute/zk/ZKDisputeGame.t.sol"
       ]
+    },
+    {
+      "title": "alloy-op-evm: apply access lists to legacy transaction simulations",
+      "prNumber": 23270,
+      "type": "other",
+      "body": "Legacy-style `eth_createAccessList` requests retain a legacy transaction type when rerun with the discovered access list, so `gasUsed` reflects execution without that list. The rerun now applies EIP-2930 pricing and warming while preserving",
+      "files": [
+        "rust/alloy-op-evm/src/tx.rs"
+      ]
+    },
+    {
+      "title": "op-challenger!: label L2 sequence numbers and root claims correctly",
+      "prNumber": 23265,
+      "type": "other",
+      "body": "`list-games` and `list-claims` labelled two values as L2 block numbers and output roots. Both are only accurate for output-root games. `l2SequenceNumber()` returns an L2 **timestamp** for the four game types where `UsesSuperRoots()` is true",
+      "files": [
+        "op-challenger/cmd/list_claims.go",
+        "op-challenger/cmd/list_claims_test.go",
+        "op-challenger/cmd/list_games.go",
+        "op-challenger/cmd/list_games_test.go"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: read REPO_GITHUB_TOKEN in the PR base lookups",
+      "prNumber": 23262,
+      "type": "other",
+      "body": "`get-target-branch.sh` and `check-semver-diff.sh` pick a GitHub token from `GH_TOKEN`, `GITHUB_TOKEN` or `GHTOKEN`. #23249 added a `REPO_GITHUB_TOKEN` override, but only in the two CI steps that map it to `GH_TOKEN`. The semver-diff check s",
+      "files": [
+        "packages/contracts-bedrock/scripts/checks/check-semver-diff.sh",
+        "packages/contracts-bedrock/scripts/ops/get-target-branch.sh"
+      ]
+    },
+    {
+      "title": "rust: bump hickory-resolver to 0.26.3",
+      "prNumber": 23261,
+      "type": "other",
+      "body": "Fixes two hickory-resolver advisories flagged on `rust/Cargo.lock` and in the op-reth images: GHSA-6w6g-hm98-mhgm (unbounded TC-retry loop, resource-exhaustion DoS) and GHSA-5j98-2g5x-46v6 (`lookup()`/`lookup_ip()` obscure DNSSEC validation",
+      "files": [
+        "rust/Cargo.lock"
+      ]
+    },
+    {
+      "title": "op-node, op-e2e, op-devstack: support ZK dispute games in withdrawal helpers",
+      "prNumber": 23255,
+      "type": "other",
+      "body": "The `withdrawal` tool in `op-chain-ops/cmd/withdrawal` fails with `unsupported game type` when the portal's respected game type is the ZK dispute game (type 10), so withdrawals on ZK chains cannot be proven with it. It now finds the coverin",
+      "files": [
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/bridge_test.go",
+        "op-e2e/e2eutils/wait/withdrawals.go",
+        "op-node/withdrawals/utils.go",
+        "op-node/withdrawals/utils_test.go"
+      ]
+    },
+    {
+      "title": "ci: bump apko factory workflows to pick up fork-PR safety fix",
+      "prNumber": 23273,
+      "type": "bugfix",
+      "body": "## Summary\nBumps melange-build.yaml, apko-publish.yaml, and apko-smoke-test.yaml references to the factory commit that adds fork-PR safety handling to the apko build pipeline (skip provenance attestation, skip GCP auth, push to ttl.sh inste",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 132.82341026132627,
+      "prScore": 114.82341026132627,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 69.8698941956196,
+      "prScore": 16.869894195619587,
+      "issueScore": 0,
+      "reviewScore": 53,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 61.34750799360215,
+      "prScore": 61.14750799360215,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 58.42191014905532,
+      "prScore": 28.081910149055314,
+      "issueScore": 0,
+      "reviewScore": 30,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 52.80412521556153,
+      "prScore": 42.866125215561524,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
       "totalScore": 39.2697738965761,
       "prScore": 37.2697738965761,
       "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 36.86843237606567,
+      "prScore": 36.86843237606567,
+      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -117,6 +322,16 @@
       "summary": null
     },
     {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 27.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
       "totalScore": 26.408735590425668,
@@ -124,6 +339,46 @@
       "issueScore": 0,
       "reviewScore": 9,
       "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 15.5,
+      "prScore": 0,
+      "issueScore": 6,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 14.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 13.627295203420116,
+      "prScore": 13.287295203420117,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -155,11 +410,81 @@
       "reviewScore": 5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "atenalt",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/207357267?u=72dcaa012434cc0411ebe81a6fd162529cc7701c&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "swiftnodes",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275502250?u=67d8a6266dfbc7500bbf26931126f3d3b620d193&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 3,
-  "mergedPRs": 1,
-  "newIssues": 1,
-  "closedIssues": 0,
-  "activeContributors": 7
+  "newPRs": 18,
+  "mergedPRs": 9,
+  "newIssues": 4,
+  "closedIssues": 2,
+  "activeContributors": 28
 }

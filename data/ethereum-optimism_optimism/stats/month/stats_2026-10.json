@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 95 new PRs (50 merged), 32 new issues, and 68 active contributors.",
+  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 110 new PRs (58 merged), 35 new issues, and 73 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABVOh7FA",
@@ -90,7 +90,7 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-10-07T23:01:19Z",
       "mergedAt": null,
-      "additions": 66941,
+      "additions": 83503,
       "deletions": 1
     },
     {
@@ -106,6 +106,18 @@
       "deletions": 1176
     },
     {
+      "id": "PR_kwDODjvEJM8AAAABHOrN9Q",
+      "title": "kona-node!: simplify engine RPC clients and servers",
+      "author": "joshklop",
+      "number": 23268,
+      "body": "Engine RPC reads previously crossed queue clients and actors that added indirection to ordinary request handling. Kona now uses concrete Alloy-backed engine clients, serves rollup reads directly, and centralizes request observability in JSON-RPC middleware.\n\nHTTP and WebSocket serve the remaining modules. The unused `dev` and `ws` RPC modules and `--rpc.ws-enabled` flag are removed; WebSocket is always available. Downstream Rust users must adopt the concrete `EngineClient`, remove client type parameters, and use `EngineQueryClient::output_at_block` for output reads. Metrics instrumentation is always compiled. The end-to-end tests now exercise ordinary rollup RPC methods over WebSocket instead of the removed subscriptions.\n\nThird PR in the stack: #23220 → #23227 → this PR → #23258 → #23229 → #23223 → #22307. The five task-to-helper commits are isolated in #23258 above this PR.\n\nEach retained intermediate RPC/helper commit compiles. The RPC tip passes 308 focused Rust tests; the final rebased stack passes 323, full Rust and Go lint, both validator and sequencer runtime suites (13 passed and one existing skip each), the restart suite, and conductor runtime coverage. Rust, Go, and deletion reviews have no unresolved findings.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-08T00:26:26Z",
+      "mergedAt": null,
+      "additions": 3252,
+      "deletions": 5556
+    },
+    {
       "id": "PR_kwDODjvEJM7-QxXY",
       "title": "op-deployer: share one bootstrapped L1 across PCD test cases",
       "author": "maurelian",
@@ -116,25 +128,13 @@
       "mergedAt": null,
       "additions": 2587,
       "deletions": 29
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABHMBDAg",
-      "title": "contracts-bedrock,op-core,op-interop-filter,kona!: per-message interop expiry and SuperchainETHBridge refunds",
-      "author": "karlfloersch",
-      "number": 23259,
-      "body": "## Summary\n\nInterop executing messages can't be forced in through deposits, so a destination sequencer that refuses to relay a message can keep it from ever being delivered. For `SuperchainETHBridge.sendETH`, that strands the ETH: it is burned on the source chain and never minted on the destination.\n\nThis PR lets the source chain learn, through censorship-resistant paths only, that a message can never be delivered. It exposes that per message as `L2ToL2CrossDomainMessenger.expiredMessages(messageHash)`. `SuperchainETHBridge.refundETH` uses it to give the ETH back.\n\nIt replaces #22601, rebuilt on current `develop`. There is no registry, no admin setter, no app callback and no configurable window.\n\nBREAKING CHANGE: `L2ToL2CrossDomainMessenger.resendMessage` is removed, and the messenger now rejects messages whose target is the `L2CrossDomainMessenger` or the `L2ToL1MessagePasser` (`MessageTargetUnsafe`).\n- **Who is affected:** applications and relayers that resend unrelayed interop messages, and anyone sending cross-chain messages to those two targets.\n- **What breaks:** a message that isn't relayed within the expiry window can no longer be revived.\n- **Configuration:** op-core and kona now refuse to load a dependency set whose `overrideMessageExpiryWindow` exceeds 604800 seconds (7 days), and `op-interop-filter` refuses `--message-expiry-window` above 168h. Operators with a longer override must lower it.\n- **Migration:** treat an unrelayed message as expired, and undo the send on the source chain after `expiredMessages(messageHash)` is set, as `SuperchainETHBridge.refundETH` does. To reach L1 or the L2 messenger from a relayed message, go through your own contract.\n\n## The protocol fact it builds on\n\nAn executing message is invalid when its block is more than the message expiry window (7 days) after its initiating message's block. Both cross-safety (op-supernode) and the fault proof (kona) enforce this, comparing the same two timestamps.\n\nSo once a destination's clock passes `sendTime + window` and the message is still unrelayed, no valid block can relay it. This PR carries that fact back to the source chain over a withdrawal followed by a deposit.\n\n## How it works\n\nFor a message `H` sent from A to B and never relayed on B:\n\n1. **On A, at send time:** `sendMessage` stores `sentMessageTimestamps[H] = block.timestamp`.\n2. **On B, export:** anyone calls `UndeliveredMessageExporter.exportUndeliveredMessage(sourceMessenger, source, nonce, sender, target, message, minGasLimit)`. This is a new predeploy at `0x…0030`.\n   - It hashes the message with **B's own chain ID as the destination**, so a chain can only speak for messages addressed to it.\n   - It requires `!L2ToL2CrossDomainMessenger.successfulMessages(H)`.\n   - It sends `relayUndeliveredMessage(H, block.timestamp)` to `sourceMessenger`, which is A's `L1CrossDomainMessenger`, through the `L2CrossDomainMessenger`.\n   - This is not an executing message, so if B censors it, it can be forced in as a deposit. The acceptance test does exactly that.\n3. **On L1:** B's `L1CrossDomainMessenger` relays the withdrawal into A's `L1CrossDomainMessenger.relayUndeliveredMessage`. The function first requires that A has the `INTEROP` feature enabled. It then accepts the call only if:\n   - the caller is a real `L1CrossDomainMessenger`: its portal's `SystemConfig` names it as that chain's messenger;\n   - the caller's portal is authorized by **A's `ETHLockbox`**, meaning it is in A's cluster;\n   - the L2 sender of the withdrawal is the **`UndeliveredMessageExporter`**.\n\n   It then sends `expireMessage(H, undeliveredAt)` to A's `L2ToL2CrossDomainMessenger` as a deposit.\n4. **On A, expire:** `expireMessage` accepts only the `L2CrossDomainMessenger` relaying from A's own `L1CrossDomainMessenger`, which is `otherMessenger()`, so L2 needs no new address. If `undeliveredAt > sentMessageTimestamps[H] + EXPIRY_PERIOD`, it sets `expiredMessages[H] = true`.\n5. **On A, refund:** anyone calls `SuperchainETHBridge.refundETH(destination, nonce, from, to, amount)`. It rebuilds `H` from those arguments, requires `expiredMessages[H]`, and refunds `from` exactly once with a forced send.\n\n**Why a refund can't double-spend:** B attests that H was unrelayed at a time past the window, and from then on the protocol rejects any relay of H. A acts only on a fact dated past `EXPIRY_PERIOD`, measured from a send time that is written once and never changes.\n\n### Why the trusted sender is a new predeploy\n\nThe L1 side trusts withdrawals from the `UndeliveredMessageExporter` at `0x…0030`. It does not trust the `L2ToL2CrossDomainMessenger`.\n- **No forged withdrawal can predate the upgrade.** The proxy at `0x…0030` had no implementation until this upgrade, so no withdrawal from it exists from before.\n- **It can't be impersonated.** The exporter makes exactly one kind of call, so nothing can make it say something it didn't check.\n\nThe messenger, by contrast, has a history of relaying messages to arbitrary targets. Trusting it would let forged withdrawals created before the upgrade wait in unfinalized withdrawals or failed messages and be replayed afterwards. It would also open a window during any L1-before-L2 rollout.\n\n### What prevents each attack\n- **Forged facts from other chains:** every chain whose portal A's lockbox authorizes can already withdraw A's ETH, so trusting its facts adds no trust.\n- **A forged messenger borrowing a real portal:** it fails the reverse binding.\n- **Governance of another cluster chain:** that chain's governance could upgrade its own exporter and forge facts about any destination. That is the same trust as the shared `ETHLockbox` already places in it, since lockbox portals must share one proxy admin owner.\n- **Something else sending the deposit as A's L1 messenger:** `L1CrossDomainMessenger` already refuses to relay messages that target itself, so only `relayUndeliveredMessage` can make it the sender.\n- **The L1 call runs out of gas:** it lands in the calling messenger's failed messages, and anyone can replay it.\n- **The wrong source messenger is named:** the deposit reverts on a chain that never sent `H`, and anyone can export again.\n- **A fact that arrives too early:** it fails on A with `MessageNotExpired`. It can never succeed later, because its timestamp is fixed.\n\n## Behavior changes (please review these closely)\n\n- **`resendMessage` is removed** (`L2ToL2CrossDomainMessenger` 2.0.0).\n  - **Why:** resending lets a message be relayed for another window, which conflicts with expiry: a sender could resend, take a refund, and then have the resent event relayed. And letting anyone resend would let anyone stop a message from ever expiring.\n  - **What happens instead:** an unrelayed message expires, and the app undoes the send.\n  - **Who loses out:** apps without a refund, such as `SuperchainTokenBridge` today, lose the ability to revive an unrelayed message until they add one. See follow-ups.\n- **The messenger refuses unsafe targets.** It won't send or relay messages whose target is the `L2CrossDomainMessenger` or the `L2ToL1MessagePasser` (`MessageTargetUnsafe`).\n  - **This is defense in depth:** expiry's safety doesn't depend on it.\n  - **What it guarantees:** the messenger never starts a withdrawal. Nothing that trusts it as a withdrawal sender, today or in future L1 contracts, can be fooled by a relayed message.\n- **The expiry window can't exceed 7 days.** op-core and kona both reject a dependency-set message expiry window override above 7 days, and `op-interop-filter` caps its `--message-expiry-window` flag the same way. A window longer than the contract's period would allow a refund followed by a valid relay.\n- **`EXPIRY_PERIOD = 8 days`:** the protocol's 7-day window plus a 1-day safety margin.\n- **Every message costs more gas:** `sendMessage` stores a timestamp, about 22k more gas per message.\n- **Old messages can't expire:** messages sent before this upgrade have no timestamp.\n\n## Contract changes\n\n- **`L2ToL2CrossDomainMessenger` 1.3.2 → 2.0.0:**\n  - new constant `EXPIRY_PERIOD`;\n  - new storage at slots 3–4: `sentMessageTimestamps` and `expiredMessages`;\n  - new function `expireMessage`, the unsafe-target helper, and `resendMessage` removed;\n  - no initializer, so it is still upgraded with plain `upgradeTo`.\n- **New `UndeliveredMessageExporter` 1.0.0 at `0x…0030`:** gated on interop like the other interop predeploys, and wired through `Predeploys`, `L2Genesis`, `L2ContractsManager` (now 1.15.0), the Go predeploy registry and the NUT bundle.\n- **`L1CrossDomainMessenger` 2.11.1 → 2.12.0:** adds `relayUndeliveredMessage`, with no new storage and an `INTEROP` gate. `EXPIRE_MESSAGE_GAS_LIMIT = 100_000`, which a cold-storage relay test exercises.\n- **`SuperchainETHBridge` 1.0.1 → 1.1.0:** `sendETH` is unchanged. Adds `refundETH` and a `refunded` mapping.\n- **Off-chain:** the window cap in op-core (Go), kona (Rust) and `op-interop-filter`.\n- **Docs:** `message-expiration.mdx` and the interop overview now describe expiry instead of resend.\n\n## Launch checklist\n\n- **The window cap is live before expiry is relied on.** Every node and the accepted proof program must enforce the dependency-set window cap of 7 days or less. With an older prestate that accepts a longer override, a refund could be followed by a valid relay.\n- **The dependency set and the lockbox agree.** Every chain in a cluster's dependency set must also be authorized in the cluster's `ETHLockbox` and run the exporter, in the same fork. Otherwise sends to it can't be refunded.\n- **Embed each cluster's dependency set in the prestate.** It must be in the registry and the absolute prestate: kona falls back to a host-supplied dependency set for clusters that aren't in the registry.\n- **Re-snapshot Lagoon after merge.** Lagoon's NUT bundle (`op-core/nuts/fork_lock.toml`) still locks the old messenger. It must be re-snapshotted once this merges, together with kona's bundle counts, and the exporter added back to op-core's `Predeploys` map at that snapshot. It is deliberately left out until then, so the frozen fork state stays unchanged.\n- **Rules every future upgrade must keep:**\n  - nothing may re-emit `SentMessage` for a message that already has a timestamp: no resend, and no rollback to an implementation that has `resendMessage`;\n  - every way of relaying on the destination must set `successfulMessages`;\n  - any change to message hashing or nonce versioning must be mirrored in the exporter.\n\n  Breaking any of these allows a refund followed by a relay.\n- **Use enough L1 gas when finalizing an export,** at least 1M. Because a failed relay is stored rather than reverted, `eth_estimateGas` under-estimates.\n\n## Limitations\n\n- **Messages sent before the upgrade can't be recovered.** They have no send timestamp, so they can never expire, and with `resendMessage` gone they can't be resent either. In production this ships with interop's launch, so no messages predate it.\n- **`refundETH` always pays `from`,** which is `sendETH`'s `msg.sender`. A router that sent ETH on someone's behalf needs its own way to pass a refund on. If `sendETH` was itself called from a relayed interop message, `from` is the `L2ToL2CrossDomainMessenger`, and a refund would be stuck there.\n- **An early export is harmless.** It fails on the source with `MessageNotExpired`. Export again after `EXPIRY_PERIOD`.\n\n## Testing\n\n- **Forge:**\n  - messenger: send timestamps, the unsafe-target rule on send and on relay, `expireMessage` auth and the exact boundary, and `expireMessage` through a real `L2CrossDomainMessenger` relay with cold storage, including an out-of-gas run then a replay;\n  - exporter: hashing, the delivered check, and an export forced in from a deposit;\n  - `L1CrossDomainMessenger`: an integration test with real contracts; rejection of a forged messenger, another lockbox, the wrong L2 sender (including `0x…23`), interop disabled, and the chain's own messenger;\n  - bridge: refund after expiry pays exactly once; a forged refund through a direct `sendMessage` reverts; wrong-preimage fuzzing;\n  - one end-to-end test of send → export → L1 → expire → refund, using `vm.warp`.\n- **Acceptance (`op-acceptance-tests/tests/interop/expiry`, two-chain interop devnet):** every leg runs for real:\n  - `sendETH` from A, never relayed on B;\n  - an export **forced in as an L1 deposit** on B;\n  - prove and finalize, then A's L1 messenger relays and the deposit lands on A.\n\n  The devnet can't advance L2 time 8 days, so the test then asserts the exact `MessageNotExpired` rejection, the carried hash and the timestamp. Forge covers the expired path. The acceptance test also checks ordinary relays and that exporting a delivered message is refused.\n- **Go and Rust:** tests for the window cap, and tests pinning the constants.\n\n## Follow-ups (not in this PR)\n\n- A spec section.\n- Refunds in `SuperchainTokenBridge`, using the same `expiredMessages` check.\n- Formal models and proofs, in a stacked draft PR: Lean, Quint, Kontrol, Halmos and invariant fuzzing.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-07T19:17:24Z",
-      "mergedAt": null,
-      "additions": 2380,
-      "deletions": 323
     }
   ],
   "codeChanges": {
-    "additions": 13644,
-    "deletions": 12320,
-    "files": 407,
-    "commitCount": 579
+    "additions": 14343,
+    "deletions": 12816,
+    "files": 422,
+    "commitCount": 747
   },
   "completedItems": [
     {
@@ -906,6 +906,29 @@
       ]
     },
     {
+      "title": "op-challenger: check super-root and ZK games against superroot_atTimestamp in game-proposal-outputs",
+      "prNumber": 23242,
+      "type": "other",
+      "body": "`game-proposal-outputs` always asked op-node for `optimism_outputAtBlock` at the game's `l2SequenceNumber`. For super-cannon-kona and super-permissioned games that value is a super-root timestamp, so the command compared each proposal again",
+      "files": [
+        ".claude/agents/dispute-game-investigator.md",
+        ".claude/skills/dispute-game-investigator/SKILL.md",
+        "docs/ai/dispute-game-investigation.md",
+        "op-challenger/cmd/game_proposal_outputs.go",
+        "op-challenger/cmd/game_proposal_outputs_test.go"
+      ]
+    },
+    {
+      "title": "op-challenger: show ZK game state in list-claims",
+      "prNumber": 23241,
+      "type": "other",
+      "body": "`list-claims` failed on ZK dispute games with `unsupported game type: zk`, and no CLI command showed a ZK game's `claimData`: proposal status, challenger, prover and deadline. Those fields are what tell an operator whether a proof landed af",
+      "files": [
+        "op-challenger/cmd/list_claims.go",
+        "op-challenger/cmd/list_claims_test.go"
+      ]
+    },
+    {
       "title": "kona-sp1: remove single-chain proving leftovers",
       "prNumber": 23240,
       "type": "other",
@@ -1061,6 +1084,46 @@
       ]
     },
     {
+      "title": "alloy-op-evm: apply access lists to legacy transaction simulations",
+      "prNumber": 23270,
+      "type": "other",
+      "body": "Legacy-style `eth_createAccessList` requests retain a legacy transaction type when rerun with the discovered access list, so `gasUsed` reflects execution without that list. The rerun now applies EIP-2930 pricing and warming while preserving",
+      "files": [
+        "rust/alloy-op-evm/src/tx.rs"
+      ]
+    },
+    {
+      "title": "op-challenger!: label L2 sequence numbers and root claims correctly",
+      "prNumber": 23265,
+      "type": "other",
+      "body": "`list-games` and `list-claims` labelled two values as L2 block numbers and output roots. Both are only accurate for output-root games. `l2SequenceNumber()` returns an L2 **timestamp** for the four game types where `UsesSuperRoots()` is true",
+      "files": [
+        "op-challenger/cmd/list_claims.go",
+        "op-challenger/cmd/list_claims_test.go",
+        "op-challenger/cmd/list_games.go",
+        "op-challenger/cmd/list_games_test.go"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: read REPO_GITHUB_TOKEN in the PR base lookups",
+      "prNumber": 23262,
+      "type": "other",
+      "body": "`get-target-branch.sh` and `check-semver-diff.sh` pick a GitHub token from `GH_TOKEN`, `GITHUB_TOKEN` or `GHTOKEN`. #23249 added a `REPO_GITHUB_TOKEN` override, but only in the two CI steps that map it to `GH_TOKEN`. The semver-diff check s",
+      "files": [
+        "packages/contracts-bedrock/scripts/checks/check-semver-diff.sh",
+        "packages/contracts-bedrock/scripts/ops/get-target-branch.sh"
+      ]
+    },
+    {
+      "title": "rust: bump hickory-resolver to 0.26.3",
+      "prNumber": 23261,
+      "type": "other",
+      "body": "Fixes two hickory-resolver advisories flagged on `rust/Cargo.lock` and in the op-reth images: GHSA-6w6g-hm98-mhgm (unbounded TC-retry loop, resource-exhaustion DoS) and GHSA-5j98-2g5x-46v6 (`lookup()`/`lookup_ip()` obscure DNSSEC validation",
+      "files": [
+        "rust/Cargo.lock"
+      ]
+    },
+    {
       "title": "op-supernode: only return denied output at the replaced block's own timestamp",
       "prNumber": 23257,
       "type": "other",
@@ -1068,6 +1131,19 @@
       "files": [
         "op-supernode/supernode/chain_container/chain_container.go",
         "op-supernode/supernode/chain_container/chain_container_test.go"
+      ]
+    },
+    {
+      "title": "op-node, op-e2e, op-devstack: support ZK dispute games in withdrawal helpers",
+      "prNumber": 23255,
+      "type": "other",
+      "body": "The `withdrawal` tool in `op-chain-ops/cmd/withdrawal` fails with `unsupported game type` when the portal's respected game type is the ZK dispute game (type 10), so withdrawals on ZK chains cannot be proven with it. It now finds the coverin",
+      "files": [
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/bridge_test.go",
+        "op-e2e/e2eutils/wait/withdrawals.go",
+        "op-node/withdrawals/utils.go",
+        "op-node/withdrawals/utils_test.go"
       ]
     },
     {
@@ -1091,6 +1167,15 @@
         ".circleci/scripts/test-decision-tree.sh",
         ".circleci/scripts/workflow-helpers.sh"
       ]
+    },
+    {
+      "title": "ci: bump apko factory workflows to pick up fork-PR safety fix",
+      "prNumber": 23273,
+      "type": "bugfix",
+      "body": "## Summary\nBumps melange-build.yaml, apko-publish.yaml, and apko-smoke-test.yaml references to the factory commit that adds fork-PR safety handling to the apko build pipeline (skip provenance attestation, skip GCP auth, push to ttl.sh inste",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
     }
   ],
   "topContributors": [
@@ -1105,13 +1190,33 @@
       "summary": null
     },
     {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 408.36844839105873,
+      "prScore": 390.36844839105873,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 354.98142188361663,
+      "totalScore": 370.48142188361663,
       "prScore": 185.54342188361665,
-      "issueScore": 8,
-      "reviewScore": 161,
+      "issueScore": 14,
+      "reviewScore": 170.5,
       "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 316.3144453053146,
+      "prScore": 185.23644530531462,
+      "issueScore": 16.1,
+      "reviewScore": 114,
+      "commentScore": 0.978,
       "summary": null
     },
     {
@@ -1125,13 +1230,13 @@
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 275.54503812973246,
-      "prScore": 275.54503812973246,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 295.7316246959244,
+      "prScore": 250.41562469592435,
+      "issueScore": 2,
+      "reviewScore": 41.5,
+      "commentScore": 1.8159999999999998,
       "summary": null
     },
     {
@@ -1142,26 +1247,6 @@
       "issueScore": 0,
       "reviewScore": 58.5,
       "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 246.44455110969506,
-      "prScore": 168.36655110969502,
-      "issueScore": 16.1,
-      "reviewScore": 61,
-      "commentScore": 0.978,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 242.92749948036283,
-      "prScore": 207.54949948036284,
-      "issueScore": 2,
-      "reviewScore": 32,
-      "commentScore": 1.378,
       "summary": null
     },
     {
@@ -1177,11 +1262,11 @@
     {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 144.37199421015103,
+      "totalScore": 149.71199421015103,
       "prScore": 118.87199421015103,
       "issueScore": 0,
-      "reviewScore": 25.5,
-      "commentScore": 0,
+      "reviewScore": 30.5,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -1207,11 +1292,51 @@
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 116.03207712855229,
+      "totalScore": 120.53207712855229,
       "prScore": 93.03207712855229,
       "issueScore": 0,
-      "reviewScore": 23,
+      "reviewScore": 27.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 110.00697502522934,
+      "prScore": 64.46697502522935,
+      "issueScore": 0,
+      "reviewScore": 45,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 97.60640388008419,
+      "prScore": 97.40640388008418,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 96.17034806148942,
+      "prScore": 50.630348061489414,
+      "issueScore": 0,
+      "reviewScore": 45,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 85.36342359164556,
+      "prScore": 50.32342359164555,
+      "issueScore": 0,
+      "reviewScore": 34.5,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -1225,16 +1350,6 @@
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 80.86342359164556,
-      "prScore": 50.32342359164555,
-      "issueScore": 0,
-      "reviewScore": 30,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
       "username": "obiyang",
       "avatarUrl": "https://avatars.githubusercontent.com/u/124426464?u=dc97322e71359a4e5fc18f722d07679c1c047178&v=4",
       "totalScore": 78.95097688137517,
@@ -1242,6 +1357,26 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 74,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 74,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 71.54750799360215,
+      "prScore": 61.14750799360215,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -1265,6 +1400,16 @@
       "summary": null
     },
     {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 57.888793505901035,
+      "prScore": 56.272793505901035,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.6159999999999999,
+      "summary": null
+    },
+    {
       "username": "0xarktos",
       "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
       "totalScore": 56.968347486856075,
@@ -1285,6 +1430,16 @@
       "summary": null
     },
     {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 53.83931329904619,
+      "prScore": 53.83931329904619,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
       "totalScore": 51.88727588020243,
@@ -1292,46 +1447,6 @@
       "issueScore": 4,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "oplabs-renovate",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 51.799943051537056,
-      "prScore": 51.59994305153705,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 46.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 46.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 44.261498302480916,
-      "prScore": 42.98549830248092,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.2759999999999998,
-      "summary": null
-    },
-    {
-      "username": "OptimismBot",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 40.54,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 40,
-      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -1355,16 +1470,6 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 37.7484379124341,
-      "prScore": 22.5484379124341,
-      "issueScore": 0,
-      "reviewScore": 15,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "studiokvc",
       "avatarUrl": "https://avatars.githubusercontent.com/u/180499652?v=4",
       "totalScore": 33.117760823346906,
@@ -1385,6 +1490,16 @@
       "summary": null
     },
     {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 32.036766166719346,
+      "prScore": 12.398766166719344,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
       "totalScore": 28.429612288668107,
@@ -1392,16 +1507,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.7779999999999999,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 27.536766166719346,
-      "prScore": 12.398766166719344,
-      "issueScore": 0,
-      "reviewScore": 14.5,
-      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -1425,6 +1530,16 @@
       "summary": null
     },
     {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 24,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 24,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Kshot3000",
       "avatarUrl": "https://avatars.githubusercontent.com/u/318831680?u=5c191a758ae0f34380b9c9256e158aa61cf51315&v=4",
       "totalScore": 20.870480365792417,
@@ -1441,16 +1556,6 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 19,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "bitwiseguy",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
-      "totalScore": 16.97088092298052,
-      "prScore": 16.97088092298052,
-      "issueScore": 0,
-      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1485,16 +1590,6 @@
       "summary": null
     },
     {
-      "username": "yashvardhan-kukreja",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
-      "totalScore": 10.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "donoso-eth",
       "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
       "totalScore": 10.2,
@@ -1505,22 +1600,22 @@
       "summary": null
     },
     {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "chillsauce",
       "avatarUrl": "https://avatars.githubusercontent.com/u/37008057?u=64d05ba5130763cd9b85b54c416f8ce6b0241178&v=4",
       "totalScore": 9.60761228866811,
       "prScore": 9.60761228866811,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "raffaele-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
-      "totalScore": 9.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9.5,
       "commentScore": 0,
       "summary": null
     },
@@ -1551,6 +1646,16 @@
       "prScore": 0,
       "issueScore": 8,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -1595,6 +1700,16 @@
       "summary": null
     },
     {
+      "username": "atenalt",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/207357267?u=72dcaa012434cc0411ebe81a6fd162529cc7701c&v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ariescodescream",
       "avatarUrl": "https://avatars.githubusercontent.com/u/12948118?v=4",
       "totalScore": 2,
@@ -1615,6 +1730,16 @@
       "summary": null
     },
     {
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "totalScore": 0.54,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
       "username": "wjmelements",
       "avatarUrl": "https://avatars.githubusercontent.com/u/799573?v=4",
       "totalScore": 0.2,
@@ -1625,8 +1750,8 @@
       "summary": null
     },
     {
-      "username": "alezvillo",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/204168614?u=8bfca7863a83706e866fb80ae002144c3a57e251&v=4",
+      "username": "swiftnodes",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/275502250?u=67d8a6266dfbc7500bbf26931126f3d3b620d193&v=4",
       "totalScore": 0.2,
       "prScore": 0,
       "issueScore": 0,
@@ -1635,8 +1760,8 @@
       "summary": null
     },
     {
-      "username": "PeaStew",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "username": "alezvillo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/204168614?u=8bfca7863a83706e866fb80ae002144c3a57e251&v=4",
       "totalScore": 0.2,
       "prScore": 0,
       "issueScore": 0,
@@ -1665,9 +1790,9 @@
       "summary": null
     }
   ],
-  "newPRs": 95,
-  "mergedPRs": 50,
-  "newIssues": 32,
-  "closedIssues": 25,
-  "activeContributors": 68
+  "newPRs": 110,
+  "mergedPRs": 58,
+  "newIssues": 35,
+  "closedIssues": 27,
+  "activeContributors": 73
 }
