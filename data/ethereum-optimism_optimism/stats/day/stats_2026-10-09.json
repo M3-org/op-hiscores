@@ -5,17 +5,189 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-09 to 2026-10-10, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 4 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-10-09 to 2026-10-10, ethereum-optimism/optimism had 21 new PRs (1 merged), 17 new issues, and 29 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM7H4aXm",
+      "title": "[Tracking] [Forge Deployer] OP Deployer Forge Migration",
+      "author": "mslipper",
+      "number": 17213,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Related design doc for reference: [link](https://github.com/ethereum-optimism/design-docs/blob/main/protocol/op-deployer-forge-engine.md)",
+      "createdAt": "2025-08-25T23:04:01Z",
+      "closedAt": "2026-10-09T12:54:30Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABIvECrQ",
+      "title": "opgeth-decoupling: replace op-chain-ops/script's op-geth EVM with a Rust script engine",
+      "author": "sebastianst",
+      "number": 21743,
+      "repository": "ethereum-optimism/optimism",
+      "body": "\nPart of #20257. See §16 of the [op-geth decoupling doc](https://github.com/ethereum-optimism/optimism/blob/develop/docs/ai/opgeth-decoupling.md). **Blocks #20266.**\n\n## Problem\n\n`op-chain-ops/script` is a Foundry-style in-process forge-script executor; op-deployer runs all\nits deployment/genesis scripts through it (~40 importing files). Semantically it is a **plain L1\nEVM** — its chain config activates only Ethereum forks (OP fork fields are explicitly nil), so\nthere is no OP state transition to preserve. But its *mechanism* is fork-bound: the cheatcode\nmachinery runs on op-geth-only EVM hooks that upstream go-ethereum does not have and will not get\n(we don't open upstream PRs):\n\n- `vm.Config.PrecompileOverrides` — cheatcode precompile injection\n- `vm.Config.CallerOverride` — prank support\n- `vm.Config.NoMaxCodeSize`\n- `vm.BlockContext.L1CostFunc` (trivial: set to nil today)\n- exported `state.StateUpdate` — upstream's `state.Database.Commit` takes the *unexported*\n  `*state.stateUpdate`, so `script/forking.ForkDB` cannot implement the interface outside the fork\n\nSo \"swap call sites to op-core\" does not exist as an option here.\n\n## Decision: Rust engine, no interim module split\n\nRewrite script execution as a **Rust engine reusing foundry crates** (forge is the reference\nexecutor for these scripts; revm underneath), consumed by op-deployer — subprocess/sidecar\nfollowing the op-reth-test-engine pattern (#20415), or an equivalent embedding.\n\nA transitional Go module split (op-chain-ops+op-deployer keeping the op-geth replace in their own\n`go.mod`) was considered and **rejected**: the value of this epic only materialises when we can\nstop maintaining the op-geth fork entirely. Any in-repo module still depending on it keeps the\nfork alive.\n\n## Design constraints\n\n- **Distribution**: op-deployer must keep working without a system-installed foundry — the engine\n  is version-pinned and shipped/built with our tooling, not discovered from the user's PATH.\n- **Cheatcode surface**: only what our scripts actually use. Derive the current surface from the\n  cheatcode dispatch in `op-chain-ops/script/cheatcodes*.go` rather than reimplementing all of\n  forge.\n- **Fork mode**: `script/forking` (RPC-backed state) is part of the surface; foundry crates\n  already provide this.\n- **Parity gate**: before switching, run both engines over the deployment/genesis scripts of a\n  reference config and require identical resulting state/allocs.\n\n## Spike results (2026-07, branch `seb/spike-op-script-engine` — three completed spikes)\n\nThe strategy is **spike-proven end-to-end**; what remains is landing, bake time, and the final\nGo-host deletion. Spike 1 built the engine core and passed the first byte-for-byte parity gate;\nspike 2 made Rust the op-deployer default for non-forked hosts (L2Genesis `ForgeAllocs`\nbyte-parity across all 5 alloc modes, OPCM `RunScript*` path, interopgen, CI binary provisioning,\n~2.6× faster than the Go host); spike 3 added fork mode (lazy RPC-backed `AlloyDB` underlay\npinned by block hash) and deleted the per-host-kind boundary, making `--script-engine=go` the\nonly remaining Go-engine path — forked A/B parity verified against a hermetic fixture and live\nSepolia archive. Each spike passed independent adversarial no-shortcut audits (no skips, no\nweakened assertions, no regenerated goldens).\n\nKey facts from spike 1 (still the architectural foundation):\n\n- **Hand-rolled on the already-pinned revm 40 — no foundry crates.** Sidesteps foundry's\n  revm/alloy version-skew risk entirely; no second workspace or lockfile. All four fork hooks\n  have proven revm equivalents (inspector call hook, `CallInputs.caller`,\n  `CfgEnv.limit_contract_code_size`, `CacheDB` iteration).\n- **The headline risk is dead**: revm==geth gas/nonce accounting at the L1 fork is empirically\n  equal on the golden sequences.\n- Transport per #20415: reth-ipc/jsonrpsee UDS server, `rpc.DialIPC`-compatible.\n- **Honest gap**: ~13 of ~153 cheatcodes implemented; L2Genesis parity (the true go/no-go\n  milestone) not yet attempted; fork mode (~2k LOC Go equivalent) absent; OPCM\n  input/output-precompile path designed but unbuilt; artifact plumbing minimal.\n- **Known hazard to fix first**: the unimplemented-cheatcode fallback returns empty-success\n  instead of reverting — silent-wrong-state risk; must become a loud revert before any further\n  parity work.\n- **Estimated production effort**: ~7–9.5 engineer-weeks, sequenced so L2Genesis parity comes\n  first as the go/no-go milestone, then fork mode, OPCM path, op-deployer cutover,\n  distribution/packaging.\n\n## Acceptance criteria\n\n- op-deployer executes its scripts via the Rust engine; `op-chain-ops/script` (Go EVM host) is\n  deleted.\n- No monorepo Go package imports `go-ethereum/core/vm` for script execution.\n- Parity run against the old engine documented in the PR.\n\n🤖 *Generated by Claude Code*\n",
+      "createdAt": "2026-07-14T08:15:24Z",
+      "closedAt": "2026-10-09T12:54:27Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABMK9yNQ",
+      "title": "Re-Deploy Lightnode as majority configuration to production environments",
+      "author": "jelias2",
+      "number": 22354,
+      "repository": "ethereum-optimism/optimism",
+      "body": "# Description\nRe-deploy lightnode as the majority configuration to production environments as a way to bake and harden lightnodes prior to interop activation",
+      "createdAt": "2026-08-10T15:34:58Z",
+      "closedAt": "2026-10-09T14:07:24Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABPm2VNA",
+      "title": "contracts-bedrock: audit prep for OPCMMigrator",
+      "author": "0xOneTony",
+      "number": 22772,
+      "repository": "ethereum-optimism/optimism",
+      "body": "### Audit prep for the the interop migration path and lockbox changes\n\n`ETHLockbox` becomes the pause identifier and is deployed on every chain through `upgrade()`, `SystemConfig`, `AnchorStateRegistry` and `DelayedWETH` resolve pause and guardian through it, and `OPContractsManagerMigrator` and its validator are hardened. All of it needs an external audit before the upgrade ships.\n\n- Define dates.\n- Define the scope as the diff of every changed contract.\n- Prepare the briefing: architecture before and after, invariants, known issues and their status, test coverage, out of scope.\n- Triage the findings and agree on a status for each.",
+      "createdAt": "2026-09-03T23:08:22Z",
+      "closedAt": "2026-10-09T10:12:53Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABWEiBww",
+      "title": "op-reth: require the L1-info deposit as tx 0 on import (malicious-sequencer hardening; also desyncs SDM settlement fee context)",
+      "author": "geoknee",
+      "number": 23294,
+      "repository": "ethereum-optimism/optimism",
+      "body": "op-reth accepts imported blocks whose first transaction is not the L1-info deposit. The rule is enforced only in the consensus layer (op-node `derive/payload_util.go` `PayloadToBlockRef`; Kona `protocol/src/block.rs` `MissingL1InfoDeposit` / `FirstTxNonDeposit`). A malicious or buggy sequencer, or anyone with Engine API (JWT) access, can therefore get op-reth to execute such a block as unsafe head:\n\n- **No L1-info-first check on import.** `OpBeaconConsensus::validate_block_pre_execution` (`rust/op-reth/crates/consensus/src/lib.rs:114-140`), post-execution validation (`validation/mod.rs:99-160`) and `context_for_payload` (`rust/op-reth/crates/evm/src/lib.rs:363-397`) never check that tx 0 is the L1-info deposit. The block then executes against the parent's L1Block storage (stale fee and DA parameters). op-geth's block validator has the same gap.\n- **SDM settlement uses a different fee context than the EVM charged.** With an ordinary tx before the L1-info deposit, the op-revm handler latches the parent-state `L1BlockInfo` for the whole block (`rust/op-revm/src/handler.rs:163-167`). PostExec settlement keeps its own lazily filled cache (`rust/alloy-op-evm/src/block/mod.rs:700-713`) and can load the post-deposit operator-fee params. A refunded tx can then be credited an operator-fee delta it never paid, debited from the operator fee vault. This is the same invariant as internal SDM-L13 (settlement must use the fee context the EVM charged), broken through a different input.\n\n**Impact:** low. Derivation always places L1-info first, so these blocks can never become safe and op-node / kona-node reorg them out at consolidation. The vault debited belongs to the operator, the same party as the sequencer. It is a malicious-sequencer, unsafe-chain hardening gap, not a permissionless one.\n\n**Suggested fix:**\n1. Enforce \"tx 0 is the L1-info deposit\" for non-genesis blocks in op-reth consensus validation (covers both items).\n2. Defence in depth for SDM: have settlement reuse the handler's `L1BlockInfo` (or `debug_assert` that the two agree), so the two caches can't diverge.\n\nSources: Cantina Apex findings [OPTI1-44](https://ai.cantina.xyz/optimistic-ethereum/finding/OPTI1-44) and [OPTI1-157](https://ai.cantina.xyz/optimistic-ethereum/finding/OPTI1-157), both triaged valid, Low. Verified at `52aff8e968`, and unchanged on `develop`.\n",
+      "createdAt": "2026-10-09T09:44:40Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABHK1nYA",
+      "title": "op-reth!: add eth_sendBundle with revert protection",
+      "author": "trianglesphere",
+      "number": 23254,
+      "body": "Add the `eth_sendBundle` RPC to op-reth, served alongside `eth_sendRawTransactionConditional` when `--rollup.enable-tx-conditional` is set, following the public Unichain docs:\r\n\r\n- a bundle holds exactly one raw transaction plus an execution window, either a block number range (hex quantities) or a timestamp range (JSON numbers), the two being mutually exclusive;\r\n- without `maxBlockNumber` the bundle expires 10 blocks after submission; a timestamp-ranged bundle expires at `maxTimestamp`, at most 10 minutes ahead; ranges whose maximum is already in the past are rejected;\r\n- unless its hash is listed in `revertingTxHashes`, the transaction is revert protected: the payload builder only commits it when it succeeds, so a revert costs the sender nothing;\r\n- the response carries the transaction hash as `bundleHash`, and once the bundle's window has passed without inclusion, `eth_getTransactionReceipt` for it answers with `-32602: the transaction was dropped from the pool`, also on a replica that forwarded the bundle to its sequencer.\r\n\r\nThe window is carried by the pool transaction's existing conditional. Two gaps in conditional handling are closed because bundles rely on them: the payload builder now skips a conditional transaction whose window does not cover the block being built (the minimum bounds were never enforced before), and the conditional expiry sweep now covers `Private`-origin transactions, which is how conditional transactions and bundles enter the pool (they never expired before).\r\n\r\nRevert protection is a new flag on `OpPooledTransaction` (`MaybeRevertProtectedTransaction`, now part of `OpPooledTx`) which `execute_best_transactions` honours via the executor's commit condition.\r\n\r\nBREAKING CHANGE: `OpPooledTx` gains the `MaybeRevertProtectedTransaction` supertrait. Downstream crates with their own pool transaction type implementing `OpPooledTx` must implement it too, delegating to the wrapped `OpPooledTransaction`. Node operators are unaffected.\r\n\r\n\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-07T17:24:49Z",
+      "mergedAt": null,
+      "additions": 1329,
+      "deletions": 68
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHmpURw",
+      "title": "ci: enforce shfmt formatting on shell scripts",
+      "author": "maurelian",
+      "number": 23326,
+      "body": "Stacked on #23325.\n\nNothing in CI runs shfmt, and `just shellcheck` ran `shfmt --diff` through `find -exec … \\;`, which discards its exit status. So 26 scripts drifted from the style set in `.editorconfig`, and only someone reading the local output would notice.\n\nThis adds a blocking `shfmt-check` job, required by `ci-gate`, and reformats the 26 scripts once so the job passes. The reformat changes formatting only: `shfmt -mn` produces identical output before and after for every file except `pr-facts.sh`, where the one difference is the placement of a comment inside a `case` arm. The routing self-test (`test-decision-tree.sh`) and `check-pr-title-test.sh` pass before and after under bash 5. Under macOS bash 3.2 they already fail on develop.\n\n`just shellcheck` now also fails locally on unformatted scripts; `just shfmt-fix` fixes them.\n\n`ci-config-reviewer` found nothing blocking. I skipped one of its nits: excluding the `superchain-registry` submodule from the scan. `shell-check` has the same exposure, and the submodule is empty unless a checkout initialises it.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-09T19:59:37Z",
+      "mergedAt": null,
+      "additions": 1272,
+      "deletions": 1154
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBGd0Xw",
+      "title": "op-reth: forward pre-bedrock eth_getLogs to historical endpoint",
+      "author": "riba2534",
+      "number": 22663,
+      "body": "## Description\n\nFixes #22573.\n\n`extract_block_id_for_method` already forwarded `eth_getBlockReceipts` to the historical RPC, but `eth_getLogs` was missing. Pre-Bedrock log filters were served locally and returned `[]` even when the historical endpoint had the logs.\n\nParse the filter's `blockHash` or `toBlock` (the range lies entirely before Bedrock iff its upper bound does). Open-ended and crossing-Bedrock ranges stay local.\n\n## Testing\n\nUnit tests in `rust/op-reth/crates/rpc/src/historical.rs` cover range/hash extraction, open-ended filters, and the OP Mainnet pre/post/crossing Bedrock cases from the issue.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-26T16:18:17Z",
+      "mergedAt": null,
+      "additions": 822,
+      "deletions": 29
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABBQJyEw",
+      "title": "kona-node: recover from a stale sequencer build instead of hot-looping FCUs",
+      "author": "sebastianst",
+      "number": 22686,
+      "body": "A kona-node sequencer could be permanently wedged — hot-looping `engine_forkchoiceUpdatedV3` at thousands of calls per second — whenever the engine reorged its unsafe head while a build was in flight. Derivation force-inclusion after a batcher outage makes that reorg happen deterministically, so a sequencing-window expiry reliably killed the node. Full mechanism in #22681.\n\nThe sequencer reads the unsafe head from a watch channel, then does network-bound async work (L1 origin selection, attributes building) before submitting the build. If derivation reorgs in that window, `BuildTask::start_build` sends the EL `head = <stale sequencer block>`, `safe = <derived block>` and gets `-38002`. That was classified `Temporary`, and `EngineTask::execute` retries temporary errors in a `while let Err(..)` loop whose only pause is `yield_now().await`. The forkchoice state cannot change while the queue is draining, so the retry could never succeed: the engine actor was stuck inside `Engine::drain` and the sequencer parked awaiting a payload id, with no path left to a reset.\n\n## Changes\n\nBoth guards are lifted from op-node's `EngineController`:\n\n- `-38002` on the build forkchoice update maps to a new `EngineBuildError::InvalidForkchoiceState` with severity `Reset`, mirroring `SynchronizeTask` (which already special-cased the same code on the attribute-less FCU) and op-node's `startPayload`.\n- A `Detached` build whose parent is no longer the unsafe head is rejected before the engine is called, mirroring op-node's `startBuild`. The gate reuses the existing `BuildSealCoupling` flag that `SealTask` already uses for this exact distinction: `Atomic` for the derivation-driven `build_and_seal` path, where the parent legitimately differs from the unsafe head, `Detached` for a caller working from its own snapshot. `BuildTask`'s result channel now carries a `Result` so the caller learns why, instead of waiting on a sender that gets dropped.\n- The sequencer treats a rejected or dropped build as \"re-build on the current head\", not a fatal actor error — every `NodeActor::step` error shuts the whole node down. Build errors are classified by an explicit `is_build_task_err_fatal` match rather than a wildcard, for the same reason `is_seal_task_err_fatal` next to it is written that way. `ResponseError` (the engine cleared the queue during a reset) gets the same treatment; a genuinely dead engine actor surfaces as `RequestError`, which stays fatal.\n- Retries of a temporarily failing task now back off (10ms, doubling to ~1.3s). Without this the hot loop is still reachable by a different trigger: any transport-level FCU failure — an EL restarting — maps to `AttributesInsertionFailed`, which is `Temporary`, and spun the actor at the rate the transport answered.\n- The engine actor publishes the unsafe head after a reset, before the awaits that can block on a full derivation-actor channel. This is load-bearing rather than defensive: without it the new staleness guard would reject the sequencer's first build on every startup, since the watch channel still holds `L2BlockInfo::default()`.\n\n## Testing\n\nUnit tests only; no full-system repro. `-38002` on a build now surfaces as `Reset` and is not retried (that test blows its timeout before the fix), a stale detached build is rejected without touching the engine and tells its caller, and the sequencer retries onto the reorged head instead of dying. The build-task success cases are parameterized over both couplings so an inverted staleness guard fails CI — verified by inverting it.\n\nA devstack repro is blocked on a harness gap documented in #22681: nothing anywhere exercises batcher outage → window expiry → force-include → sequencer reorg against a kona-node sequencer, and the one test that models the whole loop (`TestSequencingWindowExpiry`) is bound to a supernode preset that cannot start a `KonaNode`. The gap is fillable via `presets.NewMinimal` + `sysgo.WithSequencingWindow`, which the kona-node acceptance job already covers.\n\n## Review\n\n`rust-code-reviewer` run; no blocking findings. Taken: the retry backoff, the exhaustive build-error classification, deduplicating the staleness check and the `-38002` detection, moving the post-reset publish earlier, surfacing the inner build error in `Display`, and the two test gaps (no `Detached` success coverage, no recovery assertion).\n\nDeferred to follow-ups on #22681, all pre-existing and out of scope here:\n\n- `SealTask` routes every error to its caller and returns `Ok`, so a `-38002` raised during a sequencer seal still never triggers a reset.\n- `QueuedSequencerEngineClient`'s `recv().await` calls have no timeout, so the sequencer can still be parked indefinitely on an engine round-trip and stops servicing its admin API.\n- The sequencer's next parent comes from a watch channel that lags the seal result, which is what makes the new guard fire at all; taking the parent from the seal's return value (what op-node does) removes the race rather than handling it.\n\n`go-code-reviewer` not run — no Go changes.\n\nFixes #22681\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01Fi2GEEBE6LmUwLS25WPKfq\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-27T19:30:19Z",
+      "mergedAt": null,
+      "additions": 451,
+      "deletions": 81
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHhX6OA",
+      "title": "op-node: prefetch L1 origins off the event loop and keep them across late updates",
+      "author": "geoknee",
+      "number": 23299,
+      "body": "Stacked on #23279. These are the follow-ups from its review.\n\n#23279 gives the sequencer one block of slack: the origin it needs next is cached in time, as long as the forkchoice update of the previous block reaches the origin selector within one build. That still fails when the event loop lags the sequencer goroutine. When the selector is fed forkchoice updates two builds late, a 10s chain again drifts to ~150 L1 blocks behind. A 2s chain keeps up, but resets its origin cache on almost every update: 899 lookups by hash in a 90-minute simulation, where one is expected. With this PR, the origin stays within the confirmation depth plus two blocks, and needs no lookup by hash, whatever the timing of forkchoice updates. Operators see L1 deposits and L1 data on L2 stay current even when the node is busy.\n\nThree changes:\n- **A late forkchoice update no longer clears the origin cache.** When the update's head is behind the current origin, it is skipped. If the unsafe head really was rewound, the build on top of it still looks its origin up by hash and repairs the cache.\n- **Each build triggers the next fetch.** After every build, the selector fetches the successor of the origin it just selected, in the background: the next origin if the build kept its parent's origin, or the lookahead if it adopted the next one. Behind a confirmation-depth shim this adds no L1 RPC in steady state. Without one, it adds at most one by-number call per build, and only one such fetch runs at a time.\n- **Receipts of cached origins are prefetched.** The first build on a new origin needs that origin's receipts. The node already prefetches receipts of new L1 heads, so in steady state this is a cache hit. It saves an L1 round trip on the build path while the origin catches up through older blocks, for example after a restart. Total L1 load is unchanged, because each origin's receipts are still fetched once.\n\nThe selector previously only fetched on the event loop. It now also fetches on its own goroutines. A fetch that started before a reset is therefore discarded rather than cached, so it can't trigger a second, avoidable `ErrNextL1OriginOrphaned` reset after an L1 reorg. In op-e2e action tests the fetches run inline, which keeps those tests deterministic.\n\n**Review notes.** I ran go-code-reviewer and an adversarial correctness review, and fixed their findings:\n- the generation guard on fetches that straddle a reset\n- only one successor fetch in flight at a time\n- no error logs for cancelled fetches at shutdown\n- tests for the background goroutine path and for the rewind repair\n\nNot done: the selector doesn't join its prefetch goroutines on shutdown. They are bounded by the driver context and a 10s timeout, and they no longer log on cancellation.\n\nEach behaviour is covered by a test that fails without it:\n- `TestOriginSelectorIgnoresLateForkchoiceUpdate`, and the `fcuDelay=2` cases of `TestOriginSelectorKeepsUpWithL1`, for the late-update skip\n- `TestOriginSelectorPrefetchesOnAdoption`, and `fcuDelay=2/blockTime=10`, for the successor fetch\n- `TestOriginSelectorPrefetchesNextOriginReceipts`, and the receipts check in `TestOriginSelectorKeepsUpWithL1`, for the receipts prefetch\n- `TestOriginSelectorDropsFetchStraddlingReset`, for the generation guard\n\nRelated: https://github.com/ethereum-optimism/optimism/issues/23271\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-09T11:22:10Z",
+      "mergedAt": null,
+      "additions": 328,
+      "deletions": 42
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
+    "additions": 8,
     "deletions": 0,
-    "files": 0,
-    "commitCount": 8
+    "files": 1,
+    "commitCount": 69
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "docs: warn not to expose op-node's admin API in the create-L2 tutorial",
+      "prNumber": 23298,
+      "type": "docs",
+      "body": "The create-L2 op-reth tutorial runs op-node with `--rpc.enable-admin` on `0.0.0.0:8547`. Nothing told readers that this RPC is unauthenticated (the JWT protects only the Engine API), so someone copying the tutorial onto a reachable host wou",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-reth-setup.mdx"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 150.70044590134324,
+      "prScore": 47.262445901343256,
+      "issueScore": 4,
+      "reviewScore": 99,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 136.3850882436438,
+      "prScore": 115.8470882436438,
+      "issueScore": 2.1,
+      "reviewScore": 18,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 105.02296545539792,
+      "prScore": 51.18296545539792,
+      "issueScore": 26,
+      "reviewScore": 27.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 73,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 73,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "OptimismBot",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
@@ -24,6 +196,26 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 50.04222947741509,
+      "prScore": 45.04222947741509,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 46.25286062417121,
+      "prScore": 36.55286062417121,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -37,6 +229,126 @@
       "summary": null
     },
     {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 42.96572897110376,
+      "prScore": 42.96572897110376,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 40.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 39.40021506143494,
+      "prScore": 25.70021506143494,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 35.79710149055313,
+      "prScore": 26.297101490553132,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 35.46537881253402,
+      "prScore": 35.46537881253402,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JSeiferth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/43515441?u=563afcbd9c4305c43db6ad35855cc0377a93a669&v=4",
+      "totalScore": 30.03043424064714,
+      "prScore": 30.03043424064714,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 29.88482705760126,
+      "prScore": 15.88482705760126,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mark-chen-mantle",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/292447144?v=4",
+      "totalScore": 23.482667543357145,
+      "prScore": 23.482667543357145,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 16.5,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 10.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 10.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
       "totalScore": 5.34,
@@ -45,11 +357,51 @@
       "reviewScore": 5,
       "commentScore": 0.33999999999999997,
       "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "somasoil",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/262555387?u=31f4f655410c6156631228df2c122f4e43bbb3a2&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "methakon",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3263074?u=38f286e09d8e2349c34db2014d2c37bb64663ea6&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 4
+  "newPRs": 21,
+  "mergedPRs": 1,
+  "newIssues": 17,
+  "closedIssues": 4,
+  "activeContributors": 29
 }

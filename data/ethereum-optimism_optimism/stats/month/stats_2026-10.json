@@ -5,8 +5,32 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 110 new PRs (58 merged), 35 new issues, and 73 active contributors.",
+  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 131 new PRs (61 merged), 52 new issues, and 76 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABVyDNdg",
+      "title": "op-node: origin prefetch ordering regression on 10-second L2 chains since v1.19.5",
+      "author": "atenalt",
+      "number": 23271,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWe observed persistent L1-origin lag on a custom OP Stack rollup with **10-second L2 blocks** after upgrading op-node to **v1.19.9**. L2 block timestamps remain fresh and derivation stays at the configured L1 confirmation distance, but the unsafe L2 head's L1 origin falls approximately 148–149 L1 blocks behind the observed L1 head, near the Fjord 1,800-second drift limit.\n\nSource-history analysis and controlled component tests identify an ordering change introduced by **#22241 / `4c3d0d3da6`**, first included in stable **v1.19.5**: the direct sequencer path can schedule its next build before the shared event dispatcher runs the next-origin prefetch triggered by `ForkchoiceUpdateEvent`.\n\nThis report concerns origin advancement, not a failure to produce L2 blocks. We would appreciate confirmation of whether this is an unintended regression and guidance on preserving timely origin adoption without reintroducing derivation-induced sequencer starvation.\n\n## Environment and observations\n\n- Observed deployed version: op-node v1.19.9; execution client op-reth v2.6.0.\n- L1: Sepolia, approximately 12-second blocks.\n- L2 block time: 10 seconds.\n- Sequencer and verifier L1 confirmations: 15.\n- Consensus-layer sync; Fjord, Granite and Holocene active; Isthmus not activated.\n- CPU was not saturated during this investigation.\n\nAt a representative sample:\n\n| Measurement | Value |\n| --- | --- |\n| `head_l1.number - current_l1.number` | 15 |\n| `head_l1.number - unsafe_l2.l1origin.number` | 149 |\n| Unsafe L2 timestamp age | approximately 3 seconds |\n| Unsafe-to-safe L2 distance | approximately 20–24 blocks |\n\nSafe/finalized progress and L1 transaction confirmations continued. Sequencing logs repeatedly showed the same origin used for two consecutive 10-second L2 blocks, for example:\n\n```text\nL2 parent  N     -> origin O\nL2 parent  N+1   -> origin O\nL2 parent  N+2   -> origin O+1\nL2 parent  N+3   -> origin O+1\n```\n\nReverting **only op-node** to the previously deployed v1.17.0 restored one origin advance per L2 block while behind, and the observed head-to-origin lag began decreasing (146 → 144 → 143, later 122). Execution client, batcher, RPC provider, fork schedule and confirmation settings were unchanged. This rollback was diagnostic, **not a recommendation to run an old client after Sepolia's L1 fork**; we are aware of the v1.19.5+ requirement.\n\n## Suspected mechanism\n\n1. The selector has cached current origin `O` and next origin `O+1`.\n2. A newly inserted L2 block adopts `O+1`.\n3. The direct sequencer path completes `ProcessPayload` and calls `scheduleNextAction` without requiring the shared dispatcher to finish the corresponding forkchoice-prefetch handler.\n4. If the next `FindL1Origin` runs first, `CurrentAndNextOrigin` promotes cached `O+1` to current and clears the next-origin cache.\n5. With no next origin cached and drift still below its limit, the selector reuses `O+1`, despite `O+2` being available and having a valid timestamp/confirmation distance.\n6. The later forkchoice handler prefetches `O+2`, but the missed adoption opportunity can repeat as origins advance.\n\nWith 10-second L2 blocks, advancing an origin only once per two L2 blocks means approximately 20 seconds per origin, slower than L1's approximately 12-second block interval. Once drift approaches the limit, the synchronous-fetch fallback constrains the lag rather than restoring the intended confirmation-distance target. Faster 2-second chains can still keep up despite the missed opportunities, so the effect is more visible with a longer L2 block time.\n\nRelevant source:\n\n- [Sequencer concurrency change #22241](https://github.com/ethereum-optimism/optimism/pull/22241)\n- [Introduction commit](https://github.com/ethereum-optimism/optimism/commit/4c3d0d3da6c9b2edd9ac93756aef5629b8a97b44)\n- [v1.19.9 origin selector](https://github.com/ethereum-optimism/optimism/blob/op-node/v1.19.9/op-node/rollup/sequencing/origin_selector.go)\n- [v1.19.9 sequencer](https://github.com/ethereum-optimism/optimism/blob/op-node/v1.19.9/op-node/rollup/sequencing/sequencer.go)\n\n## Controlled source-boundary tests\n\nWe tested isolated production-source snapshots with their original module pins and checksum-verified superchain bundles, using Go 1.26.6 and test-only overlays. The probes use each snapshot's **actual Sequencer and L1OriginSelector**, existing attribute/conductor test fixtures, and a mocked successful engine insertion with deliberately controlled forkchoice-dispatch timing. Each boundary test was repeated 20 times.\n\nThe setup has current origin 818, prefetched origin 819, and origin 820 already available with a valid timestamp. The inserted child adopts 819. The question is whether the next build can run before the selector handles the child's forkchoice update.\n\n| Source snapshot | Before prefetch fanout | Result |\n| --- | --- | --- |\n| `4c3d0d3^` (`20818c5b`) | Payload success alone does not arm the next build; shared forkchoice processing precedes the next action | selects 820 |\n| `4c3d0d3` | Direct insertion arms the next build independently | delayed prefetch selects 819; prefetch-first control selects 820 |\n| stable v1.19.4 | same as the parent | selects 820 |\n| stable v1.19.5 | same as the child | delayed prefetch selects 819; prefetch-first control selects 820 |\n\nThese are **controlled component tests, not an end-to-end historical-binary/network bisect**. They reproduce the call-site ordering change; the production v1.19.9 versus node-only rollback comparison provides separate operational evidence. Tests with Isthmus disabled and enabled both reproduced the same origin-selection outcome.\n\n### Minimal selector-order reproducer\n\nThe following self-contained program models the triggering event order using the real selector. Run it from an upstream module checkout, for example v1.19.5, with its normal dependencies available:\n\n```bash\ngo run /tmp/origin-order-repro.go\n```\n\n```go\npackage main\n\nimport (\n    \"context\"\n    \"fmt\"\n    \"io\"\n    \"log/slog\"\n    \"math/big\"\n\n    \"github.com/ethereum-optimism/optimism/op-node/rollup\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup/engine\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup/sequencing\"\n    \"github.com/ethereum-optimism/optimism/op-service/eth\"\n    \"github.com/ethereum/go-ethereum\"\n    \"github.com/ethereum/go-ethereum/common\"\n    \"github.com/ethereum/go-ethereum/log\"\n)\n\ntype source struct {\n    sequencing.L1Blocks // Unused additional methods, if present, must not be called.\n    now uint64\n}\n\nfunc block(n uint64) eth.L1BlockRef {\n    return eth.L1BlockRef{\n        Number: n, Time: n * 12,\n        Hash: common.BigToHash(new(big.Int).SetUint64(n)),\n        ParentHash: common.BigToHash(new(big.Int).SetUint64(n - 1)),\n    }\n}\n\nfunc (s *source) L1BlockRefByNumber(_ context.Context, n uint64) (eth.L1BlockRef, error) {\n    if n + 15 > s.now / 12 {\n        return eth.L1BlockRef{}, ethereum.NotFound\n    }\n    return block(n), nil\n}\n\nfunc (s *source) L1BlockRefByHash(_ context.Context, h common.Hash) (eth.L1BlockRef, error) {\n    return block(h.Big().Uint64()), nil\n}\n\nfunc run(prefetchFirst bool, blockTime uint64) {\n    ctx := context.Background()\n    src := &source{now: 10000}\n    cfg := &rollup.Config{BlockTime: blockTime, MaxSequencerDrift: 1800}\n    logger := log.NewLogger(slog.NewTextHandler(io.Discard, nil))\n    sel := sequencing.NewL1OriginSelector(ctx, logger, cfg, src)\n    head := eth.L2BlockRef{Number: 100, Time: src.now, L1Origin: block(src.now/12 - 15).ID()}\n    for i := 0; i < 600; i++ {\n        src.now = head.Time\n        ev := engine.ForkchoiceUpdateEvent{UnsafeL2Head: head}\n        if prefetchFirst { sel.OnEvent(ctx, ev) }\n        origin, err := sel.FindL1Origin(ctx, head)\n        if err != nil { panic(err) }\n        if !prefetchFirst { sel.OnEvent(ctx, ev) }\n        head = eth.L2BlockRef{Number: head.Number + 1, Time: head.Time + blockTime, L1Origin: origin.ID()}\n    }\n    fmt.Printf(\"prefetchFirst=%v blockTime=%d originLag=%d drift=%d\\n\",\n        prefetchFirst, blockTime, head.Time/12-head.L1Origin.Number,\n        head.Time-block(head.L1Origin.Number).Time)\n}\n\nfunc main() {\n    run(true, 10)\n    run(false, 10)\n    run(false, 2)\n}\n```\n\nObserved output:\n\n```text\nprefetchFirst=true  blockTime=10 originLag=16  drift=196\nprefetchFirst=false blockTime=10 originLag=149 drift=1792\nprefetchFirst=false blockTime=2  originLag=15  drift=184\n```\n\nThe selector-only model deliberately chooses the event order; it does not itself simulate the full driver. The separate actual-Sequencer probes above establish that the new direct-call path permits that order, while the old path required forkchoice processing before scheduling the next action.\n\n## Downstream impact\n\nWith batcher's unchanged `max-channel-duration=100`, a large gap between current L1 head and the last submitted L1 origin causes newly opened channels to expire immediately. We observed single-L2-block channels and a higher number of small L1 submissions while origin lag exceeded that threshold. This appears to be downstream amplification, not the initiating batcher fault.\n\n## Expected behavior / questions\n\n- When the immediate next origin is available, confirmed and timestamp-valid, the new scheduling path should not systematically miss its adoption opportunity because the prefetch event is queued behind the next direct build.\n- Can next-origin readiness be established independently of the shared dispatcher, while retaining confirmation-depth, immediate-child, timestamp and max-drift constraints and avoiding unbounded L1 RPC blocking?\n- Is there an existing supported mitigation or fix for long-block-time chains that should retain post-Glamsterdam compatibility?\n\nWe searched related reports including #11960, #19263, #22821 and the receipts-prefetch changes #22861/#22863, but did not find an exact report of this long-block-time origin-progression regression. Latest stable checked on 2026-10-08 was v1.19.9. Please let us know if this should be linked to an existing issue.\n",
+      "createdAt": "2026-10-08T05:58:10Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 3
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABMK9yNQ",
+      "title": "Re-Deploy Lightnode as majority configuration to production environments",
+      "author": "jelias2",
+      "number": 22354,
+      "repository": "ethereum-optimism/optimism",
+      "body": "# Description\nRe-deploy lightnode as the majority configuration to production environments as a way to bake and harden lightnodes prior to interop activation",
+      "createdAt": "2026-08-10T15:34:58Z",
+      "closedAt": "2026-10-09T14:07:24Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
     {
       "id": "I_kwDODjvEJM8AAAABVOh7FA",
       "title": "ZKDisputeGame: a respected game can use an unrespected game as its parent",
@@ -20,6 +44,18 @@
       "commentCount": 2
     },
     {
+      "id": "I_kwDODjvEJM7H4aXm",
+      "title": "[Tracking] [Forge Deployer] OP Deployer Forge Migration",
+      "author": "mslipper",
+      "number": 17213,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Related design doc for reference: [link](https://github.com/ethereum-optimism/design-docs/blob/main/protocol/op-deployer-forge-engine.md)",
+      "createdAt": "2025-08-25T23:04:01Z",
+      "closedAt": "2026-10-09T12:54:30Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
       "id": "I_kwDODjvEJM8AAAABBrRbHg",
       "title": "Interop status page integration",
       "author": "karlfloersch",
@@ -28,42 +64,6 @@
       "body": "",
       "createdAt": "2026-05-08T15:21:57Z",
       "closedAt": "2026-10-07T21:33:47Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABIvEDwg",
-      "title": "opgeth-decoupling: own the log layer; re-home the RPC metrics hooks",
-      "author": "sebastianst",
-      "number": 21745,
-      "repository": "ethereum-optimism/optimism",
-      "body": "\nPart of #20257. See §15 of the [op-geth decoupling doc](https://github.com/ethereum-optimism/optimism/blob/develop/docs/ai/opgeth-decoupling.md). **Blocks #20266.**\n\n## Problem\n\nTwo op-service foundation features are built on op-geth fork extensions to *general-purpose* geth\npackages — nothing OP-protocol-specific, so no earlier plan section covers them, but they sit\nunder every service and break the whole tree at cutover:\n\n1. **Context-based log filtering** — the fork extends `log.Logger` with `SetContext`, `WriteCtx`,\n   `LogAttrs`, and `Trace/…/ErrorContext`. `op-service/log` (logfilter) builds on it;\n   `op-service/testlog` implements the whole extended interface.\n2. **RPC recording hooks** — the fork adds `rpc.Recorder`/`RecordedMsg`/`RecordDone`/\n   `WithRecorder` inside the geth RPC client and server. `op-service/metrics` (RPC metrics),\n   `op-service/rpc` (server handlers), and `op-service/client` (`WithRPCRecorder`) build on it.\n   (`rpc.JsonError` in op-test-sequencer is the same family; trivially replaced by a local type.)\n\n## Strategy\n\n### (1) Own the log layer — `op-service/log` becomes the monorepo's logging API\n\nBetter layering regardless of the decoupling: monorepo code should depend on an internal log\nlayer, not on `geth/log` directly.\n\n- **Phase 1 (now, mechanical, incremental):** add `oplog.Logger` as a *type alias* of geth\n  `log.Logger`, plus re-exports of the package-level API in use (`Root`, `SetDefault`,\n  `NewLogger`, level parsing, …). Sweep all monorepo imports of `go-ethereum/log` to\n  `op-service/log`. Pure rename while the alias holds — landable per component, zero risk.\n- **Phase 2 (at cutover):** flip the alias to an owned interface (upstream's method set + the\n  context methods) with an slog-backed implementation. Implement over `slog` — do not copy\n  upstream's LGPL log package; the fork's context-extension logic is OP-authored and ports over.\n  Because our interface is a superset of upstream's, our loggers still satisfy upstream\n  `log.Logger` wherever we hand one into geth code (e.g. the in-process L1 geth in op-e2e).\n\n### (2) RPC recorder\n\n- Client side: re-implement recording in our own RPC client wrappers (`op-service/client`) — we\n  own that seam.\n- Server side: the fork hooks observe inside geth's `rpc` server; upstream offers no equivalent.\n  Needs a small design: HTTP-middleware-level observation, or wrapping the registered handlers.\n  Metric continuity (names/labels) is required; per-message fidelity may be approximated.\n\n## Acceptance criteria\n\n- No monorepo Go file imports `go-ethereum/log` (grep is the gate).\n- RPC metrics keep their metric names/labels on upstream go-ethereum; `rpc.Recorder` &\n  `rpc.JsonError` uses are gone.\n\n🤖 *Generated by Claude Code*\n",
-      "createdAt": "2026-07-14T08:15:26Z",
-      "closedAt": "2026-10-01T13:49:30Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABRZ07lg",
-      "title": "contracts-bedrock: replace the OPCM v8 development fixture with released artifacts",
-      "author": "0xOneTony",
-      "number": 22906,
-      "repository": "ethereum-optimism/optimism",
-      "body": "**Description**\n\nThe OPCM v9 upgrade tests currently build a pinned v8 development manager and stage it locally before upgrading to v9. This allows testing against forks that are still on v7, but the fixture uses the current implementation bundle rather than a finalized v8 release.\n\nOnce released v8 artifacts are available, replace the development fixture and retire the temporary setup where the normal upgrade path can provide the required starting state.\n\n**Definition of done**\n\n- Replace the pinned v8 development fixture with the finalized v8 release bundle.\n- Verify that `PastUpgrades` supplies the v8 starting state for supported fork blocks.\n- Remove `prepare-opcm-v8-artifact`, `OPCM_V8_ARTIFACT`, its Config accessor, and `stageV8` once covered by the released upgrade path.\n- Preserve v8 → v9 regression coverage, including a reproducible upgrade path for supported forks still on v7.\n- Update the documentation and remove the corresponding TODOs.\n- Run the full upgrade suite and ZK migration tests.",
-      "createdAt": "2026-09-15T13:59:35Z",
-      "closedAt": "2026-10-01T10:46:22Z",
-      "state": "CLOSED",
-      "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABR-zROg",
-      "title": "Test active SDM policy on an interop devnet",
-      "author": "sbvegan",
-      "number": 22944,
-      "repository": "ethereum-optimism/optimism",
-      "body": "We need to test the Unichain policy on an interop network to make sure both features play nicely by smoke testing both features",
-      "createdAt": "2026-09-18T15:56:13Z",
-      "closedAt": "2026-10-01T14:41:15Z",
       "state": "CLOSED",
       "commentCount": 1
     }
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 14343,
-    "deletions": 12816,
-    "files": 422,
-    "commitCount": 747
+    "additions": 14438,
+    "deletions": 12877,
+    "files": 428,
+    "commitCount": 813
   },
   "completedItems": [
     {
@@ -459,6 +459,18 @@
         "rust/op-alloy/crates/consensus/src/post_exec/tests.rs",
         "rust/op-reth/crates/evm/src/lib.rs",
         "rust/op-reth/crates/evm/src/sdm_metrics.rs"
+      ]
+    },
+    {
+      "title": "nuts: re-snapshot Lagoon NUT bundle from develop",
+      "prNumber": 23122,
+      "type": "other",
+      "body": "Fixes #23097.\n\n## Problem\n\nThe Lagoon NUT bundle embedded in op-node and kona-node was snapshotted from `fa9974a2` (2026-05-29) and hasn't been refreshed since. Nine L2 predeploys have been bumped on `develop` since then:\n\n| Contract | Bund",
+      "files": [
+        "op-core/nuts/bundles/lagoon_nut_bundle.json",
+        "op-core/nuts/fork_lock.toml",
+        "op-core/nuts/state/lagoon_state.json",
+        "packages/contracts-bedrock/test/setup/PastNUTBundles.t.sol"
       ]
     },
     {
@@ -1176,77 +1188,95 @@
       "files": [
         ".github/workflows/build-images.apko.yaml"
       ]
+    },
+    {
+      "title": "docs/ai: make forge op-deployer's only script engine in the op-geth decoupling plan",
+      "prNumber": 23310,
+      "type": "docs",
+      "body": "Updates the op-geth decoupling plan for `op-chain-ops/script`: instead of building a Rust script engine, op-deployer's existing forge path is extended to every use and the Go host is deleted. Experiments with forge 1.8.3 reproduced the Go h",
+      "files": [
+        "docs/ai/opgeth-decoupling.md"
+      ]
+    },
+    {
+      "title": "docs: warn not to expose op-node's admin API in the create-L2 tutorial",
+      "prNumber": 23298,
+      "type": "docs",
+      "body": "The create-L2 op-reth tutorial runs op-node with `--rpc.enable-admin` on `0.0.0.0:8547`. Nothing told readers that this RPC is unauthenticated (the JWT protects only the Engine API), so someone copying the tutorial onto a reachable host wou",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-reth-setup.mdx"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 483.6893653286052,
-      "prScore": 390.11336532860525,
+      "totalScore": 519.1547441411393,
+      "prScore": 425.5787441411393,
       "issueScore": 4,
       "reviewScore": 88.5,
       "commentScore": 1.0759999999999998,
       "summary": null
     },
     {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 475.50438733901456,
+      "prScore": 236.72638733901456,
+      "issueScore": 40,
+      "reviewScore": 198,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 408.36844839105873,
-      "prScore": 390.36844839105873,
+      "totalScore": 438.25327544866,
+      "prScore": 406.25327544866,
       "issueScore": 0,
-      "reviewScore": 18,
+      "reviewScore": 32,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 370.48142188361663,
-      "prScore": 185.54342188361665,
-      "issueScore": 14,
-      "reviewScore": 170.5,
-      "commentScore": 0.43799999999999994,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 432.1167129395682,
+      "prScore": 366.26271293956813,
+      "issueScore": 4.1,
+      "reviewScore": 59.5,
+      "commentScore": 2.254,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 409.0626375147453,
+      "prScore": 246.58463751474528,
+      "issueScore": 4,
+      "reviewScore": 157.5,
+      "commentScore": 0.978,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 316.3144453053146,
+      "totalScore": 389.3144453053146,
       "prScore": 185.23644530531462,
       "issueScore": 16.1,
-      "reviewScore": 114,
+      "reviewScore": 187,
       "commentScore": 0.978,
       "summary": null
     },
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 310.4415694239045,
+      "totalScore": 320.78156942390456,
       "prScore": 212.06156942390453,
       "issueScore": 4,
-      "reviewScore": 93.5,
-      "commentScore": 0.8799999999999999,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 295.7316246959244,
-      "prScore": 250.41562469592435,
-      "issueScore": 2,
-      "reviewScore": 41.5,
-      "commentScore": 1.8159999999999998,
-      "summary": null
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 258.36219161340205,
-      "prScore": 199.32219161340203,
-      "issueScore": 0,
-      "reviewScore": 58.5,
-      "commentScore": 0.54,
+      "reviewScore": 103.5,
+      "commentScore": 1.22,
       "summary": null
     },
     {
@@ -1260,6 +1290,36 @@
       "summary": null
     },
     {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 170.57430660596737,
+      "prScore": 138.07430660596737,
+      "issueScore": 0,
+      "reviewScore": 32.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 164.65151060080598,
+      "prScore": 83.65151060080598,
+      "issueScore": 0,
+      "reviewScore": 81,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 164.05214686180526,
+      "prScore": 145.15214686180525,
+      "issueScore": 4,
+      "reviewScore": 14.5,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
       "totalScore": 149.71199421015103,
@@ -1270,33 +1330,13 @@
       "summary": null
     },
     {
-      "username": "zkfrov",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
-      "totalScore": 124.15151060080598,
-      "prScore": 83.65151060080598,
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 121.16052508219869,
+      "prScore": 76.62052508219868,
       "issueScore": 0,
-      "reviewScore": 40.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 121.08641789070148,
-      "prScore": 102.18641789070148,
-      "issueScore": 4,
-      "reviewScore": 14.5,
-      "commentScore": 0.4,
-      "summary": null
-    },
-    {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 120.53207712855229,
-      "prScore": 93.03207712855229,
-      "issueScore": 0,
-      "reviewScore": 27.5,
-      "commentScore": 0,
+      "reviewScore": 44,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -1330,13 +1370,23 @@
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 85.36342359164556,
-      "prScore": 50.32342359164555,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 91.28749094163737,
+      "prScore": 73.58749094163737,
+      "issueScore": 4,
+      "reviewScore": 13.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 84.2,
+      "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 34.5,
-      "commentScore": 0.54,
+      "reviewScore": 84,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1360,16 +1410,6 @@
       "summary": null
     },
     {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 74,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 74,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "yashvardhan-kukreja",
       "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
       "totalScore": 71.54750799360215,
@@ -1387,6 +1427,16 @@
       "issueScore": 0,
       "reviewScore": 67.5,
       "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 65.96834748685608,
+      "prScore": 47.968347486856075,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1410,13 +1460,13 @@
       "summary": null
     },
     {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 56.968347486856075,
-      "prScore": 47.968347486856075,
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 56.452860624171215,
+      "prScore": 36.55286062417121,
       "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -1440,13 +1490,13 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 51.88727588020243,
-      "prScore": 47.88727588020243,
-      "issueScore": 4,
-      "reviewScore": 0,
-      "commentScore": 0,
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 48.536766166719346,
+      "prScore": 12.398766166719344,
+      "issueScore": 2,
+      "reviewScore": 33.5,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -1470,6 +1520,16 @@
       "summary": null
     },
     {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 34.746952941144386,
+      "prScore": 19.206952941144383,
+      "issueScore": 6,
+      "reviewScore": 9,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
       "username": "studiokvc",
       "avatarUrl": "https://avatars.githubusercontent.com/u/180499652?v=4",
       "totalScore": 33.117760823346906,
@@ -1480,33 +1540,23 @@
       "summary": null
     },
     {
-      "username": "0xOneTony",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 32.54695294114438,
-      "prScore": 19.206952941144383,
-      "issueScore": 4,
-      "reviewScore": 9,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 32.036766166719346,
-      "prScore": 12.398766166719344,
+      "username": "JSeiferth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/43515441?u=563afcbd9c4305c43db6ad35855cc0377a93a669&v=4",
+      "totalScore": 30.03043424064714,
+      "prScore": 30.03043424064714,
       "issueScore": 0,
-      "reviewScore": 19,
-      "commentScore": 0.6379999999999999,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 28.429612288668107,
+      "totalScore": 28.867612288668106,
       "prScore": 27.651612288668108,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.7779999999999999,
+      "commentScore": 1.2159999999999997,
       "summary": null
     },
     {
@@ -1522,11 +1572,11 @@
     {
       "username": "somasoil",
       "avatarUrl": "https://avatars.githubusercontent.com/u/262555387?u=31f4f655410c6156631228df2c122f4e43bbb3a2&v=4",
-      "totalScore": 26.164785973923514,
+      "totalScore": 26.364785973923514,
       "prScore": 24.164785973923514,
       "issueScore": 2,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1536,6 +1586,16 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 24,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mark-chen-mantle",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/292447144?v=4",
+      "totalScore": 23.482667543357145,
+      "prScore": 23.482667543357145,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1586,16 +1646,6 @@
       "prScore": 4.51,
       "issueScore": 2,
       "reviewScore": 4.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "donoso-eth",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 10.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
       "commentScore": 0.2,
       "summary": null
     },
@@ -1722,11 +1772,11 @@
     {
       "username": "methakon",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3263074?u=38f286e09d8e2349c34db2014d2c37bb64663ea6&v=4",
-      "totalScore": 0.6000000000000001,
+      "totalScore": 0.8,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.6000000000000001,
+      "commentScore": 0.8,
       "summary": null
     },
     {
@@ -1790,9 +1840,9 @@
       "summary": null
     }
   ],
-  "newPRs": 110,
-  "mergedPRs": 58,
-  "newIssues": 35,
-  "closedIssues": 27,
-  "activeContributors": 73
+  "newPRs": 131,
+  "mergedPRs": 61,
+  "newIssues": 52,
+  "closedIssues": 32,
+  "activeContributors": 76
 }
