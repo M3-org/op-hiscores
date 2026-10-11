@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-10 to 2026-10-11, ethereum-optimism/optimism had 0 new PRs (2 merged), 0 new issues, and 3 active contributors.",
+  "overview": "From 2026-10-10 to 2026-10-11, ethereum-optimism/optimism had 4 new PRs (3 merged), 0 new issues, and 12 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABUAUZSw",
@@ -18,9 +18,33 @@
       "closedAt": "2026-10-10T00:16:56Z",
       "state": "CLOSED",
       "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVyDNdg",
+      "title": "op-node: origin prefetch ordering regression on 10-second L2 chains since v1.19.5",
+      "author": "atenalt",
+      "number": 23271,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWe observed persistent L1-origin lag on a custom OP Stack rollup with **10-second L2 blocks** after upgrading op-node to **v1.19.9**. L2 block timestamps remain fresh and derivation stays at the configured L1 confirmation distance, but the unsafe L2 head's L1 origin falls approximately 148–149 L1 blocks behind the observed L1 head, near the Fjord 1,800-second drift limit.\n\nSource-history analysis and controlled component tests identify an ordering change introduced by **#22241 / `4c3d0d3da6`**, first included in stable **v1.19.5**: the direct sequencer path can schedule its next build before the shared event dispatcher runs the next-origin prefetch triggered by `ForkchoiceUpdateEvent`.\n\nThis report concerns origin advancement, not a failure to produce L2 blocks. We would appreciate confirmation of whether this is an unintended regression and guidance on preserving timely origin adoption without reintroducing derivation-induced sequencer starvation.\n\n## Environment and observations\n\n- Observed deployed version: op-node v1.19.9; execution client op-reth v2.6.0.\n- L1: Sepolia, approximately 12-second blocks.\n- L2 block time: 10 seconds.\n- Sequencer and verifier L1 confirmations: 15.\n- Consensus-layer sync; Fjord, Granite and Holocene active; Isthmus not activated.\n- CPU was not saturated during this investigation.\n\nAt a representative sample:\n\n| Measurement | Value |\n| --- | --- |\n| `head_l1.number - current_l1.number` | 15 |\n| `head_l1.number - unsafe_l2.l1origin.number` | 149 |\n| Unsafe L2 timestamp age | approximately 3 seconds |\n| Unsafe-to-safe L2 distance | approximately 20–24 blocks |\n\nSafe/finalized progress and L1 transaction confirmations continued. Sequencing logs repeatedly showed the same origin used for two consecutive 10-second L2 blocks, for example:\n\n```text\nL2 parent  N     -> origin O\nL2 parent  N+1   -> origin O\nL2 parent  N+2   -> origin O+1\nL2 parent  N+3   -> origin O+1\n```\n\nReverting **only op-node** to the previously deployed v1.17.0 restored one origin advance per L2 block while behind, and the observed head-to-origin lag began decreasing (146 → 144 → 143, later 122). Execution client, batcher, RPC provider, fork schedule and confirmation settings were unchanged. This rollback was diagnostic, **not a recommendation to run an old client after Sepolia's L1 fork**; we are aware of the v1.19.5+ requirement.\n\n## Suspected mechanism\n\n1. The selector has cached current origin `O` and next origin `O+1`.\n2. A newly inserted L2 block adopts `O+1`.\n3. The direct sequencer path completes `ProcessPayload` and calls `scheduleNextAction` without requiring the shared dispatcher to finish the corresponding forkchoice-prefetch handler.\n4. If the next `FindL1Origin` runs first, `CurrentAndNextOrigin` promotes cached `O+1` to current and clears the next-origin cache.\n5. With no next origin cached and drift still below its limit, the selector reuses `O+1`, despite `O+2` being available and having a valid timestamp/confirmation distance.\n6. The later forkchoice handler prefetches `O+2`, but the missed adoption opportunity can repeat as origins advance.\n\nWith 10-second L2 blocks, advancing an origin only once per two L2 blocks means approximately 20 seconds per origin, slower than L1's approximately 12-second block interval. Once drift approaches the limit, the synchronous-fetch fallback constrains the lag rather than restoring the intended confirmation-distance target. Faster 2-second chains can still keep up despite the missed opportunities, so the effect is more visible with a longer L2 block time.\n\nRelevant source:\n\n- [Sequencer concurrency change #22241](https://github.com/ethereum-optimism/optimism/pull/22241)\n- [Introduction commit](https://github.com/ethereum-optimism/optimism/commit/4c3d0d3da6c9b2edd9ac93756aef5629b8a97b44)\n- [v1.19.9 origin selector](https://github.com/ethereum-optimism/optimism/blob/op-node/v1.19.9/op-node/rollup/sequencing/origin_selector.go)\n- [v1.19.9 sequencer](https://github.com/ethereum-optimism/optimism/blob/op-node/v1.19.9/op-node/rollup/sequencing/sequencer.go)\n\n## Controlled source-boundary tests\n\nWe tested isolated production-source snapshots with their original module pins and checksum-verified superchain bundles, using Go 1.26.6 and test-only overlays. The probes use each snapshot's **actual Sequencer and L1OriginSelector**, existing attribute/conductor test fixtures, and a mocked successful engine insertion with deliberately controlled forkchoice-dispatch timing. Each boundary test was repeated 20 times.\n\nThe setup has current origin 818, prefetched origin 819, and origin 820 already available with a valid timestamp. The inserted child adopts 819. The question is whether the next build can run before the selector handles the child's forkchoice update.\n\n| Source snapshot | Before prefetch fanout | Result |\n| --- | --- | --- |\n| `4c3d0d3^` (`20818c5b`) | Payload success alone does not arm the next build; shared forkchoice processing precedes the next action | selects 820 |\n| `4c3d0d3` | Direct insertion arms the next build independently | delayed prefetch selects 819; prefetch-first control selects 820 |\n| stable v1.19.4 | same as the parent | selects 820 |\n| stable v1.19.5 | same as the child | delayed prefetch selects 819; prefetch-first control selects 820 |\n\nThese are **controlled component tests, not an end-to-end historical-binary/network bisect**. They reproduce the call-site ordering change; the production v1.19.9 versus node-only rollback comparison provides separate operational evidence. Tests with Isthmus disabled and enabled both reproduced the same origin-selection outcome.\n\n### Minimal selector-order reproducer\n\nThe following self-contained program models the triggering event order using the real selector. Run it from an upstream module checkout, for example v1.19.5, with its normal dependencies available:\n\n```bash\ngo run /tmp/origin-order-repro.go\n```\n\n```go\npackage main\n\nimport (\n    \"context\"\n    \"fmt\"\n    \"io\"\n    \"log/slog\"\n    \"math/big\"\n\n    \"github.com/ethereum-optimism/optimism/op-node/rollup\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup/engine\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup/sequencing\"\n    \"github.com/ethereum-optimism/optimism/op-service/eth\"\n    \"github.com/ethereum/go-ethereum\"\n    \"github.com/ethereum/go-ethereum/common\"\n    \"github.com/ethereum/go-ethereum/log\"\n)\n\ntype source struct {\n    sequencing.L1Blocks // Unused additional methods, if present, must not be called.\n    now uint64\n}\n\nfunc block(n uint64) eth.L1BlockRef {\n    return eth.L1BlockRef{\n        Number: n, Time: n * 12,\n        Hash: common.BigToHash(new(big.Int).SetUint64(n)),\n        ParentHash: common.BigToHash(new(big.Int).SetUint64(n - 1)),\n    }\n}\n\nfunc (s *source) L1BlockRefByNumber(_ context.Context, n uint64) (eth.L1BlockRef, error) {\n    if n + 15 > s.now / 12 {\n        return eth.L1BlockRef{}, ethereum.NotFound\n    }\n    return block(n), nil\n}\n\nfunc (s *source) L1BlockRefByHash(_ context.Context, h common.Hash) (eth.L1BlockRef, error) {\n    return block(h.Big().Uint64()), nil\n}\n\nfunc run(prefetchFirst bool, blockTime uint64) {\n    ctx := context.Background()\n    src := &source{now: 10000}\n    cfg := &rollup.Config{BlockTime: blockTime, MaxSequencerDrift: 1800}\n    logger := log.NewLogger(slog.NewTextHandler(io.Discard, nil))\n    sel := sequencing.NewL1OriginSelector(ctx, logger, cfg, src)\n    head := eth.L2BlockRef{Number: 100, Time: src.now, L1Origin: block(src.now/12 - 15).ID()}\n    for i := 0; i < 600; i++ {\n        src.now = head.Time\n        ev := engine.ForkchoiceUpdateEvent{UnsafeL2Head: head}\n        if prefetchFirst { sel.OnEvent(ctx, ev) }\n        origin, err := sel.FindL1Origin(ctx, head)\n        if err != nil { panic(err) }\n        if !prefetchFirst { sel.OnEvent(ctx, ev) }\n        head = eth.L2BlockRef{Number: head.Number + 1, Time: head.Time + blockTime, L1Origin: origin.ID()}\n    }\n    fmt.Printf(\"prefetchFirst=%v blockTime=%d originLag=%d drift=%d\\n\",\n        prefetchFirst, blockTime, head.Time/12-head.L1Origin.Number,\n        head.Time-block(head.L1Origin.Number).Time)\n}\n\nfunc main() {\n    run(true, 10)\n    run(false, 10)\n    run(false, 2)\n}\n```\n\nObserved output:\n\n```text\nprefetchFirst=true  blockTime=10 originLag=16  drift=196\nprefetchFirst=false blockTime=10 originLag=149 drift=1792\nprefetchFirst=false blockTime=2  originLag=15  drift=184\n```\n\nThe selector-only model deliberately chooses the event order; it does not itself simulate the full driver. The separate actual-Sequencer probes above establish that the new direct-call path permits that order, while the old path required forkchoice processing before scheduling the next action.\n\n## Downstream impact\n\nWith batcher's unchanged `max-channel-duration=100`, a large gap between current L1 head and the last submitted L1 origin causes newly opened channels to expire immediately. We observed single-L2-block channels and a higher number of small L1 submissions while origin lag exceeded that threshold. This appears to be downstream amplification, not the initiating batcher fault.\n\n## Expected behavior / questions\n\n- When the immediate next origin is available, confirmed and timestamp-valid, the new scheduling path should not systematically miss its adoption opportunity because the prefetch event is queued behind the next direct build.\n- Can next-origin readiness be established independently of the shared dispatcher, while retaining confirmation-depth, immediate-child, timestamp and max-drift constraints and avoiding unbounded L1 RPC blocking?\n- Is there an existing supported mitigation or fix for long-block-time chains that should retain post-Glamsterdam compatibility?\n\nWe searched related reports including #11960, #19263, #22821 and the receipts-prefetch changes #22861/#22863, but did not find an exact report of this long-block-time origin-progression regression. Latest stable checked on 2026-10-08 was v1.19.9. Please let us know if this should be linked to an existing issue.\n",
+      "createdAt": "2026-10-08T05:58:10Z",
+      "closedAt": "2026-10-10T07:43:23Z",
+      "state": "CLOSED",
+      "commentCount": 0
     }
   ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABHYHNOA",
+      "title": "op-node: prefetch one L1 origin ahead so adoption keeps pace with L1",
+      "author": "geoknee",
+      "number": 23279,
+      "body": "Since the sequencer runs on its own goroutine (#22241), it starts each build before the forkchoice update of the previous insertion reaches the L1 origin selector. That update is what prefetches the next origin, so the build finds no next origin cached and keeps the one just adopted. As a result, the L1 origin advances at most once every two L2 blocks.\n\nOn chains whose L2 block time exceeds half the L1 block time, this can't keep up with L1. A 10s chain on Sepolia advances one origin per 20s against L1's 12s. Its origin drifts back to the max sequencer drift, about 149 L1 blocks (~30 min) behind the L1 head instead of the confirmation depth. Once the origin has drifted that far, users see:\n\n- deposits included about 30 minutes late\n- L1 fee parameters in the L1 block info that are 30 minutes stale\n- a sequencer that only advances its origin by a synchronous L1 fetch on the build path, right at the drift limit\n- a batcher whose channels exceed `max-channel-duration` immediately, so it posts many single-block batches\n\nChains with short block times still adopt fast enough and see no change. Operators of affected chains can't work around this by downgrading op-node: on Sepolia, versions without #21920 can no longer follow Glamsterdam L1.\n\nThe fix lets the forkchoice handler prefetch one origin further ahead. The block the next build needs is then cached a whole block build earlier, rather than racing the event loop. A lookahead is only promoted if it still extends the new current origin, and the fetch stays off the build path. Behind a confirmation-depth shim, the extra probe costs no L1 RPC in steady state. Without one (`--sequencer.l1-confs=0`), it costs at most one extra by-number call per L2 block.\n\nI rejected two simpler alternatives:\n- **Prefetching when the next origin is promoted:** this still adopts only every other block, because the fetch lands one build too late.\n- **Fetching synchronously before scheduling the next build:** this puts up to 500ms of L1 RPC back on the hot path that #22241 removed.\n\n`TestOriginSelectorKeepsUpWithL1` reproduces the reported 149-block lag on the old selector and keeps it within the confirmation depth after the fix. The changes to `TestOriginSelectorAdvances` and `TestOriginSelectorHandlesReorg` reflect the new behaviour: the origin no longer waits a block, and a lookahead that a reorg made stale is dropped.\n\n**Review notes.** I ran go-code-reviewer and an adversarial correctness review, and fixed their findings: two lint issues and two comments. I dismissed two low findings; please confirm:\n- **A forkchoice update that arrives late clears the origin cache.** If the event loop falls a full block behind the sequencer, that update clears the cache. Clearing costs one hash lookup under the selector's lock and one block on the same origin. This predates this PR and heals itself, so it's left for a follow-up.\n- **The next origin is still cached by number without a hash check.** I left it deliberately: an orphaned next origin is what surfaces an L1 reorg as `ErrNextL1OriginOrphaned` and triggers a prompt reset.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/23271\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-08T16:45:39Z",
+      "mergedAt": "2026-10-10T07:43:22Z",
+      "additions": 152,
+      "deletions": 44
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABF8Z0QQ",
       "title": "nuts: re-snapshot Lagoon NUT bundle from develop",
@@ -44,13 +68,37 @@
       "mergedAt": "2026-10-10T00:51:33Z",
       "additions": 38,
       "deletions": 12
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHuQTyQ",
+      "title": "op-node: do not clobber persisted sequencer state on Init",
+      "author": "Tyagiquamar",
+      "number": 23332,
+      "body": "## Summary\n- Stop calling `SequencerStopped()` from `Sequencer.Init` when the node starts with sequencing inactive; startup now only syncs in-memory state.\n- Add a regression test ensuring `Init(..., false)` does not rewrite persisted `sequencerStarted: true`.\n\nFixes #12854\n\n## Test plan\n- [x] Docker `golang:1.26-bookworm` from repo root: `go test -count=1 -run TestInitStoppedDoesNotOverwritePersistedStartedState ./op-node/rollup/sequencing/ -v` (pass, 0.250s)\n- [x] Docker `golang:1.26-bookworm`: `gofmt -l` on changed files (clean)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-10T17:45:59Z",
+      "mergedAt": null,
+      "additions": 37,
+      "deletions": 6
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHuP8Qg",
+      "title": "op-node: tolerate pruned L1 history in genesis check",
+      "author": "Tyagiquamar",
+      "number": 23331,
+      "body": "## Summary\n- Accept JSON-RPC history-pruned errors (code 4444) in `CheckL1GenesisBlockHash`, matching the existing L2 genesis check.\n- Add regression tests for pruned-history skip and non-pruned fetch failures.\n\nFixes #23161\n\n## Test plan\n- [x] Docker `golang:1.26-bookworm` from repo root: `go test -count=1 -run TestCheckL1BlockRefByNumber ./op-node/rollup/ -v` (pass, 1.430s)\n- [x] Docker `golang:1.26-bookworm`: `gofmt -l` on changed files (clean)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-10T17:44:59Z",
+      "mergedAt": null,
+      "additions": 15,
+      "deletions": 3
     }
   ],
   "codeChanges": {
-    "additions": 87,
-    "deletions": 61,
-    "files": 5,
-    "commitCount": 5
+    "additions": 239,
+    "deletions": 105,
+    "files": 7,
+    "commitCount": 24
   },
   "completedItems": [
     {
@@ -66,6 +114,16 @@
       ]
     },
     {
+      "title": "op-node: prefetch one L1 origin ahead so adoption keeps pace with L1",
+      "prNumber": 23279,
+      "type": "other",
+      "body": "Since the sequencer runs on its own goroutine (#22241), it starts each build before the forkchoice update of the previous insertion reaches the L1 origin selector. That update is what prefetches the next origin, so the build finds no next o",
+      "files": [
+        "op-node/rollup/sequencing/origin_selector.go",
+        "op-node/rollup/sequencing/origin_selector_test.go"
+      ]
+    },
+    {
       "title": "docs/ai: make forge op-deployer's only script engine in the op-geth decoupling plan",
       "prNumber": 23310,
       "type": "docs",
@@ -75,10 +133,61 @@
       ]
     }
   ],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 2,
+  "topContributors": [
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 51.33384711983868,
+      "prScore": 51.33384711983868,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Tyagiquamar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/104281681?u=fec62c96c582a9e4cb30bb4a0c796550211dda47&v=4",
+      "totalScore": 17.6926286130847,
+      "prScore": 17.6926286130847,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "goosun666-cell",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/235016563?v=4",
+      "totalScore": 8.83805020110221,
+      "prScore": 8.83805020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "KubilayJackson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/108900031?v=4",
+      "totalScore": 7.89161228866811,
+      "prScore": 7.89161228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.021306144334055,
+      "prScore": 6.583306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    }
+  ],
+  "newPRs": 4,
+  "mergedPRs": 3,
   "newIssues": 0,
-  "closedIssues": 1,
-  "activeContributors": 3
+  "closedIssues": 2,
+  "activeContributors": 12
 }

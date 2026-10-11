@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 131 new PRs (61 merged), 52 new issues, and 76 active contributors.",
+  "overview": "From 2026-10-01 to 2026-11-01, ethereum-optimism/optimism had 137 new PRs (62 merged), 52 new issues, and 80 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABVyDNdg",
@@ -15,8 +15,8 @@
       "repository": "ethereum-optimism/optimism",
       "body": "## Summary\n\nWe observed persistent L1-origin lag on a custom OP Stack rollup with **10-second L2 blocks** after upgrading op-node to **v1.19.9**. L2 block timestamps remain fresh and derivation stays at the configured L1 confirmation distance, but the unsafe L2 head's L1 origin falls approximately 148–149 L1 blocks behind the observed L1 head, near the Fjord 1,800-second drift limit.\n\nSource-history analysis and controlled component tests identify an ordering change introduced by **#22241 / `4c3d0d3da6`**, first included in stable **v1.19.5**: the direct sequencer path can schedule its next build before the shared event dispatcher runs the next-origin prefetch triggered by `ForkchoiceUpdateEvent`.\n\nThis report concerns origin advancement, not a failure to produce L2 blocks. We would appreciate confirmation of whether this is an unintended regression and guidance on preserving timely origin adoption without reintroducing derivation-induced sequencer starvation.\n\n## Environment and observations\n\n- Observed deployed version: op-node v1.19.9; execution client op-reth v2.6.0.\n- L1: Sepolia, approximately 12-second blocks.\n- L2 block time: 10 seconds.\n- Sequencer and verifier L1 confirmations: 15.\n- Consensus-layer sync; Fjord, Granite and Holocene active; Isthmus not activated.\n- CPU was not saturated during this investigation.\n\nAt a representative sample:\n\n| Measurement | Value |\n| --- | --- |\n| `head_l1.number - current_l1.number` | 15 |\n| `head_l1.number - unsafe_l2.l1origin.number` | 149 |\n| Unsafe L2 timestamp age | approximately 3 seconds |\n| Unsafe-to-safe L2 distance | approximately 20–24 blocks |\n\nSafe/finalized progress and L1 transaction confirmations continued. Sequencing logs repeatedly showed the same origin used for two consecutive 10-second L2 blocks, for example:\n\n```text\nL2 parent  N     -> origin O\nL2 parent  N+1   -> origin O\nL2 parent  N+2   -> origin O+1\nL2 parent  N+3   -> origin O+1\n```\n\nReverting **only op-node** to the previously deployed v1.17.0 restored one origin advance per L2 block while behind, and the observed head-to-origin lag began decreasing (146 → 144 → 143, later 122). Execution client, batcher, RPC provider, fork schedule and confirmation settings were unchanged. This rollback was diagnostic, **not a recommendation to run an old client after Sepolia's L1 fork**; we are aware of the v1.19.5+ requirement.\n\n## Suspected mechanism\n\n1. The selector has cached current origin `O` and next origin `O+1`.\n2. A newly inserted L2 block adopts `O+1`.\n3. The direct sequencer path completes `ProcessPayload` and calls `scheduleNextAction` without requiring the shared dispatcher to finish the corresponding forkchoice-prefetch handler.\n4. If the next `FindL1Origin` runs first, `CurrentAndNextOrigin` promotes cached `O+1` to current and clears the next-origin cache.\n5. With no next origin cached and drift still below its limit, the selector reuses `O+1`, despite `O+2` being available and having a valid timestamp/confirmation distance.\n6. The later forkchoice handler prefetches `O+2`, but the missed adoption opportunity can repeat as origins advance.\n\nWith 10-second L2 blocks, advancing an origin only once per two L2 blocks means approximately 20 seconds per origin, slower than L1's approximately 12-second block interval. Once drift approaches the limit, the synchronous-fetch fallback constrains the lag rather than restoring the intended confirmation-distance target. Faster 2-second chains can still keep up despite the missed opportunities, so the effect is more visible with a longer L2 block time.\n\nRelevant source:\n\n- [Sequencer concurrency change #22241](https://github.com/ethereum-optimism/optimism/pull/22241)\n- [Introduction commit](https://github.com/ethereum-optimism/optimism/commit/4c3d0d3da6c9b2edd9ac93756aef5629b8a97b44)\n- [v1.19.9 origin selector](https://github.com/ethereum-optimism/optimism/blob/op-node/v1.19.9/op-node/rollup/sequencing/origin_selector.go)\n- [v1.19.9 sequencer](https://github.com/ethereum-optimism/optimism/blob/op-node/v1.19.9/op-node/rollup/sequencing/sequencer.go)\n\n## Controlled source-boundary tests\n\nWe tested isolated production-source snapshots with their original module pins and checksum-verified superchain bundles, using Go 1.26.6 and test-only overlays. The probes use each snapshot's **actual Sequencer and L1OriginSelector**, existing attribute/conductor test fixtures, and a mocked successful engine insertion with deliberately controlled forkchoice-dispatch timing. Each boundary test was repeated 20 times.\n\nThe setup has current origin 818, prefetched origin 819, and origin 820 already available with a valid timestamp. The inserted child adopts 819. The question is whether the next build can run before the selector handles the child's forkchoice update.\n\n| Source snapshot | Before prefetch fanout | Result |\n| --- | --- | --- |\n| `4c3d0d3^` (`20818c5b`) | Payload success alone does not arm the next build; shared forkchoice processing precedes the next action | selects 820 |\n| `4c3d0d3` | Direct insertion arms the next build independently | delayed prefetch selects 819; prefetch-first control selects 820 |\n| stable v1.19.4 | same as the parent | selects 820 |\n| stable v1.19.5 | same as the child | delayed prefetch selects 819; prefetch-first control selects 820 |\n\nThese are **controlled component tests, not an end-to-end historical-binary/network bisect**. They reproduce the call-site ordering change; the production v1.19.9 versus node-only rollback comparison provides separate operational evidence. Tests with Isthmus disabled and enabled both reproduced the same origin-selection outcome.\n\n### Minimal selector-order reproducer\n\nThe following self-contained program models the triggering event order using the real selector. Run it from an upstream module checkout, for example v1.19.5, with its normal dependencies available:\n\n```bash\ngo run /tmp/origin-order-repro.go\n```\n\n```go\npackage main\n\nimport (\n    \"context\"\n    \"fmt\"\n    \"io\"\n    \"log/slog\"\n    \"math/big\"\n\n    \"github.com/ethereum-optimism/optimism/op-node/rollup\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup/engine\"\n    \"github.com/ethereum-optimism/optimism/op-node/rollup/sequencing\"\n    \"github.com/ethereum-optimism/optimism/op-service/eth\"\n    \"github.com/ethereum/go-ethereum\"\n    \"github.com/ethereum/go-ethereum/common\"\n    \"github.com/ethereum/go-ethereum/log\"\n)\n\ntype source struct {\n    sequencing.L1Blocks // Unused additional methods, if present, must not be called.\n    now uint64\n}\n\nfunc block(n uint64) eth.L1BlockRef {\n    return eth.L1BlockRef{\n        Number: n, Time: n * 12,\n        Hash: common.BigToHash(new(big.Int).SetUint64(n)),\n        ParentHash: common.BigToHash(new(big.Int).SetUint64(n - 1)),\n    }\n}\n\nfunc (s *source) L1BlockRefByNumber(_ context.Context, n uint64) (eth.L1BlockRef, error) {\n    if n + 15 > s.now / 12 {\n        return eth.L1BlockRef{}, ethereum.NotFound\n    }\n    return block(n), nil\n}\n\nfunc (s *source) L1BlockRefByHash(_ context.Context, h common.Hash) (eth.L1BlockRef, error) {\n    return block(h.Big().Uint64()), nil\n}\n\nfunc run(prefetchFirst bool, blockTime uint64) {\n    ctx := context.Background()\n    src := &source{now: 10000}\n    cfg := &rollup.Config{BlockTime: blockTime, MaxSequencerDrift: 1800}\n    logger := log.NewLogger(slog.NewTextHandler(io.Discard, nil))\n    sel := sequencing.NewL1OriginSelector(ctx, logger, cfg, src)\n    head := eth.L2BlockRef{Number: 100, Time: src.now, L1Origin: block(src.now/12 - 15).ID()}\n    for i := 0; i < 600; i++ {\n        src.now = head.Time\n        ev := engine.ForkchoiceUpdateEvent{UnsafeL2Head: head}\n        if prefetchFirst { sel.OnEvent(ctx, ev) }\n        origin, err := sel.FindL1Origin(ctx, head)\n        if err != nil { panic(err) }\n        if !prefetchFirst { sel.OnEvent(ctx, ev) }\n        head = eth.L2BlockRef{Number: head.Number + 1, Time: head.Time + blockTime, L1Origin: origin.ID()}\n    }\n    fmt.Printf(\"prefetchFirst=%v blockTime=%d originLag=%d drift=%d\\n\",\n        prefetchFirst, blockTime, head.Time/12-head.L1Origin.Number,\n        head.Time-block(head.L1Origin.Number).Time)\n}\n\nfunc main() {\n    run(true, 10)\n    run(false, 10)\n    run(false, 2)\n}\n```\n\nObserved output:\n\n```text\nprefetchFirst=true  blockTime=10 originLag=16  drift=196\nprefetchFirst=false blockTime=10 originLag=149 drift=1792\nprefetchFirst=false blockTime=2  originLag=15  drift=184\n```\n\nThe selector-only model deliberately chooses the event order; it does not itself simulate the full driver. The separate actual-Sequencer probes above establish that the new direct-call path permits that order, while the old path required forkchoice processing before scheduling the next action.\n\n## Downstream impact\n\nWith batcher's unchanged `max-channel-duration=100`, a large gap between current L1 head and the last submitted L1 origin causes newly opened channels to expire immediately. We observed single-L2-block channels and a higher number of small L1 submissions while origin lag exceeded that threshold. This appears to be downstream amplification, not the initiating batcher fault.\n\n## Expected behavior / questions\n\n- When the immediate next origin is available, confirmed and timestamp-valid, the new scheduling path should not systematically miss its adoption opportunity because the prefetch event is queued behind the next direct build.\n- Can next-origin readiness be established independently of the shared dispatcher, while retaining confirmation-depth, immediate-child, timestamp and max-drift constraints and avoiding unbounded L1 RPC blocking?\n- Is there an existing supported mitigation or fix for long-block-time chains that should retain post-Glamsterdam compatibility?\n\nWe searched related reports including #11960, #19263, #22821 and the receipts-prefetch changes #22861/#22863, but did not find an exact report of this long-block-time origin-progression regression. Latest stable checked on 2026-10-08 was v1.19.9. Please let us know if this should be linked to an existing issue.\n",
       "createdAt": "2026-10-08T05:58:10Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "closedAt": "2026-10-10T07:43:23Z",
+      "state": "CLOSED",
       "commentCount": 3
     },
     {
@@ -131,10 +131,10 @@
     }
   ],
   "codeChanges": {
-    "additions": 14438,
-    "deletions": 12877,
-    "files": 428,
-    "commitCount": 813
+    "additions": 14590,
+    "deletions": 12921,
+    "files": 430,
+    "commitCount": 834
   },
   "completedItems": [
     {
@@ -1181,6 +1181,16 @@
       ]
     },
     {
+      "title": "op-node: prefetch one L1 origin ahead so adoption keeps pace with L1",
+      "prNumber": 23279,
+      "type": "other",
+      "body": "Since the sequencer runs on its own goroutine (#22241), it starts each build before the forkchoice update of the previous insertion reaches the L1 origin selector. That update is what prefetches the next origin, so the build finds no next o",
+      "files": [
+        "op-node/rollup/sequencing/origin_selector.go",
+        "op-node/rollup/sequencing/origin_selector_test.go"
+      ]
+    },
+    {
       "title": "ci: bump apko factory workflows to pick up fork-PR safety fix",
       "prNumber": 23273,
       "type": "bugfix",
@@ -1320,6 +1330,16 @@
       "summary": null
     },
     {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 161.54082214506803,
+      "prScore": 115.80082214506803,
+      "issueScore": 0,
+      "reviewScore": 45,
+      "commentScore": 0.74,
+      "summary": null
+    },
+    {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
       "totalScore": 149.71199421015103,
@@ -1336,16 +1356,6 @@
       "prScore": 76.62052508219868,
       "issueScore": 0,
       "reviewScore": 44,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "OptimismBot",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
-      "totalScore": 110.00697502522934,
-      "prScore": 64.46697502522935,
-      "issueScore": 0,
-      "reviewScore": 45,
       "commentScore": 0.54,
       "summary": null
     },
@@ -1492,11 +1502,21 @@
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 48.536766166719346,
+      "totalScore": 53.536766166719346,
       "prScore": 12.398766166719344,
       "issueScore": 2,
-      "reviewScore": 33.5,
+      "reviewScore": 38.5,
       "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 40.95722457733622,
+      "prScore": 39.303224577336216,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.654,
       "summary": null
     },
     {
@@ -1547,16 +1567,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 28.867612288668106,
-      "prScore": 27.651612288668108,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.2159999999999997,
       "summary": null
     },
     {
@@ -1616,6 +1626,26 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 19,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Tyagiquamar",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/104281681?u=fec62c96c582a9e4cb30bb4a0c796550211dda47&v=4",
+      "totalScore": 17.6926286130847,
+      "prScore": 17.6926286130847,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "akatsukiwork0320",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/214928413?v=4",
+      "totalScore": 15.164621127558696,
+      "prScore": 15.164621127558696,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1680,6 +1710,16 @@
       "summary": null
     },
     {
+      "username": "goosun666-cell",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/235016563?v=4",
+      "totalScore": 8.83805020110221,
+      "prScore": 8.83805020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "MarkChen12138",
       "avatarUrl": "https://avatars.githubusercontent.com/u/147058976?u=694048e2c461d0a4a64bc8a3cd4cdb071328bf9d&v=4",
       "totalScore": 8.131048269010742,
@@ -1695,6 +1735,16 @@
       "totalScore": 8,
       "prScore": 0,
       "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "KubilayJackson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/108900031?v=4",
+      "totalScore": 7.89161228866811,
+      "prScore": 7.89161228866811,
+      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -1840,9 +1890,9 @@
       "summary": null
     }
   ],
-  "newPRs": 131,
-  "mergedPRs": 61,
+  "newPRs": 137,
+  "mergedPRs": 62,
   "newIssues": 52,
-  "closedIssues": 32,
-  "activeContributors": 76
+  "closedIssues": 33,
+  "activeContributors": 80
 }
