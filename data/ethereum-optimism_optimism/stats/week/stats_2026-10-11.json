@@ -5,9 +5,82 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-11 to 2026-10-18, ethereum-optimism/optimism had 2 new PRs (0 merged), 0 new issues, and 3 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-10-11 to 2026-10-18, ethereum-optimism/optimism had 5 new PRs (3 merged), 0 new issues, and 11 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABUCzucg",
+      "title": "op-reth: delay proofs ExEx acknowledgements until indexing completes",
+      "author": "joshklop",
+      "number": 23105,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Description\n\nThe proofs-history ExEx can emit `FinishedHeight` immediately after scheduling asynchronous catch-up with `sync_to`, before the proof engine has indexed that height. This can let reth prune the replay data that catch-up still needs.\n\nWhen catch-up reaches a block whose parent state is not available yet, `StateForHashNotFound` is currently converted to success without advancing the proof tip. The engine resets its retry backoff on that apparent success and can retry the same block in a tight loop.\n\n## Expected behavior\n\n- Emit `FinishedHeight` only for heights the proof engine has actually indexed.\n- Treat unavailable parent state as a no-progress retry and apply exponential backoff.\n- Resume and acknowledge progress once the state becomes available.\n\n## Context\n\nFound while reviewing the reth v2.6.0 bump: https://github.com/ethereum-optimism/optimism/pull/23046#discussion_r4135197920\n",
+      "createdAt": "2026-09-30T02:47:36Z",
+      "closedAt": "2026-10-11T15:41:08Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABUCoQqQ",
+      "title": "op-reth: include pending block logs in eth_getLogs ranges",
+      "author": "joshklop",
+      "number": 23104,
+      "repository": "ethereum-optimism/optimism",
+      "body": "`eth_getLogs` ranges whose upper bound is `pending` currently resolve that bound to the canonical head unless the range also starts at `pending`. Requests such as `latest..pending` therefore return successfully while omitting logs from the local pending block.\n\nThis is not flashblock-specific: op-reth omits sequencer flashblock logs, while upstream Reth omits logs from its locally built pending block when pending-block construction is enabled.\n\nThe focused fix is in draft PR #23103, stacked on the Reth update in #23046. Original review finding: https://github.com/ethereum-optimism/optimism/pull/23046#discussion_r4135197967\n",
+      "createdAt": "2026-09-30T02:25:31Z",
+      "closedAt": "2026-10-11T21:30:55Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABH30QTg",
+      "title": "op-interop-mon: verify interop message expiries and ETH bridge refunds",
+      "author": "karlfloersch",
+      "number": 23337,
+      "body": "op-interop-mon now checks the two safety rules of interop message expiry from chain data:\n\n1. A destination never relays a message that its source marked expired.\n2. Every SuperchainETHBridge burn is matched by at most one mint.\n\n**What it reads.** The monitor already reads each chain's L2 receipts. Its finders now also pass every `MessageExpired` and `RefundETH` event to a new `ExpiryChecker`. The checker then reads the source and destination chains' logs and storage. It never relies on a contract call succeeding.\n\n**What it produces.**\n\n- `expiry_checks_total{chain_id,check,result}`\n- `expiry_violations_total{chain_id,check,reason}`: the counter alerting should page on.\n- `expiry_last_verified_block{chain_id}`\n- `eth_in_flight` and `eth_in_flight_timestamp`\n\nIt also logs an error for each violation, with the message hash and the transaction.\n\n**Who consumes it.** On-call alerting and dashboards, the same as the existing op-interop-mon metrics.\n\nThis PR follows the \"Interop Message Expiry and Refund Monitoring\" design doc. It covers the checks that enforce the safety rules. More monitoring will follow.\n\n## Checks\n\n- **Check 1, a relay after an expiry.** The existing window check already covers this. A message expires only once it has gone unrelayed for longer than the 8-day expiry period. Any later relay is therefore past the 7-day window, so the updater marks it `expired`. With `--supernode-endpoints` set, such a relay also counts in `cross_safety_violations_total` once it reaches cross-safe. A new updater test pins this case.\n- **Check 2, expiry.** For each `MessageExpired(messageHash, undeliveredAt)` on source A:\n  - a. `sentMessageTimestamps[H]` on A is nonzero.\n  - b. A `SentMessage` in A's block at that time rebuilds to H. The hash is rebuilt in Go and tested against vectors from `cast`.\n  - c. `undeliveredAt` is greater than `sentAt + expiryPeriod`, and not later than the block that expired the message.\n  - d. Destination B has no `RelayedMessage(source=A, …, H)` within the window.\n  - e. `successfulMessages[H]` is false on B at its head.\n  - f. B's block at `undeliveredAt` contains `UndeliveredMessageExported(H, A, …, undeliveredAt)`.\n- **Check 3, refund.** For each `RefundETH(from, amount, H)`:\n  - H is expired.\n  - The `SentMessage` for H is a bridge-to-bridge `relayETH(from, to, amount)`, with the same sender and amount as the refund.\n  - The send transaction emitted the matching `SendETH` and an `ETHLiquidity` `LiquidityBurned` of the amount.\n  - There is exactly one `RefundETH` for H between the send and this refund.\n- **Check 4, ETH conservation.** Every 12 seconds, at one L2 timestamp across the chains:\n  - Every `LiquidityBurned` is paired with a `SendETH` of the same amount in the same transaction.\n  - Every `LiquidityMinted` is paired with a `RelayETH` or `RefundETH` of the same amount in the same transaction.\n  - Each chain's ETHLiquidity figure, `balance - baseline - sum(LiquidityFunded)`, is compared with its bridge events (`SendETH - RelayETH - RefundETH`).\n  - The cluster's ETH in flight is never negative.\n  - The checker keeps only running sums, not lists of events.\n\nEvents are checked once their block is at or below `--expiry-check-head`, which is `finalized` by default and can be set to `safe`. Refunds are checked before expiries. An event whose block was reorged out is dropped. The conservation check starts over if a block it already counted is reorged out.\n\n## Deviations from the doc\n\n- **Check 4 tests equality, not only \"never negative\".** A per-chain mint smaller than the ETH in flight would hide inside the cluster total, so each chain is also checked against its own bridge events. The balance may exceed the events, but that excess must never shrink.\n  - ETH forced into ETHLiquidity raises the balance without an event. That happens through a self-destruct, or through `relayETH` to ETHLiquidity itself. Anyone can do it.\n  - Strict equality would therefore page on an attacker's 1 wei. Requiring the excess never to shrink still catches any ETH that leaves without an event, including after a forced send.\n  - A double mint whose events look legitimate passes check 4: the same message both relayed and refunded. Checks 2 and 3, together with the window check, catch it. The code comment on the tripwire says so.\n- **Head.** The doc does not choose one. The checks read only up to `finalized` by default, so a reorg cannot produce a false violation.\n- **`sentAt == 0` on a `MessageExpired`** is reported as the violation `unknown_message`. `expireMessage` reverts for such messages, including those sent before send times were recorded.\n- **Baseline for chains that activated interop by upgrade** (one of the doc's open questions). `--eth-liquidity-baseline-blocks <chain>=<block>` sets the baseline; it defaults to genesis. The L2 RPCs must serve state back to that block.\n- **Check 3 checks two more things.** It also requires the ETHLiquidity burn, not only the `SendETH`, and it bounds the duplicate-refund query to the range from the send to the refund.\n- **Doc errors.**\n  - \"relayUndeliveredMessage and refundETH don't check the pause\" is wrong for `relayUndeliveredMessage`, which reverts with `L1CrossDomainMessenger_Paused`. `refundETH` does not check the pause.\n  - `MessageExpired` carries no destination; the checks get it from the decoded `SentMessage`.\n  - `UndeliveredMessageExported` also carries `sourceMessenger`, which this PR does not check. That needs the L1 addresses from step 2g.\n  - Every other event, function and storage name in the doc matches the contracts.\n\n## Tests\n\n- **Unit tests.** They run against an in-memory chain and cover:\n  - valid expiry, refund and conservation flows;\n  - an expiry with no export, or an export for another source;\n  - a relay within the window, and a relay after the expiry;\n  - a hash mismatch, a message never sent, an early expiry, a fact from the future, an unmonitored destination, and waiting for the export to be final;\n  - a refund with no expiry, a second refund, a refund to another sender or of another amount, a send that burned nothing, and a refund of a non-bridge message;\n  - a send both refunded and relayed (negative in flight), a mint with no event, unpaired mints and burns, top-ups and forced ETH, forced ETH followed by an outflow, same-timestamp reads, a baseline block, catch-up over several checks, and a reorg below the conservation check's progress;\n  - refund-first ordering, reorged events, and holding events until their block is final.\n- **Acceptance test.** `TestUnrelayedMessageExpiresAndIsRefunded` now attaches op-interop-mon to both chains, reading finalized heads. It requires that the monitor checks the expiry and the refund as valid, checks conservation past the refund with nothing left in flight, and finds no violation.\n\n## Not covered, and why\n\nThese are left out to keep this PR small and reviewable. Each is a follow-up:\n\n- **Step 2g, linking the L1 legs.** This needs an L1 reader, plus each chain's L1 messenger and portal addresses. With those, the remaining steps are:\n  - match B's withdrawal to `WithdrawalFinalized` on B's portal;\n  - match B's L1 messenger `RelayedMessage` and A's L1 messenger `SentMessage(expireMessage)` in the L1 transaction that deposited into A;\n  - match that deposit, by its source hash, to A's L2 transaction.\n- **Check 5:** configuration drift.\n- **Check 6** beyond the last-verified block: rate, lag, backlog, and stall and RPC health.\n- **Check 7:** dashboards. This includes failed `expireMessage` deposits, and sends or refunds whose sender is the L2CrossDomainMessenger.\n- **Overload handling.** There is no priority queue beyond refunds-first, and no backpressure.\n- **Saved progress and a backfill from interop activation.** The finders still start 100 blocks back, so an event from before the monitor started is not checked. The conservation sums are rebuilt from the baseline on each start.\n- **More than one RPC endpoint per chain.**\n- **Devnet fault injection with broken contracts.**\n- **Alert rules for `expiry_violations_total`.** They belong with the other alerting config.\n\n## How to run\n\n```\nop-interop-mon --l2-rpcs <rpc per chain> --dependency-set <depset.json> \\\n  --metrics.enabled [--expiry-check-head finalized|safe] \\\n  [--eth-liquidity-baseline-blocks <chain-id>=<block> ...]\n```\n\nThe L2 RPCs must be archive nodes back to each chain's baseline block.\n\nTests:\n\n- unit tests: `go test ./op-interop-mon/...`\n- acceptance test: `cd op-acceptance-tests && RUST_JIT_BUILD=1 mise exec -- just test -run TestUnrelayedMessageExpiresAndIsRefunded ./op-acceptance-tests/tests/interop/expiry/`\n\n## Review\n\nThe `go-code-reviewer` checklist ran on this diff. Its findings are fixed, except for two that are dismissed:\n\n- Keep `unknown_destination` as a violation. Only a chain in the source's cluster can export a fact that the source accepts, so the monitor must watch every chain in the cluster.\n- The acceptance-test monitor keeps the default 7-day window instead of the system's 12 seconds. This only widens the relay search, which the destination's head bounds anyway.\n\nThe `interop-reviewer` does not apply: this is monitor-only code.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-11T23:39:31Z",
+      "mergedAt": null,
+      "additions": 2555,
+      "deletions": 8
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABF0HklA",
+      "title": "op-reth: acknowledge indexed proof heights",
+      "author": "joshklop",
+      "number": 23106,
+      "body": "Proof-history catch-up can currently acknowledge a notification target before the asynchronous engine has indexed it, while temporary parent-state unavailability is treated as successful progress and retried without delay. This keeps `FinishedHeight` at the engine's actual indexed tip and applies exponential backoff to no-progress attempts, preventing premature replay-data pruning and tight retry loops while allowing catch-up to resume automatically.\n\nStacked on #23046.\n\nCloses #23105\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-30T02:56:54Z",
+      "mergedAt": null,
+      "additions": 1151,
+      "deletions": 1408
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABFwmxmw",
+      "title": "op-reth!: use standard RPC metrics for historical proofs",
+      "author": "joshklop",
+      "number": 23087,
+      "body": "Stacked on #23046. The historical-proofs override currently duplicates Reth's built-in per-method RPC instrumentation, so this switches operators to the standard `reth_rpc_server_calls_*{method=\"eth_getProof\"}` series and documents the migration and its accounting differences.\n\nThis intentionally accepts that Reth exposes only volume for batch entries and does not cover authenticated RPC calls or standalone notifications. The in-tree Kona hosts, Go clients, and proof benchmark all issue individual `eth_getProof` calls rather than JSON-RPC batches.\n\nA seven-day comparison of successful-call counter increases found an exact match on production proof nodes and differences of only -0.0014% to -0.0078% on high-volume I nodes. This query reports the percentage difference per network and namespace, where zero means the counters are equivalent:\n\n```promql\n(\n  100 * (\n    (\n      sum by (stack_optimism_io_network, namespace) (\n        increase(reth_rpc_server_calls_successful_total{method=\"eth_getProof\"}[$__range])\n      )\n      /\n      sum by (stack_optimism_io_network, namespace) (\n        increase(reth_optimism_rpc_eth_api_ext_get_proof_successful_responses[$__range])\n      )\n    ) - 1\n  )\n)\nand on (stack_optimism_io_network, namespace)\n(\n  sum by (stack_optimism_io_network, namespace) (\n    increase(reth_optimism_rpc_eth_api_ext_get_proof_successful_responses[$__range])\n  ) > 100\n)\n```\n\nKnown rollout dependency: the Grafana dashboard [`op-reth: NVMe vs hyperdisk`](https://optimistic.grafana.net/d/gunou-reth-perf-cmp) has five queries across its proof-serving panels that use the removed metrics. Those queries must be migrated before this change is deployed.\n\nNo additional integration test is included because the metric middleware and batch accounting are owned and tested upstream; the local change only removes handler-level instrumentation, while the operator documentation captures the pinned upstream semantics.\n\nBREAKING CHANGE: Historical-proofs operators must migrate dashboards and alerts from `reth_optimism_rpc_eth_api_ext_get_proof_*` to `reth_rpc_server_calls_*` filtered by `method=\"eth_getProof\"`. The public `EthApiExtMetrics` Rust type is removed. Per-entry batch outcomes and latency, authenticated RPC calls, and standalone notification calls are no longer measured.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-29T19:14:59Z",
+      "mergedAt": null,
+      "additions": 1073,
+      "deletions": 1420
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABF61K4g",
+      "title": "op-reth: fix reth v2.6.0 review findings",
+      "author": "sebastianst",
+      "number": 23118,
+      "body": "This fixes the blocking findings from my review of #23046. Each one is a regression that the reth v2.6.0 bump introduces. Stacked on #23046.\n\n- **Isthmus withdrawals root:** with state masking on (the new default), an op-reth sequencer could write a wrong `withdrawalsRoot` into a block header, and a verifier could reject a valid block with `L2WithdrawalsRootMismatch`. The cause is upstream: `OverlayStateProvider::storage_root` ignored the overlay trie nodes. The fix lives in ethereum-optimism/reth#11, and this PR pins reth to that commit. A regression test, masked and unmasked over both storage versions, fails on #23046.\n- **`op-reth proofs init`:** init now refuses a datadir whose state trie lags its tip, or where reth's repair of it was interrupted, which happens after an unclean shutdown or on a snapshot of a running node. Before, init seeded a proofs store that matched no block. With backfill, that then failed with `StateRootMismatch`; without backfill, the node silently served wrong historical proofs. The error tells operators to start the node once and stop it cleanly.\n- **Block access lists:** `debug_getRawBlockAccessList` is no longer served. op-reth now refuses to start with `--rpc-cache.prewarm-bals` or `--rpc-cache.cache-computed-bals`: on OP, prewarming re-executes every block forever, and it feeds the untested block access list reconstruction into tracing.\n- **Flashblock log stream:** `flashblock_receipts_stream` returns logs for filters with an address or topic again. Since the bump, it returned none for them.\n\n**Before merge:** keep this as a draft until ethereum-optimism/reth#11 merges, then re-pin to the merged commit. The current pin is reachable only from the fork PR's branch.\n\n**Not addressed:**\n- Low-impact test-helper refactors suggested by the Rust review: a shared `RethTrieStorageLayout` conversion, named test tuples, and a network-args helper.\n- A pre-existing issue: flashblock stream logs carry per-flashblock, hash-ordered `transaction_index`/`log_index`.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-30T14:59:04Z",
+      "mergedAt": "2026-10-12T00:35:47Z",
+      "additions": 877,
+      "deletions": 215
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABHwf_GQ",
       "title": "op-reth: keep proofs history shard keys valid on unwind",
@@ -19,28 +92,131 @@
       "mergedAt": null,
       "additions": 677,
       "deletions": 1
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABHwQ1zg",
-      "title": "ci: bump rust nightly pin to nightly-2026-10-10",
-      "author": "opgitgovernance",
-      "number": 23333,
-      "body": "Automated weekly bump of the pinned nightly Rust toolchain from `nightly-2026-08-22` to `nightly-2026-10-10`. CI on this PR will validate the new toolchain compiles cleanly.",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-11T00:01:35Z",
-      "mergedAt": null,
-      "additions": 1,
-      "deletions": 1
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 2
+    "additions": 1429,
+    "deletions": 1158,
+    "files": 68,
+    "commitCount": 24
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "op-reth: fix reth v2.6.0 review findings",
+      "prNumber": 23118,
+      "type": "bugfix",
+      "body": "This fixes the blocking findings from my review of #23046. Each one is a regression that the reth v2.6.0 bump introduces. Stacked on #23046.\n\n- **Isthmus withdrawals root:** with state masking on (the new default), an op-reth sequencer coul",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/op-reth/crates/consensus/Cargo.toml",
+        "rust/op-reth/crates/consensus/src/validation/isthmus.rs",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/tests/it/rpc.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/proofs.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/trie/Cargo.toml",
+        "rust/op-reth/crates/trie/src/db/store.rs",
+        "rust/op-reth/crates/trie/src/engine/buffer/overlay.rs",
+        "rust/op-reth/crates/trie/src/error.rs",
+        "rust/op-reth/crates/trie/src/initialize.rs",
+        "rust/op-reth/crates/trie/src/provider.rs",
+        "rust/op-reth/crates/trie/src/test_utils.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-evm/src/tx.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/provider.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/consensus/src/lib.rs",
+        "rust/op-reth/crates/consensus/src/proof.rs",
+        "rust/op-reth/crates/exex/Cargo.toml",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/tests/it/main.rs",
+        "rust/op-reth/crates/node/tests/it/p2p_version.rs",
+        "rust/op-reth/crates/node/tests/it/payload_handoff.rs",
+        "rust/op-reth/crates/rpc/src/debug.rs",
+        "rust/op-reth/crates/rpc/src/metrics.rs",
+        "rust/op-reth/crates/rpc/src/state.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/backfill.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/snapshot_tests.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store_v2/write.rs",
+        "rust/op-reth/crates/trie/src/in_memory.rs",
+        "rust/op-reth/crates/trie/src/proof.rs"
+      ]
+    },
+    {
+      "title": "docs,op-challenger,kona: Remove stale op-program references",
+      "prNumber": 23289,
+      "type": "docs",
+      "body": "op-program was deleted in ethereum-optimism/optimism#21271, and it is not supported. Some comments and AI docs still describe it as a live program, a component to update, or a file to compare against. Agents read these files, so they ask fo",
+      "files": [
+        ".claude/skills/release-notes/scripts/pr-facts.sh",
+        "docs/ai/devfeatures.md",
+        "docs/ai/fault-proofs.md",
+        "op-challenger/cmd/main_test.go",
+        "op-challenger/config/config.go",
+        "op-challenger/config/config_test.go",
+        "op-challenger/flags/flags.go",
+        "op-supernode/dafny-models/Interop.dfy",
+        "rust/kona/bin/client/scripts/fetch-witness-tar.sh",
+        "rust/kona/bin/client/tests/interop_trace_extension.rs",
+        "rust/kona/crates/proof/proof-interop/src/boot.rs",
+        "rust/kona/tests/justfile"
+      ]
+    },
+    {
+      "title": "op-revm, alloy-op-evm: support revm's feature-gated asyncdb fields",
+      "prNumber": 23335,
+      "type": "feature",
+      "body": "Addresses https://github.com/ethereum-optimism/optimism/pull/23046#discussion_r4135197956. Stacked on #23046.\n\nWith revm 43, `op-revm` and `alloy-op-evm` fail to compile (E0063, missing `async_stack`) whenever anything in the dependency gra",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/alloy-op-evm/Cargo.toml",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/op-revm/Cargo.toml",
+        "rust/op-revm/src/evm.rs"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 72.9760879618524,
+      "prScore": 59.0380879618524,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "akatsukiwork0320",
       "avatarUrl": "https://avatars.githubusercontent.com/u/214928413?v=4",
@@ -49,6 +225,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 14.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -72,6 +258,16 @@
       "summary": null
     },
     {
+      "username": "huklaa",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/129692708?u=c05bfda288117361c6a3e7b4012759cf592f6eb3&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "OptimismBot",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
       "totalScore": 0.2,
@@ -82,9 +278,9 @@
       "summary": null
     }
   ],
-  "newPRs": 2,
-  "mergedPRs": 0,
+  "newPRs": 5,
+  "mergedPRs": 3,
   "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 3
+  "closedIssues": 2,
+  "activeContributors": 11
 }
