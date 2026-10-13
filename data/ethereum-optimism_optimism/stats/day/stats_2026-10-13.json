@@ -1,0 +1,226 @@
+{
+  "interval": {
+    "intervalStart": "2026-10-13T00:00:00.000Z",
+    "intervalEnd": "2026-10-14T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-10-13 to 2026-10-14, ethereum-optimism/optimism had 4 new PRs (3 merged), 0 new issues, and 9 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABSeK8uw",
+      "title": "op-supernode: Full rewind deletes backfilled logs and invalidates valid blocks",
+      "author": "ajsutton",
+      "number": 22984,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I found this while I reviewed ethereum-optimism/optimism#22846.\n\nA full rewind deletes every chain's logsDB, including the cold-start backfill. The backfill is the history the node needs to verify the timestamps it is about to replay. After the delete, the node invalidates valid blocks.\n\n## Event sequence\n\n1. `buildRewindPlan` returns a plan with a nil `TargetHeads` when `lastTS <= firstVerifiableTimestamp` (`interop.go:953-961`).\n2. `applyRewindPlan` then calls `db.Clear()` on every chain (`interop.go:1065-1070`).\n3. `clearLocked` deletes the whole range and resets `firstBlock` to 0 (`db.go:474-484`).\n4. Verification resumes at the first verifiable timestamp with an empty logsDB.\n5. `verifyExecutingMessage` calls `Contains` for an initiating message that the backfill held (`algo.go:229-231`).\n6. `Contains` returns `interop.ErrFuture` because `hasBlocks` is false (`db.go:287-289`).\n7. `verifyInteropMessages` treats the error as an invalid executing message (`algo.go:129-141`).\n8. The round applies `DecisionInvalidate` and replaces a valid block.\n\n## Why the delete is wrong\n\nThe logsDB holds history below `firstVerifiableTimestamp` on purpose. `runColdStartBackfill` seals one message expiry window of history before the first verified timestamp (`log_backfill.go:100-166`). A rewind of the verified state to that timestamp does not make the backfill invalid. It is exactly the history the node needs to verify that timestamp again.\n\n## Why the node does not recover\n\nCold start runs once, from `Start` (`interop.go:333`). `waitingForSync` never returns to true, so no backfill re-runs in process.\n\nA restart repairs the node only if the verifiedDB also emptied. If any commit survives, `tryInitFromVerifiedDB` resumes and skips backfill (`interop.go:342-350`).\n\n## Reachability\n\nThe window is narrow. A rewind removes one timestamp per round.\n\n`progressInterop` calls `buildRewindPlan(*obs.LastVerifiedTS)` (`interop.go:736`). `observeRound` sets `LastVerifiedTS` from `verifiedDB.LastTimestamp()` (`interop.go:600-603`). So the plan always targets the last verified timestamp, not a reorg depth. The loop then re-checks `SameL1Chain` on the new last entry (`interop.go:635-643`) and repeats.\n\nThe verifiedDB has no pruning. `firstTimestamp` moves only in `Rewind`, and only downward or to empty (`verified_db.go:254-290`). So `first` stays at the first round the node ever verified, for the life of the data directory.\n\nTo reach `lastTS <= first`, the node must walk its verified DB back to the single first entry. The L1 reorg must invalidate the L1 inclusion of every verified timestamp. In practice the reorg depth must exceed the age of the verified DB. That gives two reachable cases:\n\n1. A young verified DB. A node that cold-started minutes ago holds a recent `L1Inclusion` on its first entry. An ordinary one or two block L1 reorg reaches past it. If the node has verified exactly one timestamp, `last == first` and any L1 inconsistency triggers the clear at once.\n2. After an operator wipes the data directory, which is the documented recovery path. That returns the node to case 1.\n\nA mature node is effectively immune. The reorg would have to be deeper than the whole run.\n\nA rewind to the interop activation timestamp is harmless. `runColdStartBackfill` clamps `commonStart` to `activationTimestamp` (`log_backfill.go:122`), so nothing is retained below activation, and a message cannot reference a pre-activation block anyway.\n\nThe damaging case is a node that cold-starts long after activation. `advanceColdStartInit` sets `verificationStartTimestamp` to `max(activation, max_c firstSafeHeadTS)` (`log_backfill.go:31-38`). The backfill below that point is real data, and the clear destroys it.\n\n## Expected behavior\n\nTruncate the logsDB to the last block that backfill sealed, instead of a full delete. Keep every block below `firstVerifiableTimestamp`. Clear the database only when the rewind reaches the interop activation timestamp.\n\nIn process, this is sufficient. After the verifiedDB empties, `observeRound` reads `firstVerifiableTimestamp`, which falls back to the unchanged `verificationStartTimestamp` (`interop.go:235-245`). So verification resumes at the same point that backfill ended.\n\nRe-run backfill if the resume point can ever move later than the backfill end. `verifyCanAddTimestamp` rejects a gap larger than one block time (`logdb.go:193-198`), so a later resume point would wedge the seal path.\n\n## Related\n\n- ethereum-optimism/optimism#20627 added `reconcileLogsDBTail` and the backfill-path clear.\n- ethereum-optimism/optimism#19287 introduced the L1 reorg rewind handling.\n- ethereum-optimism/optimism#22846 covers storage errors that cause invalidation. This issue is a separate cause of the same outcome.\n",
+      "createdAt": "2026-09-22T02:22:28Z",
+      "closedAt": "2026-10-13T02:59:10Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABIEu-5w",
+      "title": "kona-sp1: accelerate EIP-2537 BLS12-381 precompiles",
+      "author": "wwared",
+      "number": 23353,
+      "body": "The kona-sp1 guest ran the EIP-2537 precompiles (0x0b–0x11) on revm's software arkworks backend, so any block that used them was expensive to prove. `CustomCrypto` now runs all seven on `sp1_bls12_381`, which uses SP1's field, point and bigint syscalls. In SP1's executor that is 5–26× fewer cycles per op (pairing 9.4×, G1 MSM 7.2×, G2 MSM 6.2×). Cycle counts overstate the proving saving, since syscalls cost more trace area; the one op measured in prover gas, a single-term G1 MSM, costs 3.6× less.\n\nThere is no behaviour change for chains or operators. The new backend must match arkworks bit for bit, including which `PrecompileHalt` wins when an input is invalid in several ways, because any divergence would make the proof disagree with the chain.\n\nCloses https://github.com/ethereum-optimism/proofs-team/issues/11\n\n**Pieces**\n- `crates/client/src/precompiles/bls12_381.rs`: the backend. It decodes and encodes EIP-2537 bytes itself, because `sp1_bls12_381`'s serializers use ZCash flag bits. The module doc lists the APIs it must not use and the zkVM hint paths it relies on.\n- `crates/bls12-381-check` (test-only): a vendored copy of revm's arkworks backend as the oracle, and a deterministic 1340-case corpus (torsion and off-subgroup points, non-canonical encodings, error precedence, MSM and pairing inputs at the Jovian and Isthmus caps). Host tests compare `CustomCrypto` with arkworks and blst and run the official EIP-2537 vectors.\n- `programs/tests/bls12-381-check` (test-only guest) and `examples/zkvm_check.rs`: run the corpus through `CustomCrypto` and in-guest arkworks inside SP1's executor, the only place `sp1_bls12_381`'s syscall and hint paths run, and print per-op cycles (`just check-bls12-381-zkvm`).\n- `.circleci/continue/rust-e2e.yml`: a nightly `sp1-bls12-381-zkvm-check` job that runs that check (executor only; proving the corpus nightly is too costly).\n\n**Review focus**\n- Error precedence: MSM stops at the first error and validates each point before dropping a zero-scalar term; pairing skips identity pairs by their raw bytes, as revm does.\n- Malicious-prover guards: the `g2_to_affine` assert and the `read_fp` pre-check only fire on a forged hint, so no test exercises them. Re-audit the module doc's hint list whenever `sp1_bls12_381` changes.\n- u = 0 in `map_fp2_to_g2`: `sp1_bls12_381`'s G2 map (inherited from zkcrypto `bls12_381`) returns an off-curve point there, so that input returns the reference output directly. Not reported upstream yet.\n- The nightly job can't run on this PR; its first run is the first nightly on `develop`, and a failure pages @proofs-team.\n\n**Design choices**\n- MSMs with fewer than four terms use per-term multiplication, which is cheaper than the bucket method's fixed per-window cost. A G1-only affine point-syscall loop would cut 1–3-term G1 MSMs another 4.3× in prover gas; rejected as extra hand-written code for a rare op.\n- The new job restores the toolchain cache twice to stay simple. The G1 map keeps its isogeny-kernel guard: the output is the same without it, but it keeps `clear_h` off a degenerate point.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-13T00:53:00Z",
+      "mergedAt": null,
+      "additions": 4056,
+      "deletions": 97
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHYCgXw",
+      "title": "op-devstack,op-acceptance-tests: add interop message expiry acceptance tests",
+      "author": "karlfloersch",
+      "number": 23277,
+      "body": "Adds the acceptance tests for interop message expiry, and the op-devstack DSL they need, ahead of the contracts.\n\nThe three expiry tests are skipped until #23286 adds the contracts they exercise:\n- `TestUnrelayedMessageCannotExpireBeforeExpiryPeriod`;\n- `TestRelayedMessageCannotBeExportedAsUndelivered`;\n- `TestUnrelayedMessageExpires`, which runs the expiry path to its end with a short expiry period.\n\n#23286 removes the skips, and #23284 adds the refund checks. The spec is ethereum-optimism/specs#960.\n\nThe positive test sets a short expiry period through a new knob in genesis:\n- **op-deployer:** a `l2ToL2MessageExpiryPeriod` genesis override. It is refused for standard intents and on public L1s, and has unit tests.\n- **devstack:** `presets.WithL2ToL2MessageExpiryPeriod`, which refuses a period that doesn't exceed the message expiry window, or that is set when interop isn't active at genesis.\n- **L2Genesis:** the matching `Input` field. op-deployer's input must match the script's struct exactly. Until the messenger can be deployed with a period (#23286), L2Genesis refuses any non-zero override, so the knob can't be used by mistake.\n\nThe DSL additions are covered by tests that run now:\n- **ETH bridge:** `dsl.SendETH` sends ETH through `SuperchainETHBridge`, and `ETHSend.Relay` relays it once the supernode has validated the send. The supernode ETH bridge test uses them in place of its own helpers, and it now also checks that the send and the relay succeed. `SendETH` is a free function because the send involves an EOA, a chain and a destination, not one DSL object.\n- **Messages:** `SentMessageFromReceipt` decodes `SentMessage` and returns an error instead of failing, so callers can tell a receipt without one.\n- **Deposits:** `L2ELNode.TraceCalls`, which `DepositTxExpectRevert` now uses, and a gas option for deposits that may not go below the portal's minimum.\n- **Game clocks:** the deployer options that shorten the game clocks are checked by `TestShortGameClocksReachDeployedGames`, which is not skipped.\n\nSome code is only used by the skipped tests until the contracts land: `WaitForDeposit`, `WithdrawalFromReceipt`, `DisputeGameMaxClockDuration`, and the bindings for functions that don't exist on develop yet (`RefundETH`, `ExpiredMessages`, `SentMessageTimestamps`, `UndeliveredMessageExporter`), plus the exporter's address and the `expiryPeriod` binding. It is here because the skipped tests need it to compile, so the contracts PRs only have to remove the skips and add the refund check.\n\nPart of the change that replaces #23259 (stack: this PR → #23286 → #23284). No effect on users.\n\nReviews: the repo's Claude review agents were not run, because this PR was prepared by a subagent that cannot start other agents; a separate Claude review was run instead. Two independent model reviews (Codex) found two P3 items. Missing diagnostics while waiting for an L1 origin are fixed. I didn't act on the other: they suggested retrying only some errors in two waits, but a failed read there is logged and retried until the timeout, which is the pattern flake-prevention.md asks for.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-08T16:38:40Z",
+      "mergedAt": "2026-10-13T01:22:45Z",
+      "additions": 856,
+      "deletions": 97
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHYBm2Q",
+      "title": "op-core,kona,op-interop-filter!: reject message expiry window overrides above 7 days",
+      "author": "karlfloersch",
+      "number": 23276,
+      "body": "A dependency set can override the interop message expiry window with any value, and op-core, kona and op-interop-filter accept a window longer than the protocol's 7 days. The interop message expiry contracts (#23286, with the ETH refund in #23284) mark a message expired, and let apps refund it, once its destination shows it unrelayed a day after the 7-day window. A longer window would let a refunded message still be relayed. The interop specification now makes 7 days the limit (ethereum-optimism/specs#960, \"Expiry Window\"), and this PR enforces it:\n- op-core rejects a longer override wherever a dependency set is built or parsed;\n- kona puts the rule in a `MessageExpiryOverride` type, so a longer override can be neither constructed nor deserialized, matching op-core;\n- op-interop-filter rejects a `--message-expiry-window` above 168h, checked before the value is truncated to whole seconds.\n\nkona-host also refuses to start when `--depset-cfg` is missing, unreadable or doesn't parse, and reports the file. It no longer serves an empty dependency set in that case. Before, a bad file made kona-host report every executing message as outside the dependency set while op-program failed with an error, so the challenger could post a wrong trace.\n\nThis PR stands alone and can land first. It is part of the change that replaces #23259.\n\nBREAKING CHANGE: an expiry window override above 604800 seconds is now rejected.\n- **op-node, op-supernode and kona-node:** a dependency set with `overrideMessageExpiryWindow` above 604800 seconds now fails to load at startup.\n- **kona-client and op-program:** such a dependency set fails when its preimage is read during the proof.\n- **op-interop-filter:** `--message-expiry-window` above 168h fails at startup.\n- **kona-host:** fails at startup when `--depset-cfg` is missing, unreadable or doesn't parse, instead of serving an empty dependency set.\n- **Rust API:** `DependencySet.override_message_expiry_window` changes from `Option<u64>` to `Option<MessageExpiryOverride>`. Code in kona-genesis and kona-interop users that builds it with `Some(n)` must use `Some(n.try_into()?)`. The JSON format is unchanged.\n- **Migration:** operators with a longer override must lower it to at most 7 days.\n\nReviews: the repo's Claude review agents were not run, because this PR was prepared by a subagent that cannot start other agents; a separate Claude review was run instead. Two independent model reviews (Codex) found two P3 items, both fixed in this PR:\n- the filter accepted a value a fraction of a second over 168h, because it was truncated before the check;\n- kona-host reported a dependency-set parse error as a RollupConfig error.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-08T16:37:28Z",
+      "mergedAt": "2026-10-13T02:34:13Z",
+      "additions": 299,
+      "deletions": 24
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABIE4pHA",
+      "title": "op-interop-mon: let other binaries add checks to the monitor",
+      "author": "karlfloersch",
+      "number": 23354,
+      "body": "op-interop-mon runs a fixed set of checks. This PR lets another binary import it as a library and add its own checks, so an operator still runs one monitor.\n\n- **`Extension`**: an extra check with `Start` and `Stop`. The service builds it once its L2 clients are ready, starts it before the finders and stops it after them.\n- **`BlockObserver`**: an Extension that also implements `ObserveBlock` sees the receipts of every block the finders process, before they become jobs. It runs on the finders' goroutines, so it must not block.\n- **`ExtensionEnv`**: what an Extension is built from. It carries the logger, the per-chain clients, the dependency set's message expiry window, and the metrics registry the metrics server serves (nil when metrics are disabled).\n- **Options**: `Main`, `InteropMonitorServiceFromCLIConfig` and `InteropMonitorServiceFromClients` take `WithExtension(factory)`. `WithExtraFlags` stops `Main` from warning about an extension binary's own environment variables.\n\nWith no options, the monitor behaves exactly as before. Existing callers compile unchanged, because the options are variadic.\n\nTests: a lifecycle test (the extension gets the registry and the expiry window, and is started and stopped) and a test that the observing filter shows every receipt to observers and still runs the job filter.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-13T01:15:56Z",
+      "mergedAt": null,
+      "additions": 207,
+      "deletions": 11
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABIEUL0g",
+      "title": "ci,contracts-bedrock: Release the triggering tag and backport upgrade test fixes",
+      "author": "ajsutton",
+      "number": 23352,
+      "body": "The v8 proposal branch needs a CI fix before we tag `op-deployer/v0.8.1-rc.1`. The upgrade tests fork mainnet at the latest daily block. Mainnet chains now run v8 with super root games, so the tests fail. This PR is the alternative to ethereum-optimism/optimism#23351. It does not pin the fork block or the superchain-registry URL.\n\nChanges:\n\n- Cherry-pick the go-release fix so the release uses the tag that triggered the workflow.\n- Backport the test parts of ethereum-optimism/optimism#22939. The OPCM upgrade tests now use the super game slots when the chain respects a super game. `PastUpgrades` keeps retired games disabled and keeps the v8 game order.\n- Add a test-only step for a chain that already runs the OPCM release under test. OPCM permits an upgrade within one minor version only from the same OPCM address. The local v8 OPCM has a new address, so the upgrade reverts with `InvalidUpgradeSequence(\"8.0.1\", \"8.0.1\")`. The tests now record the local OPCM as the last used OPCM. This represents a rerun of the live upgrade.\n\nNothing under `src/`, `interfaces/` or `snapshots/` changes, and no Go code changes. The embedded contracts stay identical to v0.8.0.\n\nNot backported: the `src/` and `semver-lock.json` parts of ethereum-optimism/optimism#22939, and the op-deployer `apply_test.go` change, which removes a skip that this branch cannot verify.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-12T23:52:55Z",
+      "mergedAt": null,
+      "additions": 160,
+      "deletions": 87
+    }
+  ],
+  "codeChanges": {
+    "additions": 1259,
+    "deletions": 121,
+    "files": 42,
+    "commitCount": 22
+  },
+  "completedItems": [
+    {
+      "title": "op-devstack,op-acceptance-tests: add interop message expiry acceptance tests",
+      "prNumber": 23277,
+      "type": "tests",
+      "body": "Adds the acceptance tests for interop message expiry, and the op-devstack DSL they need, ahead of the contracts.\n\nThe three expiry tests are skipped until #23286 adds the contracts they exercise:\n- `TestUnrelayedMessageCannotExpireBeforeExp",
+      "files": [
+        "op-acceptance-tests/tests/interop/expiry/messageexpiry_test.go",
+        "op-acceptance-tests/tests/supernode/interop/eth_bridge_test.go",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-deployer/pkg/deployer/opcm/l2genesis.go",
+        "op-deployer/pkg/deployer/pipeline/l2genesis.go",
+        "op-deployer/pkg/deployer/pipeline/l2genesis_expiry_test.go",
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/deposit_eoa.go",
+        "op-devstack/dsl/l2_el.go",
+        "op-devstack/dsl/l2_el_tx.go",
+        "op-devstack/dsl/l2tol2_messenger.go",
+        "op-devstack/dsl/superchain_eth_bridge.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/l2tol2_expiry_period.go",
+        "op-devstack/sysgo/l2tol2_expiry_period_test.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-service/txintent/bindings/L2ToL2CrossDomainMessenger.go",
+        "op-service/txintent/bindings/SuperchainETHBridge.go",
+        "op-service/txintent/bindings/SystemConfig.go",
+        "op-service/txintent/bindings/UndeliveredMessageExporter.go",
+        "packages/contracts-bedrock/scripts/L2Genesis.s.sol",
+        "packages/contracts-bedrock/test/scripts/L2Genesis.t.sol",
+        "packages/contracts-bedrock/test/setup/Setup.sol",
+        "op-devstack/dsl/message_expiry.go"
+      ]
+    },
+    {
+      "title": "op-core,kona,op-interop-filter!: reject message expiry window overrides above 7 days",
+      "prNumber": 23276,
+      "type": "other",
+      "body": "A dependency set can override the interop message expiry window with any value, and op-core, kona and op-interop-filter accept a window longer than the protocol's 7 days. The interop message expiry contracts (#23286, with the ETH refund in ",
+      "files": [
+        "op-core/interop/depset/depset_test.go",
+        "op-core/interop/depset/static_depset.go",
+        "op-interop-filter/filter/config.go",
+        "op-interop-filter/filter/config_test.go",
+        "op-interop-filter/flags/flags.go",
+        "rust/kona/bin/host/src/interop/cfg.rs",
+        "rust/kona/bin/host/src/interop/local_kv.rs",
+        "rust/kona/crates/protocol/genesis/src/interop/depset.rs",
+        "rust/kona/crates/protocol/genesis/src/interop/mod.rs",
+        "rust/kona/crates/protocol/genesis/src/lib.rs",
+        "rust/kona/crates/protocol/interop/src/lib.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/test_utils.rs",
+        "rust/kona/sp1/crates/super-range-executor/src/lib.rs"
+      ]
+    },
+    {
+      "title": "op-supernode: halt instead of deleting cold-start backfill on rewind",
+      "prNumber": 23356,
+      "type": "other",
+      "body": "A rewind that removes a node's first verified timestamp clears every logsDB. On a node that cold-started after interop activation, the logsDBs also hold the cold-start log backfill below that timestamp. Backfill runs only at cold start, so ",
+      "files": [
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 96.50996521534579,
+      "prScore": 82.57196521534578,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 42.822773896576095,
+      "prScore": 42.822773896576095,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 33.733453324894,
+      "prScore": 18.533453324894,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "imitater-dou",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/287387610?u=12f6d7a042a5f12399623f115bd79d35f35da2c2&v=4",
+      "totalScore": 7.499437912434101,
+      "prScore": 7.499437912434101,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 4,
+  "mergedPRs": 3,
+  "newIssues": 0,
+  "closedIssues": 1,
+  "activeContributors": 9
+}

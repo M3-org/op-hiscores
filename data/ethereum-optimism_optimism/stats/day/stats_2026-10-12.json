@@ -5,9 +5,94 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-12 to 2026-10-13, ethereum-optimism/optimism had 0 new PRs (1 merged), 0 new issues, and 2 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-10-12 to 2026-10-13, ethereum-optimism/optimism had 11 new PRs (14 merged), 4 new issues, and 28 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABS1-RBQ",
+      "title": "op-challenger: support ZK dispute games in CLI commands",
+      "author": "pauldowman",
+      "number": 23009,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Some op-challenger CLI commands do not yet support ZK games.\n\n| Command | Status | Observed |\n|---|---|---|\n| `list-games` | works | lists game type 10 |\n| `move --attack` | works | attaches `challengerBond()` |\n| `list-claims` | fails | `unsupported game type: zk` |\n| `list-credits` | fails | `unsupported game type: zk` |\n| `game-proposal-outputs` | fails | `unsupported game type: zk` |\n| `resolve` | fails | `unsupported game type: zk` |\n| `resolve-claim` | fails | `unsupported game type: zk` |\n| `create-game` | builds an invalid tx | reverts `BadExtraData()` |\n| `run-trace` | accepts `zk`, cannot run it | no executor for the type |\n\n## Root cause\n\n`list-claims`, `list-credits`, `game-proposal-outputs`, `resolve` and `resolve-claim` all construct via `NewFaultDisputeGameContract` (`faultdisputegame.go:84`), which has no ZK case. The generic `NewDisputeGameContract` (`disputegame.go:52`) does — that is why `move` works.\n\n## In scope\n\n**`resolve`** — switch `resolve.go:15` to `DisputeGameContract` / `NewDisputeGameContract`, as `move.go:90` does. `ResolveTx()` is already on that interface.\n\n**`list-credits`** — `GetBalanceAndDelay` and `GetWithdrawals` are already on `ZKDisputeGameContract` (`zkdisputegame.go:79-81`). Only the recipient set differs: challenger, prover and game creator instead of the claim tree.\n\n**`game-proposal-outputs`** — needs `--superroot-rpc` / `superroot_atTimestamp`, because `L2SequenceNum` is a super-root timestamp, not a block number. **Already broken for `super-cannon-kona` and `super-permissioned`** for the same reason: they construct fine, then feed a timestamp to `OutputAtBlock` (`game_proposal_outputs.go:174`, `superfaultdisputegame.go:63`). That file has no super-game test coverage. The logic exists in `game/zk/actor.go`'s `SuperRootProvider`.\n\n**`create-game`** — needed by the `op-challenger-invalid-proposal` CronJob (`ethereum-optimism/k8s`, every 12h). `createGameParams` (`gamefactory.go:313`) has no ZK case; ZK `extraData` is a 4-byte `parentIndex` plus a `SuperRootProof` (`ZKDisputeGame.sol:189-205`). Reuse the existing `encodeSuperRootProof` and add `--parent-index` defaulting to `uint32.max`, which anchors to the `AnchorStateRegistry` root and keeps the cron invocation unchanged. Note `initBonds(10)` is non-zero (0.021 ETH on zk-proofs-1) and is forfeited on each invalid proposal.\n\n**ZK game state** — nothing exposes `claimData()` (proposal status, challenger, prover, deadline), which is what confirms a proof landed after a challenge. Needs a ZK branch in `list-claims` or a new subcommand.\n\n**`list-games`** (cosmetic) — prints `Claims 0`, because `GetClaimCount` is only called for `FaultDisputeGameContract` (`list_games.go:134`).\n\n`credits.go`, `resolve.go`, `resolve_claim.go` and `create_game.go` have no test files; follow the stub-RPC pattern in `move_test.go`.\n\n## Out of scope\n\n**`resolve-claim`** — ZK games have no `resolveClaim`. Improve the error message only.\n\n**`run-trace`** — ZK has no VM trace. The bug is that `--run zk/...` is accepted: `PlayableGameTypes` (`game_type.go:43`) backs the parser, but `serverExecutorForGameType` (`runner/factory.go:61`) has no case for it — same for `alphabet` and `fast`. Add a separate trace-types list; `PlayableGameTypes` must keep ZK, since it also backs `--game-type`, config validation and the monitor.\n",
+      "createdAt": "2026-09-23T21:06:31Z",
+      "closedAt": "2026-10-12T14:44:56Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABVOlI7A",
+      "title": "kona-interop: the proof cost of message validation grows as executing messages × initiating-block receipts",
+      "author": "Inphi",
+      "number": 23209,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nFor each executing message, `MessageGraph` walks to the initiating block's header and decodes all of that block's receipts. Nothing is cached, and identical messages are not deduplicated. `CrossL2Inbox.validateMessage` costs about 3.5k gas after the first call, so one transaction can emit about 11k messages that all point to one log in a block with large receipts.\n\n## Measurements\n\nSP1 executor, real guest ELF:\n\n| Receipts | Messages | Cycles |\n|---|---|---|\n| 64 | 1 | 7.0M |\n| 512 | 64 | 443M |\n| 2048 | 256 | 6.94B |\n\nThe rate is about 13k cycles for each (message × receipt). An attack with about 11k messages against about 1 MB of receipts is about 4e11 cycles for one timestamp. One timestamp cannot be split across consolidation proofs.\n\n## Where\n\n- `rust/kona/crates/protocol/interop/src/graph.rs:198-211`: one header walk and one receipts decode for each message.\n- `rust/kona/crates/proof/proof-interop/src/provider.rs:106-132`: a full receipts decode, with no cache.\n\n## Impact\n\nLiveness in interop clusters. For a few dollars of L2 gas, an attacker can make the proof for one timestamp too expensive to finish in `maxProveDuration`. The attacker then challenges each honest game that covers that timestamp and takes the bonds. The FPVM uses the same algorithm, but it has no prove deadline.\n\n## Fix\n\n1. Cache headers by number and decoded receipts by block hash, across messages and across consolidation iterations.\n2. Validate each distinct identifier once.\n3. Index logs so that each lookup costs a fixed amount, not a full walk.",
+      "createdAt": "2026-10-05T22:04:07Z",
+      "closedAt": "2026-10-12T14:43:38Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABWraf_w",
+      "title": "kona/tests/proofs: run on op-reth-test-engine and delete op-e2e/e2eutils/gethengine",
+      "author": "sebastianst",
+      "number": 23345,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of #21905. Depends on #23343, #23344 and #21787.\n\nMove the harness onto `op-reth-test-engine`, then delete the in-process op-geth L2 EL.\n\n- [`env.go`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/rust/kona/tests/proofs/helpers/env.go#L82) builds the actions [`L2Engine`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/op-e2e/actions/helpers/l2_engine.go) instead of `gethengine.NewL2Engine`.\n- Engine control:\n  - Replace `EngineApi.IncludeTx` with `IncludeTxErr`.\n  - Add `L2Engine.SetForceEmpty`, `ActL2IncludeTxIgnoreForcedEmpty` and `BlockByHash`.\n- [`runner.go`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/rust/kona/tests/proofs/helpers/runner.go#L144) gives kona-host the engine socket path instead of `HTTPEndpoint()`.\n- The pre-fork state generator ([`StateAt`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/rust/kona/tests/proofs/prefork_state_gen_test.go#L68), run by [`just nut-prefork-state-for`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/justfile#L484-L490)) reads state through `optest_dumpAccounts`.\n- Delete [`op-e2e/e2eutils/gethengine`](https://github.com/ethereum-optimism/optimism/tree/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/op-e2e/e2eutils/gethengine).\n- Build and CI:\n  - [`action-tests-build`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/rust/kona/tests/justfile#L149-L153) and the generator recipe also build `op-reth-test-engine`.\n  - [`kona-proof-action-tests`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/.circleci/continue/rust-e2e.yml#L159-L194) and [`kona-sp1-action-tests`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/.circleci/continue/rust-e2e.yml#L447-L470) export `RUST_BINARY_PATH_OP_RETH_TEST_ENGINE`. The binary is already in the workspace release builds they attach.\n- Add a timeout on kona-host runs so that a witness gap fails the test instead of hanging it.\n- Docs: [`fault-proofs.md`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/docs/ai/fault-proofs.md#L90-L113), [`opgeth-decoupling.md`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/docs/ai/opgeth-decoupling.md#L721).\n\nThe PR for this closes #21905.\n\nSize: M.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "createdAt": "2026-10-12T16:12:57Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABWraRTQ",
+      "title": "op-reth-test-engine: serve the debug_ methods kona-host needs",
+      "author": "sebastianst",
+      "number": 23344,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of #21905. Stack on #21787's tip. This needs the [`OpEthApi` module](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/rust/op-reth-test-engine/src/rpc.rs#L154-L175) from #23198, and #21787 also edits that file.\n\nServe the `debug_` methods kona-host `super` calls on its L2 node. These are what production op-reth serves to kona-host: `eth_getProof`, `eth_getBlockBy*` and `eth_chainId` are served already, and IPC is enough (no HTTP listener).\n\n- **`debug_getRawHeader`, `debug_getRawReceipts`, `debug_dbGet` (code form):** mount reth's [`DebugApi`](https://github.com/ethereum-optimism/reth/blob/0fbe428518594611bdd3fdd822eb5968823c8e66/crates/rpc/rpc/src/debug.rs#L65-L70) over the existing `OpEthApi`. It needs a `reth_tasks::Runtime` on the current tokio handle.\n- **`debug_executePayload`:** mount op-reth's [`OpDebugWitnessApi`](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/op-reth/crates/rpc/src/witness.rs#L81-L91) with an `OpPayloadBuilder` over a no-op pool, as the [production node does](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/op-reth/crates/node/src/node.rs#L866-L912).\n- **`optest_dumpAccounts(blockHash, addresses)`:** full account and storage state for the pre-fork state generator. reth's [`debug_dumpBlock`](https://github.com/ethereum-optimism/reth/blob/0fbe428518594611bdd3fdd822eb5968823c8e66/crates/rpc/rpc/src/debug.rs#L1061-L1063) and [`debug_storageRangeAt`](https://github.com/ethereum-optimism/reth/blob/0fbe428518594611bdd3fdd822eb5968823c8e66/crates/rpc/rpc/src/debug.rs#L1158-L1166) are stubs. Implement it by merging genesis plain state with the canonical in-memory blocks' bundle states, honoring storage wipes.\n- **Socket-path accessor for kona-host:** `ipc.Proc.Path` → `testengine.Client.SocketPath` → `L2Engine.RPCEndpoint`. The [socket path is already owned by `Proc`](https://github.com/ethereum-optimism/optimism/blob/5eaa2e6cb3fdfb6e0aa61043c8d2759e34c41579/op-service/ipc/ipc.go#L55-L64).\n- **Tests:**\n  - Raw header and receipts round-trip.\n  - Witness check: `debug_executePayload` for a built block's parent and attributes returns the parent state-root node and the code of touched contracts.\n  - Dump of a predeploy after a storage change.\n\nRisks:\n- **A witness gap hangs instead of failing.** reth's `debug_dbGet` serves [code only](https://github.com/ethereum-optimism/reth/blob/0fbe428518594611bdd3fdd822eb5968823c8e66/crates/rpc/rpc/src/debug.rs#L1037-L1058). So a node outside the witness is unservable, and kona-host [retries forever](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/kona/bin/host/src/backend/online.rs#L143-L182). Production op-reth would hit the same gap.\n- **Witness cost grows with chain length.** The witness is computed over the [in-memory overlay](https://github.com/ethereum-optimism/reth/blob/0fbe428518594611bdd3fdd822eb5968823c8e66/crates/chain-state/src/memory_overlay.rs#L202-L210), which is the production path for unpersisted blocks. Each call merges every in-memory block, so a from-genesis proof sweep is quadratic in chain length. That is fine at action-test sizes.\n- **A parent on a reorged-out fork is invisible to the provider.** Side chains live in the engine's tree state. The tests only prove the final canonical chain.\n\nSize: S–M.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "createdAt": "2026-10-12T16:12:40Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABWraQKw",
+      "title": "kona/tests/proofs: read the L2 chain over RPC instead of the in-process chain",
+      "author": "sebastianst",
+      "number": 23343,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of #21905.\n\nReplace the harness's in-process `core.BlockChain` reads (`env.Engine.L2Chain()…`) with eth RPC reads. They then work unchanged on today's in-process op-geth engine and on `op-reth-test-engine` after the cutover. Because the change is engine-agnostic, it can land on develop and is verified by the current `kona-proof-action-tests` job.\n\n- `CurrentBlock`/`CurrentHeader`/`CurrentSafeBlock` → header by `latest`/`safe` label.\n- `GetBlockByHash`/`GetBlockByNumber`/`GetHeaderBy*` → `ethclient`. Where geth returned nil, `ethclient` returns an error, so adjust the `NotNil` assertions.\n- `GetReceiptsByHash` → `BlockReceipts`. op-reth's RPC receipts carry the Jovian [`daFootprintGasScalar` and `blobGasUsed`](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/op-reth/crates/rpc/src/eth/receipt.rs#L355-L364) that [`jovian_dafootprint_test.go`](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/kona/tests/proofs/jovian_dafootprint_test.go#L143-L154) reads.\n- `L2Chain().Config()` → `env.Sd.L2Cfg.Config`, the genesis config the engine is built from.\n- Delete dead code:\n  - [`L2RPCTracker`](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/kona/tests/proofs/helpers/l2_rpc_tracker.go) and [`WithL2RPCTracker`](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/kona/tests/proofs/helpers/env.go#L171-L176). Nothing calls them, and the proxy only speaks HTTP.\n  - The never-read [`FaultProofProgramL2Source.ChainConfig`](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/kona/tests/proofs/helpers/fixture.go#L19), set at [`runner.go`](https://github.com/ethereum-optimism/optimism/blob/c3b34f1cf34e00d7cab7d1425e1e08783af52abf/rust/kona/tests/proofs/helpers/runner.go#L68).\n\nOut of scope: engine control (`EngineApi.*`, force-empty), the kona-host endpoint and `StateAt`. Those move in the cutover.\n\nSize: S–M, mechanical.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "createdAt": "2026-10-12T16:12:39Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABIBUFSA",
+      "title": "Add Lean proof of the super-aggregation coverage checks",
+      "author": "Inphi",
+      "number": 23346,
+      "body": "Adds a Lean proof that `SuperAggregationInputs::validate` only accepts aggregations whose child outputs form one contiguous chain of super roots from the starting root to the root claim, with one range-derived block per chain and one consolidation step at every timestamp in between.\n\nThe Rust is extracted with Charon and Aeneas into `rust/kona/sp1/verification`. The main theorem is `KonaSp1.aggregation_sound`. It assumes child-proof soundness and `l2_sequence_number < u64::MAX`; the README lists the full trust base. `#print axioms` shows only Lean's standard axioms and the opaque super-root hash.\n\nThe `super_root.rs` change is only to suit the extractor: loops that returned early from nested or post-`?` positions move into private helpers, with the same accepted inputs and error order. A new test covers a chain-ID mismatch in a later timestamp block, the one loop that was rewritten rather than moved.\n\nCI does not build the Lean project yet. `scripts/extract.sh` regenerates the generated files and `lake build` checks the proofs.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-12T18:05:49Z",
+      "mergedAt": null,
+      "additions": 7443,
+      "deletions": 42
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABIDl7Lw",
+      "title": "op-chain-ops: add eth-liquidity-pause command",
+      "author": "karlfloersch",
+      "number": 23349,
+      "body": "Stacked on #23348 (`karl/eth-liquidity-pause`). That PR makes `ETHLiquidity` mirror the chain's L1 pause through the permissionless `L1CrossDomainMessenger.syncETHLiquidityPause()`.\n\n## What it's for\n\n`op-chain-ops/cmd/eth-liquidity-pause` is a small CLI for the ETHLiquidity pause. It has three uses:\n\n- **Devnet gate `interop.eth-liquidity-pause`:** `devnet-pause` → `status --expect paused` → `devnet-unpause` → `status --expect unpaused`.\n- **Production verification:** `status` is read-only and works on any chain. Production pausing stays with the guardian's existing DeputyPauseModule flow, and this tool never pauses production. Nothing new is needed in superchain-ops.\n- **Mirroring an L1 pause (or unpause, or expiry) to L2:** `sync` is permissionless, so any funded key can run it.\n\n## Commands\n\n- **`status --l2 <rpc>... [--l1 <rpc> --l1-messenger <addr>...] [--expect paused|unpaused] [--json]`**\n  - For each chain it reads `ETHLiquidity.paused()` and `pausedL1Timestamp()`.\n  - It runs an `eth_call` of `SuperchainETHBridge.sendETH` with 1 wei. A state override funds the dummy `--from`, so the sender needs no balance. It reports whether the call reverts and with which error (selector and name).\n  - With `--l1`, it also shows `L1CrossDomainMessenger.paused()`, which is the ETHLockbox pause, and prints `OUT OF SYNC` when L1 and L2 differ.\n  - `--expect` exits non-zero on any mismatch. For `paused`, every chain needs `paused()` true, `sendETH` reverting with `ETHLiquidity_Paused()` and, if read, L1 paused.\n- **`sync --l1 <rpc> --l2 <rpc> --l1-messenger <addr> ... --key <any funded key>`**\n  - Checks that each messenger's `SystemConfig.l2ChainId()` matches the `--l2` it is paired with.\n  - Prints the L1 and L2 state per chain and skips chains already in sync (`--force` overrides).\n  - Calls `syncETHLiquidityPause()`, waits for the L1 receipt, then polls L2 until `paused()` equals the L1 pause at the sync's block, or `--timeout` passes.\n- **`devnet-pause` / `devnet-unpause --guardian-key <key>`**\n  - Resolves each chain's ETHLockbox identifier through messenger → SystemConfig → portal → lockbox. Chains that share a lockbox are handled once.\n  - Checks that the key is the SuperchainConfig guardian.\n  - Calls `pause`, `extend` (if an earlier pause expired) or `unpause` on the lockbox identifier, then runs `sync`.\n  - `devnet-unpause` warns if a global pause is still active.\n  - Refuses OP Mainnet, Ink, Unichain, their Sepolia chains (10, 57073, 130, 11155420, 763373, 1301) and an L1 of Ethereum mainnet. There is no override flag.\n\nEvery flag can also come from `--config <toml>` (see `config.example.toml`). Local `*.toml` files in that directory are gitignored because they may hold keys.\n\n## Usage\n\n```bash\n# Production / any chain: read-only\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status \\\n  --l2 https://mainnet.optimism.io --l2 <ink-rpc> --l2 <unichain-rpc> \\\n  --l1 <eth-rpc> --l1-messenger <op-l1cdm> --l1-messenger <ink-l1cdm> --l1-messenger <uni-l1cdm>\n\n# Mirror the current L1 pause to L2 (permissionless)\ngo run ./op-chain-ops/cmd/eth-liquidity-pause sync --config pause.toml --key <funded-l1-key>\n\n# Devnet gate\ngo run ./op-chain-ops/cmd/eth-liquidity-pause devnet-pause   --config devnet.toml\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status         --config devnet.toml --expect paused\ngo run ./op-chain-ops/cmd/eth-liquidity-pause devnet-unpause --config devnet.toml\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status         --config devnet.toml --expect unpaused\n```\n\n## Tests\n\nNone of these tests need a network.\n\n- **Calldata:** encoding for `paused()`, `syncETHLiquidityPause()`, `sendETH`, and SuperchainConfig `pause`/`unpause`/`extend`/`pausable`/`paused(address)`.\n- **ABI drift:** a test checks every hand-written signature and custom error against the contracts-bedrock ABI snapshots on this stack, so a rename in #23348 fails here.\n- **Revert decoding:** custom errors and `Error(string)` reasons.\n- **Safety checks:** production refusal, `--l2`/`--l1-messenger` pairing, grouping chains by shared lockbox, the guardian pause/extend/unpause choice, and `--expect` evaluation, including L1 paused while L2 is not synced.\n- **Config loading:** TOML values load into each command, including the example config.\n- **`status` end to end:** runs against in-process fake L1/L2 JSON-RPC servers. The cases are paused and synced, unpaused, out of sync, a pre-pause ETHLiquidity, a messenger paired with the wrong chain, and JSON output. The fake rejects `sendETH` without the balance override, as geth does.\n- **`sync` end to end:** runs on geth simulated backends with mock contracts. The cases are skip when in sync, `--force` send and wait for L2, a reverting call never sent, and an L2 timeout.\n\n```\ngo test ./op-chain-ops/cmd/eth-liquidity-pause/...   # ok\ngo vet ./op-chain-ops/cmd/eth-liquidity-pause/...    # clean\n./linter/bin/op-golangci-lint run ./op-chain-ops/cmd/eth-liquidity-pause/...   # 0 issues\ngo mod tidy -diff                                    # clean\n```\n\nI also ran `status` read-only against OP Mainnet and OP Sepolia public RPCs. ETHLiquidity is not initialized there yet, and the tool reports `Error(\"Proxy: implementation not initialized\")` for both reads.\n\n**Not run:** `sync` and `devnet-*` against a live devnet with #23348 deployed. The guardian path (`devnet-pause`/`devnet-unpause`) has unit coverage only for its decision logic.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-12T22:14:45Z",
+      "mergedAt": null,
+      "additions": 1913,
+      "deletions": 0
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABF61K4g",
       "title": "op-reth: fix reth v2.6.0 review findings",
@@ -19,13 +104,37 @@
       "mergedAt": "2026-10-12T00:35:47Z",
       "additions": 877,
       "deletions": 215
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABIDklNA",
+      "title": "contracts-bedrock: mirror the L1 pause onto ETHLiquidity",
+      "author": "karlfloersch",
+      "number": 23348,
+      "body": "**Draft.** Interop message expiry (#23286, #23284) makes the ETH bridge's safety rest on the 7-day message expiry window. If that is ever in doubt, we want to stop the bridge on L2 with the pause we already have. Today we can't:\n- the L1 pause stops withdrawals and the lockbox, but it doesn't reach L2;\n- nothing on L2 can be paused;\n- the op-interop-filter failsafe is per operator, so it is not a chain-wide control.\n\nThis PR is defense in depth for message expiry (design-docs#393). `ETHLiquidity` mirrors the chain's existing L1 pause, and anyone can sync it. There is no new pause role, key or process.\n\n**How it works.**\n- **L1.** `L1CrossDomainMessenger.syncETHLiquidityPause()` takes no arguments and anyone can call it. It reads `paused()`, which already resolves the SuperchainConfig's local or global pause through the SystemConfig and the lockbox. It sends `ETHLiquidity.setPaused(paused, block.timestamp)` to L2 as this messenger, with a 100k gas limit. It works while the chain is paused, which is how the pause reaches L2: `sendMessage` and portal deposits aren't paused. It reverts unless the SystemConfig has `INTEROP` enabled, as `relayUndeliveredMessage` does, since `ETHLiquidity` exists only on interop chains. It adds no L1 storage.\n- **L2.** `ETHLiquidity.setPaused(bool, uint256 l1Timestamp)` accepts only a relay from this chain's `L1CrossDomainMessenger`: `msg.sender` must be the `L2CrossDomainMessenger` and its `xDomainMessageSender()` must be its `otherMessenger()`. This is the check `L2ToL2CrossDomainMessenger.expireMessage` uses. It stores `paused` (slot 0) and `pausedL1Timestamp` (slot 1). An update read on L1 before the applied one is a no-op, not a revert, so replaying an older failed message can't undo a newer state. `burn()` and `mint()` revert with `ETHLiquidity_Paused()` while paused; `fund()` stays open.\n- **Operations.** Pausing stays the existing deputy/guardian flow on L1 and takes seconds. Then anyone runs the sync for each interop chain, and the next deposit applies it. Unpausing, and the SuperchainConfig's roughly 3-month pause expiry, reach L2 the same way: the guardian or the clock changes the L1 state, then anyone syncs.\n\n**What it blocks and what it doesn't.** While `ETHLiquidity` is paused:\n- `SuperchainETHBridge.sendETH` reverts atomically. The sender keeps the ETH and no message is sent.\n- `relayETH` reverts, so `L2ToL2CrossDomainMessenger.relayMessage` reverts and `successfulMessages` stays unset. The message can be relayed after the unpause.\n- `refundETH` reverts and `refunded` stays unset. The refund can be claimed after the unpause.\n\nGeneric interop messaging, the `L2ToL2CrossDomainMessenger`, `expireMessage` and the `UndeliveredMessageExporter` all stay live.\n\n**Why expiry stays safe.**\n- If a pause outlasts the 7-day window, the ETH sends in flight can no longer be relayed, so they expire. Expiry doesn't touch `ETHLiquidity`, so it still works while paused.\n- Their refunds then wait for the unpause.\n- Expiry and relay exclude each other, so each send is either minted on the destination or refunded on the source, never both. There is no double spend.\n- A pause never strands ETH for good: the relay or the refund goes through once the chain is unpaused.\n\n**One edge case.** L2 applies an update with the same L1 timestamp as the applied one. Two syncs in one L1 block that straddle a pause change carry the same timestamp. If the earlier of them failed for gas and is replayed later, it would win. Any later sync fixes this, since the sync always reads the current L1 state.\n\n**Versions and the bundle.**\n- `ETHLiquidity` goes 1.1.1 → 1.2.0, and `L1CrossDomainMessenger` 3.0.0 → 3.1.0.\n- `ETHLiquidity` gains storage. Its layout snapshot was `[]`, and Lagoon installs the interop predeploys fresh. The `L1CrossDomainMessenger` storage layout is unchanged.\n- **Gas limit.** `ETHLiquidity`'s deployment in the upgrade bundle rises from 423,000 to 719,000 gas, since its bytecode grows from about 1.0 KB to 1.8 KB. `L2ForkUpgrade_GasProfile_Test` measured 697,039 gas at the 1.5x margin (718,534 in its isolated variant). The figures were the same on forks of Unichain, Zora, Soneium, Mode and Ink; OP Mainnet's public RPC rate-limited the run.\n- **#23287 must be re-snapshotted after this lands.** The Lagoon NUT bundle in `op-core/nuts` isn't regenerated here; only `snapshots/upgrades/current-upgrade-bundle.json` is.\n\n**Tests.** `forge test --match-contract 'ETHLiquidity|SuperchainETHBridge|L1CrossDomainMessenger_SyncETHLiquidityPause'` passes all 54 tests. A wider run that adds `L1CrossDomainMessenger`, `L2CrossDomainMessenger`, `L2ToL2CrossDomainMessenger`, `L2ContractsManager`, `L2Genesis`, `Predeploys` and `UndeliveredMessageExporter` passes 315 tests, with 13 skipped by feature flags.\n- **L1** (`L1CrossDomainMessenger_SyncETHLiquidityPause_Test`):\n  - anyone can sync the unpaused state;\n  - the sync works under a global pause and a local pause, and sends the paused state;\n  - after the unpause it sends the unpaused state;\n  - each sync checks the exact deposit and `SentMessage`, with the block timestamp;\n  - the sync reverts when interop is disabled.\n- **L2 auth and ordering** (`ETHLiquidity_SetPaused_Test`):\n  - the relay from the L1 messenger applies and emits `PausedSet`;\n  - any direct caller is rejected, and so is any other L1 sender through the `L2CrossDomainMessenger`;\n  - a stale timestamp is a no-op that is consumed and emits nothing, and an equal timestamp applies;\n  - an older sync that failed for gas, replayed after a newer one, changes nothing;\n  - `setPaused` fits the 100k limit on cold storage (about 54k with a mocked sender lookup);\n  - the storage slots match the layout snapshot.\n- **ETHLiquidity calls.** `burn` and `mint` revert while paused and work again after the unpause. `fund` works while paused.\n- **Bridge paths** (`SuperchainETHBridge.t.sol`):\n  - `sendETH` reverts atomically: the sender's balance, the liquidity and the messenger nonce are unchanged;\n  - `relayETH` through the real `relayMessage` reverts with `successfulMessages` unset, and the same message relays after the unpause;\n  - a message expires while paused, its refund reverts with `refunded` unset, and the sender claims it after the unpause;\n  - `test_sendETH_l1PauseSynced_reverts` runs it end to end: the guardian pauses on the real SuperchainConfig, the real `syncETHLiquidityPause` runs, its `SentMessage` is relayed into L2, and `sendETH` reverts; after the unpause and another sync, `sendETH` succeeds.\n- **Checks.** These pass: `just lint-check`, `snapshots-check-no-build` and `nut-bundle-check-no-build` (both from a clean `build-no-tests`), `semver-diff-check-no-build`, `valid-semver-check-no-build`, `strict-pragma-check-no-build`, `unused-imports-check-no-build`, `validate-spacers-no-build`, `reinitializer-check-no-build` and `lint-forge-tests-check-no-build`. Locally, `just interfaces-check` reports only `VmContractHelper*` artifacts in test files across the repo, plus the dispute-game interfaces. It reports nothing for the interfaces this PR touches.\n- **Acceptance.** `TestL1PauseSyncedToETHLiquidity` is new in `op-acceptance-tests/tests/interop/expiry`:\n  - the guardian pauses the superchain on the real L1, and anyone calls `syncETHLiquidityPause`;\n  - the deposit sets `paused` on A, and a `sendETH` on A is included and reverts with `ETHLiquidity_Paused()` (from the trace), leaving ETHLiquidity's balance unchanged;\n  - the guardian unpauses, anyone syncs, and the send succeeds and is relayed on B.\n\n  It passed in 117s: `go test -count=1 -run TestL1PauseSyncedToETHLiquidity ./op-acceptance-tests/tests/interop/expiry/`.\n\nStacked on #23284. The spec is ethereum-optimism/specs#960; a spec note for the sync is a follow-up.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-12T22:12:03Z",
+      "mergedAt": null,
+      "additions": 833,
+      "deletions": 22
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABHKD7wQ",
+      "title": "kona: avoid repeated interop message validation work",
+      "author": "Inphi",
+      "number": 23251,
+      "body": "Reduces interop proof cost when many executing messages reference the same source block by avoiding repeated header walks, receipt decoding, and log scans. Duplicate declarations are validated once after full cycle detection.\n\nHistorical source data is released between block groups; only current safe-head receipts persist across consolidation attempts. Log hashes are computed on demand, and replacement headers are reused from memory.\n\nLocally verified with 103 native tests in the affected crates, isolated default-feature test builds, formatting, and scoped Clippy.\nGuest cycles, from the SP1 executor running the `super-range` ELF on a consolidation step. One initiating block, all messages valid:\n\n| Receipts × messages | Before | After |\n|---|---|---|\n| 64 × 1 | 7.1M | 7.2M |\n| 512 × 64 | 450M | 16.9M |\n| 2048 × 256, distinct identifiers | 7.07B | 50.0M |\n| 2048 × 256, one identifier | 7.07B | 49.0M |\n\nCost now grows with messages plus receipts, not with their product. Each extra duplicate message costs about 11k cycles. VM memory and messages that point to many distinct source blocks have not been measured.\n\nFixes https://github.com/ethereum-optimism/optimism/issues/23209\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-07T16:09:21Z",
+      "mergedAt": "2026-10-12T14:43:37Z",
+      "additions": 811,
+      "deletions": 50
     }
   ],
   "codeChanges": {
-    "additions": 1341,
-    "deletions": 1094,
-    "files": 53,
-    "commitCount": 3
+    "additions": 3532,
+    "deletions": 1308,
+    "files": 85,
+    "commitCount": 72
   },
   "completedItems": [
     {
@@ -88,9 +197,363 @@
         "rust/op-reth/crates/trie/src/in_memory.rs",
         "rust/op-reth/crates/trie/src/proof.rs"
       ]
+    },
+    {
+      "title": "op-challenger: support ZK games in resolve and list-credits",
+      "prNumber": 23107,
+      "type": "other",
+      "body": "Fixes #23009. This is the `resolve` and `list-credits` subset only.\n\n## Description\n\n`resolve` and `list-credits` constructed a `FaultDisputeGameContract` directly, so both returned an unsupported game type error for ZK games, which have no",
+      "files": [
+        "op-challenger/cmd/credits.go",
+        "op-challenger/cmd/resolve.go",
+        "op-challenger/cmd/zk_dispute_game_test.go"
+      ]
+    },
+    {
+      "title": "alloy-op-evm: net SDM producer refunds above evmGasUsed instead of dropping them",
+      "prNumber": 23195,
+      "type": "other",
+      "body": "Stacked on #23191.\n\n#23191 still zeroes any policy refund above `evmGasUsed` before netting it. That makes a cliff: a refund just below `evmGasUsed` gets its full net saving, and one just above gets nothing. A correct block-warming policy c",
+      "files": [
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/alloy-op-evm/src/post_exec/refund.rs"
+      ]
+    },
+    {
+      "title": "alloy-op-evm: clip SDM producer refunds to their net saving",
+      "prNumber": 23191,
+      "type": "other",
+      "body": "## Why\n\nThe SDM block-level warming policy rebates the gross EIP-2929 surcharge on block-warm accesses. The EIP-3529 refund cap and the EIP-7623 floor are both functions of gas spent, so when either binds, part of that surcharge never reach",
+      "files": [
+        "op-acceptance-tests/tests/sdm/block_test.go",
+        "rust/alloy-op-evm/src/block/mod.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/alloy-op-evm/src/post_exec/refund.rs"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: check pause after early return in SuperFaultDisputeGame.closeGame",
+      "prNumber": 23267,
+      "type": "other",
+      "body": "Matches FaultDisputeGame and ZKDisputeGame (Spearbit U16 5.3.1): closed games can still unlock credit while paused; DelayedWETH.withdraw still blocks withdrawals. Context: https://github.com/ethereum-optimism/optimism/pull/23239#discussion_",
+      "files": [
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/dispute/SuperFaultDisputeGame.sol",
+        "packages/contracts-bedrock/test/dispute/SuperFaultDisputeGame.t.sol"
+      ]
+    },
+    {
+      "title": "kona: avoid repeated interop message validation work",
+      "prNumber": 23251,
+      "type": "other",
+      "body": "Reduces interop proof cost when many executing messages reference the same source block by avoiding repeated header walks, receipt decoding, and log scans. Duplicate declarations are validated once after full cycle detection.\n\nHistorical so",
+      "files": [
+        "rust/kona/crates/proof/proof-interop/Cargo.toml",
+        "rust/kona/crates/proof/proof-interop/src/provider.rs",
+        "rust/kona/crates/protocol/interop/src/graph.rs",
+        "rust/kona/crates/protocol/interop/src/message.rs"
+      ]
+    },
+    {
+      "title": "ci: build kona-zkvm-canary in its own melange stack",
+      "prNumber": 23288,
+      "type": "other",
+      "body": "## Why\n\n`kona-zkvm-canary` was a subpackage of `melange/op-stack-rust.yaml`. Its SP1 profiling feature has to stay out of the combined build, so it already ran its own `cargo build` with its own target tree (`rust_kona_sp1_crates_zkvm-canar",
+      "files": [
+        ".github/images.apko.json",
+        "melange/kona-zkvm-canary.yaml",
+        "melange/op-stack-rust.yaml"
+      ]
+    },
+    {
+      "title": "op-zk-proposer: add fast finality scenario tests",
+      "prNumber": 23283,
+      "type": "tests",
+      "body": "Adds six scenario tests for fast finality mode in op-zk-proposer. They cover early proof and resolution with the mode enabled, ownership rules, deadline priority, creation capacity through proof failure and retry, defense capacity, challeng",
+      "files": [
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests/fast_finality.rs"
+      ]
+    },
+    {
+      "title": "kona-interop: reject stale initiating block numbers before history lookup",
+      "prNumber": 23275,
+      "type": "other",
+      "body": "An executing message whose identifier pairs a recent timestamp with a stale block number (e.g. `1`) no longer makes the FPP/SP1 guests walk the initiating chain's entire history: it is rejected before the lookup, so lookups stay within the ",
+      "files": [
+        "rust/kona/crates/proof/proof-interop/Cargo.toml",
+        "rust/kona/crates/proof/proof-interop/src/provider.rs",
+        "rust/kona/crates/protocol/interop/src/errors.rs",
+        "rust/kona/crates/protocol/interop/src/graph.rs",
+        "rust/kona/crates/protocol/interop/src/rules.rs",
+        "rust/kona/crates/protocol/interop/src/test_util.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_consolidation.rs"
+      ]
+    },
+    {
+      "title": "justfile: skip Rust build output in the shell lint recipes",
+      "prNumber": 23325,
+      "type": "other",
+      "body": "`just shellcheck` and `just shfmt-fix` detect issues in third-party scripts which are left over from building the rust workspace.\r\n\r\nThe recipes now skip those directories, matching `.gitignore`.\r\n \r\nCI is unaffected: its `shell-check` job ",
+      "files": [
+        "justfile"
+      ]
+    },
+    {
+      "title": "op-challenger: stop advertising JSON absolute prestates",
+      "prNumber": 23292,
+      "type": "other",
+      "body": "op-challenger offered `.json.gz` and `.json` absolute prestates and the config guide told operators to pass `prestate.json`, but Cannon rejects every non-binary state (`cannon/mipsevm/versions/state.go`: JSON states are legacy singlethreade",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/op-challenger-config-guide.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-challenger-setup.mdx",
+        "op-challenger/flags/flags.go",
+        "op-challenger/game/fault/trace/prestates/multi.go",
+        "op-challenger/game/fault/trace/prestates/multi_test.go"
+      ]
+    },
+    {
+      "title": "security: Update module golang.org/x/net to v0.60.0 [SECURITY]",
+      "prNumber": 23291,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [golang.org/x/net](https://pkg.go.dev/g",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
+      "title": "security: Update go toolchain directive to v1.26.9 [SECURITY]",
+      "prNumber": 23290,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Type | Update | Change |\n|---|---|---|---|\n| [go](https://go.dev/) ([source](https://redirect.github.com/golang/go)) | toolchain | patch | `1.26.6` → `1.26.9` |\n| [go](https://go.dev/) ([",
+      "files": [
+        "cannon/testdata/common/go.mod",
+        "go.mod"
+      ]
+    },
+    {
+      "title": "ci: Release the tag that triggered go-release",
+      "prNumber": 23350,
+      "type": "other",
+      "body": "The `go-release` job does not give goreleaser a tag. So goreleaser picks the highest version-sorted tag on HEAD. Git sorts an rc tag above the final tag of the same version. When the final tag and an rc tag are on the same commit, the job b",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 128.13482392823317,
+      "prScore": 109.93482392823317,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 112.5066806848359,
+      "prScore": 58.56868068483589,
+      "issueScore": 0,
+      "reviewScore": 53.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 111.29111043066476,
+      "prScore": 106.29111043066476,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 83.62501275123793,
+      "prScore": 41.12501275123793,
+      "issueScore": 2,
+      "reviewScore": 40.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 65.7,
+      "prScore": 0,
+      "issueScore": 6,
+      "reviewScore": 59.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 41.8707738965761,
+      "prScore": 36.8707738965761,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 40.55894835904611,
+      "prScore": 31.558948359046113,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 33.09061228866811,
+      "prScore": 23.09061228866811,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ChengenH",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36215014?u=dc1de6035260b462941d151754c753d8fbe39a73&v=4",
+      "totalScore": 25.868687219528596,
+      "prScore": 25.668687219528596,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 19.795875740656363,
+      "prScore": 19.795875740656363,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 19.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 18.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ihooni",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/37792049?u=5d5dfa80bc54fd29248ecec7b4a6d259f56450c1&v=4",
+      "totalScore": 17.38744301054642,
+      "prScore": 17.38744301054642,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "kelm2021",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/119882399?v=4",
+      "totalScore": 17.332204510175202,
+      "prScore": 17.332204510175202,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 9.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "adolfochzs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/98196843?u=ce2fb52ef4d8f70678bbd32476df738c9b6213c0&v=4",
+      "totalScore": 9.38405020110221,
+      "prScore": 9.38405020110221,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
@@ -100,11 +563,31 @@
       "reviewScore": 4.5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "akatsukiwork0320",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/214928413?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 1,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 2
+  "newPRs": 11,
+  "mergedPRs": 14,
+  "newIssues": 4,
+  "closedIssues": 2,
+  "activeContributors": 28
 }
