@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-11 to 2026-10-18, ethereum-optimism/optimism had 64 new PRs (41 merged), 38 new issues, and 54 active contributors.",
+  "overview": "From 2026-10-11 to 2026-10-18, ethereum-optimism/optimism had 89 new PRs (58 merged), 39 new issues, and 60 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABW4lnJw",
@@ -17,7 +17,19 @@
       "createdAt": "2026-10-13T12:55:49Z",
       "closedAt": null,
       "state": "OPEN",
-      "commentCount": 6
+      "commentCount": 7
+    },
+    {
+      "id": "I_kwDODjvEJM7jDNFH",
+      "title": "[Forge Deployer] Remove old OPCM code",
+      "author": "serpixel",
+      "number": 18762,
+      "repository": "ethereum-optimism/optimism",
+      "body": "### Description\n\nThis would imply the complete use of forge throughout op-deployer.",
+      "createdAt": "2026-01-13T15:02:43Z",
+      "closedAt": "2026-10-15T16:33:30Z",
+      "state": "CLOSED",
+      "commentCount": 1
     },
     {
       "id": "I_kwDODjvEJM8AAAABATvx-g",
@@ -54,18 +66,6 @@
       "closedAt": "2026-10-11T21:30:55Z",
       "state": "CLOSED",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABVTrbig",
-      "title": "op-revm: operator fee is refunded for transactions charged none (empty envelope), crediting the sender in `eth_simulateV1`",
-      "author": "ariescodescream",
-      "number": 23213,
-      "repository": "ethereum-optimism/optimism",
-      "body": "**Bug Description**\n\nFor a transaction whose `enveloped_tx` is empty, op-revm charges no operator fee but still refunds the operator fee for the unused gas, so the sender ends up with more ETH than it started with.\n\n- `L1BlockInfo::operator_fee_charge` returns zero for an empty `input` (`rust/op-revm/src/l1block.rs`).\n- `L1BlockInfo::operator_fee_refund` does not look at the envelope; it refunds `fee(gas_limit) − fee(gas_used)` (`rust/op-revm/src/l1block.rs`), and `reimburse_caller` applies it whenever fee charging is not disabled (`rust/op-revm/src/handler.rs`).\n- op-reth builds RPC transactions with `enveloped_tx: Some(Bytes::new())` (`rust/op-reth/crates/evm/src/tx.rs`).\n\n`eth_call`, `debug_traceCall` and `eth_createAccessList` set `disable_fee_charge` and are unaffected. `eth_simulateV1` does not set it (with or without `validation`), so after Isthmus each simulated call credits the sender roughly `unused_gas × operator fee rate`, and later calls in the same simulation see the inflated balance. Block execution is not affected: real transactions carry a non-empty envelope, and deposits are excluded from the refund.\n\n**Steps to Reproduce**\n\n1. Check out `develop` at `dfe4f947ca`.\n2. Add this test to `mod tests` in `rust/op-revm/src/handler.rs`:\n\n```rust\n#[test]\nfn operator_fee_refund_without_charge() {\n    let caller = Address::ZERO;\n    let initial = U256::from(1_000);\n    let mut db = InMemoryDB::default();\n    db.insert_account_info(caller, AccountInfo { balance: initial, ..Default::default() });\n    let ctx = Context::op()\n        .with_db(db)\n        .with_chain(L1BlockInfo {\n            operator_fee_scalar: Some(U256::from(10_000_000)),\n            operator_fee_constant: Some(U256::from(50)),\n            l2_block: Some(U256::from(0)),\n            ..Default::default()\n        })\n        .with_cfg(CfgEnv::new_with_spec(OpSpecId::ISTHMUS))\n        .with_tx(\n            OpTransaction::builder()\n                .base(TxEnv::builder().gas_limit(100_000).gas_price(0).gas_priority_fee(None))\n                // What op-reth's `OpTxEnvConverter` sets for RPC requests.\n                .enveloped_tx(Some(Bytes::new()))\n                .build_fill(),\n        );\n    let mut evm = ctx.build_op();\n    let handler = OpHandler::<_, EVMError<_, OpTransactionError>, EthFrame<EthInterpreter>>::new();\n\n    // Charge: the operator fee for an empty envelope is zero.\n    handler.validate_against_state_and_deduct_caller(&mut evm, &mut Default::default()).unwrap();\n    let after_charge = evm.ctx().journal_mut().load_account(caller).unwrap().info.balance;\n    assert_eq!(after_charge, initial);\n\n    // Refund after spending 21_000 of the 100_000 gas limit.\n    let mut gas = Gas::new(100_000);\n    gas.set_spent(21_000);\n    let mut exec_result = FrameResult::Call(CallOutcome::new(\n        InterpreterResult { result: InstructionResult::Return, output: Default::default(), gas },\n        0..0,\n    ));\n    handler.reimburse_caller(&mut evm, &mut exec_result).unwrap();\n    let after_refund = evm.ctx().journal_mut().load_account(caller).unwrap().info.balance;\n    assert!(after_refund <= initial, \"sender gained {} from an operator fee it never paid\", after_refund - initial);\n}\n```\n\n3. Run `cargo test -p op-revm --lib -- operator_fee_refund_without_charge` from `rust/`.\n\n**Expected behavior**\n\nThe sender's balance after the refund does not exceed its balance before the charge: no operator fee is refunded beyond what was charged.\n\n**Environment Information:**\n\n- `ethereum-optimism/optimism` `develop` at `dfe4f947ca`, crate `op-revm`\n- Rust 1.95 (`rust/rust-toolchain.toml`)\n- `eth_simulateV1` path checked against `ethereum-optimism/reth` at `0fbe428` (the revision in `rust/Cargo.lock`)\n\n**Configurations:**\n\nNone; the test sets the operator fee parameters directly.\n\n**Logs:**\n\n```\nsender gained 790000 from an operator fee it never paid\ntest result: FAILED. 0 passed; 1 failed\n```\n\n790000 is the refund for the 79000 unused gas at scalar 10_000_000 (`79_000 × 10_000_000 / 1e6`), against zero charged.\n\n**Additional context**\n\nWe observed the same credit end to end on an OP-stack chain running op-reth; we have not run `eth_simulateV1` against an upstream node.\n\nShould the refund be bounded by what was actually charged? Base's EVM, for example, stores the operator fee charged up front and refunds `charged.saturating_sub(fee(gas_used))` (`crates/common/evm2/src/handler.rs`), which yields zero here. Alternatively the refund could be skipped under the same condition that makes the charge zero (empty envelope). \n",
-      "createdAt": "2026-10-06T07:46:46Z",
-      "closedAt": "2026-10-13T21:20:52Z",
-      "state": "CLOSED",
-      "commentCount": 1
     }
   ],
   "topPRs": [
@@ -79,7 +79,7 @@
       "createdAt": "2026-10-13T03:37:39Z",
       "mergedAt": null,
       "additions": 21311,
-      "deletions": 19824
+      "deletions": 19832
     },
     {
       "id": "PR_kwDODjvEJM8AAAABIBUFSA",
@@ -118,23 +118,23 @@
       "deletions": 415
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABH30QTg",
-      "title": "op-interop-mon: verify interop message expiries and ETH bridge refunds",
+      "id": "PR_kwDODjvEJM8AAAABIDl7Lw",
+      "title": "op-chain-ops: add eth-liquidity-pause command",
       "author": "karlfloersch",
-      "number": 23337,
-      "body": "op-interop-mon now checks the two safety rules of interop message expiry from chain data:\n\n1. A destination never relays a message that its source marked expired.\n2. Every SuperchainETHBridge burn is matched by at most one mint.\n\n**What it reads.** The monitor already reads each chain's L2 receipts. Its finders now also pass every `MessageExpired` and `RefundETH` event to a new `ExpiryChecker`. The checker then reads the source and destination chains' logs and storage. It never relies on a contract call succeeding.\n\n**What it produces.**\n\n- `expiry_checks_total{chain_id,check,result}`\n- `expiry_violations_total{chain_id,check,reason}`: the counter alerting should page on.\n- `expiry_last_verified_block{chain_id}`\n- `eth_in_flight` and `eth_in_flight_timestamp`\n\nIt also logs an error for each violation, with the message hash and the transaction.\n\n**Who consumes it.** On-call alerting and dashboards, the same as the existing op-interop-mon metrics.\n\nThis PR follows the \"Interop Message Expiry and Refund Monitoring\" design doc. It covers the checks that enforce the safety rules. More monitoring will follow.\n\n## Checks\n\n- **Check 1, a relay after an expiry.** The existing window check already covers this. A message expires only once it has gone unrelayed for longer than the 8-day expiry period. Any later relay is therefore past the 7-day window, so the updater marks it `expired`. With `--supernode-endpoints` set, such a relay also counts in `cross_safety_violations_total` once it reaches cross-safe. A new updater test pins this case.\n- **Check 2, expiry.** For each `MessageExpired(messageHash, undeliveredAt)` on source A:\n  - a. `sentMessageTimestamps[H]` on A is nonzero.\n  - b. A `SentMessage` in A's block at that time rebuilds to H. The hash is rebuilt in Go and tested against vectors from `cast`.\n  - c. `undeliveredAt` is greater than `sentAt + expiryPeriod`, and not later than the block that expired the message.\n  - d. Destination B has no `RelayedMessage(source=A, …, H)` within the window.\n  - e. `successfulMessages[H]` is false on B at its head.\n  - f. B's block at `undeliveredAt` contains `UndeliveredMessageExported(H, A, …, undeliveredAt)`.\n- **Check 3, refund.** For each `RefundETH(from, amount, H)`:\n  - H is expired.\n  - The `SentMessage` for H is a bridge-to-bridge `relayETH(from, to, amount)`, with the same sender and amount as the refund.\n  - The send transaction emitted the matching `SendETH` and an `ETHLiquidity` `LiquidityBurned` of the amount.\n  - There is exactly one `RefundETH` for H between the send and this refund.\n- **Check 4, ETH conservation.** Every 12 seconds, at one L2 timestamp across the chains:\n  - Every `LiquidityBurned` is paired with a `SendETH` of the same amount in the same transaction.\n  - Every `LiquidityMinted` is paired with a `RelayETH` or `RefundETH` of the same amount in the same transaction.\n  - Each chain's ETHLiquidity figure, `balance - baseline - sum(LiquidityFunded)`, is compared with its bridge events (`SendETH - RelayETH - RefundETH`).\n  - The cluster's ETH in flight is never negative.\n  - The checker keeps only running sums, not lists of events.\n\nEvents are checked once their block is at or below `--expiry-check-head`, which is `finalized` by default and can be set to `safe`. Refunds are checked before expiries. An event whose block was reorged out is dropped. The conservation check starts over if a block it already counted is reorged out.\n\n## Deviations from the doc\n\n- **Check 4 tests equality, not only \"never negative\".** A per-chain mint smaller than the ETH in flight would hide inside the cluster total, so each chain is also checked against its own bridge events. The balance may exceed the events, but that excess must never shrink.\n  - ETH forced into ETHLiquidity raises the balance without an event. That happens through a self-destruct, or through `relayETH` to ETHLiquidity itself. Anyone can do it.\n  - Strict equality would therefore page on an attacker's 1 wei. Requiring the excess never to shrink still catches any ETH that leaves without an event, including after a forced send.\n  - A double mint whose events look legitimate passes check 4: the same message both relayed and refunded. Checks 2 and 3, together with the window check, catch it. The code comment on the tripwire says so.\n- **Head.** The doc does not choose one. The checks read only up to `finalized` by default, so a reorg cannot produce a false violation.\n- **`sentAt == 0` on a `MessageExpired`** is reported as the violation `unknown_message`. `expireMessage` reverts for such messages, including those sent before send times were recorded.\n- **Baseline for chains that activated interop by upgrade** (one of the doc's open questions). `--eth-liquidity-baseline-blocks <chain>=<block>` sets the baseline; it defaults to genesis. The L2 RPCs must serve state back to that block.\n- **Check 3 checks two more things.** It also requires the ETHLiquidity burn, not only the `SendETH`, and it bounds the duplicate-refund query to the range from the send to the refund.\n- **Doc errors.**\n  - \"relayUndeliveredMessage and refundETH don't check the pause\" is wrong for `relayUndeliveredMessage`, which reverts with `L1CrossDomainMessenger_Paused`. `refundETH` does not check the pause.\n  - `MessageExpired` carries no destination; the checks get it from the decoded `SentMessage`.\n  - `UndeliveredMessageExported` also carries `sourceMessenger`, which this PR does not check. That needs the L1 addresses from step 2g.\n  - Every other event, function and storage name in the doc matches the contracts.\n\n## Tests\n\n- **Unit tests.** They run against an in-memory chain and cover:\n  - valid expiry, refund and conservation flows;\n  - an expiry with no export, or an export for another source;\n  - a relay within the window, and a relay after the expiry;\n  - a hash mismatch, a message never sent, an early expiry, a fact from the future, an unmonitored destination, and waiting for the export to be final;\n  - a refund with no expiry, a second refund, a refund to another sender or of another amount, a send that burned nothing, and a refund of a non-bridge message;\n  - a send both refunded and relayed (negative in flight), a mint with no event, unpaired mints and burns, top-ups and forced ETH, forced ETH followed by an outflow, same-timestamp reads, a baseline block, catch-up over several checks, and a reorg below the conservation check's progress;\n  - refund-first ordering, reorged events, and holding events until their block is final.\n- **Acceptance test.** `TestUnrelayedMessageExpiresAndIsRefunded` now attaches op-interop-mon to both chains, reading finalized heads. It requires that the monitor checks the expiry and the refund as valid, checks conservation past the refund with nothing left in flight, and finds no violation.\n\n## Not covered, and why\n\nThese are left out to keep this PR small and reviewable. Each is a follow-up:\n\n- **Step 2g, linking the L1 legs.** This needs an L1 reader, plus each chain's L1 messenger and portal addresses. With those, the remaining steps are:\n  - match B's withdrawal to `WithdrawalFinalized` on B's portal;\n  - match B's L1 messenger `RelayedMessage` and A's L1 messenger `SentMessage(expireMessage)` in the L1 transaction that deposited into A;\n  - match that deposit, by its source hash, to A's L2 transaction.\n- **Check 5:** configuration drift.\n- **Check 6** beyond the last-verified block: rate, lag, backlog, and stall and RPC health.\n- **Check 7:** dashboards. This includes failed `expireMessage` deposits, and sends or refunds whose sender is the L2CrossDomainMessenger.\n- **Overload handling.** There is no priority queue beyond refunds-first, and no backpressure.\n- **Saved progress and a backfill from interop activation.** The finders still start 100 blocks back, so an event from before the monitor started is not checked. The conservation sums are rebuilt from the baseline on each start.\n- **More than one RPC endpoint per chain.**\n- **Devnet fault injection with broken contracts.**\n- **Alert rules for `expiry_violations_total`.** They belong with the other alerting config.\n\n## How to run\n\n```\nop-interop-mon --l2-rpcs <rpc per chain> --dependency-set <depset.json> \\\n  --metrics.enabled [--expiry-check-head finalized|safe] \\\n  [--eth-liquidity-baseline-blocks <chain-id>=<block> ...]\n```\n\nThe L2 RPCs must be archive nodes back to each chain's baseline block.\n\nTests:\n\n- unit tests: `go test ./op-interop-mon/...`\n- acceptance test: `cd op-acceptance-tests && RUST_JIT_BUILD=1 mise exec -- just test -run TestUnrelayedMessageExpiresAndIsRefunded ./op-acceptance-tests/tests/interop/expiry/`\n\n## Review\n\nThe `go-code-reviewer` checklist ran on this diff. Its findings are fixed, except for two that are dismissed:\n\n- Keep `unknown_destination` as a violation. Only a chain in the source's cluster can export a fact that the source accepts, so the monitor must watch every chain in the cluster.\n- The acceptance-test monitor keeps the default 7-day window instead of the system's 12 seconds. This only widens the relay search, which the destination's head bounds anyway.\n\nThe `interop-reviewer` does not apply: this is monitor-only code.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "number": 23349,
+      "body": "Stacked on #23348 (`karl/eth-liquidity-pause`). That PR makes `ETHLiquidity` mirror the chain's L1 pause through the permissionless `L1CrossDomainMessenger.syncETHLiquidityPause()`.\n\n## What it's for\n\n`op-chain-ops/cmd/eth-liquidity-pause` is a small CLI for the ETHLiquidity pause. It has three uses:\n\n- **Devnet gate `interop.eth-liquidity-pause`:** `devnet-pause` → `status --expect paused` → `devnet-unpause` → `status --expect unpaused`.\n- **Production verification:** `status` is read-only and works on any chain. Production pausing stays with the guardian's existing DeputyPauseModule flow, and this tool never pauses production. Nothing new is needed in superchain-ops.\n- **Mirroring an L1 pause (or unpause, or expiry) to L2:** `sync` is permissionless, so any funded key can run it.\n\n## Commands\n\n- **`status --l2 <rpc>... [--l1 <rpc> --l1-messenger <addr>...] [--expect paused|unpaused] [--json]`**\n  - For each chain it reads `ETHLiquidity.paused()` and `pausedL1Timestamp()`.\n  - It runs an `eth_call` of `SuperchainETHBridge.sendETH` with 1 wei. A state override funds the dummy `--from`, so the sender needs no balance. It reports whether the call reverts and with which error (selector and name).\n  - With `--l1`, it also shows `L1CrossDomainMessenger.paused()`, which is the ETHLockbox pause, and prints `OUT OF SYNC` when L1 and L2 differ.\n  - `--expect` exits non-zero on any mismatch. For `paused`, every chain needs `paused()` true, `sendETH` reverting with `ETHLiquidity_Paused()` and, if read, L1 paused.\n- **`sync --l1 <rpc> --l2 <rpc> --l1-messenger <addr> ... --key <any funded key>`**\n  - Checks that each messenger's `SystemConfig.l2ChainId()` matches the `--l2` it is paired with.\n  - Prints the L1 and L2 state per chain and skips chains already in sync (`--force` overrides).\n  - Calls `syncETHLiquidityPause()`, waits for the L1 receipt, then polls L2 until `paused()` equals the L1 pause at the sync's block, or `--timeout` passes.\n- **`devnet-pause` / `devnet-unpause --guardian-key <key>`**\n  - Resolves each chain's ETHLockbox identifier through messenger → SystemConfig → portal → lockbox. Chains that share a lockbox are handled once.\n  - Checks that the key is the SuperchainConfig guardian.\n  - Calls `pause`, `extend` (if an earlier pause expired) or `unpause` on the lockbox identifier, then runs `sync`.\n  - `devnet-unpause` warns if a global pause is still active.\n  - Refuses OP Mainnet, Ink, Unichain, their Sepolia chains (10, 57073, 130, 11155420, 763373, 1301) and an L1 of Ethereum mainnet. There is no override flag.\n\nEvery flag can also come from `--config <toml>` (see `config.example.toml`). Local `*.toml` files in that directory are gitignored because they may hold keys.\n\n## Usage\n\n```bash\n# Production / any chain: read-only\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status \\\n  --l2 https://mainnet.optimism.io --l2 <ink-rpc> --l2 <unichain-rpc> \\\n  --l1 <eth-rpc> --l1-messenger <op-l1cdm> --l1-messenger <ink-l1cdm> --l1-messenger <uni-l1cdm>\n\n# Mirror the current L1 pause to L2 (permissionless)\ngo run ./op-chain-ops/cmd/eth-liquidity-pause sync --config pause.toml --key <funded-l1-key>\n\n# Devnet gate\ngo run ./op-chain-ops/cmd/eth-liquidity-pause devnet-pause   --config devnet.toml\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status         --config devnet.toml --expect paused\ngo run ./op-chain-ops/cmd/eth-liquidity-pause devnet-unpause --config devnet.toml\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status         --config devnet.toml --expect unpaused\n```\n\n## Tests\n\nNone of these tests need a network.\n\n- **Calldata:** encoding for `paused()`, `syncETHLiquidityPause()`, `sendETH`, and SuperchainConfig `pause`/`unpause`/`extend`/`pausable`/`paused(address)`.\n- **ABI drift:** a test checks every hand-written signature and custom error against the contracts-bedrock ABI snapshots on this stack, so a rename in #23348 fails here.\n- **Revert decoding:** custom errors and `Error(string)` reasons.\n- **Safety checks:** production refusal, `--l2`/`--l1-messenger` pairing, grouping chains by shared lockbox, the guardian pause/extend/unpause choice, and `--expect` evaluation, including L1 paused while L2 is not synced.\n- **Config loading:** TOML values load into each command, including the example config.\n- **`status` end to end:** runs against in-process fake L1/L2 JSON-RPC servers. The cases are paused and synced, unpaused, out of sync, a pre-pause ETHLiquidity, a messenger paired with the wrong chain, and JSON output. The fake rejects `sendETH` without the balance override, as geth does.\n- **`sync` end to end:** runs on geth simulated backends with mock contracts. The cases are skip when in sync, `--force` send and wait for L2, a reverting call never sent, and an L2 timeout.\n\n```\ngo test ./op-chain-ops/cmd/eth-liquidity-pause/...   # ok\ngo vet ./op-chain-ops/cmd/eth-liquidity-pause/...    # clean\n./linter/bin/op-golangci-lint run ./op-chain-ops/cmd/eth-liquidity-pause/...   # 0 issues\ngo mod tidy -diff                                    # clean\n```\n\nI also ran `status` read-only against OP Mainnet and OP Sepolia public RPCs. ETHLiquidity is not initialized there yet, and the tool reports `Error(\"Proxy: implementation not initialized\")` for both reads.\n\n**Not run:** `sync` and `devnet-*` against a live devnet with #23348 deployed. The guardian path (`devnet-pause`/`devnet-unpause`) has unit coverage only for its decision logic.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-11T23:39:31Z",
+      "createdAt": "2026-10-12T22:14:45Z",
       "mergedAt": null,
-      "additions": 2552,
-      "deletions": 8
+      "additions": 2569,
+      "deletions": 0
     }
   ],
   "codeChanges": {
-    "additions": 14213,
-    "deletions": 2583,
-    "files": 275,
-    "commitCount": 281
+    "additions": 21021,
+    "deletions": 4778,
+    "files": 426,
+    "commitCount": 382
   },
   "completedItems": [
     {
@@ -229,6 +229,15 @@
       ]
     },
     {
+      "title": "op-reth: expose the payload attributes well-formedness check as a function",
+      "prNumber": 23158,
+      "type": "other",
+      "body": "Moves the body of `OpEngineValidator`'s `ensure_well_formed_attributes` into a public function, `ensure_well_formed_payload_attributes(chain_spec, version, attributes)`, which the trait impl now delegates to. No behaviour change.\n\nThis lets",
+      "files": [
+        "rust/op-reth/crates/node/src/engine.rs"
+      ]
+    },
+    {
       "title": "alloy-op-evm: net SDM producer refunds above evmGasUsed instead of dropping them",
       "prNumber": 23195,
       "type": "other",
@@ -237,6 +246,25 @@
         "rust/alloy-op-evm/src/block/mod.rs",
         "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
         "rust/alloy-op-evm/src/post_exec/refund.rs"
+      ]
+    },
+    {
+      "title": "op-core: add the genesis JSON type and the chain config JSON codec",
+      "prNumber": 23194,
+      "type": "other",
+      "body": "Adds `op-core/genesis.Genesis`, one L2 genesis JSON encoding: go-ethereum's `core.Genesis` envelope (header fields, alloc) with a `config` object in `op-core/params.ChainConfig`'s own JSON encoding, which this PR also adds. Upstream go-ethe",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-core/genesis/genesis.go",
+        "op-core/genesis/genesis_test.go",
+        "op-core/genesis/geth.go",
+        "op-core/params/chain_config_json.go",
+        "op-core/params/chain_config_json_test.go",
+        "op-core/params/chain_config_test.go",
+        "op-core/forks/forks.go",
+        "op-core/forks/forks_test.go",
+        "op-core/forks/test/schedule.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt"
       ]
     },
     {
@@ -286,6 +314,69 @@
       ]
     },
     {
+      "title": "contracts-bedrock: Per-chain Review Period",
+      "prNumber": 23215,
+      "type": "other",
+      "body": "Closes [#686](https://github.com/ethereum-optimism/optimism-private/issues/686)\r\n\r\n## Description\r\n\r\nMakes the withdrawal review period configurable per chain. `PROOF_MATURITY_DELAY_SECONDS` (OptimismPortal2) and `DISPUTE_GAME_FINALITY_DELA",
+      "files": [
+        "op-chain-ops/interopgen/configs.go",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-chain-ops/interopgen/deploy_anchor_test.go",
+        "op-chain-ops/interopgen/recipe.go",
+        "op-deployer/pkg/deployer/bootstrap/flags.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations_test.go",
+        "op-deployer/pkg/deployer/continue_verify_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/continue_test.go",
+        "op-deployer/pkg/deployer/integration_test/continue_test.go",
+        "op-deployer/pkg/deployer/opcm/implementations.go",
+        "op-deployer/pkg/deployer/opcm/implementations_test.go",
+        "op-deployer/pkg/deployer/opcm/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/implementations.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "op-deployer/pkg/deployer/standard/standard.go",
+        "op-deployer/pkg/deployer/state/chain_intent.go",
+        "op-deployer/pkg/deployer/state/intent.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-e2e/config/init.go",
+        "packages/contracts-bedrock/interfaces/L1/IOptimismPortal2.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerV2.sol",
+        "packages/contracts-bedrock/interfaces/dispute/IAnchorStateRegistry.sol",
+        "packages/contracts-bedrock/scripts/deploy/Deploy.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployConfig.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
+        "packages/contracts-bedrock/scripts/libraries/Types.sol",
+        "packages/contracts-bedrock/snapshots/abi/AnchorStateRegistry.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerMigrator.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerV2.json",
+        "packages/contracts-bedrock/snapshots/abi/OptimismPortal2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/AnchorStateRegistry.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/OptimismPortal2.json",
+        "packages/contracts-bedrock/src/L1/OPContractsManagerStandardValidator.sol",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/src/L1/opcm/StandardValidatorUtils.sol",
+        "packages/contracts-bedrock/src/dispute/AnchorStateRegistry.sol",
+        "packages/contracts-bedrock/test/L1/OPContractsManagerStandardValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerMigrationValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/dispute/AnchorStateRegistry.t.sol",
+        "op-deployer/pkg/deployer/state/deploy_config.go",
+        "op-deployer/pkg/deployer/state/deploy_config_test.go",
+        "op-devstack/sysgo/deployer_test.go",
+        "packages/contracts-bedrock/foundry.toml",
+        "packages/contracts-bedrock/scripts/deploy/ChainAssertions.sol"
+      ]
+    },
+    {
       "title": "contracts-bedrock: check pause after early return in SuperFaultDisputeGame.closeGame",
       "prNumber": 23267,
       "type": "other",
@@ -294,6 +385,73 @@
         "packages/contracts-bedrock/snapshots/semver-lock.json",
         "packages/contracts-bedrock/src/dispute/SuperFaultDisputeGame.sol",
         "packages/contracts-bedrock/test/dispute/SuperFaultDisputeGame.t.sol"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: per-chain DelayedWETH withdrawal delay",
+      "prNumber": 23252,
+      "type": "other",
+      "body": "Stacked on #23215 (per-chain review period). Work in progress: contracts and OPCM wiring are in; Migrator, StandardValidator, deploy scripts, op-deployer and snapshots follow.\n\n## Description\n\nMakes the `DelayedWETH` withdrawal delay (the b",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerV2.sol",
+        "packages/contracts-bedrock/interfaces/dispute/IDelayedWETH.sol",
+        "packages/contracts-bedrock/scripts/deploy/Deploy.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol",
+        "packages/contracts-bedrock/scripts/libraries/Types.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/src/dispute/DelayedWETH.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerMigrationValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/dispute/DelayedWETH.t.sol",
+        "packages/contracts-bedrock/test/opcm/DeployOPChain.t.sol",
+        "packages/contracts-bedrock/test/vendor/Initializable.t.sol",
+        "docs/public-docs/op-stack/fault-proofs/reference.mdx",
+        "op-chain-ops/interopgen/configs.go",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-chain-ops/interopgen/deploy_anchor_test.go",
+        "op-chain-ops/interopgen/recipe.go",
+        "op-deployer/pkg/deployer/bootstrap/flags.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations_test.go",
+        "op-deployer/pkg/deployer/continue_verify_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/continue_test.go",
+        "op-deployer/pkg/deployer/integration_test/continue_test.go",
+        "op-deployer/pkg/deployer/opcm/implementations.go",
+        "op-deployer/pkg/deployer/opcm/implementations_test.go",
+        "op-deployer/pkg/deployer/opcm/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/implementations.go",
+        "op-deployer/pkg/deployer/pipeline/init.go",
+        "op-deployer/pkg/deployer/pipeline/init_test.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "op-deployer/pkg/deployer/standard/standard.go",
+        "op-deployer/pkg/deployer/state/chain_intent.go",
+        "op-deployer/pkg/deployer/state/intent.go",
+        "packages/contracts-bedrock/interfaces/L1/IOPContractsManagerStandardValidator.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerMigrationValidator.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IStandardValidatorUtils.sol",
+        "packages/contracts-bedrock/scripts/deploy/ChainAssertions.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployConfig.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/VerifyOPCM.s.sol",
+        "packages/contracts-bedrock/scripts/getting-started/config.sh",
+        "packages/contracts-bedrock/snapshots/abi/DelayedWETH.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerMigrationValidator.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerMigrator.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerStandardValidator.json",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerV2.json",
+        "packages/contracts-bedrock/snapshots/abi/StandardValidatorUtils.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/DelayedWETH.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/OPContractsManagerStandardValidator.json",
+        "packages/contracts-bedrock/src/L1/OPContractsManagerStandardValidator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrationValidator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
+        "op-deployer/pkg/deployer/state/deploy_config.go",
+        "packages/contracts-bedrock/src/L1/opcm/StandardValidatorUtils.sol",
+        "op-deployer/pkg/deployer/continue_verify.go"
       ]
     },
     {
@@ -364,6 +522,29 @@
       ]
     },
     {
+      "title": "contracts-bedrock: refund expired SuperchainETHBridge sends",
+      "prNumber": 23284,
+      "type": "other",
+      "body": "`SuperchainETHBridge` burns ETH on the source chain and mints it on the destination only when the message is relayed. If the destination never relays it, the ETH is stranded. #23286 lets the source chain mark such a message expired. This PR",
+      "files": [
+        "op-acceptance-tests/tests/interop/expiry/messageexpiry_test.go",
+        "op-service/txintent/bindings/SuperchainETHBridge.go",
+        "packages/contracts-bedrock/interfaces/L2/ISuperchainETHBridge.sol",
+        "packages/contracts-bedrock/snapshots/abi/SuperchainETHBridge.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/SuperchainETHBridge.json",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/L2/L2ContractsManager.sol",
+        "packages/contracts-bedrock/src/L2/SuperchainETHBridge.sol",
+        "packages/contracts-bedrock/src/libraries/Predeploys.sol",
+        "packages/contracts-bedrock/test/L2/SuperchainETHBridge.t.sol",
+        "op-devstack/dsl/superchain_eth_bridge.go",
+        "packages/contracts-bedrock/interfaces/L2/IL2ToL2CrossDomainMessenger.sol",
+        "packages/contracts-bedrock/src/L2/L2ToL2CrossDomainMessenger.sol",
+        "packages/contracts-bedrock/test/L2/L2ToL2CrossDomainMessenger.t.sol"
+      ]
+    },
+    {
       "title": "op-zk-proposer: add fast finality scenario tests",
       "prNumber": 23283,
       "type": "tests",
@@ -371,6 +552,24 @@
       "files": [
         "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
         "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests/fast_finality.rs"
+      ]
+    },
+    {
+      "title": "docs: describe interop message expiry and ETH refunds",
+      "prNumber": 23278,
+      "type": "docs",
+      "body": "Updates the docs for interop message expiry and ETH refunds:\n- the message expiration guide explains how an application undoes a message that expired unrelayed, instead of how to resend it, since `resendMessage` is removed;\n- the predeploy ",
+      "files": [
+        "docs/ai/devfeatures.md",
+        "docs/public-docs/.vale/styles/config/vocabularies/Optimism/accept.txt",
+        "docs/public-docs/app-developers/guides/interoperability/message-expiration.mdx",
+        "docs/public-docs/app-developers/guides/interoperability/message-passing.mdx",
+        "docs/public-docs/app-developers/reference/contracts/interop/predeploy.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/manual-relay.mdx",
+        "docs/public-docs/app-developers/tutorials/interoperability/message-passing.mdx",
+        "docs/public-docs/op-stack/features/l2-contract-manager.mdx",
+        "docs/public-docs/op-stack/interop/index.mdx",
+        "docs/public-docs/op-stack/interop/superchain-eth-bridge.mdx"
       ]
     },
     {
@@ -461,6 +660,16 @@
       ]
     },
     {
+      "title": "op-batcher: reject oversized calldata configuration",
+      "prNumber": 23327,
+      "type": "other",
+      "body": "Calldata batchers reject `--max-l1-tx-size-bytes` above 261,909 at startup, instead of constructing submissions whose Glamsterdam calldata gas floor exceeds the EIP-7825 transaction gas cap. Operators with oversized calldata settings must l",
+      "files": [
+        "op-batcher/batcher/config.go",
+        "op-batcher/batcher/config_test.go"
+      ]
+    },
+    {
       "title": "justfile: skip Rust build output in the shell lint recipes",
       "prNumber": 23325,
       "type": "other",
@@ -476,6 +685,26 @@
       "body": "With `--rollup.historicalrpc` configured, a failed historical request falls back to local RPC, which can report a successful `null` or incomplete data when the requested history is absent. Forwarded requests now preserve historical JSON-RPC",
       "files": [
         "rust/op-reth/crates/rpc/src/historical.rs"
+      ]
+    },
+    {
+      "title": "op-node,op-e2e: test the EL sync skip and remove the EL-sync action tests",
+      "prNumber": 23319,
+      "type": "tests",
+      "body": "- Removes the EL-sync action tests (`TestELSync`, `TestELSyncTransitionstoCL`, `TestELSyncTransitionsToCLSyncAfterNodeRestart`, `TestForcedELSyncCLAfterNodeRestart`, `TestELSyncOffsetELSafe`) and their helpers. The sysgo acceptance tests (`",
+      "files": [
+        "op-e2e/actions/sync/sync_test.go",
+        "op-node/rollup/engine/engine_el_sync_completion_test.go"
+      ]
+    },
+    {
+      "title": "ci: take the docs-only fast path for any change under docs/",
+      "prNumber": 23316,
+      "type": "other",
+      "body": "PRs that only touch `docs/` outside `docs/public-docs/` (agent guides in `docs/ai/`, the handbook, postmortems, security reviews) currently run the full `main` pipeline, although CI builds and tests nothing from those files. They now take t",
+      "files": [
+        ".circleci/routing.yml",
+        ".circleci/scripts/collect-params.sh"
       ]
     },
     {
@@ -777,6 +1006,26 @@
       ]
     },
     {
+      "title": "rust: update rustls to fix RUSTSEC-2026-0346 and RUSTSEC-2026-0349",
+      "prNumber": 23433,
+      "type": "bugfix",
+      "body": "Picks up the upstream patch for RUSTSEC-2026-0346 and RUSTSEC-2026-0349. Before this PR, the locked `rustls` was in the vulnerable range, and those advisories made `rust-deny` fail on `develop` until #23365 removed advisory checks. Nothing ",
+      "files": [
+        "rust/Cargo.lock"
+      ]
+    },
+    {
+      "title": "op-zk-proposer: export L1 transaction metrics",
+      "prNumber": 23432,
+      "type": "other",
+      "body": "op-zk-proposer exported no metrics for its L1 sends, so a failing or slow send showed up only in logs or as a growing gap between `signer_nonce` and `signer_pending_nonce`. This adds the txmgr metrics that matter for operating the proposer,",
+      "files": [
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/tx_sender.rs"
+      ]
+    },
+    {
       "title": "ci: emit scoped-commit titles from Dependabot",
       "prNumber": 23412,
       "type": "other",
@@ -784,27 +1033,149 @@
       "files": [
         ".github/dependabot.yml"
       ]
+    },
+    {
+      "title": "op-chain-ops: delete receipt-reference-builder",
+      "prNumber": 23410,
+      "type": "other",
+      "body": "Deletes `op-chain-ops/cmd/receipt-reference-builder`, an unused operator tool that collected deposit nonces for chains with pre-Canyon history. It is one of the remaining users of op-geth-only API (`Transaction.EffectiveNonce`), so deleting",
+      "files": [
+        "op-chain-ops/Makefile",
+        "op-chain-ops/README.md",
+        "op-chain-ops/cmd/receipt-reference-builder/README.md",
+        "op-chain-ops/cmd/receipt-reference-builder/convert.go",
+        "op-chain-ops/cmd/receipt-reference-builder/main.go",
+        "op-chain-ops/cmd/receipt-reference-builder/merge.go",
+        "op-chain-ops/cmd/receipt-reference-builder/print.go",
+        "op-chain-ops/cmd/receipt-reference-builder/pull.go",
+        "op-chain-ops/cmd/receipt-reference-builder/readwrite.go",
+        "op-chain-ops/justfile"
+      ]
+    },
+    {
+      "title": "all: swap op-geth-only uses the ratchet audit found to op-core",
+      "prNumber": 23409,
+      "type": "other",
+      "body": "Production code picked up op-geth-only APIs after their op-core replacements already existed. Seeding the `opgeth-ratchet` allowlist (#23407) found these, and they are now moved onto op-core:\n\n- `op-chain-ops/pkg/sdm` compared deposit types",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-chain-ops/genesis/config.go",
+        "op-chain-ops/genesis/config_test.go",
+        "op-chain-ops/pkg/sdm/conformance.go",
+        "op-chain-ops/pkg/sdm/workload.go",
+        "op-core/fees/dafootprint.go",
+        "op-core/fees/fees.go",
+        "op-deployer/pkg/deployer/pipeline/output_root.go",
+        "op-node/rollup/attributes/engine_consolidate.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "ops/scripts/opgeth-ratchet/main.go"
+      ]
+    },
+    {
+      "title": "ops: add an op-geth decoupling ratchet check",
+      "prNumber": 23407,
+      "type": "other",
+      "body": "Adds a required CI check, `opgeth-ratchet`, that stops a package from taking on op-geth-only APIs it doesn't already use. It type-checks the whole tree, tests included, against the upstream go-ethereum version op-geth is based on, using a t",
+      "files": [
+        ".circleci/continue/main.yml",
+        "AGENTS.md",
+        "docs/ai/go-dev.md",
+        "docs/ai/opgeth-decoupling.md",
+        "justfile",
+        "ops/scripts/opgeth-ratchet/allowlist.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "ops/scripts/opgeth-ratchet/collect.go",
+        "ops/scripts/opgeth-ratchet/collect_test.go",
+        "ops/scripts/opgeth-ratchet/main.go",
+        "ops/scripts/opgeth-ratchet/main_test.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/bad/bad.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/bad/go.mod",
+        "ops/scripts/opgeth-ratchet/testdata/toy/baddep/a.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/baddep/dep/dep.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/baddep/dep/go.mod",
+        "ops/scripts/opgeth-ratchet/testdata/toy/baddep/go.mod",
+        "ops/scripts/opgeth-ratchet/testdata/toy/fork/go.mod",
+        "ops/scripts/opgeth-ratchet/testdata/toy/fork/interop/interop.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/fork/types/types.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/a/a.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/b/b.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/c/c.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/d/d.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/d/d_ext_test.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/d/d_test.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/e/e.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/e/e_test.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/f/f.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/g/g.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/go.mod",
+        "ops/scripts/opgeth-ratchet/testdata/toy/upstream/go.mod",
+        "ops/scripts/opgeth-ratchet/testdata/toy/upstream/types/types.go",
+        "ops/scripts/opgeth-ratchet/upstream.go"
+      ]
+    },
+    {
+      "title": "docs: removing broken link",
+      "prNumber": 23461,
+      "type": "docs",
+      "body": "removing an old broken link on this page",
+      "files": [
+        "docs/public-docs/op-stack/protocol/privileged-roles.mdx"
+      ]
+    },
+    {
+      "title": "docs: add Security section overview page",
+      "prNumber": 23460,
+      "type": "docs",
+      "body": "## Summary\n\nThe Security sidebar group under the Protocol tab has no page of its own, so there is no single link to share for the section. Today the closest you can get is its first page, Privileged roles.\n\nThis adds an overview page at [`/",
+      "files": [
+        "docs/public-docs/docs.json",
+        "docs/public-docs/op-stack/security/index.mdx"
+      ]
+    },
+    {
+      "title": "contracts-bedrock,op-service,op-devstack,op-acceptance-tests: tighten SuperchainETHBridge refund tests and DSL",
+      "prNumber": 23456,
+      "type": "tests",
+      "body": "Addresses the follow-up nits from the #23284 review. It changes only tests, the DSL and the bindings; no contract source changes.\n\n- **Relayed `sendETH` test covers the guard.** The test now sends to `902` rather than this chain's own id, s",
+      "files": [
+        "op-acceptance-tests/tests/interop/expiry/messageexpiry_test.go",
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/superchain_eth_bridge.go",
+        "op-service/txintent/bindings/SuperchainETHBridge.go",
+        "packages/contracts-bedrock/test/L2/L2ToL2CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/L2/SuperchainETHBridge.t.sol"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 426.91001462378415,
-      "prScore": 238.27201462378417,
+      "totalScore": 519.4355624169364,
+      "prScore": 325.35956241693634,
       "issueScore": 18,
-      "reviewScore": 170,
-      "commentScore": 0.6379999999999999,
+      "reviewScore": 175,
+      "commentScore": 1.0759999999999998,
       "summary": null
     },
     {
       "username": "karlfloersch",
       "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 281.8885630401551,
-      "prScore": 236.05056304015505,
-      "issueScore": 0,
+      "totalScore": 325.7637583197676,
+      "prScore": 275.4877583197676,
+      "issueScore": 4,
       "reviewScore": 45,
-      "commentScore": 0.838,
+      "commentScore": 1.2759999999999998,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 248.2846806848359,
+      "prScore": 58.56868068483589,
+      "issueScore": 2,
+      "reviewScore": 186.5,
+      "commentScore": 1.2159999999999997,
       "summary": null
     },
     {
@@ -818,33 +1189,33 @@
       "summary": null
     },
     {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 220.2846806848359,
-      "prScore": 58.56868068483589,
-      "issueScore": 2,
-      "reviewScore": 158.5,
-      "commentScore": 1.2159999999999997,
-      "summary": null
-    },
-    {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 182.18458357112073,
+      "totalScore": 186.68458357112073,
       "prScore": 137.44458357112075,
       "issueScore": 0,
-      "reviewScore": 44,
+      "reviewScore": 48.5,
       "commentScore": 0.74,
       "summary": null
     },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 136.9578618584285,
-      "prScore": 92.5818618584285,
+      "totalScore": 173.22974880671654,
+      "prScore": 118.85374880671654,
       "issueScore": 2,
-      "reviewScore": 41.5,
+      "reviewScore": 51.5,
       "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 125.65362124379341,
+      "prScore": 89.31362124379342,
+      "issueScore": 0,
+      "reviewScore": 36,
+      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -858,23 +1229,43 @@
       "summary": null
     },
     {
-      "username": "digorithm",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
-      "totalScore": 120.81362124379342,
-      "prScore": 89.31362124379342,
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 123.14982029811063,
+      "prScore": 27.149820298110626,
       "issueScore": 0,
-      "reviewScore": 31.5,
+      "reviewScore": 96,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 113.0227738965761,
+      "totalScore": 123.0227738965761,
       "prScore": 42.822773896576095,
       "issueScore": 0,
-      "reviewScore": 70,
+      "reviewScore": 80,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 106.3725333695386,
+      "prScore": 96.1725333695386,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 91.7483832789546,
+      "prScore": 34.24838327895461,
+      "issueScore": 0,
+      "reviewScore": 57.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -898,23 +1289,23 @@
       "summary": null
     },
     {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 61.5,
-      "prScore": 0,
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 58.758948359046116,
+      "prScore": 31.558948359046113,
       "issueScore": 0,
-      "reviewScore": 61.5,
-      "commentScore": 0,
+      "reviewScore": 27,
+      "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 57.81165754467041,
-      "prScore": 52.61165754467041,
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 54.56690732032462,
+      "prScore": 36.56690732032462,
       "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.2,
+      "reviewScore": 18,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -938,32 +1329,32 @@
       "summary": null
     },
     {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 45.05894835904611,
-      "prScore": 31.558948359046113,
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 46.15972077083992,
+      "prScore": 21.159720770839918,
       "issueScore": 0,
-      "reviewScore": 13.5,
+      "reviewScore": 25,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 38,
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 41.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 38,
+      "reviewScore": 41.5,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
-      "totalScore": 36.56690732032462,
-      "prScore": 36.56690732032462,
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 33.29587574065636,
+      "prScore": 19.795875740656363,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 13.5,
       "commentScore": 0,
       "summary": null
     },
@@ -988,22 +1379,22 @@
       "summary": null
     },
     {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 28.076,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 27,
+      "commentScore": 1.0759999999999998,
+      "summary": null
+    },
+    {
       "username": "0xiamflux",
       "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
       "totalScore": 27.939264337945662,
       "prScore": 22.939264337945662,
       "issueScore": 0,
       "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 27.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 27.5,
       "commentScore": 0,
       "summary": null
     },
@@ -1018,32 +1409,12 @@
       "summary": null
     },
     {
-      "username": "zkfrov",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
-      "totalScore": 24.295875740656363,
-      "prScore": 19.795875740656363,
-      "issueScore": 0,
-      "reviewScore": 4.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "ihooni",
       "avatarUrl": "https://avatars.githubusercontent.com/u/37792049?u=5d5dfa80bc54fd29248ecec7b4a6d259f56450c1&v=4",
       "totalScore": 22.38744301054642,
       "prScore": 17.38744301054642,
       "issueScore": 0,
       "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 20,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 20,
       "commentScore": 0,
       "summary": null
     },
@@ -1068,16 +1439,6 @@
       "summary": null
     },
     {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 18.638,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 18,
-      "commentScore": 0.6379999999999999,
-      "summary": null
-    },
-    {
       "username": "pauldowman",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
       "totalScore": 18,
@@ -1085,6 +1446,16 @@
       "issueScore": 0,
       "reviewScore": 18,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 17.344421958998375,
+      "prScore": 16.706421958998376,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -1105,6 +1476,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 15.298612288668108,
+      "prScore": 15.09861228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1148,13 +1529,33 @@
       "summary": null
     },
     {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 8.65105020110221,
-      "prScore": 8.45105020110221,
+      "username": "kenny-ish",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/114967656?u=2dad5f6b3f8c355d787bd21f7237c15aa992271f&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "luangucun",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/274522060?u=58374c3ca69d7cb54546170a0f92913bce64b703&v=4",
+      "totalScore": 8.905895272798372,
+      "prScore": 8.905895272798372,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.2,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "tuantqse90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/53461362?u=49dde14505e237db24cda2e46ff1d16d5d9f07a7&v=4",
+      "totalScore": 7.66661228866811,
+      "prScore": 7.66661228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1164,6 +1565,36 @@
       "prScore": 7.499437912434101,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "EazyHood",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/209367218?u=3d6e7fcbf712a96e7451b399ca5645ff80e6dcfd&v=4",
+      "totalScore": 7.049573590279972,
+      "prScore": 7.049573590279972,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Joxess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "totalScore": 6,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -1183,16 +1614,6 @@
       "totalScore": 2.3000000000000003,
       "prScore": 0,
       "issueScore": 2.1,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "oplabs-renovate",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 0.2,
-      "prScore": 0,
-      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
@@ -1218,9 +1639,9 @@
       "summary": null
     }
   ],
-  "newPRs": 64,
-  "mergedPRs": 41,
-  "newIssues": 38,
-  "closedIssues": 12,
-  "activeContributors": 54
+  "newPRs": 89,
+  "mergedPRs": 58,
+  "newIssues": 39,
+  "closedIssues": 17,
+  "activeContributors": 60
 }
