@@ -1,0 +1,487 @@
+{
+  "interval": {
+    "intervalStart": "2026-10-21T00:00:00.000Z",
+    "intervalEnd": "2026-10-22T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/infra",
+  "overview": "From 2026-10-21 to 2026-10-22, ethereum-optimism/infra had 6 new PRs (8 merged), 0 new issues, and 26 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOL-xLQ88AAAABYZ1-pQ",
+      "title": "proxyd: consensus mode answers out-of-range state reads and log ranges with placeholder results",
+      "author": "tremarkley",
+      "number": 768,
+      "repository": "ethereum-optimism/infra",
+      "body": "## Summary\n\nSince #552, a `consensus_aware` backend group answers a request for a block above proxyd's consensus latest without forwarding it (`OverwriteConsensusResponses` in `proxyd/backend.go`). For block lookups the answer is `null`, which is correct. For state reads it returns a placeholder value:\n\n| Method | proxyd answers | The op-reth backend answers |\n| --- | --- | --- |\n| `eth_getBalance`, `eth_getTransactionCount` | `\"0x0\"` | `-32001 block not found` |\n| `eth_getCode` | `\"0x\"` | `-32001 block not found` |\n| `eth_getStorageAt` | 32 zero bytes | `-32001 block not found` |\n| `eth_call`, `eth_getProof` | `null` | `-32001 block not found` |\n| `eth_getLogs`, range past the head | `[]` | `-32602 block range extends beyond current head block` |\n\nA client can't tell these from real values: a zero balance or nonce, a contract with no code, an empty storage slot, a range with no events.\n\n`eth_getLogs` is the worst case. A range that only partly crosses the consensus head also gets `[]`, dropping the logs of the blocks that do exist. Checked on a consensus-aware mainnet deployment with `fromBlock` = head − 5 and `toBlock` = head + 50: proxyd answered `[]`, while the op-reth backend answered `-32602`. A poller that then advances its cursor loses those events for good. Execution clients return an error for state at an unknown block (geth `header not found`, reth `-32001 block not found`).\n\n## Impact\n\nproxyd runs several replicas, and each polls its own consensus latest. A client that sees block N on one replica and then reads state at N can land on a replica still at N−1, and gets a placeholder zero.\n\nWe hit this with a Ponder indexer reading `eth_getBalance` at each new head. It stored zero balances for about 3% of sampled blocks. Its `eth_call` reads were unaffected only because Ponder retries a `null` `eth_call` result.\n\n## Reproduce\n\nAgainst any consensus-aware deployment whose consensus latest is `L`:\n\n```bash\ncurl -s \"$PROXYD_URL\" -H 'content-type: application/json' \\\n  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"0x4200000000000000000000000000000000000011\",\"<L + 50, hex>\"]}'\n# {\"jsonrpc\":\"2.0\",\"result\":\"0x0\",\"id\":1}\n```\n\nThe same request sent to any backend directly returns `{\"error\":{\"code\":-32001,\"message\":\"block not found: 0x…\"}}`.\n\n## Proposed fix\n\n- Keep `null` for block lookups, which is also what op-reth returns.\n- Return the error an execution client would, with HTTP 200, which keeps #552's goal of not answering HTTP 400:\n  - for `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getProof` and `eth_call`: `{\"code\": -32001, \"message\": \"block not found\"}`. `-32001` is EIP-1474's \"Resource not found\" and matches op-reth;\n  - for `eth_getLogs` and `eth_newFilter`: `{\"code\": -32602, \"message\": \"block range extends beyond current head block\"}`. That is what both op-geth and op-reth return for `eth_getLogs`; `eth_newFilter` previously got a `null` filter id.\n- Clients that retry on errors, such as Ponder and viem, then retry instead of using a zero. A PR with integration tests will follow.\n",
+      "createdAt": "2026-10-19T22:38:13Z",
+      "closedAt": "2026-10-21T01:28:36Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ88AAAABJcHUlg",
+      "title": "fix(proxyd): answer out-of-range state reads and log ranges with errors",
+      "author": "tremarkley",
+      "number": 769,
+      "body": "**Description**\n\nIn consensus mode, proxyd answers a request for a block above its consensus latest without forwarding it. Since #552 that answer has been a placeholder value for everything except block lookups:\n\n- `\"0x0\"` for `eth_getBalance` and `eth_getTransactionCount`;\n- `\"0x\"` code, zero storage, and `null` for `eth_call` and `eth_getProof`;\n- `[]` for `eth_getLogs`, even when the range only partly crosses the head.\n\nClients can't tell those from real data. proxyd replicas each track their own consensus latest, so a client that reads at a head it just saw can hit this.\n\nThis change answers those requests with the error an execution client gives, keeping HTTP 200 as #552 intended:\n\n- **State reads:** `-32001 block not found` (EIP-1898's \"Resource not found\", which op-reth returns).\n- **`eth_getLogs` and `eth_newFilter`:** `-32602 block range extends beyond current head block`, which op-geth and op-reth both return for `eth_getLogs`.\n- **Block lookups:** unchanged, still `null`.\n\nThese overridden responses now count in `proxyd_rpc_calls_total` under `status_code=\"400\"`, following the existing convention for JSON-RPC errors sent with HTTP 200.\n\n**Tests**\n\nNew `TestConsensus` cases cover every out-of-range state read, `eth_getLogs` ranges that are past or spanning the head, `eth_newFilter`, and a batch. Each case checks for the error code, no `result`, and no backend request. All of them fail on `main` with the placeholder values.\n\n**Additional context**\n\nThis keeps #546's fix: future-block lookups still return `null` with HTTP 200, and no out-of-range answer is HTTP 400. Each error's own `HTTPErrorCode` sets the status (`writeRPCRes`). The removed `ErrBlockOutOfRange` set 400, and the new errors set none.\n\n#546 also says `eth_getStorageAt` returns zeros for a future block. The clients don't do that. Each read below was sent past head to each client directly:\n\n| Read past head | geth v1.17.8 | op-geth v1.101702.2 | op-reth v2.6 | proxyd with this PR |\n| --- | --- | --- | --- | --- |\n| `eth_getBlockByNumber` | `null` | `null` | `null` | `null` |\n| `eth_getBalance`, `eth_getStorageAt`, `eth_getCode`, `eth_call` | `-32000 header not found` | `-32000 header not found` | `-32001 block not found` | `-32001 block not found` |\n| `eth_getLogs` | `-32602 block range extends beyond current head block` | `-32602 block range extends beyond current head block` | `-32602 block range extends beyond current head block` | `-32602 block range extends beyond current head block` |\n\nAll of these answers are HTTP 200.\n\n**Metadata**\n\n- Fixes #768\n- Keeps #546 fixed (block lookups return `null` with HTTP 200)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-19T22:47:20Z",
+      "mergedAt": "2026-10-21T01:28:35Z",
+      "additions": 108,
+      "deletions": 11
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABJ2JlLw",
+      "title": "Require ca-certificates-bundle 20260909-r3 in all images",
+      "author": "falcorocks",
+      "number": 774,
+      "body": "Pins ca-certificates-bundle to >=20260909-r3 in the apko configs and installs it in the final stage of every Wolfi-based Dockerfile. This Wolfi build removes the eMudhra emSign Root CA G3, C1 and C3 roots from the trust store. ci-base-clang is Ubuntu-based and unchanged.",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-21T17:33:18Z",
+      "mergedAt": "2026-10-21T17:52:28Z",
+      "additions": 30,
+      "deletions": 23
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABJ35xSA",
+      "title": "fix(proxyd): reject null elements in batch responses instead of panicking",
+      "author": "zhwrd",
+      "number": 775,
+      "body": "**Description**\n\nWhen a backend answers a batch request with HTTP 200 and a JSON array containing a `null` element, `json.Unmarshal` into `[]*RPCRes` produces a nil pointer. The length check still passes, and `doForward` then dereferences it (`res.ID` in the consensus receipts translation loop, and `res.Error` in the non-200 status loop). The panic happens in the `ForwardWithSource` goroutine, which has no `recover`, so a single bad backend response crashes the whole proxyd process:\n\n```\npanic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x28 pc=0x10d8a5d]\n\ngithub.com/ethereum-optimism/infra/proxyd.(*Backend).doForward(...)\n\t/app/backend.go:992\ngithub.com/ethereum-optimism/infra/proxyd.(*Backend).ForwardWithSource(...)\ngithub.com/ethereum-optimism/infra/proxyd.(*BackendGroup).ForwardRequestToBackendGroup(...)\ngithub.com/ethereum-optimism/infra/proxyd.(*BackendGroup).ForwardWithSource.func1()\n```\n\nThis change rejects a batch response with any nil element as `ErrBackendBadResponse` and counts it toward the backend's intermittent error window, the same as the other malformed-response cases right above it.\n\n**Tests**\n\nAdded a `TestBatching` case where the backend returns `[null,{\"jsonrpc\":\"2.0\",\"result\":\"hello2\",\"id\":2}]` with HTTP 200 for a 2-request batch. Without the fix the test reproduces the panic above; with it, the client gets the standard per-request error responses. `go test ./ ./integration_tests/` passes.\n\n**Additional context**\n\nSeen on the public mainnet edge proxyd (`mainnet.optimism.io`): the replicas fronting one third-party backend crash-looped in three bursts between 2026-10-19 and 2026-10-21, all replicas within the same few seconds, while the backend's HTTP status codes stayed 200/413. Other replicas on the same image with a different backend were unaffected.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-21T19:59:38Z",
+      "mergedAt": "2026-10-21T20:30:30Z",
+      "additions": 25,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABJwwz-Q",
+      "title": "ci(renovate): block npm major updates",
+      "author": "falcorocks",
+      "number": 772,
+      "body": "## Summary\n- Disable npm major updates via `npm.packageRules`, including vulnerability-alert updates, which otherwise override top-level package rules.\n- Mirrors https://github.com/ethereum-optimism/factory/pull/72 explicitly in this repo.\n- In-major security fixes keep automerging; major-only CVE fixes need a manual upgrade.\n\nRefs #846\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-21T10:25:45Z",
+      "mergedAt": "2026-10-21T10:37:52Z",
+      "additions": 10,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABJmbNXg",
+      "title": "security: Update dependency markdown-it to v14.3.3 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 770,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [markdown-it](https://redirect.github.com/markdown-it/markdown-it) | [`14.3.1` → `14.3.3`](https://renovatebot.com/diffs/npm/markdown-it/14.3.1/14.3.3) | ![age](https://developer.mend.io/api/mc/badges/age/npm/markdown-it/14.3.3?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/npm/markdown-it/14.3.1/14.3.3?slim=true) |\n\n---\n\n### markdown-it: Quadratic complexity in smartquotes with unmatched closing quotes\n[CVE-2026-111759](https://nvd.nist.gov/vuln/detail/CVE-2026-111759) / [GHSA-r7fv-28h4-cvq7](https://redirect.github.com/advisories/GHSA-r7fv-28h4-cvq7)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Impact\n\nWhen `typographer: true` is enabled, specially crafted Markdown can cause quadratic processing time in the smartquotes rule, potentially leading to denial of service in applications processing untrusted input.\n\nMany opening double quotes followed by unmatched closing single quotes cause repeated scans of the entire opener stack. The same issue occurs with the quote types reversed.\n\nThe default configuration (`typographer: false`) is not affected, but this option is enabled with high probability.\n\n##### Reproduction\n\n```js\nimport MarkdownIt from 'markdown-it'\nimport { performance } from 'node:perf_hooks'\n\nconst md = new MarkdownIt({ typographer: true })\n\nfor (const k of [2000, 4000, 8000, 16000, 32000]) {\n  const input = '\"a '.repeat(k) + \"b' \".repeat(k)\n  const start = performance.now()\n  md.render(input)\n  console.log(input.length, (performance.now() - start).toFixed(1), 'ms')\n}\n```\n\nResult:\n\n|input size|time|\n|-|-|\n|12000|18ms|\n|24000|47ms|\n|48000|115ms|\n|96000|428ms|\n|192000|1586ms|\n\n##### Patches\n\nFixed in **15.0.2** and **14.3.2**.\n\n##### Workarounds\n\nDisable typography with `typographer: false`, or disable only the smartquotes rule:\n\n```js\nmd.disable('smartquotes')\n```\n\n#### Severity\n- CVSS Score: 7.5 / 10 (High)\n- Vector String: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H`\n\n#### References\n- [https://github.com/markdown-it/markdown-it/security/advisories/GHSA-r7fv-28h4-cvq7](https://redirect.github.com/markdown-it/markdown-it/security/advisories/GHSA-r7fv-28h4-cvq7)\n- [https://nvd.nist.gov/vuln/detail/CVE-2026-111759](https://nvd.nist.gov/vuln/detail/CVE-2026-111759)\n- [https://github.com/markdown-it/markdown-it/commit/1b379c1b6d0522421bd1a51b77337c79af2c8670](https://redirect.github.com/markdown-it/markdown-it/commit/1b379c1b6d0522421bd1a51b77337c79af2c8670)\n- [https://github.com/markdown-it/markdown-it/commit/cf27366035edf9196667110c47d9d67b030a4152](https://redirect.github.com/markdown-it/markdown-it/commit/cf27366035edf9196667110c47d9d67b030a4152)\n- [https://github.com/markdown-it/markdown-it/commit/daf5a3c32303e5d9de01b12eeb725fb5990b8162](https://redirect.github.com/markdown-it/markdown-it/commit/daf5a3c32303e5d9de01b12eeb725fb5990b8162)\n- [https://github.com/markdown-it/markdown-it](https://redirect.github.com/markdown-it/markdown-it)\n- [https://github.com/markdown-it/markdown-it/releases/tag/14.3.2](https://redirect.github.com/markdown-it/markdown-it/releases/tag/14.3.2)\n- [https://github.com/markdown-it/markdown-it/releases/tag/15.0.2](https://redirect.github.com/markdown-it/markdown-it/releases/tag/15.0.2)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-r7fv-28h4-cvq7) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### markdown-it: Quadratic-time rendering of a single multi-line link reference definition with default options (regression since 14.0)\n[CVE-2026-111758](https://nvd.nist.gov/vuln/detail/CVE-2026-111758) / [GHSA-gfr2-rv44-r23c](https://redirect.github.com/advisories/GHSA-gfr2-rv44-r23c)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\nA link reference definition whose label or title is never closed is O(n²) in markdown-it 15.0.2 with default options. Continuation lines are pulled lazily with str += lineContent in src/rules_block/reference.ts, and the subsequent charCodeAt and slice calls flatten the V8 cons-string, copying everything collected so far; this runs before the rule decides the definition is invalid. It is a regression introduced by PR #&#8203;1004 in 14.0.0: 13.0.2 processed a 313 KB input in 125 ms, while every version since takes about 11 seconds on the same input. At the sizes below, 200 KB takes 3.6 seconds, 400 KB takes 18.1 seconds, and 800 KB takes 74.0 seconds, which is roughly 4–5× per doubling. No options are required to trigger it.\n\n##### Details\n\nsrc/rules_block/reference.ts appends continuation lines with str += lineContent at lines 74, 83, 100, 133, and 150, then keeps indexing the accumulated string via str.charCodeAt(pos) in the label and whitespace loops and str.slice(...) in parseLinkTitle. V8 represents += as a cons-string, and the next charCodeAt or slice flattens it, copying everything collected so far, so one definition spanning n lines costs O(n²). Isolation confirms the rule is responsible: block-only parsing with inline disabled is still quadratic, md.disable('reference') makes the same input linear, and the same text without the leading [ is linear. The fix is to track positions in state.src instead of building str, or to collect line slices in an array and parse across them. At minimum, stop scanning the label after 999 characters (CommonMark §6.3) before pulling more lines, and cap title continuation. Add a pathological test with a 100k-line unclosed title and label. Open PR #&#8203;1215 edits the same file but its label check runs after the label loop, so it does not bound either variant and the fix can land together with that PR.\n\nThe observed output from PoC was:\nunclosed title n=100000   200009 B    3585.5 ms\nunclosed title n=200000   400009 B   18107.1 ms   (5.05x)\nunclosed title n=400000   800009 B   73954.4 ms   (4.08x)\n\nRegression comparison at 313 KB: 13.0.2 → 125 ms, 14.1.0 → 11.4 s, 15.0.0 → 10.6 s, 15.0.2 → 10.7 s.\n\n##### Proof of concept\n\nHow to execute the PoC:\n1. mkdir -p markdown-it-poc && cd markdown-it-poc\n2. npm init -y\n3. npm i markdown-it@15.0.2\n4. node poc_markdown_it.js\n\nPoC below is:\n```javascript\n// poc_markdown_it.js\n// Requires: npm install markdown-it@15.0.2\nconst MarkdownIt = require('markdown-it');\nconst md = new MarkdownIt();\n\nfunction bench(label, src) {\n  const t0 = process.hrtime.bigint();\n  md.render(src);\n  const t1 = process.hrtime.bigint();\n  console.log(\n    `${label.padEnd(30)} ${String(src.length).padStart(9)} B ${(Number(t1 - t0) / 1e6).toFixed(1).padStart(9)} ms`\n  );\n}\n\n// Unclosed title: one reference definition spread over many lines\nfor (const n of [100000, 200000, 400000]) {\n  bench(`unclosed title n=${n}`, '[a]: /u \"' + 'x\\n'.repeat(n));\n}\n\n// Unclosed label\nfor (const n of [5000, 10000, 20000]) {\n  bench(`unclosed label n=${n}`, '[' + 'a\\n'.repeat(n));\n}\n```\n\n##### Impact\n\nThis is an algorithmic-complexity denial of service (CWE-407). Any server that renders user Markdown with markdown-it is affected with default options, including comments, issues, chat, wikis, docs previews, and LLM chat UIs. A ~400 KB request body blocks the Node.js event loop for about 18 seconds and an ~800 KB body for about 74 seconds. This is the same class and attacker model as GHSA-253c, but it is reachable without any opt-in option, since the affected path is a core block rule.\n\n#### Severity\n- CVSS Score: 7.5 / 10 (High)\n- Vector String: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H`\n\n#### References\n- [https://github.com/markdown-it/markdown-it/security/advisories/GHSA-gfr2-rv44-r23c](https://redirect.github.com/markdown-it/markdown-it/security/advisories/GHSA-gfr2-rv44-r23c)\n- [https://github.com/markdown-it/markdown-it/commit/48fbc465812c440020c663f040ab22deaf8f1eca](https://redirect.github.com/markdown-it/markdown-it/commit/48fbc465812c440020c663f040ab22deaf8f1eca)\n- [https://github.com/markdown-it/markdown-it/commit/d99f48839d37af6fd8a2617516c43dab90755503](https://redirect.github.com/markdown-it/markdown-it/commit/d99f48839d37af6fd8a2617516c43dab90755503)\n- [https://github.com/markdown-it/markdown-it](https://redirect.github.com/markdown-it/markdown-it)\n- [https://github.com/markdown-it/markdown-it/releases/tag/14.3.3](https://redirect.github.com/markdown-it/markdown-it/releases/tag/14.3.3)\n- [https://github.com/markdown-it/markdown-it/releases/tag/15.0.3](https://redirect.github.com/markdown-it/markdown-it/releases/tag/15.0.3)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-gfr2-rv44-r23c) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### markdown-it: Quadratic-time denial of service in inline HTML parsing with html enabled\n[CVE-2026-111766](https://nvd.nist.gov/vuln/detail/CVE-2026-111766) / [GHSA-vfgh-jcmw-g37q](https://redirect.github.com/advisories/GHSA-vfgh-jcmw-g37q)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\nWith `html: true`, markdown-it takes quadratic time to parse repeated unterminated HTML constructs inside a paragraph. This affects HTML comments (`<!--`), processing instructions (`<?`), declarations (`<!A`), and CDATA sections (`<![CDATA[`).\n\nAn attacker-controlled input of a few hundred kilobytes can block the Node.js event loop for seconds or tens of seconds. The default configuration has HTML disabled, but the `commonmark` preset enables it.\n\nThe issue was reported against the published `markdown-it@15.0.2` package on Node.js 20 and reproduced on the current source with Node.js 24.16.0.\n\n##### Details\n\n`src/rules_inline/text.ts` treats `<` as a terminator, causing the inline parser to attempt the HTML rule at successive HTML construct openers.\n\nWith HTML enabled, `src/rules_inline/html_inline.ts` applies an anchored regular expression to the remaining input:\n\n```js\nconst match = state.src.slice(pos).match(HTML_TAG_RE)\n```\n\nThe comment, processing instruction, declaration, and CDATA alternatives in `src/common/html_re.ts` scan the remaining input for their respective terminators: `-->`, `?>`, `>`, and `]]>`.\n\nWhen the terminator is absent, matching fails. Parsing eventually reaches the next opener and scans an overlapping suffix again. Repeating this across the paragraph produces quadratic total work. For these inputs, the problem is repeated scanning across separate matches.\n\nThe payload must reach inline parsing. Prefixing it with `x ` keeps it inside a paragraph. Starting a line directly with one of these constructs instead invokes HTML block parsing, which does not exhibit the same repeated inline scans for these payloads.\n\nThe existing `unclosed <!--` test in `test/markdown-it/pathological.test.mjs` already contains a reproducer:\n\n```js\n'</' + '<!--'.repeat(100000)\n```\n\nHowever, it runs with default options, where HTML is disabled.\n\nA fix should avoid repeated searches for absent terminators across all four affected alternatives, for example by caching failed searches on the inline state. Fixing only the comment alternative leaves the other three cases affected. Regression coverage should exercise all four with `html: true`.\n\nThe original report was submitted by [@&#8203;JarLob](https://redirect.github.com/JarLob). It credits the [GitHub Security Lab Taskflow Agent](https://redirect.github.com/GitHubSecurityLab/seclab-taskflow-agent) as part of the [GitHub Secure Open Source Fund](https://redirect.github.com/open-source/github-secure-open-source-fund).\n\n##### Proof of concept\n\nInstall the affected package in an empty directory:\n\n```sh\nnpm install markdown-it@15.0.2\n```\n\nSave the following as `poc.mjs` and run `node poc.mjs`:\n\n```js\nimport MarkdownIt from 'markdown-it'\nimport { performance } from 'node:perf_hooks'\n\nconst mdHtml = new MarkdownIt({ html: true })\nconst mdDefault = new MarkdownIt()\nconst sizes = [8000, 16000, 32000, 64000]\n\nfunction measure(md, src) {\n  const start = performance.now()\n  md.render(src)\n  return (performance.now() - start).toFixed(1)\n}\n\nconst variants = {\n  comment: '<!--',\n  processing: '<?x',\n  declaration: '<!A',\n  cdata: '<![CDATA['\n}\n\nfor (const [name, opener] of Object.entries(variants)) {\n  console.log(`\\n${name}`)\n  for (const n of sizes) {\n    const src = 'x ' + opener.repeat(n)\n    console.log({\n      n,\n      bytes: Buffer.byteLength(src),\n      ms: measure(mdHtml, src)\n    })\n  }\n}\n\nconst n = sizes.at(-1)\nconst controls = {\n  'HTML disabled': [mdDefault, 'x ' + '<!--'.repeat(n)],\n  'Closed comments': [mdHtml, 'x ' + '<!---->'.repeat(n)],\n  'HTML block': [mdHtml, '<!--'.repeat(n)],\n  'Plain text': [mdHtml, 'x ' + 'abcd'.repeat(n)]\n}\n\nfor (const [name, [md, src]] of Object.entries(controls)) {\n  console.log({ control: name, ms: measure(md, src) })\n}\n\nconst repoPayload = '</' + '<!--'.repeat(100000)\nconsole.log({\n  payload: 'Existing pathological test',\n  htmlFalseMs: measure(mdDefault, repoPayload),\n  htmlTrueMs: measure(mdHtml, repoPayload)\n})\n```\n\nMeasurements from the original report on `markdown-it@15.0.2`, Node.js 20:\n\n| Construct | 8,000 repetitions | 64,000 repetitions |\n| --- | ---: | ---: |\n| Comment | 170 ms | 8,799 ms |\n| Processing instruction | 26 ms | 1,566 ms |\n| Declaration | 93 ms | 5,628 ms |\n| CDATA | 119 ms | 4,179 ms |\n\nAn eightfold increase in repetitions produces approximately 35–60 times the execution time, consistent with quadratic growth becoming dominant.\n\nFor the comment payload at 64,000 repetitions:\n\n- HTML disabled: 25 ms.\n- Closed comments: 29 ms.\n- Payload at the start of an HTML block: 1 ms.\n- Plain text: 1 ms.\n\nThe existing pathological-test payload with 100,000 comment openers took 33 ms with HTML disabled and 21,030 ms with HTML enabled. A separate comment payload with 128,000 repetitions, approximately 500 KiB, took 32,847 ms.\n\nExact timings depend on the runtime and hardware.\n\n##### Impact\n\nThis is an availability issue affecting applications that render attacker-controlled Markdown with `html: true`, including applications using the `commonmark` preset.\n\nOn Node.js, a synchronous `render()` call can occupy a CPU core and block the event loop for seconds or tens of seconds, delaying other requests handled by the same process. Repeated submissions can cause denial of service. Browser applications can similarly become unresponsive when rendering on the main thread.\n\nSanitizing the generated HTML afterwards does not prevent the issue because the expensive processing occurs during Markdown rendering.\n\nThe default configuration, with HTML disabled, is unaffected by these payloads. Disabling HTML or limiting input size can reduce exposure while a fix is prepared.\n\nThe reported affected release is `15.0.2`; the full affected version range has not been established.\n\n#### Severity\n- CVSS Score: 3.7 / 10 (Low)\n- Vector String: `CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L`\n\n#### References\n- [https://github.com/markdown-it/markdown-it/security/advisories/GHSA-vfgh-jcmw-g37q](https://redirect.github.com/markdown-it/markdown-it/security/advisories/GHSA-vfgh-jcmw-g37q)\n- [https://nvd.nist.gov/vuln/detail/CVE-2026-111766](https://nvd.nist.gov/vuln/detail/CVE-2026-111766)\n- [https://github.com/markdown-it/markdown-it/commit/928bc8c11ded60181c0e7fc5aa954eec582e8e79](https://redirect.github.com/markdown-it/markdown-it/commit/928bc8c11ded60181c0e7fc5aa954eec582e8e79)\n- [https://github.com/markdown-it/markdown-it/commit/d99f48839d37af6fd8a2617516c43dab90755503](https://redirect.github.com/markdown-it/markdown-it/commit/d99f48839d37af6fd8a2617516c43dab90755503)\n- [https://github.com/markdown-it/markdown-it](https://redirect.github.com/markdown-it/markdown-it)\n- [https://github.com/markdown-it/markdown-it/releases/tag/14.3.3](https://redirect.github.com/markdown-it/markdown-it/releases/tag/14.3.3)\n- [https://github.com/markdown-it/markdown-it/releases/tag/15.0.3](https://redirect.github.com/markdown-it/markdown-it/releases/tag/15.0.3)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-vfgh-jcmw-g37q) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>markdown-it/markdown-it (markdown-it)</summary>\n\n### [`v14.3.3`](https://redirect.github.com/markdown-it/markdown-it/compare/14.3.2...14.3.3)\n\n[Compare Source](https://redirect.github.com/markdown-it/markdown-it/compare/14.3.2...14.3.3)\n\n### [`v14.3.2`](https://redirect.github.com/markdown-it/markdown-it/compare/14.3.1...14.3.2)\n\n[Compare Source](https://redirect.github.com/markdown-it/markdown-it/compare/14.3.1...14.3.2)\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Enabled.\n\n♻ **Rebasing**: Whenever PR is behind base branch, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-20T16:50:16Z",
+      "mergedAt": "2026-10-21T02:54:03Z",
+      "additions": 5,
+      "deletions": 5
+    }
+  ],
+  "codeChanges": {
+    "additions": 185,
+    "deletions": 45,
+    "files": 41,
+    "commitCount": 15
+  },
+  "completedItems": [
+    {
+      "title": "ci: drop unsupported exe option from goreleaser-pro mise alias",
+      "prNumber": 776,
+      "type": "other",
+      "body": "## Summary\nThe `proxyd-go-release` job for `proxyd/v4.34.1` failed in **Setup mise**, before goreleaser ran. CI installs the newest mise each time, and mise 2026.10.15 now errors on backend options that the backend doesn't use:\n\n```\nFailed ",
+      "files": [
+        "mise.toml"
+      ]
+    },
+    {
+      "title": "fix(proxyd): reject null elements in batch responses instead of panicking",
+      "prNumber": 775,
+      "type": "bugfix",
+      "body": "**Description**\n\nWhen a backend answers a batch request with HTTP 200 and a JSON array containing a `null` element, `json.Unmarshal` into `[]*RPCRes` produces a nil pointer. The length check still passes, and `doForward` then dereferences i",
+      "files": [
+        "proxyd/CHANGELOG.md",
+        "proxyd/backend.go",
+        "proxyd/integration_tests/batching_test.go"
+      ]
+    },
+    {
+      "title": "Require ca-certificates-bundle 20260909-r3 in all images",
+      "prNumber": 774,
+      "type": "other",
+      "body": "Pins ca-certificates-bundle to >=20260909-r3 in the apko configs and installs it in the final stage of every Wolfi-based Dockerfile. This Wolfi build removes the eMudhra emSign Root CA G3, C1 and C3 roots from the trust store. ci-base-clang",
+      "files": [
+        "apko/cci-stats.apko.yaml",
+        "apko/cci-stats.yaml",
+        "apko/circleci-runner-wolfi.apko.yaml",
+        "apko/circleci-runner-wolfi.yaml",
+        "apko/op-conductor-mon.apko.yaml",
+        "apko/op-conductor-mon.yaml",
+        "apko/op-conductor-ops.apko.yaml",
+        "apko/op-conductor-ops.yaml",
+        "apko/op-signer.apko.yaml",
+        "apko/op-signer.yaml",
+        "apko/op-txproxy.apko.yaml",
+        "apko/op-txproxy.yaml",
+        "apko/op-ufm.apko.yaml",
+        "apko/op-ufm.yaml",
+        "apko/peer-mgmt-service.apko.yaml",
+        "apko/peer-mgmt-service.yaml",
+        "apko/proxyd.apko.yaml",
+        "apko/proxyd.yaml",
+        "apko/replica-healthcheck.apko.yaml",
+        "apko/replica-healthcheck.yaml",
+        "bailiff/Dockerfile",
+        "cci-stats/Dockerfile",
+        "op-conductor-mon/Dockerfile",
+        "op-conductor-ops/Dockerfile",
+        "op-signer/Dockerfile",
+        "op-txproxy/Dockerfile",
+        "op-ufm/Dockerfile",
+        "peer-mgmt-service/Dockerfile",
+        "proxyd/Dockerfile",
+        "replica-healthcheck/Dockerfile"
+      ]
+    },
+    {
+      "title": "ci: rebuild images daily from main",
+      "prNumber": 773,
+      "type": "other",
+      "body": "## Summary\n- Adds a daily `schedule` trigger (03:00 UTC) to the build-images workflow.\n- Scheduled runs rebuild every image from the default branch and publish the `<sha>` and `main` tags, so the `main` tags are refreshed each day even with",
+      "files": [
+        ".github/workflows/build-images.yaml"
+      ]
+    },
+    {
+      "title": "ci(renovate): block npm major updates",
+      "prNumber": 772,
+      "type": "other",
+      "body": "## Summary\n- Disable npm major updates via `npm.packageRules`, including vulnerability-alert updates, which otherwise override top-level package rules.\n- Mirrors https://github.com/ethereum-optimism/factory/pull/72 explicitly in this repo.\n",
+      "files": [
+        "renovate.json"
+      ]
+    },
+    {
+      "title": "chore(deps): bump certifi from 2024.7.4 to 2026.10.19 in /op-conductor-ops",
+      "prNumber": 771,
+      "type": "other",
+      "body": "Bumps [certifi](https://github.com/certifi/python-certifi) from 2024.7.4 to 2026.10.19.\n<details>\n<summary>Commits</summary>\n<ul>\n<li><a href=\"https://github.com/certifi/python-certifi/commit/662df63d7906df66f1f07c0751a3dfe9da14d914\"><code>",
+      "files": [
+        "op-conductor-ops/poetry.lock"
+      ]
+    },
+    {
+      "title": "security: Update dependency markdown-it to v14.3.3 [SECURITY]",
+      "prNumber": 770,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [markdown-it](https://redirect.github.c",
+      "files": [
+        "replica-healthcheck/package.json",
+        "replica-healthcheck/yarn.lock"
+      ]
+    },
+    {
+      "title": "fix(proxyd): answer out-of-range state reads and log ranges with errors",
+      "prNumber": 769,
+      "type": "bugfix",
+      "body": "**Description**\n\nIn consensus mode, proxyd answers a request for a block above its consensus latest without forwarding it. Since #552 that answer has been a placeholder value for everything except block lookups:\n\n- `\"0x0\"` for `eth_getBalan",
+      "files": [
+        "proxyd/CHANGELOG.md",
+        "proxyd/backend.go",
+        "proxyd/integration_tests/consensus_test.go",
+        "proxyd/integration_tests/testdata/consensus.toml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 369.8128362039945,
+      "prScore": 328.3748362039945,
+      "issueScore": 16,
+      "reviewScore": 25,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 216.1172368098279,
+      "prScore": 175.1792368098279,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 143.85099215090102,
+      "prScore": 123.85099215090102,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 104.77759219817509,
+      "prScore": 104.43759219817508,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 101.63701587322018,
+      "prScore": 87.43701587322018,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 68.70410304303287,
+      "prScore": 59.70410304303287,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 58.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 58.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 56.703747107964574,
+      "prScore": 26.703747107964574,
+      "issueScore": 0,
+      "reviewScore": 30,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 54.433450951366275,
+      "prScore": 54.433450951366275,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 51.39966831367859,
+      "prScore": 46.699668313678586,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 32.048813299576,
+      "prScore": 27.048813299576,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 28.8004379124341,
+      "prScore": 28.8004379124341,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 28,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 28,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 25.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 23,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 23,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 21.35661228866811,
+      "prScore": 21.35661228866811,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 18.8,
+      "prScore": 0,
+      "issueScore": 4.1,
+      "reviewScore": 14.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 18.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 10.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "daniel1302",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1239637?v=4",
+      "totalScore": 8,
+      "prScore": 0,
+      "issueScore": 8,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.57061228866811,
+      "prScore": 7.132612288668111,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maksim2464",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/95476260?v=4",
+      "totalScore": 2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 6,
+  "mergedPRs": 8,
+  "newIssues": 0,
+  "closedIssues": 1,
+  "activeContributors": 26
+}

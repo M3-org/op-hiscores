@@ -1,0 +1,509 @@
+{
+  "interval": {
+    "intervalStart": "2026-10-22T00:00:00.000Z",
+    "intervalEnd": "2026-10-23T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/infra",
+  "overview": "From 2026-10-22 to 2026-10-23, ethereum-optimism/infra had 8 new PRs (8 merged), 0 new issues, and 22 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ88AAAABKEzvqg",
+      "title": "feat(proxyd): serve local consensus state when shared HA state is stale",
+      "author": "zhwrd",
+      "number": 783,
+      "body": "Follows #782 (merged).\n\n## Problem\n\nWith HA consensus, every node serves the shared state from Redis: the leader posts it, followers read it each heartbeat. A node that can't refresh it, typically because it can't reach Redis, keeps serving its last copy however old it gets. On 2026-10-22 (mn-uni-mainnet-0, 03:42–03:49 UTC) every pod on one node lost Redis. All three public pods were on that node, so the public endpoint served block 61891874 for ~8 min until the pods were rescheduled. The step-down fix in #782 doesn't help here, because a follower that can't reach Redis still has nothing newer to serve.\n\n## Change\n\nOff by default: nothing changes unless a backend group sets the new option.\n\n- New backend group option **`consensus_ha_serve_local_when_stale`** (default `false`). When enabled, `GetState` and `GetCLSyncBody` serve the node's locally polled consensus state if its copy of the shared state is older than `lockPeriod` (default 30s) and the local state is valid. Once a refresh succeeds, the node serves the shared state again.\n- New gauge **`proxyd_group_consensus_ha_serving_local{backend_group_name}`**: 1 while the node serves local state (always 0 with the option off). It's set every heartbeat, and the node logs when it switches either way (`shared consensus state is stale, serving local state` / `serving shared consensus state again`).\n\n## Trade-off\n\nThis is why the option defaults to off. While a node serves local state, it can report a different head from its peers. That is the inconsistency HA consensus normally prevents, and clients spread across pods may see the head move backwards by a few blocks. We think that beats serving an arbitrarily stale head with HTTP 200. The new gauge makes this visible, and an alert can be added on it, e.g. `max_over_time(proxyd_group_consensus_ha_serving_local[5m]) == 1` for N minutes.\n\n## Tests\n\n`TestRedisConsensusTracker_ServesLocalWhenRemoteStale` covers:\n\n- the shared state is served while fresh, even when the local state is ahead;\n- the local state is served once the shared state is older than the lock period, and the gauge goes to 1;\n- after Redis returns, the node serves the shared state again and the gauge goes back to 0;\n- the stale shared state is still served when there is no valid local state.\n\n`TestRedisConsensusTracker_ServesRemoteWhenStaleByDefault` checks that with the option off the stale shared state is still served and the gauge stays 0.\n\n`go test -race ./...` passes in `proxyd`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-22T17:00:25Z",
+      "mergedAt": "2026-10-22T21:38:55Z",
+      "additions": 161,
+      "deletions": 6
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABKEzp8w",
+      "title": "fix(proxyd): step down as HA consensus leader when the lock cannot be confirmed",
+      "author": "zhwrd",
+      "number": 782,
+      "body": "## Bug\n\nIn `RedisConsensusTracker.stateHeartbeat`, when a leader failed to read the lock or to extend it, it tried to release the lock and **returned without clearing `ct.leader` if the release also failed**. Release fails in exactly the cases where leadership is lost:\n\n- Redis is unreachable (`dial tcp ...: i/o timeout`), or\n- another node has already taken the expired lock (`lock already taken, locked nodes: [0]`, redsync `ErrTaken`).\n\nFrom then on every heartbeat repeats Extend fails → Unlock fails → return. The node never reaches the follower branch that reads the current leader's state, and `GetState()` keeps serving the last state it posted. Clients routed to that pod get a frozen `eth_blockNumber`, `null` for newer blocks, \"beyond head\" errors on `eth_getLogs`, and `latest` rewritten to the stale block, all with HTTP 200. The pod never recovers on its own.\n\n## Incidents (2026-10-22)\n\n- **tn-soneium-minato-0-proxyd-public**. At ~05:48 UTC a host network blip broke Redis for 2 of 3 pods. Leader g2blr lost the lock and npn47 took it at 05:49:10. After recovery g2blr logged `failed to extend lock` / `failed to release the lock after error: lock already taken, locked nodes: [0]` every ~500ms. Its `proxyd_group_consensus_ha_latest_block` stayed at 34726891 until the pod was deleted at ~06:12, ending ~678 blocks (~22 min) behind while serving ~1/3 of traffic.\n- **tn-soneium-minato-0-proxyd-private**: pod nrhnb froze at the same block at the same time and was still stuck ~10.7h later.\n- **mn-uni-mainnet-0-proxyd-public / -internal**, 03:42–03:49 UTC. Every pod on one node lost Redis, and two leaders hit the read-lock variant (`failed to release the lock after error: dial tcp ...:6379: i/o timeout`).\n\n## Fix\n\nBoth failure paths now call `stepDown()`. It releases the lock on a best-effort basis and sets `leader = false` whether or not the release succeeds; a lock that can't be released expires after `lockPeriod`. On the next heartbeat the node follows the current leader.\n\nThis fixes the case where Redis comes back (Soneium). A node that still can't reach Redis keeps serving its last copy of the shared state; that is addressed in the follow-up PR #783.\n\n## Tests\n\nNew `proxyd/consensus_tracker_redis_test.go` (miniredis):\n\n- `StepsDownWhenLockTaken`: the lock expires and another node takes it, then extend and release both fail. Asserts the node steps down and serves the new leader's head.\n- `RecoversFromRedisOutage`: the incident sequence (Redis drops, lock expires, another node takes over, Redis returns).\n\nBoth fail on the previous code (`node must step down ...`). `go test -race ./...` passes in `proxyd`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-22T17:00:18Z",
+      "mergedAt": "2026-10-22T17:29:51Z",
+      "additions": 135,
+      "deletions": 14
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABKHgEPw",
+      "title": "security: Update dependency black to v26.10.1 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 784,
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [black](https://redirect.github.com/psf/black) ([changelog](https://redirect.github.com/psf/black/blob/main/CHANGES.md)) | `26.5.1` → `26.10.1` | ![age](https://developer.mend.io/api/mc/badges/age/pypi/black/26.10.1?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/pypi/black/26.5.1/26.10.1?slim=true) |\n\n---\n\n### Black: GitHub Action installs unvalidated required-version from pyproject.toml\n[CVE-2026-114134](https://nvd.nist.gov/vuln/detail/CVE-2026-114134) / [GHSA-cg8m-r9f2-5wm2](https://redirect.github.com/advisories/GHSA-cg8m-r9f2-5wm2)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\nThe GitHub Action bundled with Black can read the version from `tool.black.required-version` if `use_pyproject` is set to True. This version is not validated and therefore can be used to execute untrusted code in the context of a victim's repository.\n\n##### Details\n\nThis is similar to the previous CVE-2026-31900. The value in `tool.black.required-version` is accepted as the version to be installed by the action without validation.\n\n##### Proof of concept\n\nReproduction requires a victim to use Black's GitHub Action with `use_pyproject: true`. The attacker would then issue a PR to the victim's repository with `pyproject.toml` edited so that Black points to a malicious repository.\n\n##### Impact\n\nThis is a remote code execution vulnerability impacting users using the GitHub Action bundled with psf/black and using the `use_pyproject: true` setting.\n\n#### Severity\n- CVSS Score: 8.7 / 10 (High)\n- Vector String: `CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N`\n\n#### References\n- [https://github.com/psf/black/security/advisories/GHSA-cg8m-r9f2-5wm2](https://redirect.github.com/psf/black/security/advisories/GHSA-cg8m-r9f2-5wm2)\n- [https://github.com/psf/black/pull/5510](https://redirect.github.com/psf/black/pull/5510)\n- [https://github.com/psf/black/commit/ac1f71563aeccf73cf13ece00f231d9d6c66a514](https://redirect.github.com/psf/black/commit/ac1f71563aeccf73cf13ece00f231d9d6c66a514)\n- [https://github.com/psf/black](https://redirect.github.com/psf/black)\n- [https://github.com/psf/black/releases/tag/26.10.1](https://redirect.github.com/psf/black/releases/tag/26.10.1)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-cg8m-r9f2-5wm2) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>psf/black (black)</summary>\n\n### [`v26.10.1`](https://redirect.github.com/psf/black/blob/HEAD/CHANGES.md#Version-26101)\n\n[Compare Source](https://redirect.github.com/psf/black/compare/26.10.0...26.10.1)\n\n##### Highlights\n\nThis release fixes a security issue in Black's bundled GitHub Action. Repositories that\nuse the action are encouraged to update to the latest version of Black immediately. This\nupdate is received automatically when using `psf/black@stable`, and is independent of\nthe version of Black installed by the action.\n\nWhen the GitHub Action reads version specifiers from `tool.black.required-version`, it\nnow only accepts released versions of Black, as it already did for `black` requirements\nin dependency lists. Other values, such as URL references, are now rejected. This issue\nhas been registered as `GHSA-cg8m-r9f2-5wm2`; a CVE identifier is pending.\n\n##### Stable style\n\n- Fix a long Jupyter notebook assignment magic (for example `x = !ls -la`) being wrapped\n  in parentheses, which IPython can no longer run; such cells are now left unchanged\n  ([#&#8203;5481](https://redirect.github.com/psf/black/issues/5481))\n- Keep repeated lines outside the selected `--line-ranges` unchanged ([#&#8203;5436](https://redirect.github.com/psf/black/issues/5436))\n- Fix `--line-ranges` formatting lines that follow a statement when formatting joins or\n  re-indents that statement ([#&#8203;5484](https://redirect.github.com/psf/black/issues/5484))\n- Fix `--line-ranges` crashing with an internal error when an unselected statement has a\n  `# fmt: skip` comment on the last line before a closing bracket ([#&#8203;5477](https://redirect.github.com/psf/black/issues/5477))\n- Prevent moving an encoding declaration (for example `# -*- coding: latin-1 -*-`) onto\n  the first two lines of a file ([#&#8203;5487](https://redirect.github.com/psf/black/issues/5487))\n- Fix adding an extra trailing blank line inside a multi-line module docstring when its\n  last line is near the line length limit ([#&#8203;5494](https://redirect.github.com/psf/black/issues/5494))\n- Keep the parentheses around a walrus that is the only item in a set (for example\n  `{(x := f())}`) when targeting Python 3.9 or older, since Python 3.8 and 3.9.0 can't\n  parse it without them ([#&#8203;5502](https://redirect.github.com/psf/black/issues/5502))\n\n##### Preview style\n\n- Do not split short expressions on delimiters (such as binary operators, comparisons,\n  or comprehensions) inside brackets when preceded by a standalone comment ([#&#8203;5455](https://redirect.github.com/psf/black/issues/5455))\n- Fix the unstable `string_processing` feature removing backslash-newline sequences from\n  raw strings, which changed their value ([#&#8203;5482](https://redirect.github.com/psf/black/issues/5482))\n- Avoid adding unnecessary parentheses around unbreakable right-hand side expressions in\n  assignments (such as annotated assignments or subscript targets) ([#&#8203;5473](https://redirect.github.com/psf/black/issues/5473))\n- Parenthesize expressions with parameter comments when they exceed the line length\n  under `--preview` ([#&#8203;5442](https://redirect.github.com/psf/black/issues/5442))\n- Fix `wrap_long_dict_values_in_parens` dropping the parentheses around a right-hand\n  side that contains a dictionary, leaving a line over the length limit ([#&#8203;5492](https://redirect.github.com/psf/black/issues/5492))\n- Fix the unstable `string_processing` feature adding a space after `*` or `**` in a PEP\n  695 type parameter (`* Ts = ...`) when it splits a string in the parameter's default\n  ([#&#8203;5504](https://redirect.github.com/psf/black/issues/5504))\n- Avoid unnecessary line splits of trailers (such as indexing/subscripts) when an\n  earlier bracket split exceeds the line length only due to a trailing comment ([#&#8203;5498](https://redirect.github.com/psf/black/issues/5498))\n\n##### Configuration\n\n- Add `--cache-dir` to configure the cache directory from the command line ([#&#8203;5433](https://redirect.github.com/psf/black/issues/5433))\n- Don't cache a file as formatted after formatting or checking it with `--line-ranges`,\n  which made a later full `black --check` pass and `black` skip the unformatted lines\n  ([#&#8203;5476](https://redirect.github.com/psf/black/issues/5476))\n- Respect a `.gitignore` that starts with a UTF-8 byte order mark. The mark became part\n  of the first pattern, so that pattern never matched and Black formatted files that git\n  ignores ([#&#8203;5497](https://redirect.github.com/psf/black/issues/5497))\n\n##### Performance\n\n- Avoid quadratic runtime when splitting very long lines with many trailing bracket\n  pairs (such as consecutive subscripts) ([#&#8203;5475](https://redirect.github.com/psf/black/issues/5475))\n\n##### Integrations\n\n- Fix the GitHub Action crashing on dependency-group includes when `use_pyproject` is\n  enabled ([#&#8203;5479](https://redirect.github.com/psf/black/issues/5479))\n- When the GitHub Action reads version specifiers from `tool.black.required-version`, it\n  now only accepts released versions of Black, as it already did for `black`\n  requirements in dependency lists. Other values, such as URL references, are now\n  rejected. ([#&#8203;5510](https://redirect.github.com/psf/black/issues/5510))\n\n### [`v26.10.0`](https://redirect.github.com/psf/black/blob/HEAD/CHANGES.md#Version-26100)\n\n[Compare Source](https://redirect.github.com/psf/black/compare/26.5.1...26.10.0)\n\n##### Stable style\n\n- `--line-ranges` no longer inserts an empty line after a docstring when the range\n  covers only the docstring itself ([#&#8203;5312](https://redirect.github.com/psf/black/issues/5312))\n- Fix `# fmt: skip` on a bracketed ternary turning the surrounding tuple into a call\n  ([#&#8203;5464](https://redirect.github.com/psf/black/issues/5464))\n- Fix crash when `# fmt: skip` is placed on a one-line function or class with PEP 695\n  type parameters ([#&#8203;5429](https://redirect.github.com/psf/black/issues/5429))\n- Fix an inline comment after the closing bracket of optional parentheses being moved\n  inside the parentheses when the parenthesized expression contains own-line comments\n  ([#&#8203;5395](https://redirect.github.com/psf/black/issues/5395))\n- Fix unparseable output when `# fmt: skip` is placed on a bracket of an `if`, `while`,\n  `for`, or `with` header ([#&#8203;5401](https://redirect.github.com/psf/black/issues/5401), [#&#8203;5405](https://redirect.github.com/psf/black/issues/5405))\n- Fix crash when formatting parenthesized expressions with multiple inline comments and\n  `# fmt: skip` ([#&#8203;5414](https://redirect.github.com/psf/black/issues/5414))\n- Fix parsing Jupyter notebook assignment magics when non-ASCII characters appear\n  earlier on the line ([#&#8203;5381](https://redirect.github.com/psf/black/issues/5381))\n- Preserve blank lines that come immediately before a `# fmt: on` comment ([#&#8203;5300](https://redirect.github.com/psf/black/issues/5300))\n- Keep the parentheses around the target of an annotated assignment (e.g.\n  `(x): int = 5`), which prevent CPython from including the name in `__annotations__`\n  ([#&#8203;5321](https://redirect.github.com/psf/black/issues/5321))\n- Stop treating a t-string in docstring position as a docstring (e.g. `t\"  spam  \"` as\n  the first statement of a module, class or function) ([#&#8203;5287](https://redirect.github.com/psf/black/issues/5287))\n- Fix unparseable output for a t-string whose replacement field contains a quote (e.g.\n  `t'\\'{a[\"b\"]}\\''`) ([#&#8203;5265](https://redirect.github.com/psf/black/issues/5265))\n- Fix unparseable output for a triple-quoted string whose body ends in an\n  already-escaped double quote (e.g. `'''\\'''\\\"'''`) ([#&#8203;5262](https://redirect.github.com/psf/black/issues/5262))\n- Fix `--skip-magic-trailing-comma` dropping the trailing comma from a split\n  single-element tuple used as a lambda parameter default ([#&#8203;5246](https://redirect.github.com/psf/black/issues/5246))\n- Fix unstable formatting when an inline comment sits on optional parentheses (e.g. a\n  parenthesized assert message) ([#&#8203;5241](https://redirect.github.com/psf/black/issues/5241))\n- Fix `--skip-magic-trailing-comma` dropping the trailing comma of a one-element\n  subscript (`a[x,]`) when the line is long enough to be split and contains a power\n  operator ([#&#8203;5272](https://redirect.github.com/psf/black/issues/5272))\n- Fix crash when a standalone comment sits between tokens of a comprehension or lambda\n  ([#&#8203;5144](https://redirect.github.com/psf/black/issues/5144))\n- Fix inline comments on a bracket inside a comprehension being dropped ([#&#8203;5330](https://redirect.github.com/psf/black/issues/5330))\n- Respect the magic trailing comma in a PEP 695 type parameter list containing a\n  `*TypeVarTuple` or `**ParamSpec` ([#&#8203;5244](https://redirect.github.com/psf/black/issues/5244))\n- Fix crash when a comment-only `# fmt: off`/`# fmt: on` block is followed by a `with`\n  statement after another standalone comment ([#&#8203;5189](https://redirect.github.com/psf/black/issues/5189))\n- Fix a crash when splitting `case case if ...` match patterns at very small line\n  lengths ([#&#8203;5147](https://redirect.github.com/psf/black/issues/5147))\n- Fix multiline docstring indentation when leading tabs are used inside indented\n  docstrings ([#&#8203;5148](https://redirect.github.com/psf/black/issues/5148))\n- Respect `# fmt: skip` on a line that opens a bracket (e.g.\n  `from x import (  # fmt: skip`) when a standalone comment is among the bracket's\n  contents ([#&#8203;5161](https://redirect.github.com/psf/black/issues/5161))\n- Fix an AST safety error when separate `# type: ignore` comments in a parenthesized\n  attribute chain were merged onto one physical line ([#&#8203;5297](https://redirect.github.com/psf/black/issues/5297))\n- Preserve comments and blank lines outside requested ranges when formatting with\n  `--line-ranges` ([#&#8203;5175](https://redirect.github.com/psf/black/issues/5175))\n- Fix crash when `# fmt: skip` is used on one-line `async def`, `async with`, and\n  `async for` statements containing a semicolon ([#&#8203;5311](https://redirect.github.com/psf/black/issues/5311))\n- Stop converting form feeds or other similar characters in docstrings into newlines\n  ([#&#8203;5461](https://redirect.github.com/psf/black/issues/5461))\n- Fix `--skip-source-first-line` turning the skipped line's CRLF ending into `\\r\\r\\n`\n  when reformatting a file with CRLF line endings ([#&#8203;5438](https://redirect.github.com/psf/black/issues/5438))\n\n##### Preview style\n\n##### New preview features\n\n- Add missing blank lines after classes whose last method has an ellipsis body ([#&#8203;5439](https://redirect.github.com/psf/black/issues/5439))\n- Split only the brackets holding a magic trailing comma when more trailers follow them\n  (e.g. stop splitting inside the `[2]` of `[1,][2](3)`) ([#&#8203;5448](https://redirect.github.com/psf/black/issues/5448))\n- Keep dictionary keys containing operators together on one line when the value can be\n  wrapped onto a new line instead ([#&#8203;5435](https://redirect.github.com/psf/black/issues/5435))\n- Remove redundant parentheses around individual variables in unpacking targets (e.g.\n  `for (x), (y) in points:` becomes `for x, y in points:`) ([#&#8203;5416](https://redirect.github.com/psf/black/issues/5416))\n- Normalize uppercase `T` prefixes on t-strings to lowercase ([#&#8203;5425](https://redirect.github.com/psf/black/issues/5425))\n- Remove redundant parentheses around generator expressions ([#&#8203;5304](https://redirect.github.com/psf/black/issues/5304), [#&#8203;5369](https://redirect.github.com/psf/black/issues/5369))\n- Preserve two blank lines before a top-level class starting inside a `# fmt: off` block\n  after an import ([#&#8203;5238](https://redirect.github.com/psf/black/issues/5238))\n- Fix unnecessary parentheses around short right-hand expressions in indexed assignments\n  (e.g. `x[key] = expr`) ([#&#8203;5095](https://redirect.github.com/psf/black/issues/5095))\n- Parenthesize tuple expressions in `yield` statements for consistency with function\n  calls and returns ([#&#8203;5170](https://redirect.github.com/psf/black/issues/5170))\n- Stop splitting between a variable and its operator (`not in`, `==`, `is`, ...) when\n  the right-hand side is a bracketed expression, and instead split inside the brackets\n  ([#&#8203;5135](https://redirect.github.com/psf/black/issues/5135))\n- In `.pyi` stub files, enforce a blank line after a function or method that has a\n  docstring-only body when another comment or statement follows it ([#&#8203;5158](https://redirect.github.com/psf/black/issues/5158))\n\n##### Updates to existing preview features\n\n- Fix crash in stub files when `# fmt: skip` is placed on a function in a group of\n  same-name decorated functions (e.g. `@overload`s or a property setter) ([#&#8203;5430](https://redirect.github.com/psf/black/issues/5430))\n- Keep the parentheses around a lambda used as the iterable of a comprehension (e.g.\n  `[x for x in (lambda: 0) if x]`) ([#&#8203;5176](https://redirect.github.com/psf/black/issues/5176), [#&#8203;5200](https://redirect.github.com/psf/black/issues/5200))\n\n##### Updates to existing unstable features\n\n- Do not treat multi-line expressions with merged strings and trailing `# type: ignore`\n  comments as single-line unsplittable expressions ([#&#8203;5466](https://redirect.github.com/psf/black/issues/5466))\n- Fix duplicated inline comment when stripping the parentheses around a string or\n  merging a backslash-continued string on the same line ([#&#8203;5449](https://redirect.github.com/psf/black/issues/5449))\n- Split long stringified return annotations even when the function has parameters\n  ([#&#8203;5427](https://redirect.github.com/psf/black/issues/5427))\n- Don't hug brackets when doing so would join two `# type: ignore` comments onto one\n  line ([#&#8203;5271](https://redirect.github.com/psf/black/issues/5271))\n- Fix a crash when `# type: ignore` is lost during formatting of a long parenthesized\n  string ([#&#8203;5329](https://redirect.github.com/psf/black/issues/5329))\n- Fix only the first part of an implicitly concatenated unmergeable string (e.g.\n  `r\"...\" r\"...\"`) being wrapped in parentheses ([#&#8203;5434](https://redirect.github.com/psf/black/issues/5434))\n\n##### Configuration\n\n- Add support for `NO_COLOR` environment variable to disable ANSI output ([#&#8203;5129](https://redirect.github.com/psf/black/issues/5129))\n- Remove spurious target version warning when runtime version is included in a\n  `--target-version` flag ([#&#8203;5167](https://redirect.github.com/psf/black/issues/5167))\n- Fix `--force-exclude` not excluding files whose path contains `..` (e.g.\n  `black ../generated/file.py` run from a subdirectory) ([#&#8203;5471](https://redirect.github.com/psf/black/issues/5471))\n- Fall back to the default configuration, with a warning, when the given sources share\n  no common project root (e.g. they are on different drives on Windows) instead of\n  crashing ([#&#8203;5386](https://redirect.github.com/psf/black/issues/5386))\n- Fix loading a stale cached `pyproject.toml` path when `--code` is used from different\n  working directories in the same process ([#&#8203;5152](https://redirect.github.com/psf/black/issues/5152))\n- Add validation for `--line-ranges` values ([#&#8203;5107](https://redirect.github.com/psf/black/issues/5107))\n- Ignore empty cache files instead of raising an `EOFError` ([#&#8203;5192](https://redirect.github.com/psf/black/issues/5192))\n- Reject non-string `include` and `force-exclude` values in `pyproject.toml` ([#&#8203;5193](https://redirect.github.com/psf/black/issues/5193))\n- Validate `BLACK_NUM_WORKERS` values and report invalid values as usage errors instead\n  of crashing ([#&#8203;5211](https://redirect.github.com/psf/black/issues/5211))\n- Ignore permission errors when reading cache ([#&#8203;5258](https://redirect.github.com/psf/black/issues/5258))\n\n##### Packaging\n\n- Reduce the size of Linux standalone binaries by stripping debug symbols during the\n  PyInstaller release build ([#&#8203;5223](https://redirect.github.com/psf/black/issues/5223))\n- Black is now released using GitHub\n  [Immutable Releases](https://docs.github.com/code-security/concepts/supply-chain-security/immutable-releases)\n  ([#&#8203;5296](https://redirect.github.com/psf/black/issues/5296))\n\n##### Performance\n\n- Fix superlinear runtime growth with the number of input files ([#&#8203;5450](https://redirect.github.com/psf/black/issues/5450))\n- Improve performance on strings containing many consecutive backslashes ([#&#8203;5163](https://redirect.github.com/psf/black/issues/5163))\n- Improve performance on files with many `# fmt: skip`/`# fmt: off`/`# fmt: on` comments\n  ([#&#8203;5169](https://redirect.github.com/psf/black/issues/5169), [#&#8203;5190](https://redirect.github.com/psf/black/issues/5190), [#&#8203;5232](https://redirect.github.com/psf/black/issues/5232))\n- Improve performance on long calls and collections ([#&#8203;5177](https://redirect.github.com/psf/black/issues/5177))\n- Improve performance on multiline strings inside large collections (e.g. a dict literal\n  with triple-quoted strings as values) ([#&#8203;5188](https://redirect.github.com/psf/black/issues/5188))\n- Improve performance on files with many soft keywords (e.g. `match`/`case` blocks)\n  ([#&#8203;5186](https://redirect.github.com/psf/black/issues/5186))\n- Improve performance on long semicolon-separated statements (in the stable style) and\n  large dict literals (in `--preview`) ([#&#8203;5184](https://redirect.github.com/psf/black/issues/5184))\n- Improve performance of `--line-ranges` on files with many sibling blocks (a long\n  `if`/`elif` chain, a `match` with many cases, or many top-level definitions) ([#&#8203;5213](https://redirect.github.com/psf/black/issues/5213))\n- Improve performance on deeply nested bracketed expressions ([#&#8203;5171](https://redirect.github.com/psf/black/issues/5171), [#&#8203;5242](https://redirect.github.com/psf/black/issues/5242))\n- Improve performance on lists and subscripts holding one long expression without\n  operators (e.g. a long run of implicitly concatenated strings inside `[]`) ([#&#8203;5239](https://redirect.github.com/psf/black/issues/5239))\n- Improve performance on deeply chained operations (e.g. a long `a ** b ** c ** ...`\n  chain) ([#&#8203;5235](https://redirect.github.com/psf/black/issues/5235))\n- Improve performance on long `if`/`elif` chains and other compound statements with many\n  clauses ([#&#8203;5322](https://redirect.github.com/psf/black/issues/5322))\n- Improve performance of `string_processing`:\n  - when merging implicitly concatenated f-strings containing long string literals\n    ([#&#8203;5165](https://redirect.github.com/psf/black/issues/5165))\n  - when merging long implicitly concatenated strings ([#&#8203;5173](https://redirect.github.com/psf/black/issues/5173), [#&#8203;5194](https://redirect.github.com/psf/black/issues/5194))\n  - when rewriting large nodes (e.g. `\"%s ...\" % (a, b, c, ...)`) ([#&#8203;5178](https://redirect.github.com/psf/black/issues/5178), [#&#8203;5199](https://redirect.github.com/psf/black/issues/5199), [#&#8203;5220](https://redirect.github.com/psf/black/issues/5220))\n  - when splitting long string literals ([#&#8203;5183](https://redirect.github.com/psf/black/issues/5183))\n\n##### Output\n\n- Report parser failures using editor-friendly `path:line:column` locations ([#&#8203;5237](https://redirect.github.com/psf/black/issues/5237))\n- Fix crash when writing formatted code or diffs to a `sys.stdout` that has no `buffer`\n  attribute (e.g. in Jupyter notebooks) ([#&#8203;5411](https://redirect.github.com/psf/black/issues/5411))\n- Report parse failures on Black's own output as internal errors ([#&#8203;5383](https://redirect.github.com/psf/black/issues/5383))\n\n##### *Blackd*\n\n- Return HTTP 400 instead of 500 when the `X-Python-Variant` header is empty or has an\n  empty entry (e.g. a trailing comma) ([#&#8203;5428](https://redirect.github.com/psf/black/issues/5428))\n- Allow optional whitespace around comma-separated versions and `pyi` in the\n  `X-Python-Variant` header ([#&#8203;5441](https://redirect.github.com/psf/black/issues/5441))\n\n##### Integrations\n\n- Remove unused `migrate-black` script ([#&#8203;5319](https://redirect.github.com/psf/black/issues/5319))\n- Support PEP 440 version specifiers in `tool.black.required-version` for the GitHub\n  Action ([#&#8203;5399](https://redirect.github.com/psf/black/issues/5399))\n- Add outputs (`is_formatted`, `change_count`, `same_count`, `failure_count`) to GitHub\n  Action runs ([#&#8203;5408](https://redirect.github.com/psf/black/issues/5408))\n\n##### Documentation\n\n- Document `vim-python-pep8-indent`, which provides an `indentexpr` for Black-style\n  insert-mode indentation ([#&#8203;5288](https://redirect.github.com/psf/black/issues/5288))\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Enabled.\n\n♻ **Rebasing**: Whenever PR is behind base branch, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about this update again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-22T20:48:56Z",
+      "mergedAt": "2026-10-22T22:46:23Z",
+      "additions": 28,
+      "deletions": 28
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABKAc67w",
+      "title": "fix(apko): add libssl3 and libcrypto3 to circleci-runner-wolfi",
+      "author": "falcorocks",
+      "number": 779,
+      "body": "## Summary\n\nAdd `libssl3` and `libcrypto3` to the circleci-runner-wolfi apko config. The unpinned `openssl` package now resolves to the 4.0 line, which no longer ships the OpenSSL 3 shared libraries that CI binaries link against.\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-22T11:21:54Z",
+      "mergedAt": "2026-10-22T11:26:52Z",
+      "additions": 4,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABKCb9Vg",
+      "title": "revert(apko): unpin glibc in circleci-runner-wolfi",
+      "author": "falcorocks",
+      "number": 781,
+      "body": "## Summary\n\nReverts the glibc 2.43 constraint from #780. Other Wolfi packages, such as perl, are built against glibc 2.44, so pinning glibc 2.43 leaves the image with an inconsistent libc and breaks them.",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-10-22T13:58:09Z",
+      "mergedAt": "2026-10-22T14:05:44Z",
+      "additions": 2,
+      "deletions": 2
+    }
+  ],
+  "codeChanges": {
+    "additions": 335,
+    "deletions": 53,
+    "files": 11,
+    "commitCount": 17
+  },
+  "completedItems": [
+    {
+      "title": "security: Update dependency black to v26.10.1 [SECURITY]",
+      "prNumber": 784,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [black](https://redirect.github.com/psf",
+      "files": [
+        "op-conductor-ops/poetry.lock"
+      ]
+    },
+    {
+      "title": "feat(proxyd): serve local consensus state when shared HA state is stale",
+      "prNumber": 783,
+      "type": "feature",
+      "body": "Follows #782 (merged).\n\n## Problem\n\nWith HA consensus, every node serves the shared state from Redis: the leader posts it, followers read it each heartbeat. A node that can't refresh it, typically because it can't reach Redis, keeps serving",
+      "files": [
+        "proxyd/CHANGELOG.md",
+        "proxyd/config.go",
+        "proxyd/consensus_tracker.go",
+        "proxyd/consensus_tracker_redis_test.go",
+        "proxyd/metrics.go",
+        "proxyd/proxyd.go"
+      ]
+    },
+    {
+      "title": "fix(proxyd): step down as HA consensus leader when the lock cannot be confirmed",
+      "prNumber": 782,
+      "type": "bugfix",
+      "body": "## Bug\n\nIn `RedisConsensusTracker.stateHeartbeat`, when a leader failed to read the lock or to extend it, it tried to release the lock and **returned without clearing `ct.leader` if the release also failed**. Release fails in exactly the ca",
+      "files": [
+        "proxyd/CHANGELOG.md",
+        "proxyd/consensus_tracker.go",
+        "proxyd/consensus_tracker_redis_test.go"
+      ]
+    },
+    {
+      "title": "revert(apko): unpin glibc in circleci-runner-wolfi",
+      "prNumber": 781,
+      "type": "other",
+      "body": "## Summary\n\nReverts the glibc 2.43 constraint from #780. Other Wolfi packages, such as perl, are built against glibc 2.44, so pinning glibc 2.43 leaves the image with an inconsistent libc and breaks them.",
+      "files": [
+        "apko/circleci-runner-wolfi.apko.yaml",
+        "apko/circleci-runner-wolfi.yaml"
+      ]
+    },
+    {
+      "title": "fix(apko): pin glibc to 2.43 in circleci-runner-wolfi",
+      "prNumber": 780,
+      "type": "bugfix",
+      "body": "## Summary\n\nPins glibc in `circleci-runner-wolfi` to the 2.43-r13 family so the image no longer resolves to glibc 2.44. Binaries built in the runner stay compatible with Ubuntu 24.04 based CircleCI executors (glibc 2.39).\n",
+      "files": [
+        "apko/circleci-runner-wolfi.apko.yaml",
+        "apko/circleci-runner-wolfi.yaml"
+      ]
+    },
+    {
+      "title": "fix(apko): add libssl3 and libcrypto3 to circleci-runner-wolfi",
+      "prNumber": 779,
+      "type": "bugfix",
+      "body": "## Summary\n\nAdd `libssl3` and `libcrypto3` to the circleci-runner-wolfi apko config. The unpinned `openssl` package now resolves to the 4.0 line, which no longer ships the OpenSSL 3 shared libraries that CI binaries link against.\n",
+      "files": [
+        "apko/circleci-runner-wolfi.apko.yaml",
+        "apko/circleci-runner-wolfi.yaml"
+      ]
+    },
+    {
+      "title": "chore(ci): bump circleci-utils orb to 1.0.33",
+      "prNumber": 778,
+      "type": "other",
+      "body": "## Summary\n\nBumps the ethereum-optimism/circleci-utils orb from 1.0.20 to 1.0.33.\n",
+      "files": [
+        ".circleci/continue_config.yml"
+      ]
+    },
+    {
+      "title": "ci: rebuild apko images daily from main",
+      "prNumber": 777,
+      "type": "other",
+      "body": "## Summary\n- Adds a nightly `schedule` trigger (03:00 UTC) to `build-images.apko.yaml`, matching the existing trigger in `build-images.yaml`.\n- Scheduled runs plan the full image catalog from the default branch and republish, so images pick",
+      "files": [
+        ".github/workflows/build-images.apko.yaml"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 210.55296575966474,
+      "prScore": 145.11496575966476,
+      "issueScore": 2,
+      "reviewScore": 63,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 203.08010567783433,
+      "prScore": 198.08010567783433,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 126.93534545331468,
+      "prScore": 103.49534545331468,
+      "issueScore": 4.1,
+      "reviewScore": 19,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 93.68584487935416,
+      "prScore": 88.68584487935416,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 82.46827378830812,
+      "prScore": 82.46827378830812,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 70,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 70,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "OptimismBot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
+      "totalScore": 68.16832601928188,
+      "prScore": 62.828326019281874,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 66.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 66.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 53.20180006992561,
+      "prScore": 48.20180006992561,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 49.20904049211096,
+      "prScore": 48.869040492110955,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 48.982561746555774,
+      "prScore": 48.78256174655577,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 42.566130170776034,
+      "prScore": 32.86613017077603,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 37.326472384067266,
+      "prScore": 36.88847238406726,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 32.02152563391728,
+      "prScore": 32.02152563391728,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "asdv23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
+      "totalScore": 27.926682553795494,
+      "prScore": 25.926682553795494,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 22.938,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Grivn",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/56754250?u=9810c9364e51ef03535b4a89dab413975cade627&v=4",
+      "totalScore": 18.40605529921453,
+      "prScore": 16.40605529921453,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 18.305719949364,
+      "prScore": 18.305719949364,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 16.880666370464944,
+      "prScore": 16.880666370464944,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 13.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 13.0791261661455,
+      "prScore": 13.0791261661455,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "alessandro-Petrone",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/128911158?u=40e49dbba96738a3c43c7506cb524e52fa7742c8&v=4",
+      "totalScore": 8.229057329615259,
+      "prScore": 8.229057329615259,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 7.57061228866811,
+      "prScore": 7.132612288668111,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?u=f827e4edffd5a9407141e223985a4d49d2b1675b&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 8,
+  "mergedPRs": 8,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 22
+}
