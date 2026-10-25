@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-24 to 2026-10-25, ethereum-optimism/optimism had 2 new PRs (0 merged), 1 new issues, and 3 active contributors.",
+  "overview": "From 2026-10-24 to 2026-10-25, ethereum-optimism/optimism had 6 new PRs (1 merged), 1 new issues, and 15 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABZhBrPg",
@@ -22,6 +22,18 @@
   ],
   "topPRs": [
     {
+      "id": "PR_kwDODjvEJM8AAAABKcxyeg",
+      "title": "kona-node: keep the safe head across L1 reorgs that leave its L1 data canonical",
+      "author": "teddyknox",
+      "number": 23634,
+      "body": "kona-node now answers an L1 reorg with a safe-head rewind only as deep as the reorg. Before this change, every L1 reorg that derivation detected triggered a full engine reset. That reset re-runs `find_starting_forkchoice`, which moves the safe head back a full sequencing window and stops early only at the finalized head. A one-block replacement of the L1 tip therefore cost as much as a cold start. While L1 finality was stalled on glamsterdam-defense-2, one such replacement rewound the safe head about 72k L2 blocks (ethereum-optimism/protocol-team#328).\n\nThe derivation actor now keeps an in-memory record of recent safe heads, each with an L1 block that all of its L1 data is at or below. It sends that record with the reset request. The engine keeps the newest recorded safe head whose L1 block is still canonical. For a tip reorg that is usually the current safe head, so nothing is rewound and no forkchoice update is sent. If the reorg replaced the L1 block a recent safe head came from, the safe labels are rewound to the previous recorded safe head. The pipeline then restarts from the kept safe head, the same way it does today after `find_starting_forkchoice`.\n\n**Why this is sound.** Derivation is a function of the L1 chain it has read. If the L1 block a safe head depends on is still canonical, the new chain derives the same safe head. Restarting from it relies only on what every reset already relies on: restarting a channel timeout behind a correct safe head re-derives the chain above it.\n\nThe pipeline's origin alone does not bound that dependency. After a reset, the pipeline replays from before the safe head's L1 origin. It can produce the next block from an L1 block below the one its parent needed, for example from a batch that was dropped as a future batch on the first pass. So the record keeps a floor, and records a safe head only when its attributes came from at or above it.\n- After a reset to a recorded safe head, the floor is that head's L1 block.\n- After any other reset, and at EL sync completion, the floor is one past the end of the safe head's sequencing window. That is the latest block by which derivation must have decided that head.\n\n**Fallbacks to the full reset.** The full reset still runs in these cases:\n- The reorg reaches an L1 block that every recorded safe head depends on, or a block older than the record.\n- The unsafe head's L1 origin was reorged out. The full walk is still what rewinds the unsafe chain.\n- The kept safe head is no longer on the engine's chain, or is below the finalized head.\n- Any other reset is requested while a reorg reset is pending: sequencer, admin RPC, or engine error.\n- Cold starts, which are unchanged.\n\nThe engine reports its safe head to derivation only when it changes. So when a reset keeps the safe head derivation has already confirmed, derivation resumes immediately. Otherwise it would wait for the next L1 head, because it drops the L1 heads that arrived while it was awaiting the reset.\n\nBefore asking the engine, derivation drops recorded safe heads that depend on the pipeline's origin or above. The pipeline has just seen that origin reorged out. This way, an engine L1 node that has not yet seen the reorg cannot vote those safe heads back in.\n\n**Effect on operators.** An L1 reorg no longer moves the safe head back, unless it replaced the block the safe head was derived from or reached the unsafe head's L1 origin. Even then it moves back only to the previous recorded safe head. The new counter `kona_node_engine_reorg_reset_count` counts the reorgs answered this way. `kona_node_engine_reset_count` still counts full resets.\n\n**Trade-offs and limits**\n- The record is separate from the safe head database (#23583) because that database is optional. The record is bounded to 64 entries and needs only the reorg-depth window.\n- The finalizer is still cleared on reset. Safe heads kept across a reorg are not re-derived, so they are not queued for finalization again. The finalized head waits until the next derived block's L1 block finalizes.\n- A reorg of the unsafe head's L1 origin still takes the full walk. Rewinding just the unsafe chain to its last canonical origin would remove that case.\n- No consensus change. The fault proof program never sees a reorg: it derives against a fixed L1 head and never runs the node actors.\n- op-node has the same flaw: `FindL2Heads` is used for every reset. This PR does not change op-node. A port would use the same argument.\n- This is complementary to `--verifier.l1-confs` and the chart default of 4 (ethereum-optimism/optimism-charts#270). Confirmations make reorgs rarer; this makes them cheap.\n\n**Review.** `rust-code-reviewer` ran on the change before and after the rebase onto #23268 and #23583. Dismissed findings:\n- `find_reorg_safe_head` stays public, alongside `find_starting_forkchoice`.\n- No binary search over the recorded safe heads. The lookups are sequential, and up to 64 run only on a reorg deeper than the whole record.\n- An earlier revision had the engine resend an unchanged safe head after every reset. The review found that the resend could race with an L1 head, so derivation now resumes on its own instead.\n- The safe head database write is out of scope (see below).\n\n`safedb-reviewer` was not run, because this PR does not change what the safe head database records.\n\nUnder plain `cargo test`, `test_chain_label_metrics` and `records_http_batches_websocket_calls_and_subscription_setup` can fail because tests in one process share a global recorder and log capture. They pass in isolation, and the second also fails on develop.\n\n**Not in scope; flagged for follow-up**\n- `find_starting_forkchoice` checks the unsafe head's L1 origin by hash. That shows the block exists, not that it is canonical. op-node's `FindL2Heads` checks by number.\n- The safe head database (#23583) does not apply the floor. After any reset, full or targeted, the replay effect described above can make it record a safe head against an L1 block below its parent's. That breaks its exact-answer invariant. This predates this PR, since every reorg already caused a reset with a longer replay. A fix would record at the higher of `derived_from` and the database's tip after truncation. That changes what the database writes, so it should go in its own PR with `safedb-reviewer`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-24T14:27:59Z",
+      "mergedAt": null,
+      "additions": 875,
+      "deletions": 66
+    },
+    {
       "id": "PR_kwDODjvEJM8AAAABKXoWpg",
       "title": "kona-sp1: update SP1 crypto patches to 6.10.0",
       "author": "wwared",
@@ -29,7 +41,7 @@
       "body": "Upgrades the SP1-patched crates the kona-sp1 guests use (the BLS12-381 and KZG crates, and the sha2, crypto-bigint, k256, p256 and substrate-bn patches) to the releases built for the SP1 version the SDK and zkVM already run. Before this, the guests ran patches built against older `sp1-lib` releases. The sha3 patch stays as it is: there is no newer release.\n\nThe EIP-2537 differential check inside the zkVM (`just check-bls12-381-zkvm`) passes all 1342 cases against revm's arkworks backend. Per-operation cycles are within 0.5% of before, except G1ADD (+8%) and G2ADD (+6%), a fixed cost per call. The ELF-gated estimate tests (`log_estimate_bounds_measured_pgu`, `consolidation_estimate_bounds_measured_pgu`) pass.\n",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-10-24T00:08:07Z",
-      "mergedAt": null,
+      "mergedAt": "2026-10-24T15:54:16Z",
       "additions": 124,
       "deletions": 114
     },
@@ -44,15 +56,60 @@
       "mergedAt": null,
       "additions": 120,
       "deletions": 113
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABKY6loA",
+      "title": "docs/public-docs: document the Upgrade 21 contract changes",
+      "author": "sbvegan",
+      "number": 23632,
+      "body": "Documents the Upgrade 21 L1 contract changes on the pages they affect. The ETHLockbox becomes the only chain-specific pause identifier. Anyone can delete a withdrawal proof whose dispute game is invalidated. The shared dispute game migration requires the Upgrade 21 release and uses `OPContractsManagerV2.migrate`. Each change has a callout saying it applies only once Upgrade 21 is approved and executed. The callouts are removed after Mainnet execution.\n\nReview: I dismissed a suggestion to drop the line anchor on the `deleteProvenWithdrawal` source link, because every source link on that page uses a `develop` line anchor.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-24T03:37:38Z",
+      "mergedAt": null,
+      "additions": 36,
+      "deletions": 3
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABKdeWeQ",
+      "title": "Update release docs: kona-host and kona-client v1.9.0",
+      "author": "mintlify",
+      "number": 23635,
+      "body": "## Summary\nAdds the kona-host and kona-client v1.9.0 releases (published October 23, 2026) to the release docs.\n\n## Changes\n- `releases/kona-host.mdx`: new v1.9.0 entry tagged Latest; v1.7.0 set to Stable only.\n- `releases/kona-client.mdx`: new v1.9.0 entry tagged Latest; v1.7.0 set to Stable only.\n- `releases/index.mdx`: kona-host and kona-client cards updated to v1.9.0.\n\n## Context\nNo other tracked components (including proxyd and op-acceptor in `ethereum-optimism/infra`) published releases in the review window. The v1.8.x entries for kona-host and kona-client are in #23599, so this PR may conflict with it.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-24T16:08:19Z",
+      "mergedAt": null,
+      "additions": 28,
+      "deletions": 6
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 6
+    "additions": 124,
+    "deletions": 114,
+    "files": 12,
+    "commitCount": 12
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "kona-sp1: update SP1 crypto patches to 6.10.0",
+      "prNumber": 23631,
+      "type": "other",
+      "body": "Upgrades the SP1-patched crates the kona-sp1 guests use (the BLS12-381 and KZG crates, and the sha2, crypto-bigint, k256, p256 and substrate-bn patches) to the releases built for the SP1 version the SDK and zkVM already run. Before this, th",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/kona/sp1/crates/bls12-381-check/tests/differential.rs",
+        "rust/kona/sp1/crates/bls12-381-check/tests/eip2537_vectors.rs",
+        "rust/kona/sp1/crates/client/src/oracle/blob_provider.rs",
+        "rust/kona/sp1/crates/client/src/precompiles/bls12_381.rs",
+        "rust/kona/sp1/crates/client/src/precompiles/custom.rs",
+        "rust/kona/sp1/crates/client/src/witness/executor.rs",
+        "rust/kona/sp1/crates/ethereum/client/src/super_consolidation.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/tests/bls12-381-check/src/main.rs"
+      ]
+    }
+  ],
   "topContributors": [
     {
       "username": "wwared",
@@ -65,12 +122,62 @@
       "summary": null
     },
     {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 53.240026372881815,
+      "prScore": 48.240026372881815,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 23.670947636399184,
+      "prScore": 23.232947636399185,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
       "username": "oplabs-renovate",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 16.397895272798372,
       "prScore": 16.397895272798372,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 13.453758908227872,
+      "prScore": 13.453758908227872,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 11.52102209223412,
+      "prScore": 11.18102209223412,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -95,9 +202,9 @@
       "summary": null
     }
   ],
-  "newPRs": 2,
-  "mergedPRs": 0,
+  "newPRs": 6,
+  "mergedPRs": 1,
   "newIssues": 1,
   "closedIssues": 0,
-  "activeContributors": 3
+  "activeContributors": 15
 }
