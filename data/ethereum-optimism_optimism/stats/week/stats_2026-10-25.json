@@ -5,30 +5,141 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-10-25 to 2026-11-01, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 1 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-10-25 to 2026-11-01, ethereum-optimism/optimism had 4 new PRs (0 merged), 0 new issues, and 9 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABY7JMag",
+      "title": "kona-node: support raw L1 receipt fetching with fallback",
+      "author": "joshklop",
+      "number": 23570,
+      "repository": "ethereum-optimism/optimism",
+      "body": "The audit identifies an L1 provider compatibility gap: Kona historical derivation can stall on eth_getBlockReceipts while op-node continues through debug_getRawReceipts on the same endpoint.\n\nSupport raw L1 receipt fetching with a standard-method fallback and preserve correct retry and reorg handling.\n\n## Acceptance criteria\n\n- [ ] Fetch and decode raw EIP-2718 receipts, falling back to eth_getBlockReceipts when the raw method fails.\n- [ ] MethodNotFound disables the unsupported raw method for the provider lifetime, including provider clones.\n- [ ] Distinguish a missing block from an existing empty block; reject an empty receipt response for a non-empty block.\n- [ ] Missing blocks trigger the appropriate reorg/reset handling, while temporary provider failures remain retryable.\n- [ ] Regression tests cover fallback, malformed receipts, empty responses, and missing blocks; record validation against a real L1 provider.\n\nImplementation PR: https://github.com/ethereum-optimism/optimism/pull/22553. Beacon query encoding is tracked separately.\n\nSource audit: https://github.com/ethereum-optimism/optimism/pull/23545.\n\nParent tracker: https://github.com/ethereum-optimism/protocol-team/issues/49.\n",
+      "createdAt": "2026-10-21T20:00:06Z",
+      "closedAt": "2026-10-25T23:39:09Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABKgp9Qw",
-      "title": "ci: bump rust nightly pin to nightly-2026-10-24",
-      "author": "opgitgovernance",
-      "number": 23636,
-      "body": "Automated weekly bump of the pinned nightly Rust toolchain from `nightly-2026-08-22` to `nightly-2026-10-24`. CI on this PR will validate the new toolchain compiles cleanly.",
+      "id": "PR_kwDODjvEJM8AAAABJG09rQ",
+      "title": "kona-node,kona-engine!: execute engine commands through one owner",
+      "author": "joshklop",
+      "number": 23489,
+      "body": "An unsafe backlog or execution RPC failure can trap reset control, and derivation currently has to infer success from engine callbacks. Give execution mutations and resets one owner with bounded admission, epoch checks, acknowledged outcomes and state publication before replies. This removes the task heap, forwarding operation clients and callback state machine while keeping the independent kona-node connected to an external execution client.\n\nDerived rejection now uses the L1 inclusion timestamp, distinguishes INVALID from temporary statuses, and performs the deposits-only replacement only where required. Pending span progress stays separate from completed safe/finalized progress; finality records carry the actual accepted block hash and inclusion source. Sequencer retries retain the retrieved payload, and full engine admission leaves networking responsive.\n\nStacked on #23488. The tracked [implementation plan](https://github.com/ethereum-optimism/optimism/blob/codex/kona-refactor-05-engine-owner/docs/ai/kona-node-pr-plan.md) records scope and the remaining stack. Read-only RPC and sequencer-admin forwarding remain for their planned follow-ups; bootstrap policy and the canonical reset walk are preserved. The force-inclusion verifier receives one real startup block, then derives through the outage without L2 peers or further unsafe injection; idle-start bootstrap remains PR10.\n\nCloses #22681. Its forced-inclusion regression is preserved by #23494 without a verifier startup payload primer; #23495 validates the recovered safe/finalized chain with engine-owned finality.\n\nBREAKING CHANGE: replaces public Engine/task/error-severity wrappers and operation forwarding clients with ordinary kona-engine operations and kona-node-service EngineHandle. Downstream composition constructs EngineActor together with its handle; derived imports use ImportMode, EngineState includes phase/epoch/pending-safe, and producers carry captured context instead of sending raw operation messages.\n\nLocal validation: 321 offline tests, 115 focused tests, full workspace Rust lint, full repository Go lint, and a fresh default node build pass. The real short-window force-inclusion regression passes with a Kona sequencer and isolated Kona verifier. Four existing reorg subcases across both presets and both Kona restart tests also pass. Independent Rust/protocol, Go and deletion/API reviews completed; all actionable findings were fixed.\n\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-25T00:01:39Z",
+      "createdAt": "2026-10-18T03:37:09Z",
       "mergedAt": null,
-      "additions": 1,
-      "deletions": 1
+      "additions": 4129,
+      "deletions": 5476
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABJI3_RA",
+      "title": "kona-node!: centralize engine bootstrap and recovery",
+      "author": "joshklop",
+      "number": 23494,
+      "body": "Idle validators can remain uninitialized until an unsafe payload arrives, while startup and reorg recovery are initiated by several components. The engine now initializes from real EL heads, requires a fresh VALID response before readiness, and owns canonical-origin checks and recovery retries. Sequencing and derivation consume that owner context; pipeline-only resets resume from accepted pending-safe, and an engine epoch change clears cached sequencing origins.\n\nInitialization retains the existing bounded trusted-resume assumption only when no useful EL safety checkpoint exists. Canonical recent history does not prove local derivation: finalized is preserved, no local finality record is invented, and successful initialization consumes the exception. Subsequent resets retain the prior completed-safe ceiling and select a validated epoch parent.\n\nIndependent L1 observation watches replace RPC query messages. `current_l1` reports actual pipeline or validated delegate progress even when L2 safe is unchanged. Signer retry/stale-result guards and registered reset acknowledgement remain intact. Based on #23493.\n\nLocal validation: all 357 affected-package offline tests passed with all features and zero skips. Full workspace Rust lint, custom Go lint/module tidiness and a fresh default binary build passed. The isolated forced-inclusion test passed without its startup payload primer; both reorg subcases in both presets, both restart tests, and admin reset in both roles passed. Selected shared conductor startup, disaster-recovery and stop/restart cases passed (3/3, zero skips). Independent Rust/protocol, Go and deletion reviews have no unresolved findings. Hosted CI is not awaited.\n\nBREAKING CHANGE: Rust component integrators must implement `EngineClient::syncing` and `OriginSelector::reset`, pass an explicit `SyncStartPolicy` to `find_starting_forkchoice`, and handle `ForkchoiceStatus` from `synchronize`. Create shared `watch<L1State>` and `watch<DerivationStatus>` channels and pass their senders/receivers to the updated engine, watcher, derivation, delayed-origin and `RollupRpc` constructors; L1 observations now have optional `head`, `safe`, and `finalized` fields, with derivation progress separate. `L1WatcherQueries`/`L1WatcherQuerySender` are removed; `L1WatcherChain` no longer takes a query receiver. `L1WatcherActorError` is concrete and drops unused send/transport/not-found variants. RPC method names and CLI syntax are preserved.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-18T10:17:58Z",
+      "mergedAt": null,
+      "additions": 2126,
+      "deletions": 611
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABJF9K0g",
+      "title": "kona-node,kona-engine,kona-node-service!: share config and clients",
+      "author": "joshklop",
+      "number": 23486,
+      "body": "Kona applies registry/file overrides and custom-chain settings consistently, and startup uses the same bounded L1/L2 clients as engine operations and ordinary reads. Explicit L2 timeouts cover complete responses, including stalled bodies; the 10,000ms default preserves the previous effective engine deadline. Configured block-signing key files must exist and contain a valid key instead of silently creating a replacement.\n\nStacked on #23484. Addresses the timeout portion of #23034; its discovery and peer requirements remain open.\n\nBREAKING CHANGE: Rust callers replace `EngineClientBuilder`/`OpEngineClient::rpc_client` with `l1_provider`/`l2_provider` and `OpEngineClient::new(l1, l2, config)`. `RollupNodeBuilder` takes `Arc<RollupConfig>`; `EngineConfig` drops duplicate rules/L1 URL and takes an explicit timeout. `NetworkConfig` contains local settings, while `NetworkBuilder::from_config` receives resolved rules and a signer watch receiver. Updated operator examples show the new construction path. CLI flags, aliases and JWT fallback remain supported.\n\nValidation: 327 affected-package Rust tests and all six live validator/sequencer checks pass, with no skips. Full workspace Rust lint and a fresh default-feature binary build pass. Independent Rust and deletion/config reviews have no unresolved findings; the committed plan records commands and evidence.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-18T00:37:19Z",
+      "mergedAt": null,
+      "additions": 1703,
+      "deletions": 572
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABJIg_AQ",
+      "title": "kona-node!: gate sequencer publication on conductor acceptance",
+      "author": "joshklop",
+      "number": 23492,
+      "body": "Conductor failures previously occurred after local unsafe import. This change requires positive acceptance before canonicalization or gossip, retains the exact accepted payload across temporary import failures, and settles acknowledged work before Stop replies even if its caller disconnects. Managed nodes start stopped; activation checks leadership and the requested unsafe head, with the existing configured timeout applied to leader and commit calls.\n\nCloses #23264 and #23323. Implements the conductor-timeout portion of #22667; max-safe-lag remains outside this change. The separate local recovery override and full shared conductor-suite gate are completed in #23493. Based on #23491.\n\nLocal validation: 82 focused regressions and all 328 affected-package offline tests passed; full workspace Rust lint, custom Go lint/module tidiness, and a fresh default binary build passed. Shared rejected-commit and stop/restart acceptance cases passed against both Kona/op-reth and op-node/op-reth. Rust, Go and deletion reviews have no remaining findings. Hosted CI is not awaited.\n\nBREAKING CHANGE: `admin_startSequencer` now requires the expected unsafe head hash, matching op-node; pass the settled hash from `admin_stopSequencer` or the current unsafe hash. Rust users must pass that hash to `SequencerAdminAPIClient::start_sequencer`, implement `Conductor::leader`, construct `ConductorClient::new` with the injected deadline-bounded RPC client, and supply `SequencerConfig::conductor_rpc_timeout` (or use its default).\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-18T09:15:47Z",
+      "mergedAt": null,
+      "additions": 1274,
+      "deletions": 171
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABJGLV5A",
+      "title": "kona-engine!: flatten engine operations and remove dead code",
+      "author": "joshklop",
+      "number": 23487,
+      "body": "Stacked on #23486 (PR03 of the Kona refactor plan). Reusing engine steps currently requires executing nested tasks, and deposits-only replacement recurses through build/seal. The resulting control flow makes reply and recovery ownership hard to follow. Shared operations make that sequence explicit while preserving the actor, queue, retry/reset policy and provider/mock seam. Extraction and proven dead-code deletion are separate commits; selected source: #23258.\n\nExisting Holocene activation/context and rejection-outcome behavior is preserved. Its corrections have one implementation home in PR05, documented in the committed plan; this PR makes no protocol-fix or issue-closure claim.\n\nBREAKING CHANGE: downstream Rust users must remove `SynchronizeTask` and `BuildSealCoupling`. Use `Engine::reset` for reset synchronization and existing queued operations for ordinary head updates. `SealTask` now handles sequenced builds: drop its `is_attributes_derived` and `coupling` arguments; derived attributes use `ConsolidateTask`. Remove uses of `EngineKind`, `EngineNewPayloadVersion`, `EngineState::need_fcu_call_backup_unsafe_reorg`, `EngineState::needs_consolidation` and `Metrics::FORKCHOICE_TASK_LABEL`; live newPayload dispatch follows the payload envelope. RPC methods and CLI flags are unchanged.\n\nValidation: 335 affected-package tests passed (all features), full workspace `just lint`, fresh default Kona build, and all eight selected live common/restart cases passed across Kona-validator and Kona-sequencer configurations. Independent Rust/protocol and deletion reviews have no unresolved findings. Nextest flagged one unchanged synchronous attribute test as LEAK after assertions passed; one isolated diagnostic passed without the flag. Both results are retained in the plan.\n\nLine-count breakdown against the parent: production Rust −281; tests/support +426; documentation +44; manifest/lock +2; net +191.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-18T01:23:42Z",
+      "mergedAt": null,
+      "additions": 1106,
+      "deletions": 915
     }
   ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 1
+    "commitCount": 11
   },
   "completedItems": [],
   "topContributors": [
+    {
+      "username": "hieuk48",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/185932464?u=8f8a049c5f9b06fc98b0e141a085473737a66777&v=4",
+      "totalScore": 15.481785973923515,
+      "prScore": 15.481785973923515,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 14.266486406642134,
+      "prScore": 14.066486406642134,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 10.088666119016056,
+      "prScore": 10.088666119016056,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "FTHTrading",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/261508212?u=822a53142f7acf608dcabfd49370306eac2edaa1&v=4",
+      "totalScore": 8.880669618283369,
+      "prScore": 8.880669618283369,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "qac26",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/321211460?v=4",
+      "totalScore": 7.9260502011022105,
+      "prScore": 7.9260502011022105,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
@@ -38,11 +149,21 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "KubilayJackson",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/108900031?v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
     }
   ],
-  "newPRs": 1,
+  "newPRs": 4,
   "mergedPRs": 0,
   "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 1
+  "closedIssues": 1,
+  "activeContributors": 9
 }
