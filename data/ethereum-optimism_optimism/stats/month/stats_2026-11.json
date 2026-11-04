@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-01 to 2026-12-01, ethereum-optimism/optimism had 25 new PRs (8 merged), 5 new issues, and 29 active contributors.",
+  "overview": "From 2026-11-01 to 2026-12-01, ethereum-optimism/optimism had 64 new PRs (22 merged), 11 new issues, and 39 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABLn-B6g",
@@ -94,6 +94,18 @@
       "deletions": 1109
     },
     {
+      "id": "PR_kwDODjvEJM8AAAABMqH_GQ",
+      "title": "contracts-bedrock: OPCM support for bridge hook deploy and upgrade",
+      "author": "0xiamflux",
+      "number": 23891,
+      "body": "## Context\r\n`OptimismPortal2` already supports an optional bridge hook on `develop` but there was no harness around it to set it up. OPCM passed a hardcoded zero, the standard validator never read `bridgeHook`, and `ChainAssertions` asserted it was always zero. All four `TODO(optimism-private#744)` markers are now closed.\r\n\r\n`ComplianceModule` and `VisionPolicyV1` stay out of OPCM and a standalone script deploys them.\r\n\r\n### OPCM (`9.0.6` to `9.0.7`)\r\n\r\n`FullConfig` gains `bridgeHook`, which `_apply` passes to the Portal's `initialize`. On upgrades the value comes from an `overrides.cfg.bridgeHook` instruction. No override leaves it zero, preserving the chain's current hook. `_assertValidFullConfig` rejects a hook when the `BRIDGE_HOOK` dev feature is off, on a custom gas token chain, or on an interop chain, replacing the guard in `Deploy.s.sol`.\r\n\r\n### Standard validator (`5.0.0` to `5.1.0`)\r\n\r\n`PORTAL-110` reports any configured hook. Such a chain is not Stage 1, so it is never standard. This matches `OVERRIDES-*`, which records deviations rather than hiding them.\r\n\r\n### Placeholders (`0.0.1`) and the deployment script\r\n\r\n`ComplianceModule` and `VisionPolicyV1` carry the full ABI with empty bodies. Only the constructor wiring, `initialize`, `owner` and `setPolicy` are real. The behaviour lands with the module and policy implementations. `IComplianceModule` gains `initialize` and `owner()`, and `clearedAt` is renamed to `expiresAt` across the compliance interfaces.\r\n\r\n`DeployCompliance.s.sol` deploys the module behind a custody `ProxyAdmin` separate from the chain's, then the policy, then transfers custody ownership. The proxy is created before the policy, so the policy's constructor can take its address. The script never touches the Portal.\r\n\r\n### Testing\r\n\r\n`test/L1/**`: 711 passed, 0 failed. With `DEV_FEATURE__BRIDGE_HOOK=true`: 716. `semgrep` 0 findings. All other repo checks pass.\r\n\r\n### Review notes\r\n\r\n- `9.0.7` is a patch per OPCM's own rule above `version()`. A major bump would expire the v9 ETHLockbox allowance gated on `major == 9`.\r\n- `Types.DeployOPChainInput` is untouched, since it is mirrored in `op-deployer` and a hook cannot be named at deploy time anyway.\r\n- The live `PORTAL-110` test is in `SuperModeCoreValidation_Test`, because the standard-mode portal suite never runs while `SUPER_ROOT_GAMES_MIGRATION` is on (#21662).\r\n\r\nCloses [#744](https://github.com/ethereum-optimism/optimism-private/issues/744).\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-03T21:00:46Z",
+      "mergedAt": null,
+      "additions": 3063,
+      "deletions": 30
+    },
+    {
       "id": "PR_kwDODjvEJM8AAAABMOXX1Q",
       "title": "kona-node!: share one verified L1 client across the node",
       "author": "joshklop",
@@ -106,37 +118,99 @@
       "deletions": 895
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABMa0wFw",
-      "title": "kona-node!: share one L1 client across the node",
-      "author": "joshklop",
-      "number": 23848,
-      "body": "kona-node read L1 through several separately built clients. Derivation, the sequencer, the L1 watcher, the engine and the unsafe block signer lookup each had their own connection, caches and timeouts, so the same L1 data was fetched and cached more than once, and some reads had no deadline. The node now builds one `AlloyChainProvider` at startup and shares it, so every L1 read goes through the same caches and one per-request deadline on the transport. This also gives L1 verification, in the next PR, a single place to live. The engine's sync-start check now reads the canonical L1 block by number through the shared client.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/23745\nCloses https://github.com/ethereum-optimism/protocol-team/issues/579\nCloses https://github.com/ethereum-optimism/protocol-team/issues/580\nCloses https://github.com/ethereum-optimism/protocol-team/issues/581\n\n**Stack.** This is part 3 of 5, split out of #23829. Merge them in order:\n1. #23846: delete `DerivationDelegateClient`\n2. #23847: check sync-start L1 origins against the canonical chain\n3. #23848: share one L1 client across the node ← this PR\n4. #23849: verify L1 RPC data against block headers\n5. #23850: resolve pipeline reset bases by hash\n\n**Effect on operators.** Nothing changes in what the node checks or what the L1 RPC must serve. The L1 metrics change:\n- L1 RPC metrics come from the transport. `kona_providers_chain_rpc_calls` and `kona_providers_chain_rpc_errors` are replaced by `kona_rpc_client_request_duration_seconds{client, method, outcome, error}`. Its `method` label holds JSON-RPC method names, and failures that are not RPC errors, such as receipts that fail to decode, are no longer counted as errors.\n- `kona_providers_cache_memory_bytes`, which nothing set, is removed.\n- The chain provider's cache metrics use new `cache` label values.\n- The bundled dashboards are updated.\n\n**For reviewers.** Each commit is self-contained and builds and passes on its own. Each `!` commit's message states what breaks and how to migrate. Read in this order:\n- the shared client, from `e48420165c` to `71436310ff`;\n- follow-ups to the provider's API, from `968103fdf4` to `ed8eefe1a2` (`213f446544` only ignores local Zed settings);\n- caching and metrics, from `d51bac140e` to `9d86fb8c65`.\n\n**Reviews.** These are #23829's commits, rebased past the moved reset change, plus a test helper that keeps kona-rpc's tests compiling at each commit. On #23829, `rust-code-reviewer`, `deletion-reviewer` and `safedb-reviewer` ran over them. Findings dismissed, with the author's agreement:\n- **The dashboard panel for `kona_providers_cache_memory_bytes` is kept.** It was already empty before this PR.\n- **The request deadline comes from the transport kona-node builds, not from `AlloyChainProvider` itself.** The requirement is documented on `L1ConfigBuilder::provider` and `AlloyChainProvider::new`. Moving the deadline into the provider crate can follow separately.\n- **`kona-engine` now depends on `kona-providers-alloy`.** This is intended: the engine reads L1 through the shared client.\n\nBREAKING CHANGE: This affects dashboards, alerts and code that uses kona's Rust crates.\n- **Dashboards and alerts:** they must move to the metrics above.\n- **Rust API:**\n  - `kona-providers-alloy`: `AlloyChainProvider`'s constructors (`new_http` and the two-argument `new` are removed, and `cache_size` is a `NonZeroUsize`), its `inner` and `trust_rpc` are no longer public, the free `unsafe_block_signer` function is removed, and the `Metrics` constants for RPC calls, errors and cache memory are removed or renamed.\n  - `kona-node-service`: `L1Config`, `L1ConfigBuilder`, `BlockStream`, `L1WatcherActor`, `DelayedL1OriginSelectorProvider`, `L1OriginSelectorError`, `EngineConfig` and `build_engine_client`.\n  - `kona-engine`: the L1 methods on `EngineClient` and `EngineClientBuilder`, and a new `SyncStartError::L1` variant.\n\nEach `!` commit's message gives the exact change and the migration.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n",
+      "id": "PR_kwDODjvEJM8AAAABMiPhgw",
+      "title": "kona-gossip: Split the driver tests and starter out of driver.rs",
+      "author": "aakoshh",
+      "number": 23866,
+      "body": "`driver.rs` had grown to almost 2,700 lines, 60% of them tests, which made the driver hard to find your way around. This is the follow-up promised in #23801. It moves the tests into `driver/tests/`, one file per topic, and the `GossipDriverStarter` into `driver/starter.rs`. That leaves `driver.rs` at about 950 lines. There is no change in behaviour or public API, and no effect on users.\n\nReviewing: GitHub shows the moved code as new files. Locally, `git diff --color-moved=zebra --color-moved-ws=allow-indentation-change develop...` shows what moved. The test commit is a move except for one `//!` doc line per file. Lines don't match one for one because the tests lost a level of indentation and rustfmt rejoined the wrapped lines that now fit. Every test item is identical to develop with whitespace removed, and there are 64 driver tests before and after.\n\nLayout choices:\n- `driver.rs` stays, rather than becoming `driver/mod.rs`, so editor tabs from the different drivers stay distinguishable and the implementation file changes by only a few lines.\n- `starter.rs` is a child module of `driver`, not a sibling, because `start()` builds a `GossipDriver` from its private fields and calls its private methods. A sibling would need all 15 fields to be `pub(crate)`.\n- The implementation stays in one file. Splitting it into several `impl` blocks across files would make readers jump between them.\n- `static_peers.rs` holds every static-peer test, including the ones about blocking, banning and protecting static peers, so everything about static peers is in one place.\n\nReview: `rust-code-reviewer` found nothing blocking. One suggestion is deferred: tidying up fully qualified paths in the tests (e.g. `kona_genesis::RollupConfig` where the glob import already covers it). Those paths came over unchanged from develop, and changing them here would mean the test commit is no longer a pure move. General and security reviews were skipped, because the PR moves code without changing it.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-02T22:24:50Z",
-      "mergedAt": null,
-      "additions": 1060,
-      "deletions": 563
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABMa0zKg",
-      "title": "kona-node!: verify L1 RPC data against block headers",
-      "author": "joshklop",
-      "number": 23849,
-      "body": "With an untrusted L1 RPC, kona-node checked only block hashes. A dishonest or buggy L1 RPC could drop batcher transactions or deposits from what derivation sees, or install an unsafe block signer of its choosing, without any error. Unless `--l1-trust-rpc` is set, the node now verifies what it reads through its shared L1 client against the block header, as op-node does: header hashes, block numbers, transactions and receipts roots, and an `eth_getProof` proof of the unsafe block signer.\n\nCloses https://github.com/ethereum-optimism/protocol-team/issues/568\nCloses https://github.com/ethereum-optimism/protocol-team/issues/582\nCloses https://github.com/ethereum-optimism/protocol-team/issues/583\n\n**Stack.** This is part 4 of 5, split out of #23829. Merge them in order:\n1. #23846: delete `DerivationDelegateClient`\n2. #23847: check sync-start L1 origins against the canonical chain\n3. #23848: share one L1 client across the node\n4. #23849: verify L1 RPC data against block headers ← this PR\n5. #23850: resolve pipeline reset bases by hash\n\n**Effect on operators**\n- With `--l1-trust-rpc=false`, the default, the L1 RPC must serve `eth_getProof`, or the node fails to start. The README, the flag help and the operator docs now say so.\n- The chain provider's cache metrics replace the `block_info_and_transactions` value of the `cache` label with `transactions`. The bundled dashboards are unaffected.\n- The L1 watcher waits a full poll interval after each poll, so a slow L1 RPC is not polled again as soon as it answers.\n\nUntil the reset-by-hash PR above this one removes it, the pipeline reset's separate lookup by number goes through the same verification as every other lookup.\n\n**For reviewers.** Each commit is self-contained and builds and passes on its own. Each `!` commit's message states what breaks and how to migrate. Read in this order:\n- verification, from `1b33bce8ea` to `eca5df16df`, then `ae0ab3940b`;\n- the review fixes, from `6ac3383d08`;\n- the docs, `f6ed432cdc` and `d7b86a68ed`.\n\n**Reviews.** On #23829, I ran `rust-code-reviewer`, `deletion-reviewer` and a security review of the L1 verification against op-node over these commits. Here they are unchanged, except that the reset lookup is routed through verification; `rust-code-reviewer` checked that change. I skipped `deposit-reviewer` and `derivation-batch-reviewer`, because nothing here changes how deposits or batches are decoded. Finding dismissed, with the author's agreement:\n- **Two cleanups are left for later:** a shared `BlockInfo`-from-header constructor, and one helper for mapping a missing block to `None`.\n\nOlder gaps the reviews found are tracked in protocol-team: https://github.com/ethereum-optimism/protocol-team/issues/570, https://github.com/ethereum-optimism/protocol-team/issues/571 and https://github.com/ethereum-optimism/protocol-team/issues/572. The L2 provider's verification is https://github.com/ethereum-optimism/protocol-team/issues/569.\n\nBREAKING CHANGE: This affects operators, dashboards and code that uses the `kona-providers-alloy` crate.\n- **Operators:** without `--l1-trust-rpc`, the L1 RPC must serve `eth_getProof`.\n- **Dashboards and alerts:** queries on the chain provider's cache metrics that filter on `cache=\"block_info_and_transactions\"` must use `cache=\"transactions\"`.\n- **Rust API:** `AlloyChainProviderError` gains `HeaderHashMismatch`, `BlockNumberMismatch`, `TransactionsRootMismatch`, `ReceiptsRootMismatch` and `InvalidStorageProof`, and `EmptyRawReceiptsForNonEmptyBlock` loses its `transaction_count` field. `AlloyChainProvider::unsafe_block_signer` returns `Result<Address, AlloyChainProviderError>`. `AlloyChainProvider::latest_block_number` and `AlloyChainProvider::chain_id` are removed.\n\nEach `!` commit's message gives the exact change and the migration.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-02T22:24:53Z",
-      "mergedAt": null,
-      "additions": 1059,
-      "deletions": 171
+      "createdAt": "2026-11-03T11:09:33Z",
+      "mergedAt": "2026-11-03T15:55:46Z",
+      "additions": 1718,
+      "deletions": 1690
     }
   ],
   "codeChanges": {
-    "additions": 10573,
-    "deletions": 2490,
-    "files": 106,
-    "commitCount": 161
+    "additions": 14733,
+    "deletions": 5797,
+    "files": 212,
+    "commitCount": 363
   },
   "completedItems": [
+    {
+      "title": "contracts-bedrock: restrict OptimismPortal2 deposits to an allowlist",
+      "prNumber": 23712,
+      "type": "other",
+      "body": "Restricts `OptimismPortal2.depositTransaction` (and the `receive` path) to a hardcoded depositor allowlist. Any other sender gets `OptimismPortal_DepositorNotAllowed`, except the L1 `ProxyAdmin` owner, which is always allowed so that L2 con",
+      "files": [
+        "mise.toml",
+        "op-acceptance-tests/tests/base/withdrawal/permissioned/withdrawal_test.go",
+        "op-acceptance-tests/tests/isthmus/erc20_bridge/erc20_bridge_test.go",
+        "op-acceptance-tests/tests/karst/withdrawal_test.go",
+        "op-acceptance-tests/tests/proofs/super/withdrawal_test.go",
+        "op-e2e/system/bridge/bridge_test.go",
+        "op-e2e/system/bridge/validity_test.go",
+        "packages/contracts-bedrock/interfaces/L1/IOptimismPortal2.sol",
+        "packages/contracts-bedrock/scripts/checks/valid-semver-check/main.go",
+        "packages/contracts-bedrock/snapshots/abi/OptimismPortal2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/src/libraries/DepositorAllowlist.sol",
+        "packages/contracts-bedrock/src/libraries/SemverComp.sol",
+        "packages/contracts-bedrock/test/L1/L1CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/L1/L1ERC721Bridge.t.sol",
+        "packages/contracts-bedrock/test/L1/L1StandardBridge.t.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerUtils.t.sol",
+        "packages/contracts-bedrock/test/L2/CrossDomainOwnable.t.sol",
+        "packages/contracts-bedrock/test/invariants/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/libraries/SemverComp.t.sol",
+        ".circleci/continue/rust-ci.yml",
+        "packages/contracts-bedrock/src/libraries/PortalAllowlist.sol",
+        "packages/contracts-bedrock/test/setup/Setup.sol",
+        "packages/contracts-bedrock/test/libraries/PortalAllowlist.t.sol"
+      ]
+    },
+    {
+      "title": "go.mod: pin op-geth to the Karst kill switch",
+      "prNumber": 23684,
+      "type": "other",
+      "body": "Pins op-geth to the tip of ethereum-optimism/op-geth#802 (Karst deprecation kill switch), rebased onto op-geth's `optimism` branch. The pin is a pseudo-version, so this is a draft to show in CI that, after #23648, the monorepo takes an op-g",
+      "files": [
+        "go.mod",
+        "go.sum",
+        "ops/scripts/opgeth-ratchet/main_test.go",
+        "ops/scripts/opgeth-ratchet/upstream.go",
+        "op-acceptance-tests/tests/derivation/confirmations/confirmations_test.go"
+      ]
+    },
+    {
+      "title": "op-deployer: target op-contracts/v9.0.0-rc.1",
+      "prNumber": 23816,
+      "type": "other",
+      "body": "Bump the superchain-registry validation module to 41553edca76a4d67d7be0b57f857ffc978295153, which adds the op-contracts/v9.0.0-rc.1 standard versions, and point CurrentTag at that release so intents resolve the new OPCM (9.0.3) on Sepolia a",
+      "files": [
+        "go.mod",
+        "go.sum",
+        "op-deployer/pkg/deployer/standard/standard.go"
+      ]
+    },
+    {
+      "title": "kona-node: stop derivation when pipeline signals fail",
+      "prNumber": 23815,
+      "type": "other",
+      "body": "A failed pipeline reset is currently acknowledged as processed, so derivation can resume using retained stage data after SafeDB has already been truncated. Failed signals now propagate to the service supervisor before acknowledgment, head a",
+      "files": [
+        "rust/kona/crates/node/service/src/actors/derivation/actor/core.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/service_shutdown.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/signal_failures.rs",
+        "rust/kona/crates/node/service/Cargo.toml",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/database.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/op_node_parity.rs",
+        "rust/kona/crates/node/service/src/metrics/mod.rs"
+      ]
+    },
     {
       "title": "kona-gossip,kona-rpc!: Enforce peer, address and subnet blocks on inbound and existing connections",
       "prNumber": 23801,
@@ -207,6 +281,17 @@
       ]
     },
     {
+      "title": "contracts-bedrock: Block ETHLockbox.migrateLiquidity while paused",
+      "prNumber": 23852,
+      "type": "other",
+      "body": "`ETHLockbox` blocks `unlockETH` while the lockbox is paused. But the ProxyAdmin owner can still call `migrateLiquidity` and move the whole balance to another lockbox. With this change, `migrateLiquidity` reverts with `ETHLockbox_Paused` whi",
+      "files": [
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/ETHLockbox.sol",
+        "packages/contracts-bedrock/test/L1/ETHLockbox.t.sol"
+      ]
+    },
+    {
       "title": "Fix translation drift",
       "prNumber": 23845,
       "type": "bugfix",
@@ -274,6 +359,28 @@
       ]
     },
     {
+      "title": "op-node,op-service,op-reth: move L3 L1 configs and interop rejections off op-geth",
+      "prNumber": 23834,
+      "type": "other",
+      "body": "Removes the last non-test uses of op-geth-only go-ethereum APIs. Two of them only worked through op-geth behaviour that upstream lacks:\n\n- op-node on an L3. An L3 is a chain that settles on an OP Stack L2, so its L1 is an OP chain, and OP c",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-acceptance-tests/tests/interop/filter/interop_filter_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/invalid_msg_test.go",
+        "op-node/service.go",
+        "op-node/service_l1_chain_config_test.go",
+        "op-service/txinclude/resubmitter.go",
+        "op-service/txinclude/resubmitter_test.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "rust/op-reth/crates/txpool/src/interop_filter/errors.rs",
+        "op-core/interop/interop.go",
+        "op-core/interop/interop_test.go",
+        "op-interop-mon/monitor/filter_observer.go",
+        "op-interop-mon/monitor/filter_observer_test.go",
+        "rust/op-reth/crates/txpool/src/interop_filter/client.rs"
+      ]
+    },
+    {
       "title": "op-sync-tester: compute the OP-aware PayloadID without op-geth's miner",
       "prNumber": 23833,
       "type": "tests",
@@ -306,67 +413,302 @@
         "packages/contracts-bedrock/test/setup/MessengerBrickingTestInit.sol",
         "packages/contracts-bedrock/test/setup/OptimismPortal2TestInit.sol"
       ]
+    },
+    {
+      "title": "contracts-bedrock: Fail closed on zero delays in OptimismPortal2 and AnchorStateRegistry",
+      "prNumber": 23902,
+      "type": "other",
+      "body": "U22 moves the proof maturity delay and the dispute game finality delay from immutables to storage. A bare `ProxyAdmin.upgrade` without `initialize` leaves these slots at zero. Before this PR, `OptimismPortal2` and `AnchorStateRegistry` read",
+      "files": [
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/src/dispute/AnchorStateRegistry.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/dispute/AnchorStateRegistry.t.sol"
+      ]
+    },
+    {
+      "title": "op-core: Re-snapshot the Lagoon NUT bundle",
+      "prNumber": 23894,
+      "type": "other",
+      "body": "Re-snapshot the Lagoon NUT bundle from `develop`. Two contracts PRs changed L2 predeploys after the last snapshot (ethereum-optimism/optimism#23714). Without this re-snapshot, op-node and kona-node activate Lagoon with the older implementat",
+      "files": [
+        "op-core/nuts/bundles/lagoon_nut_bundle.json",
+        "op-core/nuts/fork_lock.toml",
+        "op-core/nuts/state/lagoon_state.json",
+        "packages/contracts-bedrock/test/setup/PastNUTBundles.t.sol"
+      ]
+    },
+    {
+      "title": "op-deployer,contracts-bedrock: read existing deployments without the read scripts",
+      "prNumber": 23880,
+      "type": "other",
+      "body": "op-deployer no longer runs a Solidity script to read an existing deployment. Both read scripts only call getters. On forge, each run of one costs a run slot, the sandbox and compile check, and a load of the whole artifact bundle.\n\n- **Super",
+      "files": [
+        "op-deployer/pkg/deployer/continue.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/deploy_scripts_forge_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/e2e_prepare_test.go",
+        "op-deployer/pkg/deployer/integration_test/continue_test.go",
+        "op-deployer/pkg/deployer/opcm/forge_env.go",
+        "op-deployer/pkg/deployer/opcm/opchain.go",
+        "op-deployer/pkg/deployer/opcm/read_superchain_deployment.go",
+        "op-deployer/pkg/deployer/opcm/reader.go",
+        "op-deployer/pkg/deployer/pipeline/init.go",
+        "op-deployer/pkg/deployer/pipeline/init_test.go",
+        "op-deployer/pkg/deployer/pipeline/opchain.go",
+        "op-deployer/pkg/deployer/pipeline/opchain_test.go",
+        "op-deployer/pkg/deployer/prepare.go",
+        "op-deployer/pkg/deployer/prepare_test.go",
+        "op-deployer/scripts/test-sepolia-op-deployer.sh",
+        "packages/contracts-bedrock/scripts/deploy/ReadImplementationAddresses.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/ReadSuperchainDeployment.s.sol",
+        "packages/contracts-bedrock/test/scripts/ReadImplementationAddresses.t.sol",
+        "packages/contracts-bedrock/test/scripts/ReadSuperchainDeployment.t.sol"
+      ]
+    },
+    {
+      "title": "ci: remove the contracts-bedrock coverage job",
+      "prNumber": 23879,
+      "type": "other",
+      "body": "Removes the `contracts-bedrock-coverage` job. It runs all seven feature variants on every contracts PR and on develop, and nothing has read its lcov output since #21278 removed the Codecov upload. Over the last 30 days it used about 5.16M C",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "kona-disc,kona-gossip!: Don't advertise the first interface IP when listening on all interfaces",
+      "prNumber": 23874,
+      "type": "other",
+      "body": "## What\r\n\r\nA kona-node listening on all interfaces (`0.0.0.0`) no longer advertises the first interface's IP (typically `127.0.0.1`) in its ENR. Like op-node, it advertises no IP until enough peers agree on its address, and keeps an explici",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/run/sequencer.mdx",
+        "rust/Cargo.lock",
+        "rust/kona/bin/node/src/flags/p2p.rs",
+        "rust/kona/crates/node/disc/Cargo.toml",
+        "rust/kona/crates/node/disc/src/builder.rs",
+        "rust/kona/crates/node/disc/src/driver.rs",
+        "rust/kona/crates/node/disc/src/error.rs",
+        "rust/kona/crates/node/disc/src/lib.rs",
+        "rust/kona/crates/node/gossip/src/peer_addr.rs",
+        "rust/kona/crates/node/service/src/actors/mod.rs",
+        "rust/kona/crates/node/service/src/actors/network/README.md",
+        "rust/kona/crates/node/service/src/actors/network/builder.rs",
+        "rust/kona/crates/node/service/src/actors/network/config.rs",
+        "rust/kona/crates/node/service/src/actors/network/driver.rs",
+        "rust/kona/crates/node/service/src/actors/network/mod.rs",
+        "rust/kona/crates/node/service/src/lib.rs",
+        "rust/kona/crates/node/service/tests/actors/network/mocks/builder.rs",
+        "rust/kona/crates/node/service/tests/actors/network/mocks/mod.rs",
+        "rust/kona/crates/node/service/tests/actors/network/p2p.rs",
+        "rust/kona/examples/gossip/src/main.rs"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: make the Burn.Gas invariant detect an under-burn",
+      "prNumber": 23873,
+      "type": "other",
+      "body": "## Details\n\n**Root cause**\n\nReversed unchecked subtraction wraps to ~2^256 and the conjunction never sets the failure flag. Pre-existing test defect (file unchanged from both bases); `Burn.gas` is the fee-burn primitive used by `ResourceMet",
+      "files": [
+        "packages/contracts-bedrock/test/invariants/Burn.Gas.t.sol"
+      ]
+    },
+    {
+      "title": "kona-gossip: Split the driver tests and starter out of driver.rs",
+      "prNumber": 23866,
+      "type": "tests",
+      "body": "`driver.rs` had grown to almost 2,700 lines, 60% of them tests, which made the driver hard to find your way around. This is the follow-up promised in #23801. It moves the tests into `driver/tests/`, one file per topic, and the `GossipDriver",
+      "files": [
+        "rust/kona/crates/node/gossip/src/driver.rs",
+        "rust/kona/crates/node/gossip/src/driver/starter.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/bans.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/blocking.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/commands.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/dial.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/duplicates.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/mod.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/signer.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/start.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/static_peers.rs"
+      ]
+    },
+    {
+      "title": "op-devstack,op-acceptance-tests: drop kona-node skips that no longer apply",
+      "prNumber": 23856,
+      "type": "tests",
+      "body": "The kona-node skip list now contains only open parity gaps, so it can be read as the remaining work before `SkipOnKonaNode` (and `SkipOnOpNode`) can be removed. Nothing changes for operators or chains; this only moves where tests run in CI.",
+      "files": [
+        "docs/ai/acceptance-tests.md",
+        "op-acceptance-tests/tests/derivation/confirmations/confirmations_test.go",
+        "op-acceptance-tests/tests/proofs/zk/non_interop_test.go",
+        "op-acceptance-tests/tests/safedb_parity/init_test.go",
+        "op-acceptance-tests/tests/safeheaddb_elsync/safeheaddb_test.go",
+        "op-devstack/dsl/super_root_source.go",
+        "op-devstack/sysgo/singlechain_runtime.go"
+      ]
     }
   ],
   "topContributors": [
     {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 301.86267467027915,
+      "prScore": 243.02267467027912,
+      "issueScore": 0,
+      "reviewScore": 58.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
       "username": "einar-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 152.67048126722125,
-      "prScore": 26.232481267221257,
+      "totalScore": 253.36873641908014,
+      "prScore": 126.59073641908014,
       "issueScore": 0,
       "reviewScore": 126,
+      "commentScore": 0.7779999999999999,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 227.83876536567442,
+      "prScore": 200.40076536567443,
+      "issueScore": 0,
+      "reviewScore": 27,
       "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
-      "totalScore": 80.99682310069406,
-      "prScore": 33.99682310069406,
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 193.92423382643506,
+      "prScore": 162.54823382643508,
+      "issueScore": 8,
+      "reviewScore": 22.5,
+      "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 184.7201702597965,
+      "prScore": 120.8801702597965,
       "issueScore": 2,
-      "reviewScore": 45,
+      "reviewScore": 61.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 169.0819744721185,
+      "prScore": 139.38197447211851,
+      "issueScore": 0,
+      "reviewScore": 29.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 124.97157317847291,
+      "prScore": 99.97157317847291,
+      "issueScore": 0,
+      "reviewScore": 25,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 80.5447738965761,
+      "totalScore": 115.0447738965761,
       "prScore": 52.6067738965761,
       "issueScore": 0,
-      "reviewScore": 27.5,
+      "reviewScore": 62,
       "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 73.78517117640787,
-      "prScore": 73.78517117640787,
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 89.99682310069406,
+      "prScore": 33.99682310069406,
+      "issueScore": 2,
+      "reviewScore": 54,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 68.70853856072954,
+      "prScore": 40.008538560729534,
+      "issueScore": 0,
+      "reviewScore": 28.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 67.02572077083992,
+      "prScore": 67.02572077083992,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 64.93627821483047,
-      "prScore": 64.93627821483047,
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 55.99297467267604,
+      "prScore": 45.99297467267604,
       "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 52.9277738965761,
+      "totalScore": 53.3657738965761,
       "prScore": 52.4897738965761,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 49.941773896576095,
+      "prScore": 40.941773896576095,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 49.94022105912886,
+      "prScore": 44.74022105912886,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 48.64357359027997,
+      "prScore": 20.643573590279974,
+      "issueScore": 0,
+      "reviewScore": 28,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -380,30 +722,60 @@
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 20.643573590279974,
-      "prScore": 20.643573590279974,
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 32.39789527279837,
+      "prScore": 32.39789527279837,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 15,
-      "prScore": 0,
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 29.9888642567265,
+      "prScore": 20.9888642567265,
       "issueScore": 0,
-      "reviewScore": 15,
+      "reviewScore": 9,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 11.229358100056462,
-      "prScore": 11.229358100056462,
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 17.09983686600433,
+      "prScore": 8.09983686600433,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 13.899999999999999,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "ninglinLiu",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/224592858?v=4",
+      "totalScore": 13.457255501795592,
+      "prScore": 13.457255501795592,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -420,8 +792,8 @@
       "summary": null
     },
     {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?u=f827e4edffd5a9407141e223985a4d49d2b1675b&v=4",
       "totalScore": 10,
       "prScore": 0,
       "issueScore": 0,
@@ -440,26 +812,6 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 9,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "ninglinLiu",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/224592858?v=4",
-      "totalScore": 8.742949357461537,
-      "prScore": 8.742949357461537,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "gttps",
       "avatarUrl": "https://avatars.githubusercontent.com/u/27965940?v=4",
       "totalScore": 7.080675845367574,
@@ -467,6 +819,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 5.506306144334054,
+      "prScore": 5.068306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -480,18 +842,8 @@
       "summary": null
     },
     {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 5.068306144334055,
-      "prScore": 5.068306144334055,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "pcw109550",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -500,33 +852,33 @@
       "summary": null
     },
     {
-      "username": "0xOneTony",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 4.7,
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 4.5,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "paranoiacblack",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1035296?u=4293e54a12b84115c552a1581cc80470c29cf11a&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
     },
     {
-      "username": "aakoshh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
-      "totalScore": 0.43799999999999994,
+      "username": "kriss39",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/93033289?u=330db16b661de9dc530f3f9f5f7325c64a5a5887&v=4",
+      "totalScore": 0.2,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.43799999999999994,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -538,11 +890,21 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "Joxess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 25,
-  "mergedPRs": 8,
-  "newIssues": 5,
-  "closedIssues": 10,
-  "activeContributors": 29
+  "newPRs": 64,
+  "mergedPRs": 22,
+  "newIssues": 11,
+  "closedIssues": 17,
+  "activeContributors": 39
 }
