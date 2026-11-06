@@ -5,75 +5,75 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-05 to 2026-11-06, ethereum-optimism/optimism had 2 new PRs (4 merged), 0 new issues, and 9 active contributors.",
+  "overview": "From 2026-11-05 to 2026-11-06, ethereum-optimism/optimism had 20 new PRs (19 merged), 0 new issues, and 35 active contributors.",
   "topIssues": [],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABMrkEMA",
-      "title": "kona-proofs: Test multi-chain Lagoon activation and CrossL2Inbox access list enforcement",
-      "author": "ajsutton",
-      "number": 23897,
-      "body": "`CrossL2Inbox.validateMessage` finds an undeclared message from the gas cost of one SLOAD of the checksum slot. A compiler that removes the SLOAD lets every message through. A future fork that changes SLOAD gas pricing can also break the threshold. Production chains get CrossL2Inbox from frozen NUT bundles, and op-reth runs them.\n\n`TestActivationBlockNUTBundle` now runs each bundled fork from Lagoon onward with a dependency set of 1 chain and of 2 chains. With 2 chains, Lagoon activates the interop contracts. The kona programs get the sequencer's dependency set, so kona-client proves the same block.\n\nThe multi-chain case checks the setFeature and ETHLiquidity funding deposits and the interop state. It calls `validateMessage` on the CrossL2Inbox proxy with `eth_call`. Without an access list, the call must revert with exactly `NotInAccessList()`. With the checksum declared for the proxy, the call must succeed.\n\nFrom Lagoon onward, `just nut-prefork-state-for <fork>` also writes `<fork>_multichain_state.json`, and `check-nut-locks` requires it. The next fork's multi-chain case boots from it.\n\nThe change affects tests and tooling only. ethereum-optimism/optimism#23890 adds the matching acceptance-test checks.\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-03T23:11:35Z",
-      "mergedAt": "2026-11-05T00:25:59Z",
-      "additions": 875,
-      "deletions": 76
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABM8twPw",
-      "title": "op-reth: drop the RPC replay override and pin the executor-routing fork",
+      "id": "PR_kwDODjvEJM8AAAABIltOBA",
+      "title": "op-reth: test the proofs engine reorg and revert edges and check unwind targets",
       "author": "einar-oplabs",
-      "number": 23942,
-      "body": "Alternative to #23670 for ethereum-optimism/protocol-team#485, paired with ethereum-optimism/reth#33 (the fork backport of paradigmxyz/reth#28266's executor routing, finishing George's ethereum-optimism/reth#24).\n\nWith the fork replaying every block transaction through the block executor, op-reth needs no RPC override: this branch is #23670's integration tests and Lagoon fixtures on top of develop, pinned to the reth fork head `bff7be24` that carries the executor routing. The three canonical settlement tests, the refund-dependent affordability case and both raw-block cases pass against that pin with no `Trace` or `Call` implementation in op-reth; the same canonical tests fail on develop against the current `op-v2.6.0-1` tag, which is the regression they pin. All-features clippy on `reth-optimism-rpc` and `reth-optimism-node` is clean.\n\nOne #23670 test case changes shape: the fork's `inspect_transaction_in_block` is now index-based and takes no transaction environment, so the \"supplied environment\" case becomes a direct replay of index 2 that asserts the settled receipt gas. Raw `debug_traceBlock` and `debug_traceBadBlock` stay on the bare EVM in the fork, so the raw-block cases keep asserting pre-refund gas.\n\nThe reth pin moves to the merged fork tag before this lands; after it merges, both op-reth-premium workspaces repin to the merge commit. Review agents (`rust-code-reviewer`, `reth-update-reviewer`) run before this leaves draft; findings and dismissals are recorded here.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "number": 23445,
+      "body": "Deterministic tests for the proofs engine's reorg, revert and unwind tasks at the boundaries the model-based test may not reach, with the two engine checks they found missing, and the ExEx executing a reorged chain that carries no trie data instead of failing the node.\n\nThe reorg task never checked the first new block's parent against the stored fork block, and nothing refused an unwind at or below the window's earliest block before the store saw it (MDBX refuses it; the in-memory store underflowed at block 0 and otherwise removed the earliest block). `handle_chain_reorged` returned an error for a new chain without trie data, which reth turns into a node exit.\n\n## Changes\n\n- `EngineState::unwind` (shared by the reorg and unwind tasks) now drains any in-flight save, then before touching anything refuses a target at or below `earliest` (`EngineError::Storage(UnwindBeyondEarliest)`) and a target whose parent differs from the stored block below it (`ParentHashMismatch`). The stores keep only the window's end hashes, so the engine buffer retains the hashes of the blocks it persisted (bounded to 1024) to verify forks below the disk tip within a process lifetime. A restarted engine cannot verify a fork below its disk tip; that cell is an `#[ignore]`d test (see below).\n- `EngineHandle::reorg` takes `Vec<ReorgBlock>`, each block either `Index { block, hashed_state, trie_updates }` or `Execute(block)`; the task runs each through the same code as `index_block` and `execute_block`, so every block gets the gap and parent checks (an executed block the engine has to skip no longer lets the next indexed one land on a gap). The ExEx picks per block with the rule `ChainCommitted` uses (trie data present and verification not due → index, else execute), shared in `precomputed_trie_data`.\n- `PersistenceState::unwind` no longer waits for the in-flight save itself; `EngineState::unwind` drains it first, in one place. The two rejections log at `warn`.\n- `InMemoryProofsStorage::unwind_history` follows the trait contract: no-op above `latest`, `UnwindBeyondEarliest` at or below `earliest`, no underflow.\n- `ParentHashMismatch`'s docs now describe the unwind case too.\n\n## Tests\n\nEngine live tests in `rust/op-reth/crates/trie/tests/live/reorg_revert_edges.rs`, over backend {InMemory, Mdbx} × flush cadence {(1, 2), (5, 10)} unless noted, each on a seven-block transfer chain. The engine's tip is read through the parent check of a probe block; the persisted history is compared table by table with a fresh store indexed over reth's final canonical chain (`BlockView` / `assert_same_view`), and its proofs are verified against reth's state roots.\n\n| Case | Test | Cells |\n|---|---|---|\n| baseline | `reorg_replaces_the_stored_blocks_above_the_fork` | × path {Index at fork 6, Execute at fork 3, Mixed at fork 4} |\n| (a) | `reorg_not_building_on_the_stored_fork_block_fails_and_changes_nothing` | × fork {6 (buffer or save), 2 (save), 0 (anchor)} × path |\n| (a) restart | `restarted_engine_rejects_a_reorg_not_building_on_a_block_below_its_disk_tip` | `#[ignore]`, see Findings |\n| (b) | `unwind_or_reorg_at_or_below_the_earliest_block_fails_and_changes_nothing` | × {unwind at earliest, reorg below earliest, reorg at the anchor below a pruned window, unwind at the anchor as earliest} |\n| (b) control | `unwind_to_the_block_above_the_earliest_keeps_only_the_earliest` | pruned window |\n| (b) in flight | `unwind_at_a_block_the_in_flight_save_prunes_fails_after_the_save` | pruned window; pins that the checks run against the window as the in-flight save leaves it |\n| (c) | `revert_of_buffered_blocks_unwinds_the_buffer_and_leaves_the_disk_untouched` | cadence (5, 10) only × revert from {6, 7} |\n| (c) in flight | `revert_sent_during_an_in_flight_save_ends_with_the_disk_as_it_was` | |\n| (d) | `reorg_sent_during_an_in_flight_save_ends_consistent_with_reth` | × path |\n\nA `StoreWithWriteGate` holds the engine's next write transaction so the save stays in flight until the case releases it. Whether the engine dequeues the revert or reorg before or after the held save completes is not observable from outside (both orders must end the same, and the tests assert that end state); the pruned-window in-flight case is the one where the order changes the outcome, and it pins it. `SimulatedReth` gained `reorg_with(number, specs)`, `executed_block`, `genesis`, `num_hash` and `spawn_engine_with_window`; `FlushCadence` and `Backend` moved to `live.rs` for sharing.\n\nUnder cadence (1, 2) no block stays in the buffer outside a save in flight, so (c)'s \"(1, 2)\" cells are the in-flight revert test.\n\nExEx tests in `rust/op-reth/crates/exex/src/lib.rs`:\n- (e) `chain_reorged_without_trie_data_executes_the_new_chain` × backend: reth's canonical in-memory state holds the new chain, the notification carries no trie data, the store ends on the new tip and `FinishedHeight` acknowledges it.\n- (f) `chain_reorged_with_different_fork_blocks_fails_and_changes_nothing`: the error is returned, the store keeps its tip, no event is sent. `handle_chain_reorged`'s docs state the expectation.\n- `precomputed_trie_data_follows_the_verification_interval`: a table over interval {0, 2} × block × trie data present/absent.\n\nUnit tests: `engine::buffer::state` (`hash_at` through prune and unwind, bound), `engine::state` (unwind at the anchor, unwind onto a contradicted parent), and `tests/lib.rs` `test_unwind_history_*` over both backends.\n\n## Local verification\n\nAll from `rust/` with the shared target dir, on the final commit:\n\n- `cargo test -p reth-optimism-trie --test live` — 120 passed, 8 ignored (6 pre-existing `abandoned_fork` cells from #23441 and the 2 restart cells here), 40.0 s wall for the whole live target (21.9 s before this PR).\n- `cargo test -p reth-optimism-trie --test live -- reorg_revert_edges` — 64 passed, 2 ignored, 18.3 s.\n- `cargo test -p reth-optimism-trie --lib` — 248 passed (28 under `engine::`, including the 5 new buffer and state tests).\n- `cargo test -p reth-optimism-trie --test lib` — 94 passed (8 of them the new `test_unwind_history_*` cells over InMemory and Mdbx).\n- `CARGO_INCREMENTAL=0 cargo test -p reth-optimism-exex --lib` — 19 passed (12 existing, 2 new reorg tests, 5 `precomputed_trie_data` cases); `cargo test -p reth-optimism-exex --doc --all-features` — 1 passed (the crate doctest needs `--all-features` for `OP_MAINNET`, as `just test-docs` runs it; unchanged by this PR).\n- `cargo clippy -p reth-optimism-trie -p reth-optimism-exex --all-targets` — zero warnings; `just fmt-check` — clean.\n\nThe `rust-code-reviewer` agent ran on the diff; its findings (the reorg task's `Index` arm bypassing `index_block`'s checks, the drain-before-check ordering untested, the in-flight test names, dead code in `PersistenceState::unwind`, naming and dedup) are addressed above.\n\nEvery matrix cell of the engine tests ran locally (both backends × both cadences); the only cells not run are the `#[ignore]`d restart cells, which fail by design today.\n\n## Findings\n\n- (a) and (b) fail on develop without the engine checks: with `self.check_unwind_target(to)?` removed from `EngineState::unwind`, all 28 cells of the two tests fail. (a) `reorg_not_building_on_the_stored_fork_block_fails_and_changes_nothing`: all 12 cells panic with `the reorg does not build on the stored fork block: ()`, i.e. `EngineHandle::reorg` returned `Ok(())` and inserted the chain on the wrong parent. (b) `unwind_or_reorg_at_or_below_the_earliest_block_fails_and_changes_nothing`: the 8 Mdbx cells get `got Persistence(Storage(UnwindBeyondEarliest { .. }))`, the store refusing only after the engine drained the save and sent the unwind to the persistence service; with develop's `InMemoryProofsStorage::unwind_history` the 8 InMemory cells panic with `the unwind would remove the window's earliest block: ()`, the unwind returning `Ok(())` after removing the earliest block.\n- A restarted engine knows no hash below its store's latest block, so a reorg onto a wrong fork block there is accepted; `restarted_engine_rejects_a_reorg_not_building_on_a_block_below_its_disk_tip` is `#[ignore]`d naming this issue and #23385. Fixing it means keeping every block's hash in the store (a schema change), which is out of this issue's scope.\n- The in-memory store's `unwind_history` subtracted one from the target without checking `earliest` or `latest`, so an unwind to block 0 panicked the persistence thread and an unwind above `latest` moved `latest` to a block it never stored.\n\nStacked on #23442, #23441, #23437, #23434, #23429, #23428, #23421 and #23418.\n\nCloses #23391\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-05T00:30:52Z",
+      "createdAt": "2026-10-15T09:50:38Z",
       "mergedAt": null,
-      "additions": 808,
-      "deletions": 237
+      "additions": 1709,
+      "deletions": 189
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABMqL4sg",
-      "title": "op-deployer: complete old implementation records and check continue's",
-      "author": "mds1",
-      "number": 23892,
-      "body": "Follow-up to #23880.\r\n\r\n- **Init refills an old implementations record.** A state that an op-deployer from before #23880 left after deploying a chain is now completed at init. Such a state has most of the implementations, but not the OPCM's utils, migrator, container or storage setter, and before this change init left it as it was. The check for a record to complete is now a missing OPCM container, which `DeployImplementations` and `ReadImplementations` always set and the old read-back never wrote. The new init test case fails with the `MipsImpl` check.\r\n- **`continue` checks the record from `prepare`.** `continue` now stops before any send if the implementations recorded by `prepare` differ from those of the pinned OPCM. Before, it deployed with the OPCM's set and kept the other in state.\r\n- **One apply test assertion can now fail.** The apply test compared the recorded dispute games with the values the code copies in. It now reads the factory's game for the super permissioned type, which standard chains register, and compares it with the OPCM's. A first version that read the permissioned slot passed without checking anything: on these chains that slot is `address(0)`.\r\n\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\r\n",
+      "id": "PR_kwDODjvEJM8AAAABIiQVQQ",
+      "title": "op-reth,op-devstack: behavioral tests for the proofs CLI subcommands",
+      "author": "einar-oplabs",
+      "number": 23437,
+      "body": "## Why\n\nNo `op-reth proofs` subcommand had a behavioral test, only the CLI snapshot. `proofs unwind --target T` documented removing every block *after* T but passed T to the store's `unwind_history`, which removes T as well, so the documented recovery for ethereum-optimism/protocol-team#464 (`proofs unwind --target <reth tip>`) left the store one block short of reth.\n\n## What\n\n**`op-reth proofs unwind` now matches its documentation.** The store's `unwind_history(to)` removes `to.block.number..=latest` and keeps `(to.block.number - 1, to.parent)` as the tip (the trait doc now states that contract); the command passes `target + 1` with the target's hash as the parent, so the target stays and becomes the store's latest block. A target equal to the earliest block is allowed and leaves `[earliest, earliest]`. A target below the earliest block is refused with a non-zero exit (it was a silent exit 0 with \"Nothing to unwind\" while the store kept history above the target); the message points at a backfill past the target, or at a re-init when reth no longer holds those blocks. A target at or above the latest block stays a no-op, and so does an empty store. The refusals are a typed `UnwindError`; the pruned-body refusal is unchanged.\n\n**`op-reth proofs prune`** rejects `--proofs-history.prune-batch-size=0` at parse time and exits non-zero when the pruner fails: `OpProofStoragePruner::run` logs and swallows errors, so the command reported success for a prune it did not do; the command now calls the new `try_run`. An empty store is nothing to prune, as it is nothing to unwind. In the trie crate, `with_batch_size(0)` is raised to one (the pruner could not advance with it), and `PrunerError` renders through thiserror, so `BlockNotFound` names the block instead of printing the variant name.\n\n### Behavior changes an operator can see\n\n- `proofs unwind --target T` leaves the store at `T`; it left it at `T - 1`.\n- `proofs unwind` with a target below the store's earliest block exits non-zero; it exited 0.\n- `proofs prune` exits non-zero when the pruner fails and rejects a batch size of 0; it exited 0 in both cases. On an empty store it exits 0 instead of failing with `NoBlocksFound`.\n\nThe first is the fix the #464 recovery depends on; the others turn silent failures into exits a runbook can check. None of them changes a flag, so this is not marked `op-reth!:`; say so if you want the `BREAKING CHANGE` paragraph for the release notes.\n\n### Rust: `rust/op-reth/crates/cli/tests/proofs_cli/` (40 tests)\n\nEvery test seeds a real datadir through the CLI's own `EnvironmentArgs` (genesis from a JSON file with every OP fork active, storage v2) with a short chain committed the way reth's persistence commits blocks (`append_blocks_with_state` plus `write_trie_updates`; every block changes an EOA balance and a contract storage slot, so every block has account and storage changesets), then drives `Cli` in-process the way the binary does and asserts on `get_proof_window` and the snapshot anchor read from the MDBX store. Refusals are asserted on the typed errors (`UnwindError`, `PrunerError`, `SnapshotError`, `BackfillError`, `clap::Error`). After every unwind and prune the store's state at the new tip or earliest block is checked against reth's header by building the snapshot there (`SnapshotInitJob` validates the state root), so a store that moved its pointers without its state would fail.\n\n| subcommand | cases |\n|---|---|\n| `init` | fresh with snapshot backfill, plain backfill and a window reaching below genesis; `--proofs-history.skip-backfill` leaves `[tip, tip]`; idempotent; a second init only extends the backfill (a wider window extends, a narrower one never prunes) |\n| `unwind` (store `[3, 8]`) | target {earliest, earliest + 1, latest - 1, latest, latest + 1} with the resulting window and the target's reth hash as the tip; below earliest refused and the window untouched; pruned body refused; store ahead of reth (a block reth does not hold appended to the store) unwound to reth's tip, the #464 recovery; a target reth does not hold refused; empty store is a no-op |\n| `prune` (store `[2, 8]`) | window 3 with the default batch size, batch size 1 and 2; a window covering or wider than the store leaves it; batch size 0 rejected; pruning up to a block reth does not hold fails with `BlockNotFound(9)` and leaves the window; an empty store is a no-op |\n| `backfill` (store `[8, 8]`) | snapshot and plain paths within the chain and reaching below genesis; batch size 1; a covered window is a no-op; a wider window extends an existing window further back; an empty store fails with `NoBlocksFound` |\n| `snapshot init\\|drop` (store `[4, 8]` without a snapshot) | init at the earliest block by default and at a target block; targets outside the window refused; a second init at the same anchor keeps it; another anchor refused while a snapshot is ready; drop removes it and dropping nothing succeeds; drop lets a snapshot backfill continue after a plain backfill moved the window off the snapshot's anchor |\n\n### e2e: `rust/op-reth/tests/proofs/core/unwind_test.go`\n\n`TestProofsFollowerServesTheWindowAfterItsStoreIsUnwoundAndRestarted` (threshold 7, index path, 20-block window): the follower is stopped cleanly, `op-reth proofs unwind --target <head - 5>` runs against its datadir, op-reth restarts with its CL still down and must re-index the datadir up to its tip (the ExEx's startup `sync_to`), every proof of the window is swept against the sequencer, then the CL comes back, traffic runs ten more blocks and the sweep repeats over the live window.\n\n### Seams\n\n- `stack.ProofsHistoryUnwind{Target}`, `stack.ProofsHistoryUnwinder`, and `ProofsHistoryInitReport` renamed to `ProofsHistoryCommandReport` since both subcommands report the same thing.\n- `sysgo.OpReth.UnwindProofsHistory` (shares `runProofsHistorySubcommand` with the init), forwarded by the preset frontend; DSL `L2ELNode.UnwindProofsHistory(target)` requires a stopped node and fails the test on error.\n- `OpProofStoragePruner::try_run` returns the pruner's result instead of logging it; the trie crate's `strum` dependency is now optional under `metrics`, its only user.\n\n### Follow-ups, not in this PR\n\n- `OpProofsProviderRw::unwind_history` takes a `BlockWithParent` of the first removed block but no implementation reads its hash; the CLI passes `B256::ZERO` there (reth does not hold that block when the store is ahead). Narrowing the parameter to the new tip's `BlockNumHash` would remove the sentinel. The in-memory implementation also lacks the MDBX guards (no-op above latest, error at or below earliest).\n- `docs/public-docs/node-operators/tutorials/reth-historical-proofs.mdx` now says the unwind target stays and a target below the earliest block fails; the generated CLI reference is rebuilt at release time.\n\n## Matrix\n\nStorage version v2 only (the CLI's `--storage.v2` default; v1 datadirs are legacy). Unwind targets as listed above. The bump-only init guards (lagging trie, moved tip) do not exist on develop and are not tested here.\n\n## Local verification\n\nRust, from `rust/` (debug op-reth test profile, shared target dir):\n\n```\ncargo test -p reth-optimism-cli --test proofs_cli      # 40 passed (38 before the review changes, three consecutive runs, 37-44 s each)\ncargo test -p reth-optimism-trie --lib prune::         # 7 passed (the pruner's own tests through try_run, plus the two new ones)\ncargo clippy -p reth-optimism-cli -p reth-optimism-trie --all-targets   # no warnings\nmise exec -- zepter run check                          # ok (alloy-eips/serde propagated)\njust fmt-fix                                           # applied\n```\n\nFinding while stabilizing the target: with every test seeding its own datadir in parallel threads of one process, one or two tests per run failed in `EnvironmentArgs::init` or `MdbxProofsStorage::new` with `Cannot allocate memory (12)` (3 of 4 runs of the compiled binary). reth and the proofs storage each map an 8 TB MDBX geometry, and a dozen of them exhaust the process's address space. CI's nextest runs every test in its own process, but `cargo test` does not, so the fixture holds a process-wide lock for the lifetime of each seeded datadir; the target then passed three runs in a row.\n\nGo:\n\n```\ngo build ./op-devstack/... ./rust/op-reth/tests/proofs/...          # ok\ngo vet ./op-devstack/{sysgo,dsl,presets,stack}/ ./rust/op-reth/tests/proofs/core/   # ok\ngo test -count=1 ./op-devstack/sysgo/ -run 'TestProofsHistory|TestOpRethNodeArgs|TestInitProofsHistory|TestUnwindProofsHistory|TestOpRethWith'   # ok\nop-golangci-lint run (the same packages)                             # 0 issues\n```\n\ne2e (`rust/op-reth/tests/proofs/core`, `TestProofsFollowerServesTheWindowAfterItsStoreIsUnwoundAndRestarted`, run with the recipe's env vars by hand against a debug op-reth built from this branch, since `just test-e2e-sysgo` hard-codes a release binary): \n\n```\nDISABLE_OP_E2E_LEGACY=true DEVSTACK_ORCHESTRATOR=sysgo OP_RETH_ENABLE_PROOF_HISTORY=true RUST_BINARY_PATH_OP_RETH=<debug op-reth> \\\n  go test -count=1 -timeout 40m -parallel 2 -v -run TestProofsFollowerServesTheWindowAfterItsStoreIsUnwoundAndRestarted ./proofs/core/\n--- PASS: TestProofsFollowerServesTheWindowAfterItsStoreIsUnwoundAndRestarted (62.01s)\nok      github.com/ethereum-optimism/optimism/rust/op-reth/tests/proofs/core    63.018s\n```\n\nThe test took head 24 and target 19 while the store already served [5, 25]; `proofs unwind --target=19` took 0.52 s and removed 20..25; the restarted follower's datadir tip was 25, the store's first re-executed block was 20 and it was back at [5, 25] ten seconds after the start with the CL still down; the first sweep covered [5, 25] and the second, after ten more blocks of traffic, [35, 52], every block for the four accounts, `pruned_during_sweep=0`.\n\nNot run locally: the op-geth validator variant (`OP_DEVSTACK_PROOF_VALIDATOR_EL=op-geth` skips the test) and a kona-node CL (the preset runs op-node).\n\n## Notes for the #464 and Notion recovery text\n\nThe recovery `proofs unwind --target <reth tip>` now does what the text says: the store ends at reth's tip. The text does not need to change; the previous behavior left the store at tip - 1. A target below the store's earliest block now fails instead of exiting 0, which the runbook should mention if it ever lists it.\n\nStacked on #23434, #23429, #23428, #23421 and #23418.\n\nCloses #23393\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-03T21:05:56Z",
-      "mergedAt": "2026-11-05T03:00:32Z",
-      "additions": 35,
-      "deletions": 12
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABM9jT7g",
-      "title": "docs: add BlockVectra to the OP Stack RPC directory",
-      "author": "gjwang",
-      "number": 23943,
-      "body": "This provider-submitted entry helps developers comparing RPC access for Base, Ink and Unichain find BlockVectra's public endpoints and API-key access. The linked [live chain catalog](https://api.blockvectra.com/v1/chains), checked on November 5, lists these three mainnets; the existing directory governance permits providers supporting a subset of OP Stack networks.\n\nThe links resolve, `git diff --check` passes, and an independent source/content review found no blockers. The three prescribed Bun docs lints (`nav`, `redirects`, `reference`) return 1 on both this branch and the unchanged base, with byte-identical stdout/stderr: 887 navigation, 40 redirect/link and three reference errors. The sparse checkout excludes public image assets, which also limits the redirect check; no Mintlify render was run.\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-05T02:04:16Z",
+      "createdAt": "2026-10-15T03:28:56Z",
       "mergedAt": null,
-      "additions": 8,
-      "deletions": 0
+      "additions": 1297,
+      "deletions": 87
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABM7kIXQ",
-      "title": "docs/public-docs: fix the kona-client v1.9.0 prestate in the Upgrade 21 notice",
-      "author": "Wazabie",
-      "number": 23934,
-      "body": "The Upgrade 21 notice listed op-program hashes under the kona-client v1.9.0 variants. Both came from the `[[prestates.\"1.9.0\"]]` op-program entries at the top of `standard-prestates.toml`, which share the version key with the kona-client entries further down.\n\n- **`cannon64-kona-interop`**: `0x03b985a2…af59` (op-program 1.9.0 `interop`) → `0x03e5a54835d39c1d83b198314473e1f111c3539c04f65c3e8a9b8ccebe3737c9` ([registry L498](https://github.com/ethereum-optimism/superchain-registry/blob/7e1be4543c870ec5ac3353ab0ecf4deab100602c/validation/standard/standard-prestates.toml#L498)). This is the prestate the U21 tasks set for `SUPER_CANNON_KONA`, a super-root game; it has a prestate review.\n- **`cannon64-kona`**: removed, together with its reproduce command. U21 doesn't use it, and the page previously showed an op-program hash (`0x033c0009…`) for it.\n\nEnglish and Korean pages; no other line changes. Independent of #23919 (different section of the same file).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "id": "PR_kwDODjvEJM8AAAABK5hSzg",
+      "title": "op-reth: settle SDM refunds during canonical RPC replay",
+      "author": "einar-oplabs",
+      "number": 23670,
+      "body": "Related to ethereum-optimism/protocol-team#485. Canonical transaction and block replays include SDM settlement, so debug gas, replayed balances/state diffs, and intermediate roots agree with execution. This is an independent line of work based on George’s #23615/#23616, with canonical versus diagnostic replay separated and the supplied transaction environment preserved.\n\nDepends on ethereum-optimism/reth#26. The temporary PR-head pin must be replaced with the merged fork tag before merging this PR. Raw/bad-block tracing keeps its existing permissive, pre-refund behavior; parity call-frame gas keeps its existing convention.\n\nAdds imported multi-transaction coverage, an unrefunded gap, refund-dependent affordability, modified-environment replay, direct OTS/call-many checks, and traceChain success/error alignment. CI op-reth integration tests pass: 81 passed and one skipped, including both multi-transaction settlement regressions. Nightly formatting passes. CI workspace tests, clippy, builds, documentation, and Rust merge gates pass on the latest push; two Go end-to-end memory jobs remain pending. The prerequisite’s helper unit tests and workspace all-features clippy pass. Mirror checker unit tests pass, while existing stale mirror entries still fail its repository-wide check.\n\nStatic Rust and pin/deposit reviews were performed. Full workspace, JS-tracer feature, and forward-upstream-release reviews have not been run; this pin adds only the prerequisite RPC commit to the existing fork release.\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-04T22:36:06Z",
-      "mergedAt": "2026-11-05T00:42:54Z",
-      "additions": 6,
-      "deletions": 10
+      "createdAt": "2026-10-26T23:47:58Z",
+      "mergedAt": null,
+      "additions": 1269,
+      "deletions": 248
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABIkNtVA",
+      "title": "op-reth: live test of index-versus-execute proofs store parity",
+      "author": "einar-oplabs",
+      "number": 23442,
+      "body": "Builds one chain into four proofs stores, one indexed from reth's trie data, one re-executed by the engine and two initialized at the tip and backfilled, and asserts that they serve the same state at every block. The index and execute paths cross-check each other in the ExEx and nothing verified that they still agree on a self-destruct, a zeroed slot or an emptied account; this is the regression net for the storage-wipe removal (reth#26811) in the reth 2.6 bump (#23046).\n\n## What the test does\n\n`index_execute_and_backfill_stores_agree` in `rust/op-reth/crates/trie/tests/live/index_execute_parity.rs`:\n\n1. Drives reth with `SimulatedReth` (lifted out of the parent-state test into `tests/live/simulated_reth.rs`), so every block has the `ExecutedBlock` trie data reth's engine tree holds.\n2. Feeds the indexed store through `EngineHandle::index_block` with that block's `trie_updates` and `hashed_state`, and the executed store through `EngineHandle::execute_block`.\n3. Persists the chain to reth's database, then builds two stores the way `proofs init` does: `InitializationJob` at the tip, then `BackfillJob::run` (history) and `BackfillJob::run_with_snapshot` back to genesis, in batches of three blocks so each backfill commits more than once.\n4. Compares every store with the indexed one at every block from genesis to the tip (`tests/live/store_view.rs`): the proof window; the account hashed cursor over the whole key space; the storage hashed cursor and the storage trie cursor of every account the store holds and of every address the chain can touch; the account trie cursor; and `Proof::overlay_account_proof` for every address the chain can touch with the slots its contracts write. A mismatch fails naming the store, block, table and key. The indexed store's proofs are also verified against the header's state root, so four stores agreeing on the wrong state still fail.\n5. Checks that the chain did what the case says (the slot writer kept its storage after the Cancun self-destruct, the EIP-6780 contract is gone with its storage, only the cousin slot survived the zeroing, and so on).\n\n### Matrix\n\n| Axis | Values |\n|---|---|\n| state change (`rstest` cases) | `BLOCKHASH` read; `CREATE` plus `SELFDESTRUCT` in one transaction; deploy then call; EIP-161 touch; `SELFDESTRUCT` of a pre-existing contract; `SSTORE` to zero |\n| engine flush cadence (persistence, backpressure) | every block (1, 2); every fifth block (5, 10) |\n| store backend for the indexed and executed stores | `InMemoryProofsStorage`, `MdbxProofsStorage` |\n\n24 cells, all run. The backfilled stores are always MDBX, the only backend that implements `OpProofsBackfillStore`.\n\nEvery chain is ten blocks: three empty blocks, the content, empty blocks to the end. The test asserts that ten is a multiple of the cadence's persistence threshold, so the final flush leaves nothing in the engine buffer, and multi-block content straddles the flush at block 5 under the slower cadence. The engine's buffer is not readable from outside the engine, so the cadence decides whether the execute path reads a block's parent from the buffer or from disk; the comparison runs over the persisted history once everything is flushed.\n\nThe chain is Cancun (the self-destruct cases need EIP-6780), with the EIP-4788 contract in genesis so every block also writes two slots of a pre-existing contract. `create_block_from_spec` now fills the Shanghai and Cancun header fields when the chain spec has those forks active, and gives every block a timestamp; the existing Paris tests only see the timestamps.\n\n### Trie depth\n\nreth stores no branch node for a trie whose keys all differ in their first nibble, so the first draft of this test compared empty trie tables and had no removed node to corrupt. The slot writer's eight slots and the three EIP-161 genesis accounts are therefore chosen at runtime (`colliding_keys`) so that three keys share their first hashed nibble and two of those also the second: filling them stores a branch node, and zeroing the first of the pair (or EIP-161 removing the empty account) removes it.\n\n## Local verification\n\n```\ncargo test -p reth-optimism-trie --test live\ntest result: ok. 56 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 21.73s\n```\n\nThe 24 new cases take about 10 s of that. `just fmt-fix` applied; `cargo clippy -p reth-optimism-trie --all-targets` reports only the three pre-existing warnings outside this diff. The `rust-code-reviewer` agent's findings are addressed in the second commit.\n\nCorruption check (run locally with a temporary patch, not committed): dropping one removed trie node from the index side's `TrieUpdatesSorted` fails the run with\n\n```\nError: the executed store differs from the indexed store at block 6 in StoragesTrie[0x630c…d45a] at key Nibbles(0xb): indexed Some(BranchNodeCompact { state_mask: TrieMask(0000100000000010), … }), executed None\n```\n\nfor the `SSTORE` to zero case (MDBX, every-block cadence) and with\n\n```\nError: the executed store differs from the indexed store at block 4 in AccountsTrie at key Nibbles(0xc): indexed Some(BranchNodeCompact { … }), executed None\n```\n\nfor the EIP-161 case (in-memory, every-fifth-block cadence).\n\n## Notes on the issue text\n\n- \"A transfer that creates and then empties an EIP-161 account\" cannot be produced by real transactions after Spurious Dragon: an account only an incoming transfer created can only be emptied by a transaction it signs, which leaves its nonce at one. The case instead touches an empty account from the genesis allocation, which EIP-161 removes (the trie leaf and its branch go away), and touches an address that never had anything, which creates nothing.\n- The empty-account fix (reth#27252) is in reth's state-root task, which converts the EVM state rather than the bundle state. `SimulatedReth` hashes the bundle state, like reth's engine does below five cores, so this test does not reach that code path; it covers the store's own handling of what reth hands it.\n\n## Seams for later PRs\n\n- `tests/live/simulated_reth.rs`: `SimulatedReth` (now with `spawn_engine`, `state_root` and `persist_all`, and `commit` returning the `ExecutedBlock`), `RethPersistence`, `Location`, `fixed_signer`.\n- `tests/live/store_view.rs`: `BlockView::read` reads everything a store serves at one block; `assert_same_view` names the first differing table and key.\n- `tests/live/contracts.rs`: `initcode_returning`, the block-hash recorder, the slot writer (parameterized slots, self-destruct on empty calldata) and the create-and-self-destruct initcode.\n- `live.rs`: `TxSpec::with_value`, `BlockSpec::empty`, `chain_spec_builder` and `funded` for custom genesis allocations and forks, `block_timestamp`, `PRUNE_INTERVAL_BLOCKS`.\n\nStacked on #23441, #23437, #23434, #23429, #23428, #23421 and #23418.\n\nCloses #23388\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-15T07:31:03Z",
+      "mergedAt": null,
+      "additions": 1187,
+      "deletions": 359
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABIg0uXg",
+      "title": "op-reth: test the proofs RPC window edges and old-block witness requests",
+      "author": "einar-oplabs",
+      "number": 23434,
+      "body": "The historical-proofs RPC handler (`rust/op-reth/crates/rpc/src/eth/proofs.rs`) and its state-provider factory (`state.rs`) had no tests, and the only e2e check near the window's earliest block was the dormant `proofs/prune` package. The reth 2.6 bump (#23046) rewrites the handler, so this pins what `eth_getProof`, `debug_executePayload` and `debug_executionWitness` answer at and around the window's edges before the rewrite lands.\n\n## What the tests cover\n\n### Rust: `OpStateProviderFactory::state_provider` (`rust/op-reth/crates/rpc/src/state.rs`, 16 cases)\n\nA mock eth API (`reth_rpc::EthApi` over `MockEthProvider`) with a canonical chain of 21 blocks and an `InMemoryProofsStorage` seeded with blocks 10..=18, so the store trails the head the way it does between flushes:\n\n- served: the earliest block (by number and by hash), a block inside the window, the latest stored block (by number and by hash)\n- refused with `StateForNumberNotFound(n)`: one below the earliest (by number and by hash of the canonical block), genesis, one above the store tip, the chain head the store has not flushed, the `latest` tag while the store trails\n- served once the store holds the head: the `latest` tag, no block id, the head by number\n- an unknown hash is `ProviderError::Other(\"header not found\")` (the wrapping that ethereum-optimism/protocol-team#474 reports as surfacing to clients as an internal error)\n- an empty store refuses everything\n\nNot covered in Rust: a hash that names a known non-canonical block. `MockEthProvider` resolves `block_number(hash)` and `block_hash(number)` from the same header map, so a non-canonical block cannot be modelled; the e2e reorg check below covers that branch.\n\nThe test build enables `reth-optimism-trie/metrics` so `OpProofsStorage<S>` is the production wrapper, as it is for the node and for CI's `--workspace --all-features` clippy and nextest runs; without it the alias is the bare `S` and clippy flags the conversion the node needs.\n\n### e2e, in `rust/op-reth/tests/proofs/core` (CI job `op-reth-e2e-sysgo-tests`, `just test-e2e-sysgo` with the default `GO_PKG_NAME=proofs/core`)\n\n`TestProofsFollowerServesExactlyTheWindowItReports`, matrix threshold {7, 50} x proofs path {index, execute}, each cell a sequencer without proofs history (the independent `eth_getProof` reference, `--rpc.eth-proof-window`) and a follower with a 20-block window, `--rpc.max-tracing-requests=2`, 1s blocks. The chain is driven past the window until pruning ran, then sequencing is stopped so the window stands still, and the cell checks:\n\n- the earliest block is served by number and by hash, verifies against the header and matches the reference; the chain is driven a window past the workload's setup block first, so the earliest block holds the workload's accounts\n- one below the earliest is refused by number and by hash with an error naming the block (develop: `no state found for block number N`)\n- the latest block is served by number, by hash and by the `latest` tag and equals the reference at the head\n- `eth_getProof` latency at the earliest block versus the latest (medians of 10), logged for the bump comparison and bounded at 10x with a 250ms floor so only a lookup that re-walks the window can trip it\n- `debug_executePayload` builds on the earliest block\n- `debug_executionWitness` refuses the earliest block (it executes on the parent's state, which pruning removed) and serves the block after it\n- 8 concurrent `debug_executionWitness` requests, above the 2 tracing permits and above the handler's own 3, all succeed\n- after sequencing resumes, the first new height is refused until `debug_proofsSyncStatus` reports it and never answered with a proof of another block, then matches the reference; the subtest stops the chain again, so every subtest starts from a stopped chain and can run alone\n- a block the test sequencer builds on the head and then replaces: its hash is refused once the follower reorged, the replacement is served by hash and matches the reference\n\n`TestProofsFollowerServesBlocksBelowRethHistoryPruneCheckpoint`, threshold {7, 50}, index path: the follower's reth prunes account and storage history 5 blocks behind its persisted tip (through a `--config` file, since reth's unwind-safe minimum of 10064 blocks has to be lowered in the file and `--prune.*` flags replace the file's prune section), with a proofs window that reaches below that checkpoint. Once `eth_getStorageAt` at the window's earliest block reports reth's own state as pruned, `eth_getProof` there must verify and match the reference and `debug_executionWitness` for the next block must execute: the store serves the window, not reth's history. This is the \"block below reth's history prune checkpoint\" cell from the issue; the issue's `--full` flag cannot be used because it pins the history distance to 10064 blocks.\n\nThe dormant `proofs/prune` package is folded into these checks (window read from `debug_proofsSyncStatus` and asserted equal to the configured window after pruning, pruned block refused, new earliest served) and deleted.\n\n## Matrix\n\n| test | threshold | proofs path | state masking |\n|---|---|---|---|\n| window edges | 7, 50 | index, execute | 0 only (develop compiles masking out; #23046 rejects a nonzero value; ethereum-optimism/protocol-team#457) |\n| history-pruned follower | 7, 50 | index | 0 |\n\nL2 CL is op-node in every cell: the suite's preset runs op-node and the reorg check drives op-node's test sequencer.\n\n## Local verification\n\nRust (`cd rust && cargo test -p reth-optimism-rpc --lib state::`): 17 passed. `cargo clippy -p reth-optimism-rpc --all-targets` clean, `just fmt-check` clean.\n\ne2e, run from `rust/op-reth/tests` against a debug op-reth built from this worktree (copied out of the shared target dir and selected with `RUST_BINARY_PATH_OP_RETH`, with the recipe's other env vars set by hand because `just test-e2e-sysgo` hard-codes `../../target/release/op-reth`, which has no release build here):\n\n```\nDISABLE_OP_E2E_LEGACY=true DEVSTACK_ORCHESTRATOR=sysgo OP_RETH_ENABLE_PROOF_HISTORY=true RUST_BINARY_PATH_OP_RETH=<debug op-reth> \\\n  go test -count=1 -timeout 40m -parallel 2 -v -run 'TestProofsFollowerServesExactlyTheWindowItReports/<cell>$' ./proofs/core/\n```\n\n| cell | result | setup block | window after pruning | pruned block refused with | eth_getProof median latency earliest / latest |\n|---|---|---|---|---|---|\n| threshold_7-index | PASS (85s) | 18 | [29, 49] | `no state found for block number 28` | 455µs / 406µs |\n| threshold_7-execute | PASS (85s) | 18 | [28, 48] | `no state found for block number 27` | 418µs / 346µs |\n| threshold_50-index | PASS (84s) | 18 | [27, 47] | `no state found for block number 26` | 351µs / 302µs |\n| threshold_50-execute | PASS (85s) | 18 | [28, 48] | `no state found for block number 27` | 417µs / 370µs |\n\nEvery cell: `debug_executionWitness` for the earliest block is refused naming the block below it; the height imported right after sequencing resumed was refused with `no state found for block number N` while `debug_proofsSyncStatus` still reported the previous head, then matched the reference once flushed; the reorged-out hash was refused with `header not found` and the replacement served once the store had indexed blocks above it. The stale-proof probe right after the reorg (see Findings) reported `stale=true` in threshold_7-index and threshold_7-execute and `stale=false` in threshold_50-index and threshold_50-execute.\n\n`TestProofsFollowerServesBlocksBelowRethHistoryPruneCheckpoint` (same env, `-run 'TestProofsFollowerServesBlocksBelowRethHistoryPruneCheckpoint'`):\n\n| cell | result | chain head at the stop | reth history probe (block: state) | checked block |\n|---|---|---|---|---|\n| threshold_7 | PASS (72s) | 65 | 1, 14, 27, 28 all `pruned` | 28 served from the store, witness for 29 executes |\n| threshold_50 | PASS (112s) | 105 | 1, 14, 27, 28 all `pruned` | 28 served from the store, witness for 29 executes |\n\nNot run locally: op-geth validator (`OP_DEVSTACK_PROOF_VALIDATOR_EL=op-geth` skips both tests with a message) and a kona-node CL (the preset runs op-node).\n\n## Findings\n\n- **Stale proofs right after a same-height reorg (bug candidate).** Once the follower's reth has adopted a replacement block at a height the proofs store already holds, and until the ExEx has processed the reorg notification, `eth_getProof` by the replacement's hash passes the canonical-hash check and the window check and answers with the replaced block's state. `debug_proofsSyncStatus` cannot reveal the gap: it reports numbers, and the height is \"served\". Reproduced once in a local run of the reorg subtest (threshold 7, index path): 2ms after the follower reported the reorg at height 59, the window was still `[39, 59]` and the proof for the recorder at 59 failed with `block 59 account 0x49C0...: eth_getProof from validator does not verify against state root 0xd97c...`. The store's `ProofWindowRange.latest` carries the hash of the stored tip, so the factory could refuse requests while that hash is not the canonical hash of the height (or, for deeper reorgs, while the store's tip is on the replaced chain). The subtest now records whether it hit the gap and waits for the store to index blocks above the replacement before asserting; a fix should turn that probe into an assertion.\n- `debug_executionWitness` cannot serve the window's earliest block: it executes the block on its parent's state, which is the state pruning removed, so it fails with `no state found for block number <earliest-1>`. The oldest block whose witness a proofs node serves is earliest+1; `debug_executePayload` on the earliest block works. kona-host callers that walk down to `debug_proofsSyncStatus.earliest` should stop one block above it. Recorded, not a bug in the handler.\n- On develop, eth_getProof answers from the proofs store even where reth's own history is pruned: with account and storage history pruned before block 30, reth refuses `eth_getStorageAt` at 28 and below while the proofs follower serves verified proofs there and executes the witness for 29. The \"broader limitation\" paragraph of ethereum-optimism/protocol-team#474 (the path \"fails on a history-pruned reth even when the proofs store has the block\") does not reproduce on develop: `state_at_block_id` only builds a lazy historical provider, and the overlay reads accounts, storage and trie nodes from the store, reth only for bytecode and block hashes. The bump's rewrite can be checked against this test.\n- reth still answers historical state at the prune target block itself (`before = 30` leaves 29 served, 28 refused): reconstructing state at the target needs only the changesets above it. The test checks the block below the target.\n- reth refuses a history prune distance under its unwind-safe minimum of 10064 blocks in both the CLI and the config file, and `full` is rejected the same way, so the issue's `--full` follower cannot be built on a short chain. A `before = <block>` mode in the config file with `minimum_pruning_distance` lowered in the same file is accepted; `--prune.*` flags cannot be used alongside, since they replace the file's prune section and with it the lowered minimum.\n- The pruner's own decisions are only logged at debug and the devstack prints op-reth's log at the test level, so the history-pruned follower runs with `--log.stdout.filter=info,pruner=debug,engine::persistence=debug` and the test keeps `RecordLogLines` records of the pruner's runs, which it prints when the precondition fails.\n- The error a client gets for a block outside the window on develop is `no state found for block number N` (an internal error, as #474 notes); the tests assert the error names the block, not its wording, so the bump can change the message.\n- The `latest` tag on a proofs follower resolves to the chain head and is refused while the store trails it (the Rust case `latest_tag_while_the_store_trails`); the e2e `latest` check runs with the chain stopped so the store has caught up.\n\n## Seams\n\n- `utils.NewMixedOpProofPreset(t, opts...)` takes `MixedOpProofPresetConfig` options: deployer options and per-node op-reth options for the sequencer and the validator, so a core test can run the reference-sequencer pattern of the acceptance tests.\n- `utils.ValidatorELKind(t)` for skipping when `OP_DEVSTACK_PROOF_VALIDATOR_EL` is not op-reth.\n- `utils.NextPayloadAttributes(parent, rawTxs...)` and `utils.SignedTransfer(...)` replace the attribute construction the two `debug_executePayload` tests duplicated.\n\nStacked on #23429, #23428, #23421 and #23418.\n\nCloses #23390\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-15T00:10:48Z",
+      "mergedAt": null,
+      "additions": 1073,
+      "deletions": 226
     }
   ],
   "codeChanges": {
-    "additions": 921,
-    "deletions": 99,
-    "files": 24,
-    "commitCount": 7
+    "additions": 2530,
+    "deletions": 1214,
+    "files": 74,
+    "commitCount": 93
   },
   "completedItems": [
     {
@@ -124,6 +124,25 @@
       ]
     },
     {
+      "title": "contracts-bedrock: add the mainnet portal allowlist",
+      "prNumber": 23933,
+      "type": "other",
+      "body": "Stacked on #23929. Retarget to `proposal/op-contracts/v9.0.0+allowlist` once that merges.\n\n**Mainnet allowlist.** `PortalAllowlist` now restricts L1 chain 1 to:\n\n- `0x6307ed2483af904D67cc7EB74d5Bf97BfE3152be`\n- `0x93Cd74489167f9885f2D7B5112",
+      "files": [
+        "packages/contracts-bedrock/scripts/checks/valid-semver-check/main.go",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/src/libraries/PortalAllowlist.sol",
+        "packages/contracts-bedrock/src/libraries/SemverComp.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerUtils.t.sol",
+        "packages/contracts-bedrock/test/libraries/PortalAllowlist.t.sol",
+        "packages/contracts-bedrock/test/libraries/SemverComp.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/setup/Setup.sol"
+      ]
+    },
+    {
       "title": "contracts-bedrock: retry failed upgrade tests once on transient fork RPC errors",
       "prNumber": 23930,
       "type": "tests",
@@ -131,9 +150,201 @@
       "files": [
         "packages/contracts-bedrock/justfile"
       ]
+    },
+    {
+      "title": "contracts-bedrock: restrict OptimismPortal2 deposits and withdrawals to an allowlist",
+      "prNumber": 23929,
+      "type": "other",
+      "body": "Exact cherry-pick of #23712 (7c1ec3f39fe673590b4b40930bc0e33cc3455e3d) onto `proposal/op-contracts/v9.0.0+allowlist`, a fresh branch off `proposal/op-contracts/v9.0.0`. See #23712 for the description.\n\nTo verify the cherry-pick is exact:\n\n`",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L1/IOptimismPortal2.sol",
+        "packages/contracts-bedrock/scripts/checks/valid-semver-check/main.go",
+        "packages/contracts-bedrock/snapshots/abi/OptimismPortal2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/src/libraries/PortalAllowlist.sol",
+        "packages/contracts-bedrock/src/libraries/SemverComp.sol",
+        "packages/contracts-bedrock/test/L1/L1CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/L1/L1ERC721Bridge.t.sol",
+        "packages/contracts-bedrock/test/L1/L1StandardBridge.t.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerUtils.t.sol",
+        "packages/contracts-bedrock/test/libraries/PortalAllowlist.t.sol",
+        "packages/contracts-bedrock/test/libraries/SemverComp.t.sol",
+        "packages/contracts-bedrock/test/setup/Setup.sol"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: Use the real ETHLiquidity balance in tests and docs",
+      "prNumber": 23927,
+      "type": "tests",
+      "body": "L2Genesis and the Lagoon activation deposit fund `ETHLiquidity` with `type(uint128).max` wei. That is the largest value the deposit `mint` field can hold. The `ETHLiquidity` and `SuperchainETHBridge` tests did not use the genesis state. The",
+      "files": [
+        "docs/public-docs/app-developers/reference/contracts/interop/predeploy.mdx",
+        "docs/public-docs/ko/app-developers/reference/contracts/interop/predeploy.mdx",
+        "packages/contracts-bedrock/test/L2/ETHLiquidity.t.sol",
+        "packages/contracts-bedrock/test/L2/SuperchainETHBridge.t.sol"
+      ]
+    },
+    {
+      "title": "rust: update reth to op-v2.6.0-2",
+      "prNumber": 23924,
+      "type": "other",
+      "body": "Moves the reth pin to the fork tag `op-v2.6.0-2`, which is the fork branch `op-v2.6.0` with the backport of paradigmxyz/reth#28264 (ethereum-optimism/reth#32). The upstream base stays v2.6.0, no shared revm or alloy versions move, and no AP",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml"
+      ]
+    },
+    {
+      "title": "ci,op-deployer,op-up: remove goreleaser and op-up releases",
+      "prNumber": 23914,
+      "type": "other",
+      "body": "Stacked on #23907, and must land with or after it: otherwise `op-deployer/v*` tags would produce no binaries.\n\nRemoves the CircleCI `go-release` job and goreleaser. op-deployer binaries now come from the `release-op-deployer` workflow, and ",
+      "files": [
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/main.yml",
+        "docs/public-docs/scripts/generate-releases.ts",
+        "mise.toml",
+        "op-deployer/.goreleaser.yaml",
+        "op-up/.goreleaser.yaml",
+        "op-up/Dockerfile",
+        "ops/book/src/ci/mise.md"
+      ]
+    },
+    {
+      "title": "ci,op-deployer: publish release binaries from GitHub Actions",
+      "prNumber": 23907,
+      "type": "other",
+      "body": "op-deployer can't publish a release: its goreleaser job needs a PAT, and that token has been revoked, so `op-deployer/v0.9.0-rc.1` has no release. This adds a GitHub Actions workflow that builds the same binaries and uses the built-in `GITH",
+      "files": [
+        ".github/workflows/release-op-deployer.yaml",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/release-workflows.mdx"
+      ]
+    },
+    {
+      "title": "op-chain-ops: Store the eth-liquidity-pause guardian call as a function",
+      "prNumber": 23962,
+      "type": "other",
+      "body": "Stacked on ethereum-optimism/optimism#23961. It applies a review comment on ethereum-optimism/optimism#23349.\n\nThe guardian step for `devnet-pause` and `devnet-unpause` stored the SuperchainConfig call as a string. A switch then mapped the ",
+      "files": [
+        "op-chain-ops/cmd/eth-liquidity-pause/main_test.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync.go"
+      ]
+    },
+    {
+      "title": "op-chain-ops: Fix eth-liquidity-pause devnet-unpause and review comments",
+      "prNumber": 23961,
+      "type": "bugfix",
+      "body": "Stacked on ethereum-optimism/optimism#23349. It applies review comments on that PR.\n\n- `devnet-unpause` read the global pause after it sent the guardian `unpause()` transactions. A failed read then returned before the sync and dropped the e",
+      "files": [
+        "op-chain-ops/cmd/eth-liquidity-pause/README.md",
+        "op-chain-ops/cmd/eth-liquidity-pause/contracts.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/main_test.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync_test.go"
+      ]
+    },
+    {
+      "title": "op-chain-ops: pin the registry fetch for v9 upgrade tests",
+      "prNumber": 23956,
+      "type": "tests",
+      "body": "Cherry-pick of #23952 (92bd8985bb33da89d20b2d0b1a232b2686ab2179) from `proposal/op-contracts/v9.0.0`, which fixes the mainnet-fork upgrade jobs. Bottom of the allowlist stack: this, then #23929, then #23933.\n\n🤖 Generated with [Claude Code]",
+      "files": [
+        "op-chain-ops/opcmregistry/registry.go"
+      ]
+    },
+    {
+      "title": "rust: use underscore lint names in workspace lint tables",
+      "prNumber": 23955,
+      "type": "other",
+      "body": "Cargo 1.99, the pinned toolchain, deprecates hyphenated lint names in `[lints]` tables. Because every workspace member inherits the shared lint block, each build printed one `lints.rust.X-Y is deprecated in favor of lints.rust.X_Y` warning ",
+      "files": [
+        "rust/Cargo.toml",
+        "rust/kona/sp1/programs/Cargo.toml"
+      ]
+    },
+    {
+      "title": "op-chain-ops: pin the registry fetch for v9 upgrade tests",
+      "prNumber": 23952,
+      "type": "tests",
+      "body": "Every `contracts-bedrock-tests-upgrade` job and the upgrade-coverage pass on this branch fail since 2026-11-04 21:40 UTC, when superchain-registry #1397 added the final `op-contracts/v9.0.0` entry. `PastUpgrades` fetches the standard-versio",
+      "files": [
+        "op-chain-ops/opcmregistry/registry.go"
+      ]
+    },
+    {
+      "title": "Fix translation drift",
+      "prNumber": 23950,
+      "type": "bugfix",
+      "body": "## Summary\nSync Korean (`ko`) pages with English changes made between 2026-11-03 and 2026-11-05.\n\n## Changes\n- op-deployer: `embedded` artifacts locator replaces `tag://`, SP1 verifier notes in bootstrap/custom deployments, new release publ",
+      "files": [
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/reference/artifacts-locators.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/bootstrap.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/release-workflows.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/run/sequencer.mdx",
+        "docs/public-docs/ko/notices/upgrade-21.mdx"
+      ]
+    },
+    {
+      "title": "release-notes: tag PRs that change go:embed'ed files as LINKED",
+      "prNumber": 23949,
+      "type": "other",
+      "body": "`pr-facts.sh` tagged #23649 and #23714 (Lagoon NUT bundle re-snapshots) as `--` (\"touched nothing the binaries compile\"), although `op-core/nuts` embeds the bundle JSON into op-node, op-batcher and every other binary linking it. Only `.go` ",
+      "files": [
+        ".claude/skills/release-notes/scripts/pr-facts.sh"
+      ]
+    },
+    {
+      "title": "ci: pin SOURCE_DATE_EPOCH for sccache and drop rust-binaries-for-sysgo",
+      "prNumber": 23948,
+      "type": "other",
+      "body": "- **Pin `SOURCE_DATE_EPOCH` in jobs that use sccache.** reth-node-core's vergen build script embeds the build time, so it and every crate that depends on it miss sccache on every build. Same fix as paradigmxyz/reth#27632.\n  - Locally, a war",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "op-chain-ops: Send eth-liquidity-pause transactions through txmgr",
+      "prNumber": 23945,
+      "type": "other",
+      "body": "Stacked on ethereum-optimism/optimism#23349. This PR applies the review comments on that PR.\n\n`sync` and `devnet-*` now send through `op-service/txmgr`. Before this change, the tool used a fixed fee cap of `tip + 2*baseFee` and never resubm",
+      "files": [
+        "op-chain-ops/cmd/eth-liquidity-pause/README.md",
+        "op-chain-ops/cmd/eth-liquidity-pause/chains.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/config.example.toml",
+        "op-chain-ops/cmd/eth-liquidity-pause/contracts.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/main.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/main_test.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/status.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync_test.go"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 112.38325726392888,
+      "prScore": 80.38325726392888,
+      "issueScore": 0,
+      "reviewScore": 32,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 94.0577415526326,
+      "prScore": 78.8577415526326,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
@@ -142,6 +353,36 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 70.60960877851578,
+      "prScore": 70.40960877851577,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 59.11483003965963,
+      "prScore": 49.774830039659626,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 46.41982142562943,
+      "prScore": 45.98182142562943,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -155,6 +396,36 @@
       "summary": null
     },
     {
+      "username": "ihooni",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/37792049?u=5d5dfa80bc54fd29248ecec7b4a6d259f56450c1&v=4",
+      "totalScore": 30.827006011276538,
+      "prScore": 30.827006011276538,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 26.64766248977032,
+      "prScore": 26.64766248977032,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 20.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "mds1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
       "totalScore": 19,
@@ -165,12 +436,82 @@
       "summary": null
     },
     {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 18.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 16,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
       "totalScore": 13.903899239729885,
       "prScore": 13.903899239729885,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "zkfrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lake-dunamu",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258745035?v=4",
+      "totalScore": 10.201348061489414,
+      "prScore": 10.201348061489414,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Joxess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
       "commentScore": 0,
       "summary": null
     },
@@ -193,11 +534,91 @@
       "reviewScore": 5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Agrahm13",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/217385645?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 2,
-  "mergedPRs": 4,
+  "newPRs": 20,
+  "mergedPRs": 19,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 9
+  "activeContributors": 35
 }

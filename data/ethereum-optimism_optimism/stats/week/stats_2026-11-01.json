@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-01 to 2026-11-08, ethereum-optimism/optimism had 91 new PRs (46 merged), 22 new issues, and 53 active contributors.",
+  "overview": "From 2026-11-01 to 2026-11-08, ethereum-optimism/optimism had 109 new PRs (61 merged), 22 new issues, and 58 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABLn-B6g",
@@ -118,23 +118,23 @@
       "deletions": 1690
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABMrGb4w",
-      "title": "kona-disc!: Ignore discovered records outside the node's address scope",
-      "author": "aakoshh",
-      "number": 23895,
-      "body": "### What\n\nkona-node only contacts and dials discovered peers at addresses it can reach from its own address, as op-node does, through the geth discv5 library its discovery is built on. A node with a public address ignores other nodes' loopback and LAN addresses, while local devnets keep working.\n\n### Why\n\nToday kona-node dials any address a discovered record holds. A record with `127.0.0.1:9222` makes it dial its own port 9222, and a public node dials private ranges it learned from public peers. Kona nodes advertise such records themselves at startup (#23763), so this happens without an attacker.\n\nFor operators:\n- A node with a public address no longer contacts or dials loopback, LAN or special-purpose addresses that other nodes hand it, including ones saved in its bootstore by earlier versions.\n- A bootnode the node can't reach from its own address is skipped with a warning. Use `--p2p.static-peers` to connect to it anyway.\n- Devnets on loopback or a LAN behave as before.\n- The `kona_node_discovery_events` gauge has a new `type=\"unreachable_address\"`, and `type=\"discovered\"` counts only records that are dialed.\n\nThe rules are described in the new \"Discovered addresses\" section of the kona-node configuration docs.\n\n### How\n\ngeth checks each record against the node that returned it. kona's discovery library, sigp/discv5, doesn't say which node that was, so kona-node checks against its own address instead. discv5 only takes a plain `fn` as its table filter, so the builder installs one of three, chosen once at startup.\n\n### Caveats\n\n- The scope is chosen at startup and doesn't follow an address learned later from peers. A node behind a NAT should set `--p2p.advertise.ip` to its public address.\n- A node with a public address can't bootstrap from a LAN or loopback bootnode, which op-node allows.\n\n### Review\n\n`rust-code-reviewer` and a general correctness and docs review ran. Their findings are fixed in separate commits, except two, dismissed on purpose:\n- A record is rejected if any of its addresses is unreachable, including a dual-stack record with a private IPv6 address, where geth checks only one address.\n- The `RelayAddrError` messages say \"sender\" even when our own address stands in for one.\n\n### Potential follow-ups\n\n- Upstream in sigp/discv5: `table_filter` as `Arc<dyn Fn>`, so the scope can follow the node's learned address.\n- Dial only peers we had a session with, at the session's address, as reth's `reth-discv5` does.\n- `--p2p.netrestrict` is split out into #23893.\n\n### BREAKING CHANGE\n\nRust users of `kona-disc`: `Discv5Driver::new` takes the node's `AddrScope`, and `Discv5Builder::build` replaces any `table_filter` in the discovery config it's given. Build the driver with `Discv5Builder`, or pass `AddrScope::own(...)` to `Discv5Driver::new`.\n\nOperators: a bootnode outside the node's scope is skipped, such as a LAN bootnode of a node that advertises a public IP. List it in `--p2p.static-peers` instead.\n\nCloses #23766. Closes #23765.\n",
+      "id": "PR_kwDODjvEJM8AAAABIltOBA",
+      "title": "op-reth: test the proofs engine reorg and revert edges and check unwind targets",
+      "author": "einar-oplabs",
+      "number": 23445,
+      "body": "Deterministic tests for the proofs engine's reorg, revert and unwind tasks at the boundaries the model-based test may not reach, with the two engine checks they found missing, and the ExEx executing a reorged chain that carries no trie data instead of failing the node.\n\nThe reorg task never checked the first new block's parent against the stored fork block, and nothing refused an unwind at or below the window's earliest block before the store saw it (MDBX refuses it; the in-memory store underflowed at block 0 and otherwise removed the earliest block). `handle_chain_reorged` returned an error for a new chain without trie data, which reth turns into a node exit.\n\n## Changes\n\n- `EngineState::unwind` (shared by the reorg and unwind tasks) now drains any in-flight save, then before touching anything refuses a target at or below `earliest` (`EngineError::Storage(UnwindBeyondEarliest)`) and a target whose parent differs from the stored block below it (`ParentHashMismatch`). The stores keep only the window's end hashes, so the engine buffer retains the hashes of the blocks it persisted (bounded to 1024) to verify forks below the disk tip within a process lifetime. A restarted engine cannot verify a fork below its disk tip; that cell is an `#[ignore]`d test (see below).\n- `EngineHandle::reorg` takes `Vec<ReorgBlock>`, each block either `Index { block, hashed_state, trie_updates }` or `Execute(block)`; the task runs each through the same code as `index_block` and `execute_block`, so every block gets the gap and parent checks (an executed block the engine has to skip no longer lets the next indexed one land on a gap). The ExEx picks per block with the rule `ChainCommitted` uses (trie data present and verification not due → index, else execute), shared in `precomputed_trie_data`.\n- `PersistenceState::unwind` no longer waits for the in-flight save itself; `EngineState::unwind` drains it first, in one place. The two rejections log at `warn`.\n- `InMemoryProofsStorage::unwind_history` follows the trait contract: no-op above `latest`, `UnwindBeyondEarliest` at or below `earliest`, no underflow.\n- `ParentHashMismatch`'s docs now describe the unwind case too.\n\n## Tests\n\nEngine live tests in `rust/op-reth/crates/trie/tests/live/reorg_revert_edges.rs`, over backend {InMemory, Mdbx} × flush cadence {(1, 2), (5, 10)} unless noted, each on a seven-block transfer chain. The engine's tip is read through the parent check of a probe block; the persisted history is compared table by table with a fresh store indexed over reth's final canonical chain (`BlockView` / `assert_same_view`), and its proofs are verified against reth's state roots.\n\n| Case | Test | Cells |\n|---|---|---|\n| baseline | `reorg_replaces_the_stored_blocks_above_the_fork` | × path {Index at fork 6, Execute at fork 3, Mixed at fork 4} |\n| (a) | `reorg_not_building_on_the_stored_fork_block_fails_and_changes_nothing` | × fork {6 (buffer or save), 2 (save), 0 (anchor)} × path |\n| (a) restart | `restarted_engine_rejects_a_reorg_not_building_on_a_block_below_its_disk_tip` | `#[ignore]`, see Findings |\n| (b) | `unwind_or_reorg_at_or_below_the_earliest_block_fails_and_changes_nothing` | × {unwind at earliest, reorg below earliest, reorg at the anchor below a pruned window, unwind at the anchor as earliest} |\n| (b) control | `unwind_to_the_block_above_the_earliest_keeps_only_the_earliest` | pruned window |\n| (b) in flight | `unwind_at_a_block_the_in_flight_save_prunes_fails_after_the_save` | pruned window; pins that the checks run against the window as the in-flight save leaves it |\n| (c) | `revert_of_buffered_blocks_unwinds_the_buffer_and_leaves_the_disk_untouched` | cadence (5, 10) only × revert from {6, 7} |\n| (c) in flight | `revert_sent_during_an_in_flight_save_ends_with_the_disk_as_it_was` | |\n| (d) | `reorg_sent_during_an_in_flight_save_ends_consistent_with_reth` | × path |\n\nA `StoreWithWriteGate` holds the engine's next write transaction so the save stays in flight until the case releases it. Whether the engine dequeues the revert or reorg before or after the held save completes is not observable from outside (both orders must end the same, and the tests assert that end state); the pruned-window in-flight case is the one where the order changes the outcome, and it pins it. `SimulatedReth` gained `reorg_with(number, specs)`, `executed_block`, `genesis`, `num_hash` and `spawn_engine_with_window`; `FlushCadence` and `Backend` moved to `live.rs` for sharing.\n\nUnder cadence (1, 2) no block stays in the buffer outside a save in flight, so (c)'s \"(1, 2)\" cells are the in-flight revert test.\n\nExEx tests in `rust/op-reth/crates/exex/src/lib.rs`:\n- (e) `chain_reorged_without_trie_data_executes_the_new_chain` × backend: reth's canonical in-memory state holds the new chain, the notification carries no trie data, the store ends on the new tip and `FinishedHeight` acknowledges it.\n- (f) `chain_reorged_with_different_fork_blocks_fails_and_changes_nothing`: the error is returned, the store keeps its tip, no event is sent. `handle_chain_reorged`'s docs state the expectation.\n- `precomputed_trie_data_follows_the_verification_interval`: a table over interval {0, 2} × block × trie data present/absent.\n\nUnit tests: `engine::buffer::state` (`hash_at` through prune and unwind, bound), `engine::state` (unwind at the anchor, unwind onto a contradicted parent), and `tests/lib.rs` `test_unwind_history_*` over both backends.\n\n## Local verification\n\nAll from `rust/` with the shared target dir, on the final commit:\n\n- `cargo test -p reth-optimism-trie --test live` — 120 passed, 8 ignored (6 pre-existing `abandoned_fork` cells from #23441 and the 2 restart cells here), 40.0 s wall for the whole live target (21.9 s before this PR).\n- `cargo test -p reth-optimism-trie --test live -- reorg_revert_edges` — 64 passed, 2 ignored, 18.3 s.\n- `cargo test -p reth-optimism-trie --lib` — 248 passed (28 under `engine::`, including the 5 new buffer and state tests).\n- `cargo test -p reth-optimism-trie --test lib` — 94 passed (8 of them the new `test_unwind_history_*` cells over InMemory and Mdbx).\n- `CARGO_INCREMENTAL=0 cargo test -p reth-optimism-exex --lib` — 19 passed (12 existing, 2 new reorg tests, 5 `precomputed_trie_data` cases); `cargo test -p reth-optimism-exex --doc --all-features` — 1 passed (the crate doctest needs `--all-features` for `OP_MAINNET`, as `just test-docs` runs it; unchanged by this PR).\n- `cargo clippy -p reth-optimism-trie -p reth-optimism-exex --all-targets` — zero warnings; `just fmt-check` — clean.\n\nThe `rust-code-reviewer` agent ran on the diff; its findings (the reorg task's `Index` arm bypassing `index_block`'s checks, the drain-before-check ordering untested, the in-flight test names, dead code in `PersistenceState::unwind`, naming and dedup) are addressed above.\n\nEvery matrix cell of the engine tests ran locally (both backends × both cadences); the only cells not run are the `#[ignore]`d restart cells, which fail by design today.\n\n## Findings\n\n- (a) and (b) fail on develop without the engine checks: with `self.check_unwind_target(to)?` removed from `EngineState::unwind`, all 28 cells of the two tests fail. (a) `reorg_not_building_on_the_stored_fork_block_fails_and_changes_nothing`: all 12 cells panic with `the reorg does not build on the stored fork block: ()`, i.e. `EngineHandle::reorg` returned `Ok(())` and inserted the chain on the wrong parent. (b) `unwind_or_reorg_at_or_below_the_earliest_block_fails_and_changes_nothing`: the 8 Mdbx cells get `got Persistence(Storage(UnwindBeyondEarliest { .. }))`, the store refusing only after the engine drained the save and sent the unwind to the persistence service; with develop's `InMemoryProofsStorage::unwind_history` the 8 InMemory cells panic with `the unwind would remove the window's earliest block: ()`, the unwind returning `Ok(())` after removing the earliest block.\n- A restarted engine knows no hash below its store's latest block, so a reorg onto a wrong fork block there is accepted; `restarted_engine_rejects_a_reorg_not_building_on_a_block_below_its_disk_tip` is `#[ignore]`d naming this issue and #23385. Fixing it means keeping every block's hash in the store (a schema change), which is out of this issue's scope.\n- The in-memory store's `unwind_history` subtracted one from the target without checking `earliest` or `latest`, so an unwind to block 0 panicked the persistence thread and an unwind above `latest` moved `latest` to a block it never stored.\n\nStacked on #23442, #23441, #23437, #23434, #23429, #23428, #23421 and #23418.\n\nCloses #23391\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-03T22:26:39Z",
+      "createdAt": "2026-10-15T09:50:38Z",
       "mergedAt": null,
-      "additions": 1189,
-      "deletions": 95
+      "additions": 1709,
+      "deletions": 189
     }
   ],
   "codeChanges": {
-    "additions": 17795,
-    "deletions": 7550,
-    "files": 349,
-    "commitCount": 501
+    "additions": 19404,
+    "deletions": 8665,
+    "files": 371,
+    "commitCount": 588
   },
   "completedItems": [
     {
@@ -781,12 +781,66 @@
       ]
     },
     {
+      "title": "contracts-bedrock: add the mainnet portal allowlist",
+      "prNumber": 23933,
+      "type": "other",
+      "body": "Stacked on #23929. Retarget to `proposal/op-contracts/v9.0.0+allowlist` once that merges.\n\n**Mainnet allowlist.** `PortalAllowlist` now restricts L1 chain 1 to:\n\n- `0x6307ed2483af904D67cc7EB74d5Bf97BfE3152be`\n- `0x93Cd74489167f9885f2D7B5112",
+      "files": [
+        "packages/contracts-bedrock/scripts/checks/valid-semver-check/main.go",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/src/libraries/PortalAllowlist.sol",
+        "packages/contracts-bedrock/src/libraries/SemverComp.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerUtils.t.sol",
+        "packages/contracts-bedrock/test/libraries/PortalAllowlist.t.sol",
+        "packages/contracts-bedrock/test/libraries/SemverComp.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/setup/Setup.sol"
+      ]
+    },
+    {
       "title": "contracts-bedrock: retry failed upgrade tests once on transient fork RPC errors",
       "prNumber": 23930,
       "type": "tests",
       "body": "<!-- claude-slack-attribution -->\n_Requested via [Slack thread](https://oplabs-pbc.slack.com/archives/C03N11M0BBN/p1793812273984339)_\n\n**Before:** the `contracts-bedrock-tests-upgrade-*` jobs fail outright when the L1 archive RPC returns a ",
       "files": [
         "packages/contracts-bedrock/justfile"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: restrict OptimismPortal2 deposits and withdrawals to an allowlist",
+      "prNumber": 23929,
+      "type": "other",
+      "body": "Exact cherry-pick of #23712 (7c1ec3f39fe673590b4b40930bc0e33cc3455e3d) onto `proposal/op-contracts/v9.0.0+allowlist`, a fresh branch off `proposal/op-contracts/v9.0.0`. See #23712 for the description.\n\nTo verify the cherry-pick is exact:\n\n`",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L1/IOptimismPortal2.sol",
+        "packages/contracts-bedrock/scripts/checks/valid-semver-check/main.go",
+        "packages/contracts-bedrock/snapshots/abi/OptimismPortal2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/src/libraries/PortalAllowlist.sol",
+        "packages/contracts-bedrock/src/libraries/SemverComp.sol",
+        "packages/contracts-bedrock/test/L1/L1CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/L1/L1ERC721Bridge.t.sol",
+        "packages/contracts-bedrock/test/L1/L1StandardBridge.t.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerUtils.t.sol",
+        "packages/contracts-bedrock/test/libraries/PortalAllowlist.t.sol",
+        "packages/contracts-bedrock/test/libraries/SemverComp.t.sol",
+        "packages/contracts-bedrock/test/setup/Setup.sol"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: Use the real ETHLiquidity balance in tests and docs",
+      "prNumber": 23927,
+      "type": "tests",
+      "body": "L2Genesis and the Lagoon activation deposit fund `ETHLiquidity` with `type(uint128).max` wei. That is the largest value the deposit `mint` field can hold. The `ETHLiquidity` and `SuperchainETHBridge` tests did not use the genesis state. The",
+      "files": [
+        "docs/public-docs/app-developers/reference/contracts/interop/predeploy.mdx",
+        "docs/public-docs/ko/app-developers/reference/contracts/interop/predeploy.mdx",
+        "packages/contracts-bedrock/test/L2/ETHLiquidity.t.sol",
+        "packages/contracts-bedrock/test/L2/SuperchainETHBridge.t.sol"
       ]
     },
     {
@@ -799,6 +853,16 @@
         "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
         "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
         "packages/contracts-bedrock/test/setup/ForkL1Live.s.sol"
+      ]
+    },
+    {
+      "title": "rust: update reth to op-v2.6.0-2",
+      "prNumber": 23924,
+      "type": "other",
+      "body": "Moves the reth pin to the fork tag `op-v2.6.0-2`, which is the fork branch `op-v2.6.0` with the backport of paradigmxyz/reth#28264 (ethereum-optimism/reth#32). The upstream base stays v2.6.0, no shared revm or alloy versions move, and no AP",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml"
       ]
     },
     {
@@ -898,6 +962,22 @@
       ]
     },
     {
+      "title": "ci,op-deployer,op-up: remove goreleaser and op-up releases",
+      "prNumber": 23914,
+      "type": "other",
+      "body": "Stacked on #23907, and must land with or after it: otherwise `op-deployer/v*` tags would produce no binaries.\n\nRemoves the CircleCI `go-release` job and goreleaser. op-deployer binaries now come from the `release-op-deployer` workflow, and ",
+      "files": [
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/main.yml",
+        "docs/public-docs/scripts/generate-releases.ts",
+        "mise.toml",
+        "op-deployer/.goreleaser.yaml",
+        "op-up/.goreleaser.yaml",
+        "op-up/Dockerfile",
+        "ops/book/src/ci/mise.md"
+      ]
+    },
+    {
       "title": "kona-tests: Wait for peers to drop closed connections in restart tests",
       "prNumber": 23913,
       "type": "tests",
@@ -919,6 +999,16 @@
       ]
     },
     {
+      "title": "ci,op-deployer: publish release binaries from GitHub Actions",
+      "prNumber": 23907,
+      "type": "other",
+      "body": "op-deployer can't publish a release: its goreleaser job needs a PAT, and that token has been revoked, so `op-deployer/v0.9.0-rc.1` has no release. This adds a GitHub Actions workflow that builds the same binaries and uses the built-in `GITH",
+      "files": [
+        ".github/workflows/release-op-deployer.yaml",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/release-workflows.mdx"
+      ]
+    },
+    {
       "title": "ci: use GitHub App token for checkout",
       "prNumber": 23905,
       "type": "other",
@@ -932,9 +1022,130 @@
         ".circleci/continue/rust-nightly-bump.yml",
         ".circleci/scripts/test-continuation-params.sh"
       ]
+    },
+    {
+      "title": "op-chain-ops: Store the eth-liquidity-pause guardian call as a function",
+      "prNumber": 23962,
+      "type": "other",
+      "body": "Stacked on ethereum-optimism/optimism#23961. It applies a review comment on ethereum-optimism/optimism#23349.\n\nThe guardian step for `devnet-pause` and `devnet-unpause` stored the SuperchainConfig call as a string. A switch then mapped the ",
+      "files": [
+        "op-chain-ops/cmd/eth-liquidity-pause/main_test.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync.go"
+      ]
+    },
+    {
+      "title": "op-chain-ops: Fix eth-liquidity-pause devnet-unpause and review comments",
+      "prNumber": 23961,
+      "type": "bugfix",
+      "body": "Stacked on ethereum-optimism/optimism#23349. It applies review comments on that PR.\n\n- `devnet-unpause` read the global pause after it sent the guardian `unpause()` transactions. A failed read then returned before the sync and dropped the e",
+      "files": [
+        "op-chain-ops/cmd/eth-liquidity-pause/README.md",
+        "op-chain-ops/cmd/eth-liquidity-pause/contracts.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/main_test.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync_test.go"
+      ]
+    },
+    {
+      "title": "op-chain-ops: pin the registry fetch for v9 upgrade tests",
+      "prNumber": 23956,
+      "type": "tests",
+      "body": "Cherry-pick of #23952 (92bd8985bb33da89d20b2d0b1a232b2686ab2179) from `proposal/op-contracts/v9.0.0`, which fixes the mainnet-fork upgrade jobs. Bottom of the allowlist stack: this, then #23929, then #23933.\n\n🤖 Generated with [Claude Code]",
+      "files": [
+        "op-chain-ops/opcmregistry/registry.go"
+      ]
+    },
+    {
+      "title": "rust: use underscore lint names in workspace lint tables",
+      "prNumber": 23955,
+      "type": "other",
+      "body": "Cargo 1.99, the pinned toolchain, deprecates hyphenated lint names in `[lints]` tables. Because every workspace member inherits the shared lint block, each build printed one `lints.rust.X-Y is deprecated in favor of lints.rust.X_Y` warning ",
+      "files": [
+        "rust/Cargo.toml",
+        "rust/kona/sp1/programs/Cargo.toml"
+      ]
+    },
+    {
+      "title": "op-chain-ops: pin the registry fetch for v9 upgrade tests",
+      "prNumber": 23952,
+      "type": "tests",
+      "body": "Every `contracts-bedrock-tests-upgrade` job and the upgrade-coverage pass on this branch fail since 2026-11-04 21:40 UTC, when superchain-registry #1397 added the final `op-contracts/v9.0.0` entry. `PastUpgrades` fetches the standard-versio",
+      "files": [
+        "op-chain-ops/opcmregistry/registry.go"
+      ]
+    },
+    {
+      "title": "Fix translation drift",
+      "prNumber": 23950,
+      "type": "bugfix",
+      "body": "## Summary\nSync Korean (`ko`) pages with English changes made between 2026-11-03 and 2026-11-05.\n\n## Changes\n- op-deployer: `embedded` artifacts locator replaces `tag://`, SP1 verifier notes in bootstrap/custom deployments, new release publ",
+      "files": [
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/reference/artifacts-locators.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/bootstrap.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/release-workflows.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/run/sequencer.mdx",
+        "docs/public-docs/ko/notices/upgrade-21.mdx"
+      ]
+    },
+    {
+      "title": "release-notes: tag PRs that change go:embed'ed files as LINKED",
+      "prNumber": 23949,
+      "type": "other",
+      "body": "`pr-facts.sh` tagged #23649 and #23714 (Lagoon NUT bundle re-snapshots) as `--` (\"touched nothing the binaries compile\"), although `op-core/nuts` embeds the bundle JSON into op-node, op-batcher and every other binary linking it. Only `.go` ",
+      "files": [
+        ".claude/skills/release-notes/scripts/pr-facts.sh"
+      ]
+    },
+    {
+      "title": "ci: pin SOURCE_DATE_EPOCH for sccache and drop rust-binaries-for-sysgo",
+      "prNumber": 23948,
+      "type": "other",
+      "body": "- **Pin `SOURCE_DATE_EPOCH` in jobs that use sccache.** reth-node-core's vergen build script embeds the build time, so it and every crate that depends on it miss sccache on every build. Same fix as paradigmxyz/reth#27632.\n  - Locally, a war",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "op-chain-ops: Send eth-liquidity-pause transactions through txmgr",
+      "prNumber": 23945,
+      "type": "other",
+      "body": "Stacked on ethereum-optimism/optimism#23349. This PR applies the review comments on that PR.\n\n`sync` and `devnet-*` now send through `op-service/txmgr`. Before this change, the tool used a fixed fee cap of `tip + 2*baseFee` and never resubm",
+      "files": [
+        "op-chain-ops/cmd/eth-liquidity-pause/README.md",
+        "op-chain-ops/cmd/eth-liquidity-pause/chains.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/config.example.toml",
+        "op-chain-ops/cmd/eth-liquidity-pause/contracts.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/main.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/main_test.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/status.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync_test.go"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 349.05585336200386,
+      "prScore": 264.93785336200386,
+      "issueScore": 2,
+      "reviewScore": 81,
+      "commentScore": 1.1179999999999999,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 347.7140748831585,
+      "prScore": 272.31407488315847,
+      "issueScore": 0,
+      "reviewScore": 75,
+      "commentScore": 0.4,
+      "summary": null
+    },
     {
       "username": "einar-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
@@ -958,30 +1169,20 @@
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 316.86267467027915,
+      "totalScore": 321.36267467027915,
       "prScore": 243.02267467027912,
       "issueScore": 0,
-      "reviewScore": 73.5,
+      "reviewScore": 78,
       "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
-      "username": "sebastianst",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 289.9410233223442,
-      "prScore": 215.16302332234423,
-      "issueScore": 2,
-      "reviewScore": 72,
-      "commentScore": 0.7779999999999999,
-      "summary": null
-    },
-    {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 253.6563333305259,
-      "prScore": 193.4563333305259,
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 252.45220569328177,
+      "prScore": 207.75220569328175,
       "issueScore": 0,
-      "reviewScore": 60,
+      "reviewScore": 44.5,
       "commentScore": 0.2,
       "summary": null
     },
@@ -993,16 +1194,6 @@
       "issueScore": 2,
       "reviewScore": 122.5,
       "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 242.45220569328177,
-      "prScore": 207.75220569328175,
-      "issueScore": 0,
-      "reviewScore": 34.5,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1026,43 +1217,83 @@
       "summary": null
     },
     {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 132.3832572639289,
+      "prScore": 80.38325726392888,
+      "issueScore": 0,
+      "reviewScore": 52,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 120.99031947012202,
+      "totalScore": 130.49031947012202,
       "prScore": 105.35231947012201,
       "issueScore": 0,
-      "reviewScore": 15,
+      "reviewScore": 24.5,
       "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 95.64357359027997,
-      "prScore": 20.643573590279974,
+      "totalScore": 122.2912360800503,
+      "prScore": 47.2912360800503,
       "issueScore": 0,
       "reviewScore": 75,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
-      "totalScore": 89.99682310069406,
-      "prScore": 33.99682310069406,
-      "issueScore": 2,
-      "reviewScore": 54,
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 120.86052332587079,
+      "prScore": 120.86052332587079,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 87.79347467873077,
+      "totalScore": 107.99347467873076,
       "prScore": 6.953474678730768,
       "issueScore": 0,
-      "reviewScore": 80.5,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 100.5,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 100.22359532220553,
+      "prScore": 98.47159532220553,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.7519999999999998,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 94.49682310069406,
+      "prScore": 33.99682310069406,
+      "issueScore": 2,
+      "reviewScore": 58.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 91.73768612428044,
+      "prScore": 69.23768612428044,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1076,13 +1307,13 @@
       "summary": null
     },
     {
-      "username": "0xiamflux",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
-      "totalScore": 78.23768612428044,
-      "prScore": 69.23768612428044,
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 75.60960877851578,
+      "prScore": 70.40960877851577,
       "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1098,40 +1329,30 @@
     {
       "username": "pcw109550",
       "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
-      "totalScore": 55.99297467267604,
+      "totalScore": 60.99297467267604,
       "prScore": 45.99297467267604,
       "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 53.8037738965761,
-      "prScore": 52.4897738965761,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 1.3139999999999998,
-      "summary": null
-    },
-    {
-      "username": "oplabs-renovate",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 32.39789527279837,
-      "prScore": 32.39789527279837,
-      "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 15,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "zkfrov",
       "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
-      "totalScore": 29.9888642567265,
+      "totalScore": 43.4888642567265,
       "prScore": 20.9888642567265,
       "issueScore": 0,
-      "reviewScore": 9,
+      "reviewScore": 22.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ihooni",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/37792049?u=5d5dfa80bc54fd29248ecec7b4a6d259f56450c1&v=4",
+      "totalScore": 30.827006011276538,
+      "prScore": 30.827006011276538,
+      "issueScore": 0,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
@@ -1146,23 +1367,33 @@
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 20,
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 23.4,
       "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0,
+      "issueScore": 2,
+      "reviewScore": 21,
+      "commentScore": 0.4,
       "summary": null
     },
     {
       "username": "wiz-0f98cca50a",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 18.4,
+      "totalScore": 22.9,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 18,
+      "reviewScore": 22.5,
       "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1176,6 +1407,36 @@
       "summary": null
     },
     {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 14.04,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "Joxess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "totalScore": 13.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "ninglinLiu",
       "avatarUrl": "https://avatars.githubusercontent.com/u/224592858?v=4",
       "totalScore": 13.457255501795592,
@@ -1186,28 +1447,18 @@
       "summary": null
     },
     {
-      "username": "raffaele-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
-      "totalScore": 10,
-      "prScore": 0,
+      "username": "lake-dunamu",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/258745035?v=4",
+      "totalScore": 10.201348061489414,
+      "prScore": 10.201348061489414,
       "issueScore": 0,
-      "reviewScore": 10,
+      "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "jefr90",
       "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?u=f827e4edffd5a9407141e223985a4d49d2b1675b&v=4",
-      "totalScore": 10,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "Ethnical",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
       "totalScore": 10,
       "prScore": 0,
       "issueScore": 0,
@@ -1223,16 +1474,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "ZakAyesh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
-      "totalScore": 9.34,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.33999999999999997,
       "summary": null
     },
     {
@@ -1266,16 +1507,6 @@
       "summary": null
     },
     {
-      "username": "donoso-eth",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 5.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "OptimismBot",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112345690?u=b937400b7bbf542c76c02e36ddf8c760c20cce87&v=4",
       "totalScore": 5.2,
@@ -1286,8 +1517,8 @@
       "summary": null
     },
     {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -1296,8 +1527,8 @@
       "summary": null
     },
     {
-      "username": "hdcesario-op",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "username": "Agrahm13",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/217385645?v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -1336,8 +1567,8 @@
       "summary": null
     },
     {
-      "username": "Joxess",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
       "totalScore": 0.2,
       "prScore": 0,
       "issueScore": 0,
@@ -1346,9 +1577,9 @@
       "summary": null
     }
   ],
-  "newPRs": 91,
-  "mergedPRs": 46,
+  "newPRs": 109,
+  "mergedPRs": 61,
   "newIssues": 22,
   "closedIssues": 18,
-  "activeContributors": 53
+  "activeContributors": 58
 }
