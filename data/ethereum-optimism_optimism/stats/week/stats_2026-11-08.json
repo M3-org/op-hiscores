@@ -5,30 +5,148 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-08 to 2026-11-15, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 1 active contributors.",
+  "overview": "From 2026-11-08 to 2026-11-15, ethereum-optimism/optimism had 9 new PRs (2 merged), 0 new issues, and 12 active contributors.",
   "topIssues": [],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABNl0vJg",
-      "title": "ci: bump rust nightly pin to nightly-2026-11-07",
-      "author": "opgitgovernance",
-      "number": 23983,
-      "body": "Automated weekly bump of the pinned nightly Rust toolchain from `nightly-2026-10-31` to `nightly-2026-11-07`. CI on this PR will validate the new toolchain compiles cleanly.",
+      "id": "PR_kwDODjvEJM8AAAABNvno6w",
+      "title": "kona-executor: experiment with reth's sparse trie as the trie backend",
+      "author": "joshklop",
+      "number": 23991,
+      "body": "**Experiment, not for merge.** Tests whether kona's fault-proof executor can use reth's sparse trie (`reth-trie-sparse`, what op-reth's engine computes state roots with) instead of `kona-mpt`, and what it costs. The `sparse-trie` feature of `kona-executor` swaps the trie database; it is off by default and no program enables it. The default build is unchanged.\n\nThe reth pin moves to the head of [ethereum-optimism/reth#39](https://github.com/ethereum-optimism/reth/pull/39) (a draft on `op-v2.6.0-2`), which builds the sparse trie without `std`. With it, `kona-executor` builds for `riscv32imac-unknown-none-elf` with the sparse trie.\n\n## Results\n\nOn the 8 executor fixture blocks:\n\n- **4 of 8 match exactly.** The block hash is correct, with the same number of preimage fetches as kona-mpt.\n- **4 of 8 fail.** Each inserts a key that splits an extension node. reth's sparse trie stores an extension merged with its child branch, and cannot reveal one without the other. kona-mpt splits an extension without fetching its child, so the fixtures, recorded from kona-mpt's fetches, lack that preimage. A host fed by op-reth's witness would likely have it (reth's witness builder records extension children, `crates/trie/trie/src/witness.rs`), but a host fed by an EL that doesn't, or by `eth_getProof` fallbacks, would not. Enabling the sparse trie would tie kona's preimage needs to reth's witness shape.\n\n**Cost: the sparse trie is cheaper than kona-mpt today, but not cheaper than kona-mpt with a branch-hash cache.** kona-mpt re-encodes and re-hashes every opened node on each root computation. A cache of about 20 lines (set a branch's hash when it is fetched or hashed, clear it when an insert or delete passes through) removes that, and beats the sparse trie on every block. The cache is measured here but not part of this PR.\n\nMeasured with callgrind (x86) on the 4 matching blocks. \"Trie instructions\" is the inclusive cost of the trie database's `state_root`, `basic` and `storage`. \"Keccak-f\" counts Keccak-f permutations in the whole run, which is what SP1's keccak precompile charges by.\n\n| Block | Trie instructions: kona-mpt | cached kona-mpt | sparse trie | Keccak-f: kona-mpt / cached / sparse |\n|---|---|---|---|---|\n| 26207960 | 9.9M | 7.6M (0.76×) | 8.5M (0.86×) | 1,415 / 1,117 / 1,154 |\n| 26207961 | 65.6M | 34.0M (0.52×) | 43.2M (0.66×) | 8,646 / 4,879 / 5,336 |\n| 26207963 | 21.1M | 16.1M (0.76×) | 18.1M (0.86×) | 3,288 / 2,663 / 2,738 |\n| 26211680 | 67.0M | 52.3M (0.78×) | 59.1M (0.88×) | 18,981 / 17,144 / 17,624 |\n\nThe sparse trie computes roots slightly more cheaply than cached kona-mpt (16.8M vs 18.6M instructions on 26207961), but its reads cost 1.7–1.9× more: each lookup restarts from the root with `find_leaf`, and fetched nodes are converted to reth's node types. That read overhead is not keccak, so it carries into RISC-V roughly one for one. Not measured: SP1 PGU or Cannon steps.\n\nTo reproduce: `MEASURE_ITERS`, `MEASURE_FIXTURE` and the callgrind steps are documented on the ignored `measure_trie_backend` test.\n\n## Takeaway\n\nOn cost alone, caching hashes in kona-mpt gets more than the sparse trie does, without new dependencies, without tying kona to reth's node model, and without the extension-child preimages. The sparse trie's case would have to rest on sharing code with op-reth, not on proof cost.\n\n## Before this could merge\n\n- ethereum-optimism/reth#39 merged and tagged; the pin moved to that tag.\n- Typed errors in place of strings, unit and differential tests for `SparseTrieDB`, and dedup of `block_hash` / `code_by_hash` with `TrieDB`.\n- A decision on the extension-child preimages above, and SP1 / Cannon measurements.\n\n## Reviews\n\nRan `rust-code-reviewer`, `kona-sp1-cost-reviewer` and `reth-update-reviewer`. Addressed: missing `hint_trie_node` before fetches outside the hinted proofs; removal of accounts created and destroyed in the block; the profiling-only `#[inline(never)]` now behind a `trie-profiling` feature; `test-utils` propagation. Left for a merge-ready version: the items listed above. The SP1 reviewer found no change to the guests as built today: no guest compiles a reth crate, and the moved storage-root logic is unchanged.\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01VcLt12t1d7VuM9QGcVMGxU)_",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-08T00:02:09Z",
+      "createdAt": "2026-11-09T01:34:52Z",
       "mergedAt": null,
-      "additions": 1,
-      "deletions": 1
+      "additions": 931,
+      "deletions": 195
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABNu4j2g",
+      "title": "kona-disc!: Replace the address scope with a public-only table filter",
+      "author": "joshklop",
+      "number": 23987,
+      "body": "Stacked on https://github.com/ethereum-optimism/optimism/pull/23895, as suggested in https://github.com/ethereum-optimism/optimism/pull/23895#pullrequestreview-5820238040. It keeps that PR's dial-after-session rule and bootstore changes, and replaces the rest of the address filtering with a fixed public-only filter, as Lighthouse does. A second commit fixes problems that a correctness review found in #23895, and one this PR had introduced.\n\nFor operators, compared with #23895:\n- **Filter:** discovery uses only public addresses unless `--p2p.discovery.private` is set. It no longer allows private addresses on its own when the advertised IP is a loopback or LAN address. That auto-detection also enabled them on a k8s pod that sets its listen IP to its pod IP, which is the deployment where dialing private ranges draws abuse reports.\n- **Redial:** gossip redials the peers it lost. Under #23895 a peer reached gossip only when a discv5 session started. discv5 reports that once and keeps the session alive for as long as it pings the node, so a dropped or refused gossip connection was never retried. The driver now hands gossip the saved records, the bootnodes and the session-confirmed records, at startup and on every store interval. Before #23895, every lookup result was handed over every 5s.\n- **Startup:** sessions started during startup are no longer dropped. The event stream now starts before bootstrap.\n- **Bootnodes:**\n  - An enode-URL bootnode's address is checked before discovery contacts it, as #23895 did.\n  - An ENR bootnode the filter rejects is skipped with a warning that names the flag.\n  - A bootnode whose record fails validation is removed from the table.\n- **Bootstore:** a session from a private address on a public-only node is still dialed, since the session shows that the node is reachable, but it isn't saved.\n- **Docs:** the section shrinks, and now says bootnodes are dialed without a session.\n\nFor Rust users, compared with #23895:\n- `AddrScope`, `AddrFilter`, `AddrError` and `Discv5Builder::with_addr_filter` are gone.\n- `kona_disc::public_only` is a plain `discv5::Config::table_filter`. The builder keeps the config's filter rather than overwriting it.\n- `Discv5Driver::new` takes the filter its `Discv5` was built with, and applies it to bootnodes and saved records too.\n- `Discv5Driver::forward` now also controls the periodic hand-over.\n- The discovery and gossip examples install `public_only`, as kona-node does.\n\nThe filter covers unspecified, loopback, private, link-local, shared, multicast, broadcast and documentation addresses (including `3fff::/20`) with the std predicates. It drops the IANA tables and the `ipnet` dependency, so the other special-purpose blocks, such as `198.18.0.0/15`, `240.0.0.0/4` and NAT64, now count as public. Some of them can be reached inside private networks, such as GKE's Class E pod ranges, so a public-only node may now dial them when it learns them from a lookup. I judged that an acceptable cost for dropping the tables, but it's a trade-off, not a free removal.\n\nLeft as is, and out of scope:\n- **IPv6-mode dual-stack peers:** a node that runs discovery over IPv6 never dials dual-stack peers. Its sessions come over IPv6, but `holds_session_ip` and `enr_to_multiaddr` both use the record's IPv4 TCP address first. A fix has to change both together, so that gossip dials the address the session confirmed. The check is safe as it stands: it drops these peers rather than dialing a wrong address. This corrects my earlier note, which said the behavior was deliberate.\n- **Bootstore eviction:** eviction is FIFO, and each new sequence number of a record adds an entry. This predates #23895.\n- **Records saved by older versions:** unconfirmed records saved before #23895 that pass the filter stay saved and are dialed.\n\nTests:\n- New: `test_saved_records_are_handed_over_again`, `test_accepts_enode`, and a \"not contacted\" assertion in `test_public_only_node_drops_loopback_enode_bootnode`. Each fails with its fix disabled.\n- Removed: the builder's per-advertised-IP filter cases, and the public-only LAN-bootnode integration test, which only exercised discv5's `add_enr` filter.\n\nReviews: `rust-code-reviewer` and `deletion-reviewer` ran on the first commit. Three correctness reviewers ran on both PRs, and the second commit addresses their findings for this PR. Locally, clippy, rustdoc and nextest pass for kona-disc, kona-node-service, kona-node, kona-peers and both examples. The exception is `test_online_discv5_driver_bootstrap_testnet`, which fails the same way on #23895's branch because it needs live Sepolia bootnodes.\n\nBREAKING CHANGE: compared with #23895, a node that advertises a loopback or LAN address no longer allows private addresses on its own. A devnet that uses loopback or LAN bootnodes or peers through discovery must set `--p2p.discovery.private`. op-devstack runs kona-node without discovery by default, so it isn't affected. Rust users of `kona-disc`: set `discv5::Config::table_filter`, for example to `kona_disc::public_only`, in place of `with_addr_filter`, and pass it to `Discv5Driver::new`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T00:04:41Z",
+      "mergedAt": null,
+      "additions": 361,
+      "deletions": 693
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABNvN9xQ",
+      "title": "kona-node: keep delegated heads when the delegate's current L1 is not on our L1 yet",
+      "author": "joshklop",
+      "number": 23990,
+      "body": "kona light nodes (derivation delegation) reject a delegate's whole sync status when their own L1 provider doesn't have the delegate's `current_l1` yet. On the staging devnets, the L1 endpoint is a consensus-aware proxyd whose consensus head moves back a few blocks when a lagging L1 backend rejoins. Verified safe and finalized heads are then thrown away in bursts. This is the kona-node side of ethereum-optimism/optimism#23989, which makes the same change in op-node.\n\nAfter this change, the node sends the verified heads to the engine, leaves the published derivation origin unchanged, and increments `kona_node_derivation_delegate_current_l1_not_found_total`. A `current_l1` hash mismatch or any other lookup error still rejects the status. A matching `current_l1` is what proves the L1 blocks holding the batches are on our chain, so those cases stay strict.\n\nAPI change: `DelegateDerivationActor` drops its `L1Provider` type parameter and takes `AlloyChainProvider` directly. That's its only instantiation, and it lets the not-found case match the typed `AlloyChainProviderError::BlockNotFound` rather than an opaque `ChainProvider::Error`. There are no users outside `kona-node-service`.\n\nReviews: `rust-code-reviewer` ran, and its suggestions are adopted:\n- concrete provider type\n- one warning site\n- typed error source\n- exact mockall call counts\n- `rstest` cases\n- tests that queue every L1 answer and check the mock transport is drained\n\nNot done:\n- The new counter isn't asserted in a test.\n- A pre-existing gap: kona rejects a zero `current_l1`, while op-node treats it as \"not reported\". That's a separate follow-up.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T00:40:40Z",
+      "mergedAt": null,
+      "additions": 286,
+      "deletions": 61
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABNvFslA",
+      "title": "op-node: keep follow-source heads when upstream CurrentL1 is not on our L1 yet",
+      "author": "joshklop",
+      "number": 23989,
+      "body": "Light nodes (`--l2.follow.source`) reject a whole follow-source poll, and count it as `error_l1_lookup`, when their own L1 RPC doesn't have the upstream's CurrentL1 yet. On the staging devnets, the L1 endpoint is a consensus-aware proxyd whose consensus head moves back a few blocks when a lagging L1 backend rejoins. That makes this happen in bursts on every light node at once, and it fires the `l2-follow-source-error-rate-*` alerts. From Nov 1–8, all 1,309 follow-source errors on sepolia-devnet-2, sepolia-devnet-3 and platforms-1 were this case, and every one fell in an L1 backend lag window.\n\nAfter this change, the node applies the already-verified safe and finalized heads, leaves CurrentL1 unchanged, and increments `op_node_default_follow_source_current_l1_not_found_total` instead of recording an error. A CurrentL1 hash mismatch or any other lookup error still rejects the poll. A matching CurrentL1 is what proves the L1 blocks holding the batches are on our chain, so those cases stay strict.\n\nEffect on operators: follow-source error rates drop, and there is one new counter. A follower whose L1 RPC stays behind indefinitely no longer shows up in the error rate, so an alert on this counter belongs in the alert rules. That's a follow-up.\n\nReviews: `go-code-reviewer` ran. Its main suggestion, keeping mismatches and other lookup errors strict, is adopted. `safedb-reviewer` doesn't apply: follow mode promotes safe heads with an empty L1 source either way. The kona-node equivalent is ethereum-optimism/optimism#23990.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T00:26:17Z",
+      "mergedAt": null,
+      "additions": 191,
+      "deletions": 27
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABNu8yKA",
+      "title": "kona-engine: read only headers for the super-root output",
+      "author": "joshklop",
+      "number": 23988,
+      "body": "Stacked on #23960 (base `einar/superroot-by-number`); merge that first.\n\n`superroot_atTimestamp` reads the target block with all its transactions to build an `L2BlockInfo`, but an output root only needs the header. On busy chains a full block is megabytes of JSON, which eats into the RPC timeout that #23960 is meant to fit inside. op-node's `OutputV0AtBlock` reads only the header.\n\n`superroot_atTimestamp` now asks the EL only for headers (`eth_getBlockByHash` / `eth_getBlockByNumber` with `false`). Its answers are unchanged. `optimism_outputAtBlock` still reads the full block, because its response needs the L1 origin and sequence number from the L1-info deposit.\n\nIf the EL returns a header whose reported hash is not its own hash, the query now fails with an internal error, as op-node's header check does. Before, the block id was computed from the header but the output root used the reported hash. For a block read by number, nothing compared the two, so after Isthmus a mismatch would have been served in the output root.\n\nReviews: `rust-code-reviewer` found nothing blocking. I applied its point about using one hash and its doc nit. I dismissed its nit to replace the `(id, output)` tuple with a struct, because that shape predates this PR and `output_at_block` shares it. `safedb-reviewer` found nothing that changes when the query answers or which `required_l1` it pairs with the output. Its one finding was the unchecked hash above, which this PR fixes.\n\nPart of #23473.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T00:12:05Z",
+      "mergedAt": null,
+      "additions": 130,
+      "deletions": 52
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 15,
+    "deletions": 2,
+    "files": 3,
+    "commitCount": 22
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "kona-gossip: make block timestamp bound tests clock-safe",
+      "prNumber": 23981,
+      "type": "tests",
+      "body": "Fixes a flake in `test_block_invalid_timestamp_too_far`. The test builds a block at wall-clock second `t` with timestamp `t + 6`. `block_valid` then reads the clock again. If a second boundary passes between the two reads, the validator see",
+      "files": [
+        "rust/kona/crates/node/gossip/src/block_validity.rs"
+      ]
+    },
+    {
+      "title": "ci: run 32 fault-proof tests at once in op-e2e-cannon-tests",
+      "prNumber": 23985,
+      "type": "tests",
+      "body": "**Metrics** (`op-e2e-cannon-tests`, develop only)\n- Job: 52.7 min median (60.7 p95, 54 develop runs) -> 30.3 min median (28.2-36.7, 5 runs)\n- develop pipeline: about 61 -> about 37 min\n- Compute: about -44% per merge, on the same 2xlarge.ge",
+      "files": [
+        ".circleci/continue/main.yml",
+        "justfile"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 212.15094548770224,
+      "prScore": 188.15094548770224,
+      "issueScore": 0,
+      "reviewScore": 24,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 26.789906649788,
+      "prScore": 26.789906649788,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "syszery",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/66296529?u=6abf057ea157bc59293cae3ec31406fbe10d8c77&v=4",
+      "totalScore": 17.889487437162853,
+      "prScore": 17.689487437162853,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "galexandrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2121751?u=90edbbcd01bd8e067447bb04235c92d8410f69f4&v=4",
+      "totalScore": 9.500984046564275,
+      "prScore": 9.500984046564275,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
@@ -38,11 +156,21 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "arunimshukla",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54760103?u=cb1593e1bd293fc5bdd5191d9eaa987355423a91&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 0,
+  "newPRs": 9,
+  "mergedPRs": 2,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 1
+  "activeContributors": 12
 }

@@ -5,9 +5,57 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-08 to 2026-11-09, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 1 active contributors.",
+  "overview": "From 2026-11-08 to 2026-11-09, ethereum-optimism/optimism had 4 new PRs (2 merged), 0 new issues, and 11 active contributors.",
   "topIssues": [],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABNtuWcA",
+      "title": "op-deployer: add --deploy-mock-sp1-verifier to apply",
+      "author": "joshklop",
+      "number": 23986,
+      "body": "Since #23868, `op-deployer apply --deployment-target genesis` fails with `sp1Verifier must be specified for genesis deployments` unless the caller supplies a verifier. A dummy address in the `sp1Verifier` override doesn't help: `SP1PlonkAdapter`'s constructor reverts unless the address has code, and a generated L1 has none at that stage. The one working option, `DeployMockSP1Verifier`, existed only in the Go API, so sysgo and op-e2e kept working. Tools that run the CLI could no longer deploy a genesis devnet at all. kupcake is one of them, and it is what optimism-premium's devnet suites run on, so premium has held op-deployer at a commit from before #23868.\n\nThis adds a hidden, test-only `--deploy-mock-sp1-verifier` flag (`DEPLOYER_DEPLOY_MOCK_SP1_VERIFIER`) that sets the existing option. Nothing changes for anyone who doesn't set it. The existing check in `ApplyPipeline` still rejects it for live deployments, and an `sp1Verifier` override still takes precedence over the mock. The kupcake change that uses it, ethereum-optimism/kupcake#80, sets the env var, so op-deployer images without this flag ignore it rather than failing on an unknown flag.\n\n`TestCLIApplyGenesisMockSP1Verifier` needs `forge-artifacts`, which weren't available where this was written, so its first run is CI's `go-tests` job, which passed. It runs a genesis apply through the CLI binary: without the flag it expects the existing error, and with the flag it checks that the mock is in the L1 genesis state. `go-code-reviewer` found no correctness issues, and its test suggestions are applied. `lint-go` (golangci-lint run on the changed packages, plus `go mod tidy -diff`) passes. No other review agent's trigger matches this diff.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nhttps://claude.ai/code/session_01VcLszxkCURAhDiTxN5H2sT",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-08T21:33:19Z",
+      "mergedAt": null,
+      "additions": 115,
+      "deletions": 24
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABNqMwBA",
+      "title": "kona-gossip: record dial and connection counts as counters, not gauges",
+      "author": "syszery",
+      "number": 23984,
+      "body": "<!--\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\n-->\n\n**Description**\n\n<!--\nA clear and concise description of the features you're adding in this pull request.\n-->\n\n`kona_node_dial_peer`, `kona_node_dial_peer_error{type}` and `kona_node_gossipsub_connection{type}` were recorded and described as gauges, but they are only ever incremented. This PR records them as counters, as suggested in #23699. Metric names are unchanged.\n\n- Changed `gauge!(..).increment(1)` to `counter!(..).increment(1)` in `driver.rs` and `gater.rs`\n- Changed `describe_gauge!` to `describe_counter!`, and adds the missing description for `DIAL_PEER_ERROR`\n- `Metrics::zero()` now uses `.absolute(0)` for these metrics\n- Doc comments updated, and the `dial_errors` test helper now reads `DebugValue::Counter`\n\nOther increment-only gauges and related findings are noted in the issue.\n\n**Compatibility**\n\nThe exported metric type changes from gauge to counter. The Grafana dashboards in this repo already query all three with `rate()`, so they should be unaffected. Owners of external dashboards or alerts might need to check theirs (for example whether they store the metric type).\n\n**Tests/Verification**\n\n<!--\nPlease describe any tests you've added. If you've added no tests, or left important behavior untested, please explain why not.\n-->\n\n- Searched the repo for every use of the three constants and metric names: all are in the gossip crate and the two dashboards, and nothing outside `rust/` references them. No gauge and counter should share a name anymore.\n- Confirmed in the code that none of them is decremented or set to a non-zero value.\n- `rust/` tests all pass on my machine, and `cargo +nightly fmt -p kona-gossip -- --check` is clean.\n\n**Metadata**\n\n<!-- \nInclude a link to any github issues that this may close in the following form:\n- Fixes #[Link to Issue]\n-->\n\nAddresses #23699 \n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-08T13:17:13Z",
+      "mergedAt": null,
+      "additions": 26,
+      "deletions": 25
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABNtspsw",
+      "title": "ci: run 32 fault-proof tests at once in op-e2e-cannon-tests",
+      "author": "mds1",
+      "number": 23985,
+      "body": "**Metrics** (`op-e2e-cannon-tests`, develop only)\n- Job: 52.7 min median (60.7 p95, 54 develop runs) -> 30.3 min median (28.2-36.7, 5 runs)\n- develop pipeline: about 61 -> about 37 min\n- Compute: about -44% per merge, on the same 2xlarge.gen2 runner\n\n**Why**\n\nThe tests mostly wait on L1 blocks: 16 at once used about 3 of 16 cores, and per-test times are the same at 32. So the job takes about total test time divided by the number running at once. That number comes from `nproc` (`-parallel=16`), and the cannon tests are also capped by `OP_E2E_EXECUTOR_LIMIT` (16), so both go to 32.\n\n**Why it's safe**\n- The same 186 tests ran as on develop (180 passed, 6 skipped), with no reruns in 5 runs.\n- Anonymous memory peaked at 22.3-23.5 GiB of 32 GiB in 3 sampled runs, including a point where every heavy test was running. No OOM kills and negligible memory pressure.\n- A new step prints `memory.events` and `memory.pressure` after the tests, so an OOM kill shows up there instead of looking like a flaky test. If it does, lower the number.\n- Local runs are unchanged.\n\n**Tradeoffs**\n- About 8 GiB of headroom. Heavier processes after a reth or cannon upgrade could use it up.\n- CPU briefly saturates, and a few tests run 5-15% slower. `TestSuperCannonPublishCannonRootClaim` already needs a rerun in about 4% of develop runs, and 5 runs can't show whether that changes.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-08T21:29:25Z",
+      "mergedAt": "2026-11-08T22:05:23Z",
+      "additions": 10,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABNZWekA",
+      "title": "kona-gossip: make block timestamp bound tests clock-safe",
+      "author": "teddyknox",
+      "number": 23981,
+      "body": "Fixes a flake in `test_block_invalid_timestamp_too_far`. The test builds a block at wall-clock second `t` with timestamp `t + 6`. `block_valid` then reads the clock again. If a second boundary passes between the two reads, the validator sees `t + 1`, so the block is exactly at the `current + 5` bound and is accepted. This failed on an RWX runner during the RWX CI pilot (ethereum-optimism/optimism#23151). With an offset of 10, the test fails only if more than 4 seconds pass. There is no effect on users. The production bound is unchanged.\n\n`test_block_invalid_timestamp_early` (`-= 61` against the 60-second bound) is not racy and is unchanged: forward clock movement only pushes its block further into the past. Only a backward clock step could break it.\n\nI did not inject the current time into the handler. That would let tests assert the exact `now + 5` / `now + 6` edge, but it is a larger refactor than this one flake needs. `rust-code-reviewer` ran on the diff: no findings beyond a comment-wording nit, which is applied.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-06T20:12:38Z",
+      "mergedAt": "2026-11-08T22:23:27Z",
+      "additions": 5,
+      "deletions": 1
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABNl0vJg",
       "title": "ci: bump rust nightly pin to nightly-2026-11-07",
@@ -22,13 +70,83 @@
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 15,
+    "deletions": 2,
+    "files": 3,
+    "commitCount": 13
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "kona-gossip: make block timestamp bound tests clock-safe",
+      "prNumber": 23981,
+      "type": "tests",
+      "body": "Fixes a flake in `test_block_invalid_timestamp_too_far`. The test builds a block at wall-clock second `t` with timestamp `t + 6`. `block_valid` then reads the clock again. If a second boundary passes between the two reads, the validator see",
+      "files": [
+        "rust/kona/crates/node/gossip/src/block_validity.rs"
+      ]
+    },
+    {
+      "title": "ci: run 32 fault-proof tests at once in op-e2e-cannon-tests",
+      "prNumber": 23985,
+      "type": "tests",
+      "body": "**Metrics** (`op-e2e-cannon-tests`, develop only)\n- Job: 52.7 min median (60.7 p95, 54 develop runs) -> 30.3 min median (28.2-36.7, 5 runs)\n- develop pipeline: about 61 -> about 37 min\n- Compute: about -44% per merge, on the same 2xlarge.ge",
+      "files": [
+        ".circleci/continue/main.yml",
+        "justfile"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 33.90628484521861,
+      "prScore": 24.406284845218607,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 26.789906649788,
+      "prScore": 26.789906649788,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "syszery",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/66296529?u=6abf057ea157bc59293cae3ec31406fbe10d8c77&v=4",
+      "totalScore": 17.889487437162853,
+      "prScore": 17.689487437162853,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "galexandrov",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2121751?u=90edbbcd01bd8e067447bb04235c92d8410f69f4&v=4",
+      "totalScore": 9.500984046564275,
+      "prScore": 9.500984046564275,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
@@ -38,11 +156,21 @@
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "arunimshukla",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/54760103?u=cb1593e1bd293fc5bdd5191d9eaa987355423a91&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 0,
+  "newPRs": 4,
+  "mergedPRs": 2,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 1
+  "activeContributors": 11
 }
