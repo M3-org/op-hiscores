@@ -5,78 +5,264 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-09 to 2026-11-10, ethereum-optimism/optimism had 5 new PRs (0 merged), 0 new issues, and 5 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-11-09 to 2026-11-10, ethereum-optimism/optimism had 24 new PRs (7 merged), 7 new issues, and 30 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABdrSxug",
+      "title": "op-deployer: measure forge's peak memory instead of trusting forgeRunMemory",
+      "author": "sebastianst",
+      "number": 23995,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Follow-up to #23664, part of #23300.\n\nop-deployer limits concurrent forge runs per host by memory, using a hard-coded estimate of one run's peak memory on contracts-bedrock: `forgeRunMemory = 1536 << 20` ([slots.go:42](https://github.com/ethereum-optimism/optimism/blob/06b0ae6b1c7749041601097dcde0deb4cdca0720/op-deployer/pkg/deployer/forge/slots.go#L42)). `slotCount` divides the container's memory limit by it ([slots.go:44-52](https://github.com/ethereum-optimism/optimism/blob/06b0ae6b1c7749041601097dcde0deb4cdca0720/op-deployer/pkg/deployer/forge/slots.go#L44-L52)).\n\nNothing keeps that value current. When contracts-bedrock grows, the real peak exceeds the estimate. Then too many forge runs share a CI container, and jobs are OOM-killed as flakes instead of failing with a clear message.\n\n### Proposal\n\nMeasure the peak, and fail a test when it nears the estimate:\n\n1. After `cmd.Run()` in `execWithEnv` ([client.go:429](https://github.com/ethereum-optimism/optimism/blob/06b0ae6b1c7749041601097dcde0deb4cdca0720/op-deployer/pkg/deployer/forge/client.go#L429)), read forge's peak RSS from `cmd.ProcessState.SysUsage()` (`syscall.Rusage.Maxrss`, KiB on Linux). Log it at debug level with the script name.\n2. Expose the peak to tests, and assert in a test that runs a real contracts-bedrock script. For example, one of the live runs in `integration_test/apply_test.go`. It should fail when a run exceeds about 90% of `forgeRunMemory`, and the message should give the measured value to bump the constant to.\n\n### Done when\n\n- A forge run's peak memory is logged.\n- A test that runs in CI fails before the estimate goes stale.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "createdAt": "2026-11-09T12:59:25Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABdo-OEw",
+      "title": "kona-client: the library cannot be built for a no_std target",
+      "author": "yoshidan",
+      "number": 23993,
+      "repository": "ethereum-optimism/optimism",
+      "body": "`kona-client`'s library side — `fpvm_evm`, `interop`, `single` — never references `kona_std_fpvm`; only the two binary sources, `src/kona.rs` and `src/kona_interop.rs`, do. But `kona-std-fpvm` and `kona-std-fpvm-proc` are declared unconditionally in `[dependencies]`, so cargo builds them for the library too. `kona-std-fpvm` reads the preimage oracle over file descriptors (`std::fs::File`, `std::os::fd`) and carries no `#![no_std]`, so a consumer that wants only the library cannot build for a `no_std` target:\n\n```\nerror: `std` is required by `kona_std_fpvm` because it does not declare `#![no_std]`\n```\n\nNo feature avoids it today: `client-tracing`, the only one, enables `kona-std-fpvm/tracing`.\n\nWe hit this building an Intel SGX enclave. The OP Stack light client in [datachainlab/optimism-elc](https://github.com/datachainlab/optimism-elc) uses `kona_client::fpvm_evm::FpvmOpEvmFactory`, and the enclave is built for a custom `x86_64-unknown-unknown-sgx` target with `-Z build-std=core,alloc`, where no `std` exists at all.\n\n`kona-client` is also absent from `no_std_packages` in `rust/justfile`, so `just check-no-std` does not cover it.\n\n### Proposal\n\nMove both dependencies behind a new `fpvm` feature, gate the two `[[bin]]` targets on it with `required-features`, and have `client-tracing` enable it. `default` still enables `client-tracing`, so the ordinary build is unchanged; only a consumer that opts out with `default-features = false` sees a difference. Adding `kona-client` to `no_std_packages` would keep it from regressing.\n\nWe have this working against `kona-client/v1.9.0` and are glad to open the PR if the approach looks reasonable.\n",
+      "createdAt": "2026-11-09T10:11:11Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABdzoUSQ",
+      "title": "[BP-CM] contracts-bedrock: support bridge hooks on interop chains",
+      "author": "maurelian",
+      "number": 24014,
+      "repository": "ethereum-optimism/optimism",
+      "body": "A bridge hook and interop cannot be enabled on the same chain today. OPContractsManagerV2 rejects attaching a hook to a chain with `INTEROP` enabled, `OPContractsManagerMigrator.migrate` rejects chains whose portal has a hook, and op-deployer rejects `bridgeHook` together with `useInterop`.\n\nThere are two problems to solve:\n\n- **A hook only covers its own chain's portal.** In an interop set, ETH and tokens move directly between L2s, and all members share one `ETHLockbox`. Value can enter through another member's portal and reach the hooked chain without passing its hook. One way to close this is to require the same hook on every member of the set, so the set has a single entry point to screen, and to keep attaching, replacing and removing the hook consistent across all members.\n- **Interop's own messages go through the hook.** Some interop functions send messages through the portal: `L1CrossDomainMessenger.syncETHLiquidityPause` and `relayUndeliveredMessage` send deposits to L2, and the `UndeliveredMessageExporter` sends withdrawals to L1. The portal treats them like user deposits and withdrawals, so the hook acts on them too, and interop breaks if they are not delivered as sent. These messages should bypass the hook, for example by having the portal skip it for messages the protocol itself sends.\n",
+      "createdAt": "2026-11-09T21:39:56Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABdyDeSQ",
+      "title": "op-devstack,op-reth: unify the duplicated test seams of the reth v2.6.0 coverage stacks",
+      "author": "einar-oplabs",
+      "number": 24010,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nThe two test-coverage stacks for the reth v2.6.0 bump (#23385 proofs-history ExEx, #23386 the rest) were written in parallel and grew near-duplicate devstack and op-reth test seams. Once both stacks are in, these should be unified so op-devstack carries one of each.\n\n## Duplicates\n\n- **Log capture.** The proofs stack added `RecordLogLines` (used by the proofs-history acceptance tests to watch op-reth's output for pruner and engine lines); the non-ExEx stack added `RecordLogs` with the `LogObservable` seam on `op-devstack/stack/logs.go` and `op-service/logpipe`. One recorder with one interface should serve both.\n- **Workload helpers.** `newWorkload` and the account/contract fixtures that drive a proofs-history follower (`rust/op-reth/tests/proofs/core/window_helpers_test.go`) and the acceptance packages' own workloads overlap; one shared helper in the proofs e2e utils or in the DSL would do.\n- **Flush cadence types.** The ExEx test module has its own copy of the live tests' `FlushCadence`; a thresholds struct in the trie crate (behind `test-utils`, or replacing the two positional `u64`s of `EngineHandle::spawn_with_thresholds`) would remove it (noted in #23449).\n- **Store wrappers and snapshots.** `StoreWithHooks` (liveness test), the model test's store wrapper and the live tests' `DiskSnapshot` each wrap the proofs store for observation; one wrapper with hooks would cover all three (noted in #23451 and #23455).\n\n## When\n\nAfter the 24 PRs merge, as one or two upkeep PRs, so the merge order of the stacks does not have to change. Each duplicate is listed with the PR that introduced it so the cleanup can cite them.\n\n## Related\n\n- #23385, #23386 (the two coverage trees)\n- #23428 (`RecordLogLines`), #23436 and #23440 (`RecordLogs` / `LogObservable`), #23449, #23451, #23455\n",
+      "createdAt": "2026-11-09T19:57:07Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABdxlYDA",
+      "title": "op-acceptance-tests: local build-deps skip the MockSP1Verifier artifact the devstack deployer needs",
+      "author": "einar-oplabs",
+      "number": 24009,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nSince #23868 (2026-11-04) the devstack deployer always deploys `MockSP1Verifier` (`op-deployer/pkg/deployer/opcm/mock_sp1_verifier.go`, called from `op-devstack/sysgo/deployer.go`'s `DeployImplementations` stage). Its artifact comes from `packages/contracts-bedrock/test/dispute/zk/MockSP1Verifier.sol`, which `just build-no-tests` (`forge build --skip \"/**/test/**\"`) never compiles.\n\nEvery local acceptance entry point builds the contracts that way:\n\n- `op-acceptance-tests/justfile` `build-deps` (behind `just test` and `just acceptance-test`)\n- `rust/op-reth/tests/justfile` `build-contracts` (behind `just test-e2e-sysgo`)\n- `docs/ai/acceptance-tests.md` step 2 and its \"stale contracts\" troubleshooting entry\n\nSo a fresh checkout fails every sysgo test at setup:\n\n```\nfailed to read MockSP1Verifier artifact: failed to open artifact \"MockSP1Verifier.sol/MockSP1Verifier.json\": open MockSP1Verifier.sol/MockSP1Verifier.json: no such file or directory\n```\n\nCheckouts that ever ran a full `forge build` keep a stale copy of the artifact in `forge-artifacts/` and do not notice. CI builds the contracts separately and is unaffected.\n\n## Fix options\n\n1. Build the one test contract the deployer needs after `build-no-tests`, e.g. a `build-devstack-contracts` recipe that runs `build-no-tests` and then `forge build test/dispute/zk/MockSP1Verifier.sol`, and point the two justfiles and the doc at it.\n2. Move `MockSP1Verifier.sol` out of `test/` (it is deployed to dev chains, so it is not only a test helper).\n3. Drop the `--skip` for local builds and accept the longer compile.\n\nOption 1 keeps the local build time and makes the dependency explicit.\n\n## Reproduction\n\n```\ngit worktree add ../fresh origin/develop && cd ../fresh\ncd packages/contracts-bedrock && just install && just build-no-tests && cd ../..\njust build-rust-release\ngo test -count=1 -run TestProofsHistoryFollowerServesMatchingHistoricalProofs ./op-acceptance-tests/tests/proofs_history_match/\n```\n",
+      "createdAt": "2026-11-09T19:26:46Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABNvno6w",
-      "title": "kona-executor: experiment with reth's sparse trie as the trie backend",
-      "author": "joshklop",
-      "number": 23991,
-      "body": "**Experiment, not for merge.** Tests whether kona's fault-proof executor can use reth's sparse trie (`reth-trie-sparse`, what op-reth's engine computes state roots with) instead of `kona-mpt`, and what it costs. The `sparse-trie` feature of `kona-executor` swaps the trie database; it is off by default and no program enables it. The default build is unchanged.\n\nThe reth pin moves to the head of [ethereum-optimism/reth#39](https://github.com/ethereum-optimism/reth/pull/39) (a draft on `op-v2.6.0-2`), which builds the sparse trie without `std`. With it, `kona-executor` builds for `riscv32imac-unknown-none-elf` with the sparse trie.\n\n## Results\n\nOn the 8 executor fixture blocks:\n\n- **4 of 8 match exactly.** The block hash is correct, with the same number of preimage fetches as kona-mpt.\n- **4 of 8 fail.** Each inserts a key that splits an extension node. reth's sparse trie stores an extension merged with its child branch, and cannot reveal one without the other. kona-mpt splits an extension without fetching its child, so the fixtures, recorded from kona-mpt's fetches, lack that preimage. A host fed by op-reth's witness would likely have it (reth's witness builder records extension children, `crates/trie/trie/src/witness.rs`), but a host fed by an EL that doesn't, or by `eth_getProof` fallbacks, would not. Enabling the sparse trie would tie kona's preimage needs to reth's witness shape.\n\n**Cost: the sparse trie is cheaper than kona-mpt today, but not cheaper than kona-mpt with a branch-hash cache.** kona-mpt re-encodes and re-hashes every opened node on each root computation. A cache of about 20 lines (set a branch's hash when it is fetched or hashed, clear it when an insert or delete passes through) removes that, and beats the sparse trie on every block. The cache is measured here but not part of this PR.\n\nMeasured with callgrind (x86) on the 4 matching blocks. \"Trie instructions\" is the inclusive cost of the trie database's `state_root`, `basic` and `storage`. \"Keccak-f\" counts Keccak-f permutations in the whole run, which is what SP1's keccak precompile charges by.\n\n| Block | Trie instructions: kona-mpt | cached kona-mpt | sparse trie | Keccak-f: kona-mpt / cached / sparse |\n|---|---|---|---|---|\n| 26207960 | 9.9M | 7.6M (0.76×) | 8.5M (0.86×) | 1,415 / 1,117 / 1,154 |\n| 26207961 | 65.6M | 34.0M (0.52×) | 43.2M (0.66×) | 8,646 / 4,879 / 5,336 |\n| 26207963 | 21.1M | 16.1M (0.76×) | 18.1M (0.86×) | 3,288 / 2,663 / 2,738 |\n| 26211680 | 67.0M | 52.3M (0.78×) | 59.1M (0.88×) | 18,981 / 17,144 / 17,624 |\n\nThe sparse trie computes roots slightly more cheaply than cached kona-mpt (16.8M vs 18.6M instructions on 26207961), but its reads cost 1.7–1.9× more: each lookup restarts from the root with `find_leaf`, and fetched nodes are converted to reth's node types. That read overhead is not keccak, so it carries into RISC-V roughly one for one. Not measured: SP1 PGU or Cannon steps.\n\nTo reproduce: `MEASURE_ITERS`, `MEASURE_FIXTURE` and the callgrind steps are documented on the ignored `measure_trie_backend` test.\n\n## Takeaway\n\nOn cost alone, caching hashes in kona-mpt gets more than the sparse trie does, without new dependencies, without tying kona to reth's node model, and without the extension-child preimages. The sparse trie's case would have to rest on sharing code with op-reth, not on proof cost.\n\n## Before this could merge\n\n- ethereum-optimism/reth#39 merged and tagged; the pin moved to that tag.\n- Typed errors in place of strings, unit and differential tests for `SparseTrieDB`, and dedup of `block_hash` / `code_by_hash` with `TrieDB`.\n- A decision on the extension-child preimages above, and SP1 / Cannon measurements.\n\n## Reviews\n\nRan `rust-code-reviewer`, `kona-sp1-cost-reviewer` and `reth-update-reviewer`. Addressed: missing `hint_trie_node` before fetches outside the hinted proofs; removal of accounts created and destroyed in the block; the profiling-only `#[inline(never)]` now behind a `trie-profiling` feature; `test-utils` propagation. Left for a merge-ready version: the items listed above. The SP1 reviewer found no change to the guests as built today: no guest compiles a reth crate, and the moved storage-root logic is unchanged.\n\n---\n_Generated by [Claude Code](https://claude.ai/code/session_01VcLt12t1d7VuM9QGcVMGxU)_",
+      "id": "PR_kwDODjvEJM8AAAABN5b6pw",
+      "title": "op-deployer: run forge on contracts bundles without the AST",
+      "author": "sebastianst",
+      "number": 24003,
+      "body": "Merge after #23664: this PR is based on its branch.\n\nA forge run of an op-deployer script peaked at about 1.5 GB and 3 CPU-s, because at start forge parses the artifact of every file in the script's build, AST included, and the AST is about 80% of the artifacts' bytes. op-deployer now runs forge only on artifacts without it:\n\n- `mktar` strips the AST from the embedded and published bundles. It also drops the Solidity files outside the build and the library files other than sources, licenses and forge configs.\n- A `file://` locator to a local build, as sysgo and op-e2e use, is copied the same way. The copy is made once per build into `bundles/` of the cache directory (`--cache-dir`, by default `~/.op-deployer/cache`), and the processes that use it share it:\n  - one copy of contracts-bedrock takes 3.8 s and 4.6 CPU-s (48 MB RSS, 44 MB on disk), and a later process finds it in 7 ms;\n  - processes that start together copy once (a per-build lock);\n  - eviction keeps the four most recently used copies and never removes one in use.\n- An http bundle from an earlier `mktar` is copied the same way, into a directory of the process.\n\nMeasured on the `file://` local build, 12 CPUs, transparent huge pages on:\n\n| | Before | After |\n|---|---|---|\n| Peak RSS per forge run | 1.52–1.61 GB | 0.34–0.37 GB (0.20 GB without THP) |\n| `TestEndToEndApply` | 65.5 s (25 forge runs: 41.5 s, 73 CPU-s) | 51.9 s (28.2 s, 35 CPU-s) |\n| sysgo world build, `TestRPCConnectivity`: its one forge run | 1.56 GB, 2.0 s | 0.35 GB, 1.5 s |\n| Embedded `.tzst` | 18.7 MB | 2.5 MB |\n\nThe bundle stays warm: no op-deployer script compiles on it. `forge verify-contract` on it submits the same sources as before: I compiled each submitted standard JSON with solc, and it matches the artifacts' bytecode. Only the remappings that forge auto-detects from `lib/` differ, and no source uses them.\n\n**Forge slots.** The slots now count memory only: three quarters of min(cgroup limit, `MemTotal`), at 1.5 GiB per run.\n- Before, a host without a cgroup limit had no memory bound, only cpus/2.\n- 1.5 GiB still fits a run on artifacts with an AST, for example a local directory that can't be copied, so the sizing stays safe for every bundle.\n- Slot counts: 8 on a 16 GB CI container (was 4), 11 on this 22 GB host (was 6).\n- No CPU term, because oversubscribing CPUs costs nothing: 24 runs on a stripped bundle took 3.7 s at 6 at a time, 2.1 s at 12 and 2.2 s at 18. On AST artifacts it was 7.9 s at 6–9 and 11.8 s at 12, as memory ran short.\n\n**What a copy takes from the project.** A bundle is code and data that scripts with a deployer key read, so a copy holds only files of the project:\n- every read goes through an `os.Root` of the project and checks that it read the file the walk found;\n- a copy never contains a link. A link that is, is in, or holds part of the build (the artifacts, the build infos, `forge-artifacts/` whatever the compile cache says, the compile cache, the forge configs and the sources) makes op-deployer use the build as it is, where #23664's `checkFsPermissions` refuses it. Paths are compared ignoring case, so the result doesn't depend on the filesystem. Every other link is skipped;\n- only builds whose artifacts are in `forge-artifacts/` are copied;\n- `.env*` files and directories are left out.\n\nThe shared directory and each stored copy must be private directories of the user, not links. Lock waits end after 5 minutes. Whenever op-deployer falls back to a private copy, or to the build as it is, it logs a warning with the reason.\n\nA copy's key covers the project's path, compile cache and forge config, but not the artifacts' content. Hitting that gap would take a second build with an identical compile cache, source mtimes included.\n\n**Behaviour changes worth checking:**\n- A deployment prepared with a `file://` or http locator by an earlier op-deployer no longer continues, because the stripped artifacts have a different content digest.\n- A cache directory that other users can write holds no copy: each run then copies the build into a temporary directory and logs a warning. The tests that use the local build share one private cache directory in TMPDIR, so the integration tests copy it once instead of 36 times.\n\nCopying the bundle once per CI pipeline, in the contracts build job, is left for a follow-up. The workspace attaches at the checkout, not at `$HOME`, so it needs changes to the CI config and a command that packs the bundle, and one copy costs only 3.8 s per job.\n\nReviews: `go-code-reviewer`, seven rounds, and three security reviews. Its findings are fixed except two:\n- the empty lock files stay, two per build, so that waiting processes lock the same file;\n- an http bundle is copied a second time instead of being stripped in place.\n\nCloses #24000\n\n🤖 *Co-created with Claude Opus 5.5*\n\n\n\n\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-09T01:34:52Z",
+      "createdAt": "2026-11-09T16:48:42Z",
       "mergedAt": null,
+      "additions": 1999,
+      "deletions": 232
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABN0YbLQ",
+      "title": "op-reth: test that pool admission and the payload builder agree",
+      "author": "geoknee",
+      "number": 23994,
+      "body": "Pool admission and the payload builder were only tested separately. This adds property tests that run a real validator and pool and the real builder against the same head, L1 info, base fee, balance and nonce, on both Jovian and Karst, plus parity tests for the two FastLZ implementations in use.\n\nIt also aligns the validator with the limits these tests exercise. \n\nThe pool rejects a transaction above these limits at submission, with the existing \"exceeds maximum per-transaction gas limit\" error. For a DA footprint, the first number in that error is the footprint. Block validity doesn't change.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T10:20:32Z",
+      "mergedAt": "2026-11-09T11:11:19Z",
+      "additions": 1400,
+      "deletions": 43
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABLT9FAw",
+      "title": "contracts-bedrock: screen and complete deposits through the bridge hook",
+      "author": "lumoswiz",
+      "number": 23736,
+      "body": "**Description**\r\n\r\nEnables the bridge hook to allow, reject, or hold deposits in `OptimismPortal2`. Only the configured hook can complete a held deposit, preserving its original terms and restoring its ETH or token backing. The L1 ProxyAdmin owner bypasses screening so governance can always reach L2.\r\n\r\nCompletions share the block’s deposit gas limit with ordinary deposits without paying the resource fee again. Chains without a hook retain existing behavior.\r\n\r\n**Tests**\r\n\r\nAdds coverage for screening, holds, completion, failed restoration, duplicate completion, reentrancy, governance bypass, and upgrades. A metering invariant checks that mixed deposit flows stay within the block’s gas limit.\r\n\r\n**Metadata**\r\n\r\n- Closes ethereum-optimism/optimism-private#739\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-28T16:34:59Z",
+      "mergedAt": "2026-11-09T15:04:19Z",
+      "additions": 1388,
+      "deletions": 60
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABN5-_ig",
+      "title": "kona-engine,kona-node-service: import delegated local-safe and cross-safe heads separately",
+      "author": "einar-oplabs",
+      "number": 24005,
+      "body": "Under interop op-node imports a delegate's local-safe and cross-safe heads separately; kona-node copies the delegated safe head into both, so its forkchoice safe hash can run ahead of cross-chain verification.\n\nKona-node now follows local-safe for the EL lookup, EL sync and reorgs, and moves the safe label to cross-safe only when it advances. Chain identity, not the code path, decides between extending and reorging: local-safe is compared with the EL block at its height (or the unsafe hash at the unsafe height), and a cross-safe head that differs from local-safe is checked against the EL's header. A diverged head reorgs, moving safe back to cross-safe; when the EL lacks the block only the advance rule applies. A cross-safe head behind finality leaves just the safe label in place. Before interop both heads are one block, so non-interop chains see no change and no extra lookups. The kona-node configuration docs and `--l2-follow-source` help describe the labels and the interop caveat.\n\nBREAKING CHANGE: `ConsolidateInput::BlockInfo` is replaced by `Delegated(Box<DelegatedSafeHeads>)`, built with `DelegatedSafeHeads::try_new`; the `From<L2BlockInfo>` conversions are removed.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/23911. Stacked on #24004.\n\n## Breakdown\n\n|                | Added | Removed |  Net |\n|----------------|------:|--------:|-----:|\n| Implementation |   454 |     192 |  262 |\n| Tests          |   529 |     156 |  373 |\n| Docs           |    16 |       1 |   15 |\n\n## AI Reviews\n\n- [x] Claude: Opus 5.5 (xhigh)\n- [x] Claude: Fable 5.1 (xhigh)\n- [ ] Codex: GPT-6.1-Sol (xhigh)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T17:28:09Z",
+      "mergedAt": null,
+      "additions": 996,
+      "deletions": 346
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABMWUZFw",
+      "title": "contracts-bedrock: screen and complete withdrawals through the bridge hook",
+      "author": "lumoswiz",
+      "number": 23836,
+      "body": "**Description**\n\nEnables the bridge hook to allow, reject, or hold withdrawals in `OptimismPortal2`. It receives the selected proof's finalizable time so it can wait for clearance before holding.\n\nOnly the configured hook can complete a held withdrawal, restoring its backing and executing its original call once, with the original L2 sender and required gas. Failed target calls leave withdrawals held for retry. Chains without a hook retain existing behavior.\n\n**Tests**\n\nAdds unit and fuzz coverage for screening, finalizable time, holds, completion, replay protection, failed calls, gas limits, pause and reentrancy guards, and unsafe targets. Also checks token custody call ordering and preservation of held withdrawals across upgrades.\n\n**Additional context**\n\nBuilds on #23736.\n\nLowers the Portal's optimizer runs from 750 to 200 to make room for the withdrawal path.\n\n**Metadata**\n\n- Closes ethereum-optimism/optimism-private#740\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-02T16:25:46Z",
+      "mergedAt": "2026-11-09T20:29:45Z",
       "additions": 931,
-      "deletions": 195
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABNu4j2g",
-      "title": "kona-disc!: Replace the address scope with a public-only table filter",
-      "author": "joshklop",
-      "number": 23987,
-      "body": "Stacked on https://github.com/ethereum-optimism/optimism/pull/23895, as suggested in https://github.com/ethereum-optimism/optimism/pull/23895#pullrequestreview-5820238040. It keeps that PR's dial-after-session rule and bootstore changes, and replaces the rest of the address filtering with a fixed public-only filter, as Lighthouse does. A second commit fixes problems that a correctness review found in #23895, and one this PR had introduced.\n\nFor operators, compared with #23895:\n- **Filter:** discovery uses only public addresses unless `--p2p.discovery.private` is set. It no longer allows private addresses on its own when the advertised IP is a loopback or LAN address. That auto-detection also enabled them on a k8s pod that sets its listen IP to its pod IP, which is the deployment where dialing private ranges draws abuse reports.\n- **Redial:** gossip redials the peers it lost. Under #23895 a peer reached gossip only when a discv5 session started. discv5 reports that once and keeps the session alive for as long as it pings the node, so a dropped or refused gossip connection was never retried. The driver now hands gossip the saved records, the bootnodes and the session-confirmed records, at startup and on every store interval. Before #23895, every lookup result was handed over every 5s.\n- **Startup:** sessions started during startup are no longer dropped. The event stream now starts before bootstrap.\n- **Bootnodes:**\n  - An enode-URL bootnode's address is checked before discovery contacts it, as #23895 did.\n  - An ENR bootnode the filter rejects is skipped with a warning that names the flag.\n  - A bootnode whose record fails validation is removed from the table.\n- **Bootstore:** a session from a private address on a public-only node is still dialed, since the session shows that the node is reachable, but it isn't saved.\n- **Docs:** the section shrinks, and now says bootnodes are dialed without a session.\n\nFor Rust users, compared with #23895:\n- `AddrScope`, `AddrFilter`, `AddrError` and `Discv5Builder::with_addr_filter` are gone.\n- `kona_disc::public_only` is a plain `discv5::Config::table_filter`. The builder keeps the config's filter rather than overwriting it.\n- `Discv5Driver::new` takes the filter its `Discv5` was built with, and applies it to bootnodes and saved records too.\n- `Discv5Driver::forward` now also controls the periodic hand-over.\n- The discovery and gossip examples install `public_only`, as kona-node does.\n\nThe filter covers unspecified, loopback, private, link-local, shared, multicast, broadcast and documentation addresses (including `3fff::/20`) with the std predicates. It drops the IANA tables and the `ipnet` dependency, so the other special-purpose blocks, such as `198.18.0.0/15`, `240.0.0.0/4` and NAT64, now count as public. Some of them can be reached inside private networks, such as GKE's Class E pod ranges, so a public-only node may now dial them when it learns them from a lookup. I judged that an acceptable cost for dropping the tables, but it's a trade-off, not a free removal.\n\nLeft as is, and out of scope:\n- **IPv6-mode dual-stack peers:** a node that runs discovery over IPv6 never dials dual-stack peers. Its sessions come over IPv6, but `holds_session_ip` and `enr_to_multiaddr` both use the record's IPv4 TCP address first. A fix has to change both together, so that gossip dials the address the session confirmed. The check is safe as it stands: it drops these peers rather than dialing a wrong address. This corrects my earlier note, which said the behavior was deliberate.\n- **Bootstore eviction:** eviction is FIFO, and each new sequence number of a record adds an entry. This predates #23895.\n- **Records saved by older versions:** unconfirmed records saved before #23895 that pass the filter stay saved and are dialed.\n\nTests:\n- New: `test_saved_records_are_handed_over_again`, `test_accepts_enode`, and a \"not contacted\" assertion in `test_public_only_node_drops_loopback_enode_bootnode`. Each fails with its fix disabled.\n- Removed: the builder's per-advertised-IP filter cases, and the public-only LAN-bootnode integration test, which only exercised discv5's `add_enr` filter.\n\nReviews: `rust-code-reviewer` and `deletion-reviewer` ran on the first commit. Three correctness reviewers ran on both PRs, and the second commit addresses their findings for this PR. Locally, clippy, rustdoc and nextest pass for kona-disc, kona-node-service, kona-node, kona-peers and both examples. The exception is `test_online_discv5_driver_bootstrap_testnet`, which fails the same way on #23895's branch because it needs live Sepolia bootnodes.\n\nBREAKING CHANGE: compared with #23895, a node that advertises a loopback or LAN address no longer allows private addresses on its own. A devnet that uses loopback or LAN bootnodes or peers through discovery must set `--p2p.discovery.private`. op-devstack runs kona-node without discovery by default, so it isn't affected. Rust users of `kona-disc`: set `discv5::Config::table_filter`, for example to `kona_disc::public_only`, in place of `with_addr_filter`, and pass it to `Discv5Driver::new`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-09T00:04:41Z",
-      "mergedAt": null,
-      "additions": 361,
-      "deletions": 693
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABNvN9xQ",
-      "title": "kona-node: keep delegated heads when the delegate's current L1 is not on our L1 yet",
-      "author": "joshklop",
-      "number": 23990,
-      "body": "kona light nodes (derivation delegation) reject a delegate's whole sync status when their own L1 provider doesn't have the delegate's `current_l1` yet. On the staging devnets, the L1 endpoint is a consensus-aware proxyd whose consensus head moves back a few blocks when a lagging L1 backend rejoins. Verified safe and finalized heads are then thrown away in bursts. This is the kona-node side of ethereum-optimism/optimism#23989, which makes the same change in op-node.\n\nAfter this change, the node sends the verified heads to the engine, leaves the published derivation origin unchanged, and increments `kona_node_derivation_delegate_current_l1_not_found_total`. A `current_l1` hash mismatch or any other lookup error still rejects the status. A matching `current_l1` is what proves the L1 blocks holding the batches are on our chain, so those cases stay strict.\n\nAPI change: `DelegateDerivationActor` drops its `L1Provider` type parameter and takes `AlloyChainProvider` directly. That's its only instantiation, and it lets the not-found case match the typed `AlloyChainProviderError::BlockNotFound` rather than an opaque `ChainProvider::Error`. There are no users outside `kona-node-service`.\n\nReviews: `rust-code-reviewer` ran, and its suggestions are adopted:\n- concrete provider type\n- one warning site\n- typed error source\n- exact mockall call counts\n- `rstest` cases\n- tests that queue every L1 answer and check the mock transport is drained\n\nNot done:\n- The new counter isn't asserted in a test.\n- A pre-existing gap: kona rejects a zero `current_l1`, while op-node treats it as \"not reported\". That's a separate follow-up.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-09T00:40:40Z",
-      "mergedAt": null,
-      "additions": 286,
-      "deletions": 61
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABNvFslA",
-      "title": "op-node: keep follow-source heads when upstream CurrentL1 is not on our L1 yet",
-      "author": "joshklop",
-      "number": 23989,
-      "body": "Light nodes (`--l2.follow.source`) reject a whole follow-source poll, and count it as `error_l1_lookup`, when their own L1 RPC doesn't have the upstream's CurrentL1 yet. On the staging devnets, the L1 endpoint is a consensus-aware proxyd whose consensus head moves back a few blocks when a lagging L1 backend rejoins. That makes this happen in bursts on every light node at once, and it fires the `l2-follow-source-error-rate-*` alerts. From Nov 1–8, all 1,309 follow-source errors on sepolia-devnet-2, sepolia-devnet-3 and platforms-1 were this case, and every one fell in an L1 backend lag window.\n\nAfter this change, the node applies the already-verified safe and finalized heads, leaves CurrentL1 unchanged, and increments `op_node_default_follow_source_current_l1_not_found_total` instead of recording an error. A CurrentL1 hash mismatch or any other lookup error still rejects the poll. A matching CurrentL1 is what proves the L1 blocks holding the batches are on our chain, so those cases stay strict.\n\nEffect on operators: follow-source error rates drop, and there is one new counter. A follower whose L1 RPC stays behind indefinitely no longer shows up in the error rate, so an alert on this counter belongs in the alert rules. That's a follow-up.\n\nReviews: `go-code-reviewer` ran. Its main suggestion, keeping mismatches and other lookup errors strict, is adopted. `safedb-reviewer` doesn't apply: follow mode promotes safe heads with an empty L1 source either way. The kona-node equivalent is ethereum-optimism/optimism#23990.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-09T00:26:17Z",
-      "mergedAt": null,
-      "additions": 191,
-      "deletions": 27
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABNu8yKA",
-      "title": "kona-engine: read only headers for the super-root output",
-      "author": "joshklop",
-      "number": 23988,
-      "body": "Stacked on #23960 (base `einar/superroot-by-number`); merge that first.\n\n`superroot_atTimestamp` reads the target block with all its transactions to build an `L2BlockInfo`, but an output root only needs the header. On busy chains a full block is megabytes of JSON, which eats into the RPC timeout that #23960 is meant to fit inside. op-node's `OutputV0AtBlock` reads only the header.\n\n`superroot_atTimestamp` now asks the EL only for headers (`eth_getBlockByHash` / `eth_getBlockByNumber` with `false`). Its answers are unchanged. `optimism_outputAtBlock` still reads the full block, because its response needs the L1 origin and sequence number from the L1-info deposit.\n\nIf the EL returns a header whose reported hash is not its own hash, the query now fails with an internal error, as op-node's header check does. Before, the block id was computed from the header but the output root used the reported hash. For a block read by number, nothing compared the two, so after Isthmus a mismatch would have been served in the output root.\n\nReviews: `rust-code-reviewer` found nothing blocking. I applied its point about using one hash and its doc nit. I dismissed its nit to replace the `(id, output)` tuple with a struct, because that shape predates this PR and `output_at_block` shares it. `safedb-reviewer` found nothing that changes when the query answers or which `required_l1` it pairs with the output. Its one finding was the unchecked hash above, which this PR fixes.\n\nPart of #23473.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-09T00:12:05Z",
-      "mergedAt": null,
-      "additions": 130,
-      "deletions": 52
+      "deletions": 48
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 9
+    "additions": 4043,
+    "deletions": 224,
+    "files": 51,
+    "commitCount": 183
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "contracts-bedrock: screen and complete deposits through the bridge hook",
+      "prNumber": 23736,
+      "type": "other",
+      "body": "**Description**\r\n\r\nEnables the bridge hook to allow, reject, or hold deposits in `OptimismPortal2`. Only the configured hook can complete a held deposit, preserving its original terms and restoring its ETH or token backing. The L1 ProxyAdmi",
+      "files": [
+        "packages/contracts-bedrock/interfaces/L1/IOptimismPortal2.sol",
+        "packages/contracts-bedrock/snapshots/abi/OptimismPortal2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/OptimismPortal2.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/src/L1/ResourceMetering.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/invariants/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/interfaces/L1/IResourceMetering.sol",
+        "packages/contracts-bedrock/test/setup/OptimismPortal2TestInit.sol"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: screen and complete withdrawals through the bridge hook",
+      "prNumber": 23836,
+      "type": "other",
+      "body": "**Description**\n\nEnables the bridge hook to allow, reject, or hold withdrawals in `OptimismPortal2`. It receives the selected proof's finalizable time so it can wait for clearance before holding.\n\nOnly the configured hook can complete a hel",
+      "files": [
+        "docs/ai/contract-dev.md",
+        "packages/contracts-bedrock/foundry.toml",
+        "packages/contracts-bedrock/interfaces/L1/IOptimismPortal2.sol",
+        "packages/contracts-bedrock/snapshots/abi/OptimismPortal2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol"
+      ]
+    },
+    {
+      "title": "op-deployer: add apply --deploy-mock-sp1-verifier for genesis deploys",
+      "prNumber": 23968,
+      "type": "other",
+      "body": "Since #23868, a genesis apply from the CLI always fails with `sp1Verifier must be specified for genesis deployments`. This breaks dev tools that build an L1 genesis with op-deployer, such as kupcake, whose devnets no longer deploy with op-d",
+      "files": [
+        "docs/ai/devfeatures.md",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/apply.mdx",
+        "op-deployer/pkg/deployer/apply.go",
+        "op-deployer/pkg/deployer/flags.go",
+        "op-deployer/pkg/deployer/flags/names.go",
+        "op-deployer/pkg/deployer/integration_test/cli/e2e_apply_test.go",
+        "op-deployer/pkg/deployer/pipeline/implementations.go",
+        ".github/workflows/build-images.apko.yaml",
+        ".github/workflows/release-op-deployer.yaml",
+        "docs/public-docs/chain-operators/guides/features/custom-gas-token-guide.mdx",
+        "docs/public-docs/ko/chain-operators/guides/features/custom-gas-token-guide.mdx",
+        "melange/pipelines/op-deployer/embed-artifacts.yaml",
+        "op-deployer/justfile",
+        "op-deployer/pkg/deployer/opcm/mock_sp1_verifier.go",
+        "op-deployer/scripts/build-embedded-contracts.sh",
+        "op-deployer/scripts/genesis-smoke-test.sh",
+        "ops/docker/op-stack-go/Dockerfile"
+      ]
+    },
+    {
+      "title": "op-deployer: pre-compile the deploy scripts into the embedded artifacts",
+      "prNumber": 24008,
+      "type": "other",
+      "body": "op-deployer no longer compiles the deploy scripts on its first `forge script` run, in local builds, Docker and melange images, and release binaries. That run compiled about 80 files and downloaded a solc version first.\n\nBefore #23968, `just",
+      "files": [
+        "op-deployer/scripts/build-embedded-contracts.sh"
+      ]
+    },
+    {
+      "title": "Weekly link-policy sweep: accept localized ko release badges",
+      "prNumber": 24001,
+      "type": "other",
+      "body": "## Summary\nAll 87 new `unbadged-pinned-link` findings are on `ko/` pages that already state the release, using the Korean badge \"(`<tag>` 기준)\". This PR updates the linter so it accepts that localized form.\n\n## Changes\n- `scripts/lint-link-p",
+      "files": [
+        "docs/public-docs/scripts/lint-link-policy.mjs"
+      ]
+    },
+    {
+      "title": "ci: speed up the rust e2e workflow",
+      "prNumber": 23997,
+      "type": "other",
+      "body": "**Metrics** (`rust-e2e-ci`)\n- The e2e jobs start about 2.5-3 min sooner: their build takes 420-443s instead of 557-631s\n- `kona-proof-action-single`: 407s -> 275s median (-32%), and about 15% less compute\n- `required-rust-e2e` finished at 8",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "rust/kona/tests/justfile",
+        "rust/kona/tests/proofs/jovian_dafootprint_test.go",
+        "rust/kona/tests/proofs/jovian_minbasefee_test.go"
+      ]
+    },
+    {
+      "title": "op-reth: test that pool admission and the payload builder agree",
+      "prNumber": 23994,
+      "type": "tests",
+      "body": "Pool admission and the payload builder were only tested separately. This adds property tests that run a real validator and pool and the real builder against the same head, L1 info, base fee, balance and nonce, on both Jovian and Karst, plus",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/evm/src/l1.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/tests/it/main.rs",
+        "rust/op-reth/crates/node/tests/it/pool_limits.rs",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/builder/admission_tests.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/payload/src/config.rs",
+        "rust/op-reth/crates/txpool/Cargo.toml",
+        "rust/op-reth/crates/txpool/src/estimated_da_size.rs",
+        "rust/op-reth/crates/txpool/src/lib.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 189.12485566839922,
+      "prScore": 148.68685566839923,
+      "issueScore": 4,
+      "reviewScore": 36,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
@@ -86,11 +272,231 @@
       "reviewScore": 14.5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 148.47825251822292,
+      "prScore": 102.44025251822293,
+      "issueScore": 4.1,
+      "reviewScore": 41.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 92.58040300411554,
+      "prScore": 92.38040300411554,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 86.41841965285958,
+      "prScore": 47.91841965285958,
+      "issueScore": 2,
+      "reviewScore": 36.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 73.87475352301603,
+      "prScore": 68.53475352301602,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 67.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 67.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 65.5467738965761,
+      "prScore": 51.346773896576096,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 51.52796465720816,
+      "prScore": 47.02796465720816,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 33.29534819146784,
+      "prScore": 28.095348191467835,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 32,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 32,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 31.606799625336475,
+      "prScore": 16.606799625336475,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 26.07571895621705,
+      "prScore": 25.63771895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/81847?u=577eaff0520b33aadc0f9fb6d11f5cdb2dd9486e&v=4",
+      "totalScore": 24.746306144334053,
+      "prScore": 24.746306144334053,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 18,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 17.413633597686626,
+      "prScore": 17.073633597686626,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bczak",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/42911767?v=4",
+      "totalScore": 10.993612288668109,
+      "prScore": 10.993612288668109,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 7,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "davidwoood",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/170245230?u=f16b77922393e2539521b2cad3bb9f86a56caa67&v=4",
+      "totalScore": 6.664306144334055,
+      "prScore": 6.664306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yoshidan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/958174?u=92c499463e0f943c1fedfbe63c5144321a6a5bde&v=4",
+      "totalScore": 2.1,
+      "prScore": 0,
+      "issueScore": 2.1,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 5,
-  "mergedPRs": 0,
-  "newIssues": 0,
+  "newPRs": 24,
+  "mergedPRs": 7,
+  "newIssues": 7,
   "closedIssues": 0,
-  "activeContributors": 5
+  "activeContributors": 30
 }
