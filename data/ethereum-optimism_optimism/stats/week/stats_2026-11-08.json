@@ -5,8 +5,20 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-08 to 2026-11-15, ethereum-optimism/optimism had 52 new PRs (39 merged), 18 new issues, and 46 active contributors.",
+  "overview": "From 2026-11-08 to 2026-11-15, ethereum-optimism/optimism had 71 new PRs (54 merged), 23 new issues, and 53 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABeHp1xQ",
+      "title": "flaky test: `TestInteropFaultProofs_InvalidBlock`",
+      "author": "maurelian",
+      "number": 24053,
+      "repository": "ethereum-optimism/optimism",
+      "body": "https://app.circleci.com/pipelines/gh/ethereum-optimism/optimism/139419/workflows/feb351e1-7e49-410d-a1ee-27a572f0e50e/jobs/5877424\n\nJob `memory-all-opn-op-reth-fusaka`, merge-queue run for ethereum-optimism/optimism#23771 (contracts-only change), 2026-11-10.\n\n```\nError Trace: op-devstack/dsl/eoa.go:392\n             op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go:1196\n             op-acceptance-tests/tests/interop/proofs/serial/interop_fault_proofs_test.go:81\nError:       Received unexpected error:\n             operation failed permanently after 5 attempts: not found\nMessages:    invalid exec msg receipt not found\n```\n\nAbout 10s before the assertion, chain 902 reorged out the unsafe block (13) that carried the invalid exec message tx:\n\n```\nWARN L2 reorg: existing unsafe block does not match derived attributes from L1 component=supernode chain_id=902\n  err=\"transaction 0 does not match ...\" unsafe=ce53f5..f22801:13 pending_safe=ac50d9..a4c010:12\n```\n\nThe mismatch is in the L1 info deposit (different L1 origin), so the tx is dropped and its receipt is never found. Looks like a race between sequencing and L1 derivation rather than a code regression. CircleCI insights also shows a failure in `memory-all-kona-op-reth-fusaka` (1/100 runs on develop).\n",
+      "createdAt": "2026-11-10T21:31:24Z",
+      "closedAt": "2026-11-11T20:02:35Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
     {
       "id": "I_kwDODjvEJM8AAAABdo-OEw",
       "title": "kona-client: the library cannot be built for a no_std target",
@@ -20,55 +32,55 @@
       "commentCount": 2
     },
     {
-      "id": "I_kwDODjvEJM8AAAABdrSxug",
-      "title": "op-deployer: measure forge's peak memory instead of trusting forgeRunMemory",
-      "author": "sebastianst",
-      "number": 23995,
+      "id": "I_kwDODjvEJM8AAAABeUguMA",
+      "title": "kona-node: recover when the EL rejects a delegated forkchoice update",
+      "author": "einar-oplabs",
+      "number": 24061,
       "repository": "ethereum-optimism/optimism",
-      "body": "Follow-up to #23664, part of #23300.\n\nop-deployer limits concurrent forge runs per host by memory, using a hard-coded estimate of one run's peak memory on contracts-bedrock: `forgeRunMemory = 1536 << 20` ([slots.go:42](https://github.com/ethereum-optimism/optimism/blob/06b0ae6b1c7749041601097dcde0deb4cdca0720/op-deployer/pkg/deployer/forge/slots.go#L42)). `slotCount` divides the container's memory limit by it ([slots.go:44-52](https://github.com/ethereum-optimism/optimism/blob/06b0ae6b1c7749041601097dcde0deb4cdca0720/op-deployer/pkg/deployer/forge/slots.go#L44-L52)).\n\nNothing keeps that value current. When contracts-bedrock grows, the real peak exceeds the estimate. Then too many forge runs share a CI container, and jobs are OOM-killed as flakes instead of failing with a clear message.\n\n### Proposal\n\nMeasure the peak, and fail a test when it nears the estimate:\n\n1. After `cmd.Run()` in `execWithEnv` ([client.go:429](https://github.com/ethereum-optimism/optimism/blob/06b0ae6b1c7749041601097dcde0deb4cdca0720/op-deployer/pkg/deployer/forge/client.go#L429)), read forge's peak RSS from `cmd.ProcessState.SysUsage()` (`syscall.Rusage.Maxrss`, KiB on Linux). Log it at debug level with the script name.\n2. Expose the peak to tests, and assert in a test that runs a real contracts-bedrock script. For example, one of the live runs in `integration_test/apply_test.go`. It should fail when a run exceeds about 90% of `forgeRunMemory`, and the message should give the measured value to bump the constant to.\n\n### Done when\n\n- A forge run's peak memory is logged.\n- A test that runs in CI fails before the estimate goes stale.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
-      "createdAt": "2026-11-09T12:59:25Z",
+      "body": "Part of ethereum-optimism/protocol-team#545.\n\n## Summary\n\nWhen the execution layer (EL) rejects a delegated forkchoice update with `INVALID_FORKCHOICE_STATE`, kona-node needs a recovery policy. Both op-geth (`SetCanonical` before its finalized checks) and op-reth (`on_canonical_chain_update` before `ensure_consistent_forkchoice_state`) make the requested head canonical before rejecting it. A delegate whose head does not descend from kona-node's finalized block can therefore leave the EL on its fork after a rejected update, and kona-node's reset then walks a chain that misses its own finalized block.\n\nThis scope was split out of #24004 (#23910) and #24005 (#23911). Three Fable 5.1 xhigh review rounds showed that each recovery mechanism added there brought new edge cases. Those PRs keep the pre-existing behavior for a rejected forkchoice update, which is to reset the engine.\n\n## Scope\n\n- Classify a rejected delegated forkchoice update. Look up the engine's finalized block by hash to tell \"the delegate's chain does not descend from finality\" apart from \"the EL lost finality\". When the EL still holds finality, restore the EL's canonical chain by resending the engine's own forkchoice.\n- Do not retry a rejected delegated head on every poll. Do not remember a transient rejection, such as a safe hash the EL has not stored yet.\n- Blame the label that actually moved: a cross-safe-only update must not mark the local-safe head as rejected.\n- Make the sync-start walk refuse a chain that is not on the finalized block (op-node `ReorgFinalizedErr` parity) without letting a delegate's head stop the node. Restore and retry. Classify only a genuine finality mismatch as retryable, and treat a missing L1 origin that is actually a fork as a fork.\n- Add a `synchronize` backstop that keeps safe and local-safe at or above finalized, without making the reset path fatal.\n- Correct a stale safe label even when the verified cross-safe head sits below it.\n\n## Open findings carried over (from the round-3 Fable reviews of #24004 and #24005)\n\n- `FinalityNotRestored` wraps permanent sync-start errors, so they are retried forever.\n- A restoring forkchoice update rejected because the EL lost finality loops the reset.\n- During EL sync, a different block in the EL at the delegated height does not prove divergence.\n- A missing L1 origin at or below the finalized block is classed as temporary before the mismatch check runs.\n- A transient `INVALID_FORKCHOICE_STATE` caused by a not-yet-stored safe hash is remembered until the next reset.\n- `consolidate()` sends delegated updates through plain `synchronize`, so they are not classified.\n- Blame is decided by whether an unsafe head was carried, not by which label was unproven.\n- Safe-label rejections are not remembered, which costs three EL round-trips per poll.\n\n## Acceptance criteria\n\n- [ ] A delegate's head cannot stop the node or loop the engine reset.\n- [ ] Mocked Engine API tests in kona-engine for each case above, including an EL that has already made the rejected head canonical.\n- [ ] Fable 5.1 xhigh review with no outstanding correctness findings.\n",
+      "createdAt": "2026-11-11T13:42:59Z",
       "closedAt": null,
       "state": "OPEN",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABXEyyzQ",
+      "title": "rust: bump reth to 2.7.0",
+      "author": "sebastianst",
+      "number": 23404,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Bump reth to v2.7.0, following #23046 and the fork in ethereum-optimism/reth#15.\n\nThe v2.7.0 tag does **not** contain the five upstream fixes below. Carry them on top of v2.7.0 when preparing the new fork pin. This inventory is based on #23046 at `93d9ec9d2f0fadf3b587c64b3f423e89ffaa5199`, which pins reth to `8d359d0142719d4042eaf09fcbb7e4a1f89c37ac`; reconcile any later changes before repinning.\n\n## Required follow-up review\n\n**This patch list is not exhaustive.** Before finalizing the v2.7.0 bump, sweep **all upstream commits after the v2.7.0 tag through the latest upstream HEAD** to identify additional potentially critical fixes. Assess their applicability to OP and add any required cherry-picks to this list; do not limit the sweep to the patches already identified here.\n\n## Required upstream cherry-picks\n\n### Carry forward from the v2.6.0 fork\n\n- [ ] [paradigmxyz/reth#27634](https://github.com/paradigmxyz/reth/pull/27634) — **Use trie changesets for all overlays.** Upstream commit [`078d026239a1977f5d79eeb67fa44d2087ebf7e5`](https://github.com/paradigmxyz/reth/commit/078d026239a1977f5d79eeb67fa44d2087ebf7e5); currently carried as `68594096cc4b8a53bce48485c56994d59b21642a`.\n- [ ] [paradigmxyz/reth#27782](https://github.com/paradigmxyz/reth/pull/27782) — **Rewind backward overlay seeks.** Upstream commit [`5868ee478841e1eaffc2fae740b60b7d5a920896`](https://github.com/paradigmxyz/reth/commit/5868ee478841e1eaffc2fae740b60b7d5a920896); currently carried as `56c3d375fbbb4543ff1eb702138ad01d672bd0e9`. Apply before #27832.\n- [ ] [paradigmxyz/reth#27832](https://github.com/paradigmxyz/reth/pull/27832) — **Remove orphaned trie branches.** Upstream commit [`5e309af68bb064eb594807bf8d2b2e6638b91c27`](https://github.com/paradigmxyz/reth/commit/5e309af68bb064eb594807bf8d2b2e6638b91c27); currently carried as `5f793856dd20b855973d8cdfa593d774e7534338`.\n\n### Add fixes identified during the v2.6.0 review\n\n- [ ] [paradigmxyz/reth#27530](https://github.com/paradigmxyz/reth/pull/27530) — **Time out slow compressed HTTP requests.** Cherry-pick [`d994469b9b88897fe0c6f971d16a59f6bf26001e`](https://github.com/paradigmxyz/reth/commit/d994469b9b88897fe0c6f971d16a59f6bf26001e). Prevents incomplete compressed bodies from holding decompression permits indefinitely. Applies when HTTP decompression is explicitly enabled; it is disabled by default.\n- [ ] [paradigmxyz/reth#27717](https://github.com/paradigmxyz/reth/pull/27717) — **Never send empty incomplete eth/70 receipts.** Cherry-pick [`42fa3c569ad182914d26db410919d6a10c7b4859`](https://github.com/paradigmxyz/reth/commit/42fa3c569ad182914d26db410919d6a10c7b4859). Fixes receipt responses when a receipt exceeds the soft response limit, including valid large OP deposit receipts. Ordinary OP block sync derives receipts locally.\n\nBoth newly identified fixes applied cleanly to the reviewed v2.6.0 fork and passed focused regressions. Recheck application and validation against v2.7.0.\n\n## Preserve fork-specific changes\n\n- [ ] Retain or port the masked-storage-trie regression test: [`d70cc04dab7d337f96080fad1923ec355750c391`](https://github.com/ethereum-optimism/reth/commit/d70cc04dab7d337f96080fad1923ec355750c391), `test(storage-overlay): cover storage roots over a masked state trie`. This covers the storage-root path used by OP's Isthmus withdrawals root.\n- [ ] Retain or port fork CI support: [`8d359d0142719d4042eaf09fcbb7e4a1f89c37ac`](https://github.com/ethereum-optimism/reth/commit/8d359d0142719d4042eaf09fcbb7e4a1f89c37ac), `ci: run fork validation through CircleCI act`. Update its v2.6.0 comparison base for the new release and preserve its dependency/security fixes.\n\n## Already included in v2.7.0\n\nThese upstream cherry-picks from the v2.6.0 fork are in the v2.7.0 tag and do not need replaying:\n\n| Upstream change | Upstream commit |\n| --- | --- |\n| [#27129: Skip historical trie changesets with complete overlays](https://github.com/paradigmxyz/reth/pull/27129) | `835e42864d2f5cf375ebeacca3d279c3838971dd` |\n| [#27247: Validate forkchoice state before applying updates](https://github.com/paradigmxyz/reth/pull/27247) | `a120f00d47e43427816e2fe7e38229fabbb2db87` |\n| [#27429: Do not treat a stale persisted FCU head as canonical](https://github.com/paradigmxyz/reth/pull/27429) | `444e867155c2a7a4c028e479ca7201b0b6871579` |\n| [#27252: Fix EIP-161-empty accounts persisted into HashedAccounts](https://github.com/paradigmxyz/reth/pull/27252) | `695b4f174b495e5a2bbc8779165422a678858bd7` |\n| [#27286: Update imbl and remove the bitmaps exception](https://github.com/paradigmxyz/reth/pull/27286) | `25993190fae484f6d93a247a935d25db30b3d6fc` |\n\nThe fork's `73a3a00862a8f14f89e30da8de001456f18cfae0` version bump is superseded by the new release; update fork versions as appropriate instead of replaying it unchanged.\n",
+      "createdAt": "2026-10-14T07:06:23Z",
+      "closedAt": "2026-11-11T15:50:08Z",
+      "state": "CLOSED",
       "commentCount": 1
     },
     {
-      "id": "I_kwDODjvEJM8AAAABeHp1xQ",
-      "title": "flaky test: `TestInteropFaultProofs_InvalidBlock`",
-      "author": "maurelian",
-      "number": 24053,
+      "id": "I_kwDODjvEJM8AAAABclTXaw",
+      "title": "op-interop-filter: Take the chain set from the dependency set",
+      "author": "ajsutton",
+      "number": 23937,
       "repository": "ethereum-optimism/optimism",
-      "body": "https://app.circleci.com/pipelines/gh/ethereum-optimism/optimism/139419/workflows/feb351e1-7e49-410d-a1ee-27a572f0e50e/jobs/5877424\n\nJob `memory-all-opn-op-reth-fusaka`, merge-queue run for ethereum-optimism/optimism#23771 (contracts-only change), 2026-11-10.\n\n```\nError Trace: op-devstack/dsl/eoa.go:392\n             op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go:1196\n             op-acceptance-tests/tests/interop/proofs/serial/interop_fault_proofs_test.go:81\nError:       Received unexpected error:\n             operation failed permanently after 5 attempts: not found\nMessages:    invalid exec msg receipt not found\n```\n\nAbout 10s before the assertion, chain 902 reorged out the unsafe block (13) that carried the invalid exec message tx:\n\n```\nWARN L2 reorg: existing unsafe block does not match derived attributes from L1 component=supernode chain_id=902\n  err=\"transaction 0 does not match ...\" unsafe=ce53f5..f22801:13 pending_safe=ac50d9..a4c010:12\n```\n\nThe mismatch is in the L1 info deposit (different L1 origin), so the tx is dropped and its receipt is never found. Looks like a race between sequencing and L1 derivation rather than a code regression. CircleCI insights also shows a failure in `memory-all-kona-op-reth-fusaka` (1/100 runs on develop).\n",
-      "createdAt": "2026-11-10T21:31:24Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "body": "op-interop-filter takes its chain set from its `--l2-rpcs` entries, not from the dependency set. An extra `--l2-rpcs` entry makes a chain outside the dependency set a valid source. The filter then approves executing messages that op-supernode invalidates, and each invalid message causes a reorg.\n\nMake the filter read the dependency set. It must reject an RPC for a chain that is not in the dependency set.\n\nDoes not block launch.\n\nFiled by Claude from the Lagoon interop FMA (FM19).",
+      "createdAt": "2026-11-04T23:07:59Z",
+      "closedAt": "2026-11-12T02:27:12Z",
+      "state": "CLOSED",
       "commentCount": 1
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABWGu6_w",
-      "title": "op-deployer: generate L2 genesis with forge",
-      "author": "sebastianst",
-      "number": 23304,
-      "repository": "ethereum-optimism/optimism",
-      "body": "[`GenerateL2Genesis`](https://github.com/ethereum-optimism/optimism/blob/fe7323950e39ded5510a5b18c3458d9f42b73103/op-deployer/pkg/deployer/pipeline/l2genesis.go#L47) always uses the Go host. It runs for every apply target and for `prepare`.\n\n- Add a dump wrapper around [`L2Genesis.s.sol`](https://github.com/ethereum-optimism/optimism/blob/fe7323950e39ded5510a5b18c3458d9f42b73103/packages/contracts-bedrock/scripts/L2Genesis.s.sol) (`run(input)`, etch the script away, `vm.dumpState`) or a `runWithBytes` hook. Run it offline from the L2 bundle (a separate forge client when the L1 and L2 locators differ).\n- Go side: wipe the deployer, drop zero storage slots, normalise empty code, keep `CheckL2GenesisAllocs`.\n- Differential test: forge vs Go host, equal state roots on reference intents (standard, interop, alt-fee configs). Reproduce the deployer wipe (the deployer is also dev account 0).\n- Flip `GenerateL2Genesis` to forge.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
-      "createdAt": "2026-10-09T12:54:00Z",
-      "closedAt": "2026-11-10T19:47:24Z",
-      "state": "CLOSED",
-      "commentCount": 0
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABWGu2fQ",
-      "title": "op-deployer: harden and ship the forge path; make it the default for live deploys",
-      "author": "sebastianst",
-      "number": 23302,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Make forge the default for the live target and `bootstrap`, and make forge a dependable runtime dependency.\n\n**Correctness**\n- `SetDisputeGameImpl` always runs on the Go host ([`dispute_games.go#L163`](https://github.com/ethereum-optimism/optimism/blob/fe7323950e39ded5510a5b18c3458d9f42b73103/op-deployer/pkg/deployer/pipeline/dispute_games.go#L163), [`#L246`](https://github.com/ethereum-optimism/optimism/blob/fe7323950e39ded5510a5b18c3458d9f42b73103/op-deployer/pkg/deployer/pipeline/dispute_games.go#L246)), whose fork is pinned at start and can't see contracts forge deployed earlier in the same apply. Add a `runWithBytes` entrypoint and a forge caller.\n- Don't construct the Go host or `opcm.NewScripts` in forge mode.\n- Preflight that the bundle has `foundry.toml` and the `runWithBytes` selectors, with a clear error on mismatch.\n- Never recompile at runtime: run `--offline`, fail if forge reports a compile, propagate `FOUNDRY_PROFILE`. Prewarm the script graph in every bundle producer (Docker, melange, CI, publish).\n- Use a per-invocation `FOUNDRY_BROADCAST` directory so concurrent runs don't collide (#18760).\n\n**Distribution**\n- Docker and apko images already ship a pinned forge; keep them without solc.\n- Keep the [auto-download](https://github.com/ethereum-optimism/optimism/blob/fe7323950e39ded5510a5b18c3458d9f42b73103/op-deployer/pkg/deployer/forge/binary.go) for Linux and macOS. Drop the Windows release targets (Windows auto-download is broken today).\n- Respect `--cache-dir` for the forge binary, give a clear error when offline, and autodetect musl instead of requiring `FORGE_ENV=alpine`.\n- Document forge as a runtime dependency, including for Go library users (sysgo/devstack consumers).\n\n**Tests, then flip**\n- Run the forge package tests in CI (#21200).\n- Add an e2e live apply test with additional dispute games and AltDA.\n- Flip the default to forge for the live target and `bootstrap`.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
-      "createdAt": "2026-10-09T12:53:55Z",
-      "closedAt": "2026-11-10T15:08:37Z",
-      "state": "CLOSED",
-      "commentCount": 0
     }
   ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABIBUFSA",
+      "title": "Add Lean proof of the super-aggregation coverage checks",
+      "author": "Inphi",
+      "number": 23346,
+      "body": "Adds a Lean proof that `SuperAggregationInputs::validate` only accepts aggregations whose child outputs form one contiguous chain of super roots from the starting root to the root claim, with one range-derived block per chain and one consolidation step at every timestamp in between.\n\nThe Rust is extracted with Charon and Aeneas into `rust/kona/sp1/verification`. The main theorem is `KonaSp1.aggregation_sound`. It assumes child-proof soundness and `l2_sequence_number < u64::MAX`; the README lists the full trust base. `#print axioms` shows only Lean's standard axioms and the opaque super-root hash.\n\nThe `super_root.rs` change is only to suit the extractor: loops that returned early from nested or post-`?` positions move into private helpers, with the same accepted inputs and error order. A new test covers a chain-ID mismatch in a later timestamp block, the one loop that was rewritten rather than moved.\n\nCI does not build the Lean project yet. `scripts/extract.sh` regenerates the generated files and `lake build` checks the proofs.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-12T18:05:49Z",
+      "mergedAt": null,
+      "additions": 8143,
+      "deletions": 104
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABOFn79w",
       "title": "contracts-bedrock: add ComplianceModule bridge hook",
@@ -78,7 +90,7 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-11-10T11:20:06Z",
       "mergedAt": null,
-      "additions": 4818,
+      "additions": 4762,
       "deletions": 16
     },
     {
@@ -102,41 +114,182 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-11-10T15:55:21Z",
       "mergedAt": null,
-      "additions": 2705,
-      "deletions": 10
+      "additions": 2727,
+      "deletions": 11
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABN5b6pw",
-      "title": "op-deployer: run forge on contracts bundles without the AST",
-      "author": "sebastianst",
-      "number": 24003,
-      "body": "Merge after #23664: this PR is based on its branch.\n\nA forge run of an op-deployer script peaked at about 1.5 GB and 3 CPU-s, because at start forge parses the artifact of every file in the script's build, AST included, and the AST is about 80% of the artifacts' bytes. op-deployer now runs forge only on artifacts without it:\n\n- `mktar` strips the AST from the embedded and published bundles. It also drops the Solidity files outside the build and the library files other than sources, licenses and forge configs.\n- A `file://` locator to a local build, as sysgo and op-e2e use, is copied the same way. The copy is made once per build into `bundles/` of the cache directory (`--cache-dir`, by default `~/.op-deployer/cache`), and the processes that use it share it:\n  - one copy of contracts-bedrock takes 3.8 s and 4.6 CPU-s (48 MB RSS, 44 MB on disk), and a later process finds it in 7 ms;\n  - processes that start together copy once (a per-build lock);\n  - eviction keeps the four most recently used copies and never removes one in use.\n- An http bundle from an earlier `mktar` is copied the same way, into a directory of the process.\n\nMeasured on the `file://` local build, 12 CPUs, transparent huge pages on:\n\n| | Before | After |\n|---|---|---|\n| Peak RSS per forge run | 1.52–1.61 GB | 0.34–0.37 GB (0.20 GB without THP) |\n| `TestEndToEndApply` | 65.5 s (25 forge runs: 41.5 s, 73 CPU-s) | 51.9 s (28.2 s, 35 CPU-s) |\n| sysgo world build, `TestRPCConnectivity`: its one forge run | 1.56 GB, 2.0 s | 0.35 GB, 1.5 s |\n| Embedded `.tzst` | 18.7 MB | 2.5 MB |\n\nThe bundle stays warm: no op-deployer script compiles on it. `forge verify-contract` on it submits the same sources as before: I compiled each submitted standard JSON with solc, and it matches the artifacts' bytecode. Only the remappings that forge auto-detects from `lib/` differ, and no source uses them.\n\n**Forge slots.** The slots now count memory only: three quarters of min(cgroup limit, `MemTotal`), at 1.5 GiB per run.\n- Before, a host without a cgroup limit had no memory bound, only cpus/2.\n- 1.5 GiB still fits a run on artifacts with an AST, for example a local directory that can't be copied, so the sizing stays safe for every bundle.\n- Slot counts: 8 on a 16 GB CI container (was 4), 11 on this 22 GB host (was 6).\n- No CPU term, because oversubscribing CPUs costs nothing: 24 runs on a stripped bundle took 3.7 s at 6 at a time, 2.1 s at 12 and 2.2 s at 18. On AST artifacts it was 7.9 s at 6–9 and 11.8 s at 12, as memory ran short.\n\n**What a copy takes from the project.** A bundle is code and data that scripts with a deployer key read, so a copy holds only files of the project:\n- every read goes through an `os.Root` of the project and checks that it read the file the walk found;\n- a copy never contains a link. A link that is, is in, or holds part of the build (the artifacts, the build infos, `forge-artifacts/` whatever the compile cache says, the compile cache, the forge configs and the sources) makes op-deployer use the build as it is, where #23664's `checkFsPermissions` refuses it. Paths are compared ignoring case, so the result doesn't depend on the filesystem. Every other link is skipped;\n- only builds whose artifacts are in `forge-artifacts/` are copied;\n- `.env*` files and directories are left out.\n\nThe shared directory and each stored copy must be private directories of the user, not links. Lock waits end after 5 minutes. Whenever op-deployer falls back to a private copy, or to the build as it is, it logs a warning with the reason.\n\nA copy's key covers the project's path, compile cache and forge config, but not the artifacts' content. Hitting that gap would take a second build with an identical compile cache, source mtimes included.\n\n**Behaviour changes worth checking:**\n- A deployment prepared with a `file://` or http locator by an earlier op-deployer no longer continues, because the stripped artifacts have a different content digest.\n- A cache directory that other users can write holds no copy: each run then copies the build into a temporary directory and logs a warning. The tests that use the local build share one private cache directory in TMPDIR, so the integration tests copy it once instead of 36 times.\n\nCopying the bundle once per CI pipeline, in the contracts build job, is left for a follow-up. The workspace attaches at the checkout, not at `$HOME`, so it needs changes to the CI config and a command that packs the bundle, and one copy costs only 3.8 s per job.\n\nReviews: `go-code-reviewer`, seven rounds, and three security reviews. Its findings are fixed except two:\n- the empty lock files stay, two per build, so that waiting processes lock the same file;\n- an http bundle is copied a second time instead of being stripped in place.\n\nCloses #24000\n\n🤖 *Co-created with Claude Opus 5.5*\n\n\n\n\n",
+      "id": "PR_kwDODjvEJM8AAAABIDl7Lw",
+      "title": "op-chain-ops: add eth-liquidity-pause command",
+      "author": "karlfloersch",
+      "number": 23349,
+      "body": "Stacked on #23348 (`karl/eth-liquidity-pause`). That PR makes `ETHLiquidity` mirror the chain's L1 pause through the permissionless `L1CrossDomainMessenger.syncETHLiquidityPause()`.\n\n## What it's for\n\n`op-chain-ops/cmd/eth-liquidity-pause` is a small CLI for the ETHLiquidity pause. It has three uses:\n\n- **Devnet gate `interop.eth-liquidity-pause`:** `devnet-pause` → `status --expect paused` → `devnet-unpause` → `status --expect unpaused`.\n- **Production verification:** `status` is read-only and works on any chain. Production pausing stays with the guardian's existing DeputyPauseModule flow, and this tool never pauses production. Nothing new is needed in superchain-ops.\n- **Mirroring an L1 pause (or unpause, or expiry) to L2:** `sync` is permissionless, so any funded key can run it.\n\n## Commands\n\n- **`status --l2 <rpc>... [--l1 <rpc> --l1-messenger <addr>...] [--expect paused|unpaused] [--json]`**\n  - For each chain it reads `ETHLiquidity.paused()` and `pausedL1Timestamp()`.\n  - It runs an `eth_call` of `SuperchainETHBridge.sendETH` with 1 wei. A state override funds the dummy `--from`, so the sender needs no balance. It reports whether the call reverts and with which error (selector and name).\n  - With `--l1`, it also shows `L1CrossDomainMessenger.paused()`, which is the ETHLockbox pause, and prints `OUT OF SYNC` when L1 and L2 differ.\n  - `--expect` exits non-zero on any mismatch. For `paused`, every chain needs `paused()` true, `sendETH` reverting with `ETHLiquidity_Paused()` and, if read, L1 paused.\n- **`sync --l1 <rpc> --l2 <rpc> --l1-messenger <addr> ... --key <any funded key>`**\n  - Checks that each messenger's `SystemConfig.l2ChainId()` matches the `--l2` it is paired with.\n  - Prints the L1 and L2 state per chain and skips chains already in sync (`--force` overrides).\n  - Calls `syncETHLiquidityPause()`, waits for the L1 receipt, then polls L2 until `paused()` equals the L1 pause at the sync's block, or `--timeout` passes.\n- **`devnet-pause` / `devnet-unpause --guardian-key <key>`**\n  - Resolves each chain's ETHLockbox identifier through messenger → SystemConfig → portal → lockbox. Chains that share a lockbox are handled once.\n  - Checks that the key is the SuperchainConfig guardian.\n  - Calls `pause`, `extend` (if an earlier pause expired) or `unpause` on the lockbox identifier, then runs `sync`.\n  - `devnet-unpause` warns if a global pause is still active.\n  - Refuses OP Mainnet, Ink, Unichain, their Sepolia chains (10, 57073, 130, 11155420, 763373, 1301) and an L1 of Ethereum mainnet. There is no override flag.\n\nEvery flag can also come from `--config <toml>` (see `config.example.toml`). Local `*.toml` files in that directory are gitignored because they may hold keys.\n\n## Usage\n\n```bash\n# Production / any chain: read-only\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status \\\n  --l2 https://mainnet.optimism.io --l2 <ink-rpc> --l2 <unichain-rpc> \\\n  --l1 <eth-rpc> --l1-messenger <op-l1cdm> --l1-messenger <ink-l1cdm> --l1-messenger <uni-l1cdm>\n\n# Mirror the current L1 pause to L2 (permissionless)\ngo run ./op-chain-ops/cmd/eth-liquidity-pause sync --config pause.toml --key <funded-l1-key>\n\n# Devnet gate\ngo run ./op-chain-ops/cmd/eth-liquidity-pause devnet-pause   --config devnet.toml\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status         --config devnet.toml --expect paused\ngo run ./op-chain-ops/cmd/eth-liquidity-pause devnet-unpause --config devnet.toml\ngo run ./op-chain-ops/cmd/eth-liquidity-pause status         --config devnet.toml --expect unpaused\n```\n\n## Tests\n\nNone of these tests need a network.\n\n- **Calldata:** encoding for `paused()`, `syncETHLiquidityPause()`, `sendETH`, and SuperchainConfig `pause`/`unpause`/`extend`/`pausable`/`paused(address)`.\n- **ABI drift:** a test checks every hand-written signature and custom error against the contracts-bedrock ABI snapshots on this stack, so a rename in #23348 fails here.\n- **Revert decoding:** custom errors and `Error(string)` reasons.\n- **Safety checks:** production refusal, `--l2`/`--l1-messenger` pairing, grouping chains by shared lockbox, the guardian pause/extend/unpause choice, and `--expect` evaluation, including L1 paused while L2 is not synced.\n- **Config loading:** TOML values load into each command, including the example config.\n- **`status` end to end:** runs against in-process fake L1/L2 JSON-RPC servers. The cases are paused and synced, unpaused, out of sync, a pre-pause ETHLiquidity, a messenger paired with the wrong chain, and JSON output. The fake rejects `sendETH` without the balance override, as geth does.\n- **`sync` end to end:** runs on geth simulated backends with mock contracts. The cases are skip when in sync, `--force` send and wait for L2, a reverting call never sent, and an L2 timeout.\n\n```\ngo test ./op-chain-ops/cmd/eth-liquidity-pause/...   # ok\ngo vet ./op-chain-ops/cmd/eth-liquidity-pause/...    # clean\n./linter/bin/op-golangci-lint run ./op-chain-ops/cmd/eth-liquidity-pause/...   # 0 issues\ngo mod tidy -diff                                    # clean\n```\n\nI also ran `status` read-only against OP Mainnet and OP Sepolia public RPCs. ETHLiquidity is not initialized there yet, and the tool reports `Error(\"Proxy: implementation not initialized\")` for both reads.\n\n**Not run:** `sync` and `devnet-*` against a live devnet with #23348 deployed. The guardian path (`devnet-pause`/`devnet-unpause`) has unit coverage only for its decision logic.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-09T16:48:42Z",
-      "mergedAt": null,
-      "additions": 1640,
-      "deletions": 271
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABOEvJBg",
-      "title": "rust!: Update reth to v2.7.0",
-      "author": "aakoshh",
-      "number": 24024,
-      "body": "Closes #23404. This is the first of the version-by-version reth bumps; v2.8.x and v2.9.0 follow.\n\n## What\n\nUpdates reth to v2.7.0 through the `op-v2.7.0` fork branch. The pin is a `rev` on the fork stack ethereum-optimism/reth#34 → ethereum-optimism/reth#35 → ethereum-optimism/reth#40 → ethereum-optimism/reth#41 (`0447ceb`) until that stack merges and `op-v2.7.0-0` is tagged. Two of them carry `op-v2.6.0` patches that v2.7.0 lacks: ethereum-optimism/reth#40 the trie seek boundary fix (`paradigmxyz/reth#28264`), and ethereum-optimism/reth#41 the RPC replay through the block executor (ethereum-optimism/reth#37, a backport of `paradigmxyz/reth#28266`) that #23942's `rpc_replay_settlement` tests depend on.\n\nChanges beyond the version sync:\n\n- API adaptations:\n  - `StateProviderDatabase` takes an `EvmStateProvider` (`paradigmxyz/reth#27109`).\n  - `CancelOnDrop` moved to `reth-tasks` (`paradigmxyz/reth#27466`).\n  - `StateProviderFactory` has a `Primitives` type (`paradigmxyz/reth#26923`).\n  - `BlockAndReceipts` holds `SharedReceipts` (`paradigmxyz/reth#27427`).\n  - The e2e setup functions folded into `E2ETestSetupBuilder` (`paradigmxyz/reth#27432`).\n- `reth-optimism-rpc` vendors reth v2.6.0's `MemoryOverlayStateProvider` for the flashblocks pending state (see How).\n- op-reth denies the new `--rpc-cache.max-bals-bytes`, like every other block access list option.\n- Two mirrored upstream symbols changed: the proofs buffer's copy of the deleted `MemoryOverlayStateProviderRef::hashed_post_state` becomes a frozen `port`, and the proofs-history `get_proof` copy notes why it doesn't follow upstream's new `spawn_blocking_io_with_state`.\n- `rust/UPDATING-RETH.md` gains what building the `op-v2.7.0` fork branch needed.\n\n## Why\n\nKeeps op-reth on a supported reth line.\n\n## How\n\n`paradigmxyz/reth#26923` removed `MemoryOverlayStateProvider`, and its replacement, `state_with_block_appended`, can't open the pending state of a speculative flashblock build. With canonical head N-1, a build can run several blocks ahead: N+1 on pending N, and so on. The tip's header names pending N as its parent, which reth's overlay doesn't know, while its bundle holds every write since the anchor N-1. Passing N fails with `BlockHashNotFound`, and passing N-1 panics on the parent `debug_assert` in `OverlayBuilder::with_appended_block`. The vendored provider layers the tip on `history_by_block_hash(anchor)` as before. The commits show it in order: the compiling API change, a red test of the speculative case, then the fix. `op-reth-test-engine` uses `state_with_block_appended` directly, since its blocks link to real parents in the overlay manager it shares with its provider.\n\n**Review request:** the agentic sweep from `docs/ai/reth-update-review.md` (`reth-update-reviewer`, full-range and forward) has not run on this PR. Please run it. Two leads:\n\n1. `--engine.sender-recovery-cache` is now on by default (`paradigmxyz/reth#27447`), sharing recovered senders between transaction ingress and payload execution. Check that recovery through the cache matches the uncached path for deposits (0x7E) and post-exec transactions (0x7D).\n2. Upstream's new `LoadState::spawn_blocking_io_with_state` builds pending state through `state_with_block_appended` for a `PendingStateSource::Block`. Check that every `pending` state query still reaches the vendored overlay through `OpEthApi::local_pending_state`.\n\n## Caveats\n\n- Operator-facing CLI changes inherited from reth v2.7.0. No flags are removed:\n  - New: `--rpc-cache.max-blocks-bytes` (2 GiB), `--rpc-cache.max-receipts-bytes` (1 GiB), `--rpc-cache.idle-timeout` (1h), and `--engine.backfill-threshold` (32, as before).\n  - Lower defaults: `--rpc-cache.max-blocks` 5000 → 1000, `--rpc-cache.max-receipts` 2000 → 500.\n  - `--engine.sender-recovery-cache` is on by default. `--engine.sender-recovery-cache=false` turns it off.\n  - `--rpc.gascap` (default 50M) now also caps `eth_estimateGas`.\n  - `--rpc.max-tracing-requests`, `--rpc.max-blocking-io-requests` and `--rpc.proof-permits` reject `0`.\n- RPC: a state query for a block whose changesets are pruned now fails with code `4444` and \"pruned history unavailable: requested N, earliest available M\" (`paradigmxyz/reth#27367`). It used to be an internal error (`-32603`, \"insufficient changesets...\"). Nothing in this repo matches either. External clients matching the old text need updating.\n- `alloy-trie` stays at 0.9.7 in both lockfiles. The declared range (`0.9.4`, as in reth) admits 0.9.9, which breaks `reth-trie-common` at this reth version (`HashBuilder::all_branch_nodes`), so don't refresh it with a broad `cargo update`.\n- The bump changes code that both proof programs run (revm, alloy and kona's executor). The next kona-sp1 build has a new super-aggregation vkey, and the next kona client build has a new Cannon prestate. Releasing either needs the matching `absolutePrestate` in the dispute game args updated on-chain, before or as proposers switch: a proposer whose proofs don't verify against the configured prestate loses its challenged games.\n- `eth/memory_overlay.rs` keeps upstream's three `TODO: Currently this does not reuse available in-memory trie nodes.` comments. We don't plan to resolve them:\n  - The file is a copy of upstream, kept close so it can be compared with upstream.\n  - The gap doesn't apply to its only use: flashblock `ExecutedBlock`s carry no trie updates, so there are no in-memory nodes to reuse.\n  - The copy goes away with #23998, or once reth's API can append a chain of blocks.\n\n## Alternatives\n\n- For the flashblocks pending state, several ways to stay on reth's new overlay were considered and dropped:\n  - Rewriting the tip's header parent to the anchor breaks the overlay's assumption that parent numbers are consecutive (`parent_num_hash`).\n  - Feeding speculative blocks into the engine's overlay manager would mix unvalidated, cumulative-diff blocks into engine state.\n  - Folding the whole speculative chain through `OverlayBuilder::with_appended_block` needs both the chain at the RPC (#23998) and reth access we don't have: `state_with_block_appended` takes one block, and `ProviderFactory::overlay_manager` is crate-private.\n\n## Potential follow-ups\n\n- #23998: transactions in earlier speculative flashblock blocks disappear from RPC lookups, and the RPC's pending value isn't reset when speculative state is cleared.\n- ethereum-optimism/reth#22 and ethereum-optimism/reth#28, open against `op-v2.6.0`, need carrying onto `op-v2.7.0` if they merge first.\n- Companion: ethereum-optimism/optimism-premium#440, in draft, pins this PR's head.\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-10T10:08:09Z",
-      "mergedAt": null,
-      "additions": 1637,
-      "deletions": 980
+      "createdAt": "2026-10-12T22:14:45Z",
+      "mergedAt": "2026-11-11T03:33:18Z",
+      "additions": 2703,
+      "deletions": 0
     }
   ],
   "codeChanges": {
-    "additions": 17182,
-    "deletions": 2463,
-    "files": 284,
-    "commitCount": 436
+    "additions": 29912,
+    "deletions": 5459,
+    "files": 489,
+    "commitCount": 585
   },
   "completedItems": [
+    {
+      "title": "op-chain-ops: add eth-liquidity-pause command",
+      "prNumber": 23349,
+      "type": "other",
+      "body": "Stacked on #23348 (`karl/eth-liquidity-pause`). That PR makes `ETHLiquidity` mirror the chain's L1 pause through the permissionless `L1CrossDomainMessenger.syncETHLiquidityPause()`.\n\n## What it's for\n\n`op-chain-ops/cmd/eth-liquidity-pause` ",
+      "files": [
+        "op-chain-ops/README.md",
+        "op-chain-ops/cmd/eth-liquidity-pause/.gitignore",
+        "op-chain-ops/cmd/eth-liquidity-pause/README.md",
+        "op-chain-ops/cmd/eth-liquidity-pause/chains.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/config.example.toml",
+        "op-chain-ops/cmd/eth-liquidity-pause/contracts.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/main.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/main_test.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/status.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync.go",
+        "op-chain-ops/cmd/eth-liquidity-pause/sync_test.go",
+        "op-acceptance-tests/tests/interop/expiry/ethliquiditypause_test.go",
+        "op-acceptance-tests/tests/interop/expiry/messageexpiry_test.go",
+        "op-service/txintent/bindings/ETHLiquidity.go",
+        "op-service/txintent/bindings/L1CrossDomainMessenger.go",
+        "op-service/txintent/bindings/SuperchainConfig.go",
+        "packages/contracts-bedrock/interfaces/L1/IL1CrossDomainMessenger.sol",
+        "packages/contracts-bedrock/interfaces/L2/IETHLiquidity.sol",
+        "packages/contracts-bedrock/snapshots/abi/ETHLiquidity.json",
+        "packages/contracts-bedrock/snapshots/abi/L1CrossDomainMessenger.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/ETHLiquidity.json",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/L1/L1CrossDomainMessenger.sol",
+        "packages/contracts-bedrock/src/L2/ETHLiquidity.sol",
+        "packages/contracts-bedrock/src/libraries/Predeploys.sol",
+        "packages/contracts-bedrock/test/L1/L1CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/L2/ETHLiquidity.t.sol",
+        "packages/contracts-bedrock/test/L2/SuperchainETHBridge.t.sol"
+      ]
+    },
+    {
+      "title": "op-deployer,ops: simulate prepare and continue on an anvil fork",
+      "prNumber": 23667,
+      "type": "other",
+      "body": "Stack 5/7, merge in order: #23663 → #23664 → #23665 → #23666 → #23667 → #23668 → #23669. The whole change, with green CI, is #23647.\n\n`prepare` predicted the `DeployOPChain` addresses, and `continue` ran its preflight, on the Go script host",
+      "files": [
+        ".github/images.apko.json",
+        "docs/public-docs/chain-operators/tools/op-deployer/installation.mdx",
+        "melange/pipelines/op-deployer/install-forge.yaml",
+        "op-deployer/pkg/cli/continue_test.go",
+        "op-deployer/pkg/deployer/continue.go",
+        "op-deployer/pkg/deployer/continue_test.go",
+        "op-deployer/pkg/deployer/continue_verify.go",
+        "op-deployer/pkg/deployer/forge/anvil.go",
+        "op-deployer/pkg/deployer/forge/anvil_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_resume_test.go",
+        "op-deployer/pkg/deployer/integration_test/continue_test.go",
+        "op-deployer/pkg/deployer/l1_fork.go",
+        "op-deployer/pkg/deployer/opcm/forge_env.go",
+        "op-deployer/pkg/deployer/prepare.go",
+        "op-deployer/pkg/deployer/prepare_test.go",
+        "ops/docker/op-stack-go/Dockerfile",
+        "op-deployer/pkg/deployer/forge/binary.go",
+        "op-deployer/pkg/deployer/forge/binary_test.go",
+        "op-deployer/pkg/deployer/forge/client.go",
+        "op-deployer/pkg/deployer/forge/client_test.go",
+        "op-devstack/sysgo/deployer.go"
+      ]
+    },
+    {
+      "title": "op-deployer,op-devstack,contracts-bedrock!: run genesis-target L1 deployments on forge",
+      "prNumber": 23666,
+      "type": "other",
+      "body": "Stack 4/7, merge in order: #23663 → #23664 → #23665 → #23666 → #23667 → #23668 → #23669. The whole change, with green CI, is #23647.\n\n`apply --deployment-target genesis`, op-e2e's config allocs and sysgo built the L1 genesis on the Go scrip",
+      "files": [
+        "op-deployer/pkg/deployer/apply.go",
+        "op-deployer/pkg/deployer/flags.go",
+        "op-deployer/pkg/deployer/integration_test/genesis_parity_test.go",
+        "op-deployer/pkg/deployer/opcm/forge_bundle.go",
+        "op-deployer/pkg/deployer/opcm/preinstalls.go",
+        "op-deployer/pkg/deployer/pipeline/env.go",
+        "op-deployer/pkg/deployer/pipeline/implementations.go",
+        "op-deployer/pkg/deployer/pipeline/prefund_l1_dev_genesis.go",
+        "op-deployer/pkg/deployer/pipeline/preinstall_l1_dev_genesis.go",
+        "op-deployer/pkg/deployer/pipeline/seal_l1_dev_genesis.go",
+        "op-devstack/sysgo/deployer.go",
+        "packages/contracts-bedrock/scripts/SetPreinstalls.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployAlphabetVM.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployAltDA.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployDisputeGame.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployMIPS.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployOPChain.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeploySuperchain.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/ReadImplementationAddresses.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/ReadSuperchainDeployment.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/SetDisputeGameImpl.s.sol",
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "docs/ai/opgeth-decoupling.md",
+        "docs/public-docs/chain-operators/guides/features/custom-gas-token-guide.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/installation.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/artifacts-locators.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/init.mdx",
+        "docs/public-docs/chain-operators/tutorials/create-l2-rollup/op-deployer-setup.mdx",
+        "melange/pipelines/op-deployer/embed-artifacts.yaml",
+        "op-deployer/.goreleaser.yaml",
+        "op-deployer/pkg/deployer/artifacts/cmd/mktar/main.go",
+        "op-deployer/pkg/deployer/bootstrap/flags.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations.go",
+        "op-deployer/pkg/deployer/bootstrap/superchain.go",
+        "op-deployer/pkg/deployer/broadcaster/keyed.go",
+        "op-deployer/pkg/deployer/broadcaster/keyed_test.go",
+        "op-deployer/pkg/deployer/flags/names.go",
+        "op-deployer/pkg/deployer/forge/binary.go",
+        "op-deployer/pkg/deployer/forge/binary_test.go",
+        "op-deployer/pkg/deployer/forge/client.go",
+        "op-deployer/pkg/deployer/forge/client_test.go",
+        "op-deployer/pkg/deployer/forge/encoding.go",
+        "op-deployer/pkg/deployer/forge/slots.go",
+        "op-deployer/pkg/deployer/forge/slots_other.go",
+        "op-deployer/pkg/deployer/forge/slots_unix.go",
+        "op-deployer/pkg/deployer/forge/slots_unix_test.go",
+        "op-deployer/pkg/deployer/forge/transactions.go",
+        "op-deployer/pkg/deployer/forge/transactions_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/bootstrap_forge_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/bootstrap_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/cli_runner.go",
+        "op-deployer/pkg/deployer/integration_test/cli/cli_runner_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/deploy_scripts_forge_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/e2e_apply_forge_test.go",
+        "op-deployer/pkg/deployer/opcm/alphabet.go",
+        "op-deployer/pkg/deployer/opcm/alt_da.go",
+        "op-deployer/pkg/deployer/opcm/dispute_game.go",
+        "op-deployer/pkg/deployer/opcm/dispute_game_factory.go",
+        "op-deployer/pkg/deployer/opcm/forge_bundle_test.go",
+        "op-deployer/pkg/deployer/opcm/forge_env.go",
+        "op-deployer/pkg/deployer/opcm/forge_env_test.go",
+        "op-deployer/pkg/deployer/opcm/forge_live.go",
+        "op-deployer/pkg/deployer/opcm/genesis_state.go",
+        "op-deployer/pkg/deployer/integration_test/l2_genesis_allocs_oracle_test.go",
+        "op-deployer/pkg/deployer/opcm/genesis_state_test.go",
+        "op-deployer/pkg/deployer/opcm/l2genesis.go",
+        "op-deployer/pkg/deployer/pipeline/l2genesis.go",
+        "op-e2e/system/da/eip4844_test.go",
+        "packages/contracts-bedrock/scripts/L2Genesis.s.sol",
+        "packages/contracts-bedrock/scripts/libraries/Config.sol",
+        "packages/contracts-bedrock/scripts/libraries/DeployState.sol",
+        "op-deployer/pkg/deployer/apply_test.go",
+        "op-deployer/pkg/deployer/opcm/mock_sp1_verifier.go",
+        "op-deployer/pkg/deployer/opcm/mock_sp1_verifier_test.go"
+      ]
+    },
     {
       "title": "op-deployer,contracts-bedrock!: generate the L2 genesis with forge",
       "prNumber": 23665,
@@ -393,6 +546,71 @@
       ]
     },
     {
+      "title": "op-e2e,kona: read L2 data through op-service/sources",
+      "prNumber": 23862,
+      "type": "other",
+      "body": "Upstream go-ethereum can't decode the deposit and post-exec transactions in an L2 block body, and its receipt type drops the OP fee fields. The op-geth ratchet can't catch either, because both compile. The op-e2e system, fault-proof and act",
+      "files": [
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_boot.go",
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_boot_test.go",
+        "op-e2e/actions/altda/altda_test.go",
+        "op-e2e/actions/batcher/eip4844_test.go",
+        "op-e2e/actions/batcher/l2_batcher_test.go",
+        "op-e2e/actions/derivation/batch_queue_test.go",
+        "op-e2e/actions/derivation/reorg_test.go",
+        "op-e2e/actions/derivation/system_config_test.go",
+        "op-e2e/actions/helpers/enginetest/opnode_decode_test.go",
+        "op-e2e/actions/helpers/enginetest/sequencer_smoke_test.go",
+        "op-e2e/actions/helpers/env.go",
+        "op-e2e/actions/helpers/l1_miner.go",
+        "op-e2e/actions/helpers/l1_replica.go",
+        "op-e2e/actions/helpers/l2_batcher.go",
+        "op-e2e/actions/helpers/l2_batcher_test.go",
+        "op-e2e/actions/helpers/l2_engine.go",
+        "op-e2e/actions/helpers/l2_engine_test.go",
+        "op-e2e/actions/helpers/setups.go",
+        "op-e2e/actions/helpers/user.go",
+        "op-e2e/actions/proposer/l2_proposer_test.go",
+        "op-e2e/actions/safedb/helpers/setups.go",
+        "op-e2e/actions/supernode/rewind_test.go",
+        "op-e2e/actions/sync/sync_test.go",
+        "op-e2e/actions/upgrades/ecotone_fork_test.go",
+        "op-e2e/actions/upgrades/fjord_fork_test.go",
+        "op-e2e/actions/upgrades/holocene_fork_test.go",
+        "op-e2e/actions/upgrades/span_batch_test.go",
+        "op-e2e/e2eutils/disputegame/helper.go",
+        "op-e2e/e2eutils/disputegame/split_game_helper.go",
+        "op-e2e/e2eutils/geth/find.go",
+        "op-e2e/e2eutils/geth/wait.go",
+        "op-e2e/e2eutils/wait/blocks.go",
+        "op-e2e/e2eutils/wait/waits.go",
+        "op-e2e/faultproofs/cannon_benchmark_test.go",
+        "op-e2e/faultproofs/output_cannon_test.go",
+        "op-e2e/faultproofs/precompile_test.go",
+        "op-e2e/faultproofs/super_test.go",
+        "op-e2e/faultproofs/util.go",
+        "op-e2e/interop/supersystem.go",
+        "op-e2e/interop/supersystem_l2.go",
+        "op-e2e/system/altda/concurrent_test.go",
+        "op-e2e/system/bridge/deposit_test.go",
+        "op-e2e/system/bridge/rpc_test.go",
+        "op-e2e/system/bridge/validity_test.go",
+        "op-e2e/system/bridge/withdrawal.go",
+        "op-e2e/system/conductor/sequencer_failover_setup.go",
+        "op-e2e/system/da/brotli_batcher_test.go",
+        "op-e2e/system/da/dencun_test.go",
+        "op-e2e/system/da/eip4844_test.go",
+        "op-e2e/system/da/multi_test.go",
+        ".golangci.yaml",
+        "op-e2e/system/da/startstop_test.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-e2e/system/fees/eip1559params_test.go",
+        "op-e2e/system/fees/fees_test.go",
+        "op-e2e/system/fees/gaspriceoracle_test.go",
+        "op-e2e/e2eutils/wait/waits_test.go"
+      ]
+    },
+    {
       "title": "op-reth: drop the RPC replay override and pin the executor-routing fork",
       "prNumber": 23942,
       "type": "other",
@@ -434,6 +652,22 @@
         "op-interop-filter/filter/logsdb_chain_ingester_test.go",
         "op-interop-filter/filter/service.go",
         "op-interop-filter/filter/service_test.go"
+      ]
+    },
+    {
+      "title": "kona-engine: resolve the super-root target by number, not by walking ancestors",
+      "prNumber": 23960,
+      "type": "other",
+      "body": "## Summary\n\nkona-node's `superroot_atTimestamp` found the target L2 block by walking parent hashes from the recorded safe head down to the target, one `eth_getBlockByHash` per block. With span batches the target can be ~1800 blocks below it",
+      "files": [
+        "rust/kona/crates/node/engine/src/client/query.rs",
+        "rust/kona/crates/node/rpc/src/superroot/server/safedb_tests.rs",
+        "rust/kona/crates/node/rpc/src/superroot/server/safedb_tests/distance_tests.rs",
+        "rust/kona/crates/node/rpc/src/superroot/server/safedb_tests/execution_layer.rs",
+        "rust/kona/crates/node/rpc/src/superroot/server/safedb_tests/reorg_tests.rs",
+        "rust/kona/crates/node/rpc/src/test_utils.rs",
+        "rust/kona/crates/node/engine/src/client.rs",
+        "rust/kona/crates/node/rpc/src/superroot/server/rpc.rs"
       ]
     },
     {
@@ -569,6 +803,29 @@
       ]
     },
     {
+      "title": "kona-sp1!: seed guest hash maps with per-proof prover randomness",
+      "prNumber": 24016,
+      "type": "other",
+      "body": "Part of https://github.com/ethereum-optimism/proofs-team/issues/58. Stacked on #24015.\n\nInside the zkVM, foldhash's seed is a constant of the guest ELF, so attacker-chosen keys (e.g. TSTORE slots) can be precomputed to collide in revm's map",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/sp1/crates/super-range-executor/Cargo.toml",
+        "rust/kona/sp1/crates/super-range-executor/src/consolidation_tests.rs",
+        "rust/kona/sp1/crates/super-range-executor/src/lib.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/foldhash-seeded/Cargo.toml",
+        "rust/kona/sp1/programs/foldhash-seeded/src/lib.rs",
+        "rust/kona/sp1/programs/log-commitment/Cargo.toml",
+        "rust/kona/sp1/programs/log-commitment/src/main.rs",
+        "rust/kona/sp1/programs/super-range/Cargo.toml",
+        "rust/kona/sp1/programs/super-range/src/main.rs",
+        "rust/kona/sp1/programs/super-range/src/test_config.rs",
+        "rust/kona/sp1/programs/foldhash-seeded/tests/uninstalled.rs",
+        "rust/kona/sp1/programs/super-aggregation/src/main.rs"
+      ]
+    },
+    {
       "title": "kona-sp1!: store witness preimages in a BTreeMap",
       "prNumber": 24015,
       "type": "other",
@@ -585,6 +842,42 @@
       "body": "op-deployer no longer compiles the deploy scripts on its first `forge script` run, in local builds, Docker and melange images, and release binaries. That run compiled about 80 files and downloaded a solc version first.\n\nBefore #23968, `just",
       "files": [
         "op-deployer/scripts/build-embedded-contracts.sh"
+      ]
+    },
+    {
+      "title": "op-deployer: run forge on contracts bundles without the AST",
+      "prNumber": 24003,
+      "type": "other",
+      "body": "Merge after #23664: this PR is based on its branch.\n\nA forge run of an op-deployer script peaked at about 1.5 GB and 3 CPU-s, because at start forge parses the artifact of every file in the script's build, AST included, and the AST is about",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/artifacts-locators.mdx",
+        "op-deployer/pkg/deployer/artifacts/bundle/bundle.go",
+        "op-deployer/pkg/deployer/artifacts/bundle/bundle_test.go",
+        "op-deployer/pkg/deployer/artifacts/bundle/bundle_unix_test.go",
+        "op-deployer/pkg/deployer/artifacts/cmd/mktar/main.go",
+        "op-deployer/pkg/deployer/artifacts/download.go",
+        "op-deployer/pkg/deployer/artifacts/local.go",
+        "op-deployer/pkg/deployer/artifacts/local_test.go",
+        "op-deployer/pkg/deployer/artifacts/lock_other.go",
+        "op-deployer/pkg/deployer/artifacts/lock_unix.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations_test.go",
+        "op-deployer/pkg/deployer/forge/memlimit_linux.go",
+        "op-deployer/pkg/deployer/forge/memlimit_linux_test.go",
+        "op-deployer/pkg/deployer/forge/memlimit_other.go",
+        "op-deployer/pkg/deployer/forge/slots.go",
+        "op-deployer/pkg/deployer/forge/slots_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/continue_test.go",
+        "op-deployer/pkg/deployer/integration_test/l2_genesis_allocs_oracle_test.go",
+        "op-deployer/pkg/deployer/manage/migrate_test.go",
+        "op-deployer/pkg/deployer/testutil/cache.go",
+        "op-deployer/pkg/deployer/testutil/cache_other.go",
+        "op-deployer/pkg/deployer/testutil/cache_unix.go",
+        "op-deployer/pkg/deployer/testutil/cache_unix_test.go",
+        "op-deployer/pkg/deployer/testutil/env.go",
+        "go.mod",
+        "op-deployer/pkg/deployer/forge/slots_other.go",
+        "op-deployer/pkg/deployer/forge/slots_unix.go"
       ]
     },
     {
@@ -659,6 +952,42 @@
         "rust/op-reth/crates/txpool/src/estimated_da_size.rs",
         "rust/op-reth/crates/txpool/src/lib.rs",
         "rust/op-reth/crates/txpool/src/validator.rs"
+      ]
+    },
+    {
+      "title": "ci: speed up kona-host-client-offline-cannon by about 5 min",
+      "prNumber": 24057,
+      "type": "other",
+      "body": "**Metrics** (CircleCI, xlarge.gen2 machine)\n\n| | develop's job | this PR |\n|---|---|---|\n| `kona-host-client-offline-cannon` | 785, 807 s (25 recent PR runs: median 788 s) | 458, 467 s with a warm cache. 683 s before develop has written one",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        "rust/kona/docker/fpvm-prestates/cannon-repro.dockerfile"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: run DeployVariations cases explicitly, record test files in JUnit",
+      "prNumber": 24056,
+      "type": "tests",
+      "body": "**Metrics** (bench pipelines 139449, 139454 and 139453 at base f983d83115. Old and new ran side by side in the same pipeline and are compared on the same CPU.)\n\n| `contracts-bedrock-tests` | CPU | job before → after | \"Run tests\" before → a",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/scripts/forge-junit-add-file.py",
+        "packages/contracts-bedrock/test/setup/DeployVariations.t.sol"
+      ]
+    },
+    {
+      "title": "superchain: update registry pin for sepolia-devnet-4/5/6",
+      "prNumber": 24054,
+      "type": "other",
+      "body": "op-node, kona-node and op-reth can now start sepolia-devnet-4, -5 and -6 by network name from the embedded registry. Before this PR, those chains needed an explicit rollup config and genesis. The configs merged upstream in ethereum-optimism",
+      "files": [
+        "op-core/superchain/bundle/superchain-configs.zip.sha256",
+        "rust/kona/crates/protocol/registry/etc/chainList.json",
+        "rust/kona/crates/protocol/registry/etc/configs.json",
+        "rust/kona/crates/protocol/registry/etc/depsets.json",
+        "rust/op-reth/crates/chainspec/res/superchain-configs.tar.sha256",
+        "rust/op-reth/crates/chainspec/src/superchain/chain_specs.rs",
+        "superchain-registry"
       ]
     },
     {
@@ -768,6 +1097,64 @@
       ]
     },
     {
+      "title": "rust!: Update reth to v2.7.0",
+      "prNumber": 24024,
+      "type": "other",
+      "body": "Closes #23404. This is the first of the version-by-version reth bumps; v2.8.x and v2.9.0 follow.\n\n## What\n\nUpdates reth to v2.7.0 through the `op-v2.7.0` fork branch. The pin is a `rev` on the fork stack ethereum-optimism/reth#34 → ethereum",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/UPDATING-RETH.md",
+        "rust/alloy-op-evm/src/lib.rs",
+        "rust/alloy-op-evm/src/tx.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/kona/bin/client/src/fpvm_evm/precompiles/provider.rs",
+        "rust/kona/sp1/crates/client/src/precompiles/custom.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/op-alloy/crates/consensus/src/receipts/envelope.rs",
+        "rust/op-alloy/crates/consensus/src/receipts/receipt.rs",
+        "rust/op-alloy/crates/rpc-types-engine/src/payload/mod.rs",
+        "rust/op-reth-test-engine/src/chain.rs",
+        "rust/op-reth-test-engine/src/exec.rs",
+        "rust/op-reth/crates/cli/src/lib.rs",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/Cargo.toml",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/evm/src/execute.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/flashblocks/src/worker.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/src/rpc.rs",
+        "rust/op-reth/crates/node/src/utils.rs",
+        "rust/op-reth/crates/node/tests/it/invalid_post_exec.rs",
+        "rust/op-reth/crates/node/tests/it/rpc_replay_settlement/parity_replays.rs",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/builder/admission_tests.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/rpc/src/debug.rs",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/memory_overlay.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/pending_block.rs",
+        "rust/op-reth/crates/rpc/src/eth/proofs.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/rpc/src/state.rs",
+        "rust/op-reth/crates/rpc/src/witness.rs",
+        "rust/op-reth/crates/trie/src/backfill/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/buffer/overlay.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/execute_block.rs"
+      ]
+    },
+    {
       "title": "op-interop-filter: Update ingestion lag while the EL is unavailable",
       "prNumber": 24023,
       "type": "other",
@@ -801,27 +1188,108 @@
         "op-deployer/pkg/deployer/pipeline/implementations_test.go",
         "op-deployer/pkg/deployer/standard/standard.go"
       ]
+    },
+    {
+      "title": "rust: require a tag reth pin before a reth PR leaves draft",
+      "prNumber": 24071,
+      "type": "other",
+      "body": "#24024 merged with reth pinned by `rev` to the head of an unmerged fork PR stack. Once those fork PRs squash- or rebase-merge, `develop` pins a commit that no fork branch contains. The docs already said to switch to a tag before merging, bu",
+      "files": [
+        ".circleci/continue/rust-ci.yml",
+        ".claude/agents/reth-update-reviewer.md",
+        ".claude/skills/update-reth/SKILL.md",
+        "docs/ai/reth-update-review.md",
+        "docs/ai/rust-dev.md",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/UPDATING-RETH.md",
+        "rust/justfile",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/pending_block.rs",
+        "rust/op-reth/crates/rpc/src/eth/proofs.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/rpc/src/state.rs",
+        "rust/op-reth/crates/trie/src/db/store/metrics.rs",
+        "rust/op-reth/crates/trie/src/initialize.rs",
+        "rust/op-reth/crates/trie/src/provider.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs",
+        "rust/scripts/test_upstream_mirrors.py",
+        "rust/scripts/upstream-mirrors.py"
+      ]
+    },
+    {
+      "title": "op-deployer: add --deploy-mock-sp1-verifier to bootstrap implementations",
+      "prNumber": 24064,
+      "type": "other",
+      "body": "`op-deployer bootstrap implementations` now takes `--deploy-mock-sp1-verifier`, as `apply` does since #24022. Without it, `bootstrap implementations` can't run on a development L1 like a local Anvil: it has no default SP1 verifier there, an",
+      "files": [
+        "docs/ai/devfeatures.md",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/bootstrap.mdx",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "op-deployer/pkg/deployer/bootstrap/flags.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations.go",
+        "op-deployer/pkg/deployer/bootstrap/implementations_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/bootstrap_test.go"
+      ]
+    },
+    {
+      "title": "ci: run memory-all-opn on 2xlarge.gen2 and log container memory",
+      "prNumber": 24060,
+      "type": "other",
+      "body": "`memory-all-opn-op-reth-fusaka` is the most expensive CI job (23% of October's credits). It costs 25% more per run than `memory-all-kona-op-reth-fusaka`, which runs the same tests on `2xlarge.gen2` in the same time, so op-node's extra 4 vCP",
+      "files": [
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: build the NUT bundle once per assertValidOutput fuzz test",
+      "prNumber": 24058,
+      "type": "tests",
+      "body": "**Metrics** (bench pipeline 139472 at base 8b081c14f7. Old and new ran side by side in the same pipeline, all on 6975P-C hosts.)\n\n| `contracts-bedrock-tests` | job before → after | \"Run tests\" before → after |\n|---|---|---|\n| main | 685 → 6",
+      "files": [
+        "packages/contracts-bedrock/test/scripts/GenerateNUTBundle.t.sol"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 295.7490497898432,
-      "prScore": 160.77304978984324,
+      "totalScore": 550.1154550719119,
+      "prScore": 331.70145507191194,
       "issueScore": 6.1,
-      "reviewScore": 128,
-      "commentScore": 0.8759999999999999,
+      "reviewScore": 211,
+      "commentScore": 1.3139999999999998,
       "summary": null
     },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 217.15094548770224,
-      "prScore": 188.15094548770224,
+      "totalScore": 404.0508260085485,
+      "prScore": 210.11282600854852,
       "issueScore": 0,
-      "reviewScore": 29,
-      "commentScore": 0,
+      "reviewScore": 193.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "einar-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
+      "totalScore": 234.6586295649753,
+      "prScore": 189.38262956497533,
+      "issueScore": 8.2,
+      "reviewScore": 36,
+      "commentScore": 1.0759999999999998,
       "summary": null
     },
     {
@@ -835,16 +1303,6 @@
       "summary": null
     },
     {
-      "username": "einar-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 189.3248556683992,
-      "prScore": 148.68685566839923,
-      "issueScore": 4,
-      "reviewScore": 36,
-      "commentScore": 0.6379999999999999,
-      "summary": null
-    },
-    {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
       "totalScore": 188.28018666070068,
@@ -852,6 +1310,46 @@
       "issueScore": 0,
       "reviewScore": 69.5,
       "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 169.90373108456163,
+      "prScore": 76.86573108456162,
+      "issueScore": 0,
+      "reviewScore": 92,
+      "commentScore": 1.038,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 168.06382158302245,
+      "prScore": 89.58782158302243,
+      "issueScore": 4.1,
+      "reviewScore": 73.5,
+      "commentScore": 0.8759999999999999,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 131.5318062999478,
+      "prScore": 55.9918062999478,
+      "issueScore": 2,
+      "reviewScore": 73,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 129.47683060518318,
+      "prScore": 124.4768306051832,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -865,13 +1363,33 @@
       "summary": null
     },
     {
-      "username": "ajsutton",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
-      "totalScore": 118.53749873288315,
-      "prScore": 35.399498732883146,
-      "issueScore": 0,
-      "reviewScore": 82.5,
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 96.44529938747361,
+      "prScore": 55.30729938747361,
+      "issueScore": 4,
+      "reviewScore": 36.5,
       "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 94.8867738965761,
+      "prScore": 51.346773896576096,
+      "issueScore": 0,
+      "reviewScore": 43,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 93.81666084486415,
+      "prScore": 53.316660844864145,
+      "issueScore": 0,
+      "reviewScore": 40.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -882,36 +1400,6 @@
       "issueScore": 0,
       "reviewScore": 14,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 88.61841965285959,
-      "prScore": 47.91841965285958,
-      "issueScore": 4,
-      "reviewScore": 36.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 85.9330567086071,
-      "prScore": 80.9330567086071,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
-      "totalScore": 80.31666084486415,
-      "prScore": 53.316660844864145,
-      "issueScore": 0,
-      "reviewScore": 27,
-      "commentScore": 0,
       "summary": null
     },
     {
@@ -935,16 +1423,6 @@
       "summary": null
     },
     {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 75.3867738965761,
-      "prScore": 51.346773896576096,
-      "issueScore": 0,
-      "reviewScore": 23.5,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
       "username": "donoso-eth",
       "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
       "totalScore": 73.87475352301603,
@@ -955,33 +1433,23 @@
       "summary": null
     },
     {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 72.97800000000001,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 72,
+      "commentScore": 0.978,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 70.03506237148291,
+      "totalScore": 70.47306237148291,
       "prScore": 69.1590623714829,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.8759999999999999,
-      "summary": null
-    },
-    {
-      "username": "aakoshh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
-      "totalScore": 65.4817738965761,
-      "prScore": 43.5437738965761,
-      "issueScore": 2,
-      "reviewScore": 19.5,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 63.778000000000006,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 63,
-      "commentScore": 0.7779999999999999,
+      "commentScore": 1.3139999999999998,
       "summary": null
     },
     {
@@ -995,22 +1463,42 @@
       "summary": null
     },
     {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 55.37004793020531,
+      "prScore": 55.17004793020531,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 47,
+      "totalScore": 52,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 47,
+      "reviewScore": 52,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 46.306799625336474,
+      "totalScore": 51.306799625336474,
       "prScore": 16.606799625336475,
       "issueScore": 0,
-      "reviewScore": 29.5,
+      "reviewScore": 34.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 43.3443279598018,
+      "prScore": 25.144327959801807,
+      "issueScore": 0,
+      "reviewScore": 18,
       "commentScore": 0.2,
       "summary": null
     },
@@ -1025,53 +1513,53 @@
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 35.413633597686626,
-      "prScore": 17.073633597686626,
-      "issueScore": 0,
-      "reviewScore": 18,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
       "username": "Joxess",
       "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
-      "totalScore": 30.55566248977032,
+      "totalScore": 35.05566248977032,
       "prScore": 8.05566248977032,
       "issueScore": 0,
-      "reviewScore": 22.5,
+      "reviewScore": 27,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "op-will",
       "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
-      "totalScore": 19.7,
+      "totalScore": 29.2,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 19.5,
+      "reviewScore": 29,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 26.920306144334052,
+      "prScore": 21.920306144334052,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "zkfrov",
       "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
-      "totalScore": 18,
+      "totalScore": 22.5,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 18,
+      "reviewScore": 22.5,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "0xOneTony",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 18,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 18,
-      "commentScore": 0,
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "totalScore": 22.234658162586587,
+      "prScore": 20.034658162586588,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1092,6 +1580,16 @@
       "issueScore": 2.1,
       "reviewScore": 0,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -1125,20 +1623,30 @@
       "summary": null
     },
     {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 9,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "mark1996211",
       "avatarUrl": "https://avatars.githubusercontent.com/u/342449966?v=4",
       "totalScore": 8.406346309695483,
       "prScore": 8.406346309695483,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yss787976-ai",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/353585713?v=4",
+      "totalScore": 7.9994942159291496,
+      "prScore": 7.9994942159291496,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ihooni",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/37792049?u=5d5dfa80bc54fd29248ecec7b4a6d259f56450c1&v=4",
+      "totalScore": 6.877306144334054,
+      "prScore": 6.877306144334054,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -1203,11 +1711,21 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "Jordy-Baby",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/82444671?u=3de390402be769cca2a0569d7e09dac394fd24c0&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 52,
-  "mergedPRs": 39,
-  "newIssues": 18,
-  "closedIssues": 6,
-  "activeContributors": 46
+  "newPRs": 71,
+  "mergedPRs": 54,
+  "newIssues": 23,
+  "closedIssues": 12,
+  "activeContributors": 53
 }
