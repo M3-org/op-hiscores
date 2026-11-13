@@ -5,8 +5,20 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-01 to 2026-12-01, ethereum-optimism/optimism had 194 new PRs (123 merged), 51 new issues, and 71 active contributors.",
+  "overview": "From 2026-11-01 to 2026-12-01, ethereum-optimism/optimism had 216 new PRs (158 merged), 67 new issues, and 78 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABaMk1Eg",
+      "title": "kona-node: prevent delegated finalized-head regression",
+      "author": "joshklop",
+      "number": 23677,
+      "repository": "ethereum-optimism/optimism",
+      "body": "A stale delegated source can make Kona request a backward finalized-head update. This is the finalized-monotonicity scope of the delegated derivation parity tracker.\n\n## Reproduction\n\nWith local unsafe=30, safe=20, finalized=10, a delegate reports an existing finalized block 5. FinalizeTask checks only that the target is no higher than safe, sends an FCU with finalized=5, and records finalized=5 if EL returns VALID.\n\nThe actual Kona engine unit test proves the backward request and acceptance logic. It does **not** establish that real op-reth accepts a finalized regression. EL rejection could instead cause recovery errors.\n\nCompare [Kona finalization](https://github.com/ethereum-optimism/optimism/blob/49efa52bcb3ecaeea390d333de63b37b8650aa75/rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs#L32-L75) with [op-node's external finalized monotonicity guard](https://github.com/ethereum-optimism/optimism/blob/4f0f0eaf92b923f61d11a9405b88880999399529/op-node/rollup/engine/engine_controller.go#L1535-L1538).\n\n## Acceptance criteria\n\n- [ ] Older finalized references do not emit backward FCUs or regress CL finalized state.\n- [ ] Repeated identical finalized references remain harmless while allowing legitimate pending EL synchronization.\n- [ ] Conflicting hashes at the current finalized height are rejected safely rather than silently replacing finality.\n- [ ] Preserve hash-pinned lookup, height validation, and safe/finalized ordering checks.\n- [ ] Cover older, identical, conflicting-same-height, and legitimate advancing targets.\n- [ ] Keep the implementation independent of catch-up liveness and forkchoice delivery/retry fixes.\n\nConfirmed on deployed `49efa52` and PR #23627 tip `2763f5e`; relevant code is unchanged on develop `cfec650e57`. Implement as an independent PR against develop.\n\nParent tracker: https://github.com/ethereum-optimism/protocol-team/issues/545 (target November 5, 2026).\n",
+      "createdAt": "2026-10-27T04:39:46Z",
+      "closedAt": "2026-11-12T23:54:27Z",
+      "state": "CLOSED",
+      "commentCount": 3
+    },
     {
       "id": "I_kwDODjvEJM8AAAABcbx7dw",
       "title": "kona-node: verify delegated derivation parity against op-node",
@@ -44,27 +56,15 @@
       "commentCount": 2
     },
     {
-      "id": "I_kwDODjvEJM8AAAABck196g",
-      "title": "kona-node: missing L2 block during EL catch-up resets the engine in a loop",
-      "author": "einar-oplabs",
-      "number": 23931,
+      "id": "I_kwDODjvEJM8AAAABaMk0EQ",
+      "title": "kona-node: reliably deliver and retry delegated forkchoice updates",
+      "author": "joshklop",
+      "number": 23676,
       "repository": "ethereum-optimism/optimism",
-      "body": "Part of ethereum-optimism/protocol-team#545.\n\n## Summary\n\nWhen kona-node's execution client is behind its own labels, an L2 block lookup that finds nothing becomes an engine reset. After an EL datadir wipe under a running kona-node, this turns into a loop: every reset walks the sync start back to genesis and re-derives the chain, and finalization stays at genesis. op-node, driving the same EL through the same scenario, resets once and lets the EL sync. **Not yet reproduced deterministically in a unit test.** The evidence is #23440's CI follow-up and two local runs.\n\n## Evidence (#23440, `TestFollowerResyncsFromScratchUnderConsensusClientThatKeptItsHeads/el_sync`)\n\nThe follower's op-reth is stopped, its datadir wiped and restarted while its kona-node keeps running. CircleCI job 5705185 failed at the finalized wait after 621 s: `expected head for label=finalized to advance to target=59, but got current=0`.\n\n1. The first consolidation after the wipe finds no block in the empty engine (`Received None block for 186`, `Consolidate(MissingUnsafeL2Block(186))`). That error has `Reset` severity.\n2. The reset reads the wiped engine's labels (`unsafe=0 safe=0 finalized=0`). The sync-start search walks back to the finalized block, genesis (`Found suitable L2 safe block l2_safe=0 is_finalized=true is_genesis=true`), so derivation restarts at L1 genesis and rebuilds the chain itself instead of letting the EL sync.\n3. Whenever the derived safe head catches up with the EL's canonical tip while the gossip-fed unsafe head is ahead of it, the next consolidation finds `None` again and resets again. Locally this happened 93 and 94 times in four minutes; in CI, every 4 to 8 s.\n4. Each reset clears the `L2Finalizer` queue, so finalized stays at genesis until a finalize task lands between two resets (223 s and 282 s locally). In CI the task that landed hit `BlockNotSafe` and the node exited. That crash is fixed separately by #23908.\n\nThe issue also noted that the follower's op-reth answered null by number for block 348 while it had received payload 361, and committed blocks in bursts of about six. That makes \"unsafe ahead, block below it missing\" a normal transient state during EL catch-up, not only after a wipe.\n\n## Mechanism\n\n- [`ConsolidateTask::consolidate`](https://github.com/ethereum-optimism/optimism/blob/edace855db3fdcfced40f6eda2ffe747ee3a39b8/rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs#L175-L180) returns `MissingUnsafeL2Block` when the EL has no block at the safe target's height. [Its severity is `Reset`](https://github.com/ethereum-optimism/optimism/blob/edace855db3fdcfced40f6eda2ffe747ee3a39b8/rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/error.rs#L41).\n- The reset's [sync-start search](https://github.com/ethereum-optimism/optimism/blob/edace855db3fdcfced40f6eda2ffe747ee3a39b8/rust/kona/crates/node/engine/src/sync/mod.rs#L86-L100) stops at the EL's finalized block. After a wipe that is genesis, so the derivation pipeline restarts from L1 genesis.\n- The same path exists in delegated derivation: a delegated safe target below a gossip-advanced unsafe head, while the EL is syncing, resets too. For comparison, op-node's `FollowSource` treats a not-found local block below its unsafe head as \"EL sync in progress\" and only updates local-safe.\n\n## Expected behavior / acceptance criteria\n\n- [ ] Reproduce with kona-engine tasks and mocked Engine API responses: a consolidation target below the unsafe head whose block the EL does not have yet, while the EL is syncing.\n- [ ] A block missing below the unsafe head because the EL is still syncing does not reset the engine. Compare with op-node's CL-sync and follow-source handling, and decide whether kona should wait, retarget EL sync, or reset only once.\n- [ ] After an EL datadir wipe under a running kona-node, the node lets the EL sync instead of re-deriving from genesis in a loop, and finalization resumes.\n- [ ] #23440's datadir-wipe cell passes under kona-node, and its kona skip (which names #23399) is removed or renamed to this issue.\n- [ ] Genuine divergence, where a block is missing because the chain reorged, still resets.\n\n## Related\n\n- #23440: the acceptance test and the CI follow-up this issue comes from.\n- #23908: fixes the `Finalize(BlockNotSafe)` exit seen in the same run.\n- #23912: the delegated-parity verification. Its catch-up runs can hit this loop.\n- ethereum-optimism/protocol-team#574: kona treats SYNCING as applied for unsafe payloads. A related way for the unsafe head to run ahead of the EL.\n",
-      "createdAt": "2026-11-04T22:31:46Z",
-      "closedAt": null,
-      "state": "OPEN",
-      "commentCount": 2
-    },
-    {
-      "id": "I_kwDODjvEJM8AAAABcbx47A",
-      "title": "kona-node: document or resolve the interop local-safe and cross-safe delegated parity gap",
-      "author": "einar-oplabs",
-      "number": 23911,
-      "repository": "ethereum-optimism/optimism",
-      "body": "Part of ethereum-optimism/protocol-team#545.\n\nUnder interop, op-node imports local-safe and cross-safe separately (#19330). Kona's delegated derivation copies the delegated safe head into both labels. The tracker requires this parity gap to be resolved or explicitly documented before #545 closes. It does not affect the non-interop test network.\n\nScope:\n- Document the current behavior and its consequences for interop deployments in the kona-node delegated derivation docs.\n- Decide whether Kona should import the two labels separately when the delegate exposes them; if so, implement it with a regression test, otherwise record the decision and the conditions under which it must be revisited.\n",
-      "createdAt": "2026-11-04T12:55:58Z",
-      "closedAt": null,
-      "state": "OPEN",
+      "body": "Delegated safe-head updates are not reliably delivered to the execution client, and SYNCING responses suppress retries. These are related forkchoice-delivery problems in the delegated derivation parity tracker.\n\n## Reproductions\n\n1. Local unsafe=20, safe=0, finalized=0; delegate safe=10, finalized=0; matching block 10 already exists locally. BlockInfo consolidation takes the intermediate-span branch, changes CL safe/local-safe to 10, and emits no FCU. Unchanged finalization then short-circuits synchronization. With no unsafe production/import, EL safe remains behind CL safe.\n2. Synchronization requests changed heads and receives SYNCING. Kona records the requested state. An identical subsequent request returns without calling the Engine API, even if the EL can now apply it. This matches the central pattern fixed in op-node https://github.com/ethereum-optimism/optimism/pull/20310.\n\nBoth behaviors were reproduced with actual kona-engine tasks and strict mocked Engine API responses. New block production often masks the problem; a live recovery stall has not been demonstrated.\n\nSources: [BlockInfo consolidation](https://github.com/ethereum-optimism/optimism/blob/49efa52bcb3ecaeea390d333de63b37b8650aa75/rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs#L196-L218), [synchronization](https://github.com/ethereum-optimism/optimism/blob/49efa52bcb3ecaeea390d333de63b37b8650aa75/rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/helper.rs#L25-L88).\n\n## Acceptance criteria\n\n- [ ] Delegated safe promotion reaches EL even when unsafe/finalized do not change.\n- [ ] Preserve intentional batching of intermediate native Attributes updates.\n- [ ] Distinguish requested forkchoice from successfully applied forkchoice, or provide an equally sound retry mechanism.\n- [ ] SYNCING leaves pending work and identical requests can reach EL again; cover SYNCING then VALID with unchanged targets.\n- [ ] Recovery progresses without relying on new unsafe blocks, without busy-looping or treating transient SYNCING as fatal.\n- [ ] Test changed-target behavior and ensure successful VALID updates do not cause unnecessary repeated FCUs.\n- [ ] Keep invalid forkchoice/protocol errors distinct from temporary EL sync.\n\nConfirmed on deployed `49efa52` and PR #23627 tip `2763f5e`; relevant code is unchanged on develop `cfec650e57`. Implement as an independent PR against develop.\n\nParent tracker: https://github.com/ethereum-optimism/protocol-team/issues/545 (target November 5, 2026).\n",
+      "createdAt": "2026-10-27T04:39:44Z",
+      "closedAt": "2026-11-12T23:54:24Z",
+      "state": "CLOSED",
       "commentCount": 2
     }
   ],
@@ -113,7 +113,7 @@
       "body": "**Description**\n\nAdds `ComplianceModule` so deposits and withdrawals can wait for policy clearance, then complete on their original terms. The module holds deferred value, and a replaceable policy decides whether it can move.\n\n**Tests**\n\nAdds unit, fuzz and invariant coverage, real Portal comparisons of held and direct transfers, and shared withdrawal item ID vectors for the bridge screener.\n\n**Additional context**\n\nThe module uses its own `ProxyAdmin` outside OPCM to separate custody upgrade authority from policy management. The policy implementation and broader integration coverage follow separately.\n\n**Metadata**\n\n- Closes ethereum-optimism/optimism-private#742\n",
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-11-10T11:20:06Z",
-      "mergedAt": null,
+      "mergedAt": "2026-11-12T12:36:58Z",
       "additions": 4762,
       "deletions": 16
     },
@@ -131,12 +131,22 @@
     }
   ],
   "codeChanges": {
-    "additions": 51142,
-    "deletions": 14485,
-    "files": 780,
-    "commitCount": 1280
+    "additions": 70820,
+    "deletions": 31795,
+    "files": 1016,
+    "commitCount": 1472
   },
   "completedItems": [
+    {
+      "title": "op-reth: keep proofs history shard keys valid on unwind",
+      "prNumber": 23334,
+      "type": "other",
+      "body": "Unwinding proofs history could leave the surviving boundary shard under its old key. After new appends, historical reads could fall through to current state, making `eth_getProof` serve chain-tip trie nodes for historical blocks, as reporte",
+      "files": [
+        "rust/op-reth/crates/trie/src/db/store/tests.rs",
+        "rust/op-reth/crates/trie/src/db/store/write.rs"
+      ]
+    },
     {
       "title": "op-chain-ops: add eth-liquidity-pause command",
       "prNumber": 23349,
@@ -172,6 +182,142 @@
         "packages/contracts-bedrock/test/L1/L1CrossDomainMessenger.t.sol",
         "packages/contracts-bedrock/test/L2/ETHLiquidity.t.sol",
         "packages/contracts-bedrock/test/L2/SuperchainETHBridge.t.sol"
+      ]
+    },
+    {
+      "title": "kona-gossip: start without a parseable system DNS configuration",
+      "prNumber": 23586,
+      "type": "other",
+      "body": "kona-node refuses to start on any host whose `/etc/resolv.conf` lists a nameserver the resolver library cannot parse. macOS writes one whenever a router advertises a link-local IPv6 DNS server, as `nameserver fe80::1a60:41ff:fe98:a699%en0`,",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/kona/crates/node/gossip/Cargo.toml",
+        "rust/kona/crates/node/gossip/src/builder.rs",
+        "rust/kona/crates/node/gossip/src/error.rs"
+      ]
+    },
+    {
+      "title": "op-deployer,op-chain-ops,contracts-bedrock!: delete the Go script host",
+      "prNumber": 23669,
+      "type": "other",
+      "body": "Stack 7/7, merge in order: #23663 → #23664 → #23665 → #23666 → #23667 → #23668 → #23669. The whole change, with green CI, is #23647.\n\nEvery op-deployer script now runs on forge, so `op-chain-ops/script`, its forking state and op-deployer's ",
+      "files": [
+        ".semgrep/rules/sol-rules.yaml",
+        ".semgrepignore",
+        "docs/ai/opgeth-decoupling.md",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/architecture/engine.mdx",
+        "op-chain-ops/README.md",
+        "op-chain-ops/script/abi.go",
+        "op-chain-ops/script/abi_test.go",
+        "op-chain-ops/script/addresses/addresses.go",
+        "op-chain-ops/script/bindings.go",
+        "op-chain-ops/script/bindings_test.go",
+        "op-chain-ops/script/cheatcodes.go",
+        "op-chain-ops/script/cheatcodes_environment.go",
+        "op-chain-ops/script/cheatcodes_external.go",
+        "op-chain-ops/script/cheatcodes_external_test.go",
+        "op-chain-ops/script/cheatcodes_forking.go",
+        "op-chain-ops/script/cheatcodes_state.go",
+        "op-chain-ops/script/cheatcodes_utilities.go",
+        "op-chain-ops/script/cheatcodes_utilities_test.go",
+        "op-chain-ops/script/console.go",
+        "op-chain-ops/script/console2.txt",
+        "op-chain-ops/script/console2_gen.go",
+        "op-chain-ops/script/console_test.go",
+        "op-chain-ops/script/consolegen/main.go",
+        "op-chain-ops/script/context.go",
+        "op-chain-ops/script/deploy.go",
+        "op-chain-ops/script/deploy_test.go",
+        "op-chain-ops/script/deps_test.go",
+        "op-chain-ops/script/deterministic.go",
+        "op-chain-ops/script/evm.go",
+        "op-chain-ops/script/fork.go",
+        "op-chain-ops/script/forking/cache.go",
+        "op-chain-ops/script/forking/cache_test.go",
+        "op-chain-ops/script/forking/db.go",
+        "op-chain-ops/script/forking/diff.go",
+        "op-chain-ops/script/forking/forking_test.go",
+        "op-chain-ops/script/forking/iface.go",
+        "op-chain-ops/script/forking/reader.go",
+        "op-chain-ops/script/forking/rpc.go",
+        "op-chain-ops/script/forking/rpc_test.go",
+        "op-chain-ops/script/forking/state.go",
+        "op-chain-ops/script/forking/trie.go",
+        "op-chain-ops/script/forking/trie_test.go",
+        "op-chain-ops/script/mock_evm_test.go",
+        "op-chain-ops/script/prank.go",
+        "op-chain-ops/script/precompile.go",
+        "op-chain-ops/script/precompile_test.go",
+        "op-chain-ops/script/script.go",
+        "op-chain-ops/script/script_revert_panic_test.go",
+        "op-chain-ops/script/script_test.go",
+        "op-chain-ops/script/testdata/foundry.toml",
+        "docs/public-docs/chain-operators/tools/op-deployer/reference/artifacts-locators.mdx",
+        "docs/ai/devfeatures.md",
+        "docs/ai/gas-repricing.md",
+        "op-chain-ops/foundry/allocs.go",
+        "op-chain-ops/foundry/allocs_test.go",
+        "op-chain-ops/genesis/config.go"
+      ]
+    },
+    {
+      "title": "op-e2e,op-devstack,op-chain-ops,op-deployer,contracts-bedrock!: build the interop harness with op-deployer; delete interopgen",
+      "prNumber": 23668,
+      "type": "other",
+      "body": "Stack 6/7, merge in order: #23663 → #23664 → #23665 → #23666 → #23667 → #23668 → #23669. The whole change, with green CI, is #23647.\n\nThe op-e2e interop SuperSystem, which the super fault-proof tests use, was the last user of `op-chain-ops/",
+      "files": [
+        "op-chain-ops/README.md",
+        "op-chain-ops/genesis/layer_two_check.go",
+        "op-chain-ops/interopgen/config/full_config_set.go",
+        "op-chain-ops/interopgen/config/json.go",
+        "op-chain-ops/interopgen/config/json_test.go",
+        "op-chain-ops/interopgen/config/rollup_config_set.go",
+        "op-chain-ops/interopgen/config/testfiles/rollup-10.json",
+        "op-chain-ops/interopgen/config/testfiles/rollup-20.json",
+        "op-chain-ops/interopgen/config/testfiles/rollup_set.json",
+        "op-chain-ops/interopgen/configs.go",
+        "op-chain-ops/interopgen/deploy.go",
+        "op-chain-ops/interopgen/deploy_anchor_test.go",
+        "op-chain-ops/interopgen/deploy_test.go",
+        "op-chain-ops/interopgen/deployments.go",
+        "op-chain-ops/interopgen/outputs.go",
+        "op-chain-ops/interopgen/recipe.go",
+        "op-chain-ops/interopgen/recipe_test.go",
+        "op-deployer/pkg/deployer/broadcaster/calldata.go",
+        "op-deployer/pkg/deployer/broadcaster/calldata_test.go",
+        "op-deployer/pkg/deployer/broadcaster/capture.go",
+        "op-deployer/pkg/deployer/broadcaster/keyed.go",
+        "op-deployer/pkg/deployer/integration_test/shared/shared.go",
+        "op-deployer/pkg/deployer/manage/migrate.go",
+        "op-deployer/pkg/deployer/manage/migrate_test.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/opcm_upgrade.go",
+        "op-devstack/sysgo/pre_genesis_super_game.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_supernode_synctester_variant.go",
+        "op-devstack/sysgo/superroot.go",
+        "op-devstack/sysgo/world.go",
+        "op-e2e/e2eutils/contracts/bindings/emit/emit.go",
+        "op-e2e/e2eutils/contracts/bindings/inbox/inbox.go",
+        "op-e2e/e2eutils/contracts/build/ICrossL2Inbox.sol/ICrossL2Inbox.abi",
+        "op-e2e/e2eutils/contracts/build/ICrossL2Inbox.sol/ICrossL2Inbox.bin",
+        "op-e2e/e2eutils/contracts/build/ICrossL2Inbox.sol/ICrossL2Inbox.json",
+        "op-e2e/e2eutils/contracts/build/emit.sol/EmitEvent.abi",
+        "op-e2e/e2eutils/contracts/build/emit.sol/EmitEvent.bin",
+        "op-e2e/e2eutils/contracts/build/emit.sol/EmitEvent.json",
+        "op-e2e/e2eutils/contracts/generate.sh",
+        "op-e2e/e2eutils/contracts/src/ICrossL2Inbox.sol",
+        "op-e2e/e2eutils/contracts/src/emit.sol",
+        "op-e2e/e2eutils/transactions/setcode.go",
+        "op-e2e/faultproofs/util_interop.go",
+        "op-e2e/interop/interop_recipe_test.go",
+        "op-e2e/interop/supersystem.go",
+        "docs/ai/gas-repricing.md"
       ]
     },
     {
@@ -401,6 +547,35 @@
       ]
     },
     {
+      "title": "mise,op-deployer: bump Foundry to 1.8.6",
+      "prNumber": 23642,
+      "type": "other",
+      "body": "Foundry 1.8.3 bundles `webpki-roots` 1.0.9, which still trusts the root CA from the [eMudhra key compromise](https://emudhra.we-have-a-problem.com/). So forge, cast and anvil accept a forged certificate on their RPC, explorer and solc downl",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "docs/ai/contract-dev.md",
+        "docs/public-docs/snippets/runbook-tool-versions.mdx",
+        "melange/pipelines/op-deployer/embed-artifacts.yaml",
+        "mise.toml",
+        "op-deployer/pkg/deployer/forge/cache.go",
+        "op-deployer/pkg/deployer/forge/cache_test.go",
+        "op-deployer/pkg/deployer/forge/client.go",
+        "op-deployer/pkg/deployer/forge/version.json",
+        "op-service/testutils/devnet/canned.go",
+        "ops/docker/op-stack-go/Dockerfile",
+        "packages/contracts-bedrock/checks.yaml",
+        "packages/contracts-bedrock/justfile",
+        "op-deployer/scripts/build-embedded-contracts.sh",
+        ".circleci/continue/helpers.yml",
+        "op-deployer/pkg/deployer/forge/client_test.go",
+        "packages/contracts-bedrock/scripts/ops/warm-script-cache.sh",
+        "op-deployer/pkg/deployer/artifacts/bundle/bundle.go",
+        "op-deployer/pkg/deployer/artifacts/bundle/bundle_test.go",
+        "op-deployer/pkg/deployer/artifacts/local.go"
+      ]
+    },
+    {
       "title": "contracts-bedrock: restrict OptimismPortal2 deposits to an allowlist",
       "prNumber": 23712,
       "type": "other",
@@ -467,6 +642,26 @@
       ]
     },
     {
+      "title": "kona-node,safedb,op-acceptance-tests: validate persistence and proof consumers",
+      "prNumber": 23787,
+      "type": "tests",
+      "body": "Kona's merged SafeDB RPCs now support the acceptance cases that previously skipped it. This exercises persisted-history restart/resync, Cannon step proofs through game resolution, and dispute-monitor classification of correct, incorrect, an",
+      "files": [
+        ".circleci/continue/main.yml",
+        "docs/public-docs/node-operators/kona-node/rpc/rollup.mdx",
+        "op-acceptance-tests/tests/proofs/cannon_kona/setup_test.go",
+        "op-acceptance-tests/tests/proofs/cannon_kona/step_test.go",
+        "op-acceptance-tests/tests/safedb_proof_consumers/consumers_test.go",
+        "op-acceptance-tests/tests/safeheaddb_clsync/safeheaddb_test.go",
+        "op-acceptance-tests/tests/safeheaddb_elsync/safeheaddb_test.go",
+        "rust/kona/crates/node/safedb/README.md",
+        "op-devstack/dsl/l1_el.go",
+        "op-devstack/dsl/l2_cl.go",
+        "op-devstack/dsl/proofs/dispute_game_factory.go",
+        "op-devstack/dsl/super_root_source.go"
+      ]
+    },
+    {
       "title": "kona-node,kona-genesis!: refuse to start on alt-DA chains",
       "prNumber": 23786,
       "type": "other",
@@ -526,6 +721,32 @@
         "packages/contracts-bedrock/src/libraries/BridgeHookTypes.sol",
         "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
         "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol"
+      ]
+    },
+    {
+      "title": "op-zk-proposer: local CUDA proof provider and op-zk-proposer-cuda image",
+      "prNumber": 23817,
+      "type": "other",
+      "body": "Adds `OP_ZK_PROPOSER_PROOF_PROVIDER=local-cuda`, a self-hosted backup for an SPN outage (ethereum-optimism/proofs-team#51). Proofs come from SP1's `sp1-gpu-server`, one per CUDA device, through the existing request/wait flow. A new amd64 im",
+      "files": [
+        ".github/images.apko.json",
+        "apko/op-zk-proposer-cuda.yaml",
+        "docs/ai/kona-sp1-proof-limits.md",
+        "melange/op-zk-proposer-cuda.yaml",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/proposer/Cargo.toml",
+        "rust/kona/sp1/crates/proposer/src/bin/op-zk-proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/config.rs",
+        "rust/kona/sp1/crates/proposer/src/log_proofs/mod.rs",
+        "rust/kona/sp1/crates/proposer/src/metrics.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/tests.rs",
+        "rust/kona/sp1/crates/proposer/src/proposer/scenario/world.rs",
+        "rust/kona/sp1/crates/proposer/src/prover.rs",
+        "rust/kona/sp1/crates/proposer/src/prover/cuda.rs",
+        "rust/kona/sp1/crates/proposer/src/proving.rs"
       ]
     },
     {
@@ -797,6 +1018,25 @@
       ]
     },
     {
+      "title": "op-devstack,op-acceptance-tests: run EL-resync tests on op-reth",
+      "prNumber": 23827,
+      "type": "tests",
+      "body": "`TestTruncateDatabaseOnELResync`, `TestPreserveDatabaseOnCLResync` and `TestELSyncSafeRetractedByOffset` stop the verifier EL on the assumption that doing so wipes its chain. Only op-geth (in-memory) behaves that way. op-reth keeps its data",
+      "files": [
+        "op-acceptance-tests/tests/safeheaddb_clsync/safeheaddb_test.go",
+        "op-acceptance-tests/tests/safeheaddb_elsync/safeheaddb_test.go",
+        "op-acceptance-tests/tests/sync/elsync/gap_clp2p/sync_test.go",
+        "op-acceptance-tests/tests/sync/elsync/offset_el_safe/sync_test.go",
+        "op-devstack/dsl/l2_el.go",
+        "op-devstack/presets/rpc_frontends.go",
+        "op-devstack/presets/sysgo_runtime.go",
+        "op-devstack/stack/lifecycle.go",
+        "op-devstack/sysgo/l2_el_opgeth.go",
+        "op-devstack/sysgo/l2_el_opreth.go",
+        "op-devstack/sysgo/mixed_runtime.go"
+      ]
+    },
+    {
       "title": "contracts-bedrock: Fail closed on zero delays in OptimismPortal2 and AnchorStateRegistry",
       "prNumber": 23902,
       "type": "other",
@@ -807,6 +1047,70 @@
         "packages/contracts-bedrock/src/dispute/AnchorStateRegistry.sol",
         "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
         "packages/contracts-bedrock/test/dispute/AnchorStateRegistry.t.sol"
+      ]
+    },
+    {
+      "title": "kona-engine!: deliver and retry delegated forkchoice updates",
+      "prNumber": 23900,
+      "type": "other",
+      "body": "A kona-node following a delegate could leave the execution layer's safe head behind its own, and a SYNCING answer stopped it from retrying an unchanged forkchoice. This PR delivers every delegated safe head and retries until the execution l",
+      "files": [
+        "rust/kona/crates/node/engine/src/lib.rs",
+        "rust/kona/crates/node/engine/src/state/core.rs",
+        "rust/kona/crates/node/engine/src/state/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/helper.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/tests.rs",
+        "rust/kona/crates/node/service/src/actors/engine/queue_tests.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/canonicalize_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/mod.rs",
+        "rust/kona/crates/node/engine/src/test_utils/deposits.rs",
+        "rust/kona/crates/node/engine/src/test_utils/mod.rs",
+        "rust/kona/crates/node/engine/src/test_utils/rpc.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/id.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/task.rs",
+        "rust/kona/crates/node/engine/src/test_utils/blocks.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/actor.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/tests.rs",
+        "rust/kona/crates/node/service/src/actors/engine/actor.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs"
+      ]
+    },
+    {
+      "title": "kona-engine: prevent delegated finalized-head regression",
+      "prNumber": 23899,
+      "type": "other",
+      "body": "Kona no longer moves finality backward when a delegated source reports an older finalized block. A finalization target below the finalized head is skipped with a warning. A different block at the finalized height is skipped with an error, a",
+      "files": [
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/id.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/task.rs",
+        "rust/kona/crates/node/engine/src/test_utils/blocks.rs",
+        "rust/kona/crates/node/engine/src/test_utils/mod.rs",
+        "rust/kona/crates/node/engine/src/test_utils/rpc.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/core.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/database.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/op_node_parity.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/actor.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/tests.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/request.rs",
+        "rust/kona/crates/node/service/src/actors/engine/actor.rs",
+        "rust/kona/crates/node/service/src/actors/engine/client.rs",
+        "rust/kona/crates/node/service/src/actors/engine/tests.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs",
+        "rust/kona/crates/node/service/src/actors/engine/queue_tests.rs"
       ]
     },
     {
@@ -849,6 +1153,37 @@
       "body": "Performance improvement: `BlobStore` now shares its verified blobs behind an `Arc`, indexed by versioned hash, and tracks consumption per instance as before, so the per-segment `beacon.clone()` in super-range no longer deep-copies every blo",
       "files": [
         "rust/kona/sp1/crates/client/src/oracle/blob_provider.rs"
+      ]
+    },
+    {
+      "title": "kona-disc!: Ignore discovered records outside the node's address scope",
+      "prNumber": 23895,
+      "type": "other",
+      "body": "### What\n\nkona-node only contacts and dials discovered peers at addresses it can reach from its own address, as op-node does, through the geth discv5 library its discovery is built on. A node with a public address ignores other nodes' loopb",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "rust/Cargo.lock",
+        "rust/kona/crates/node/disc/Cargo.toml",
+        "rust/kona/crates/node/disc/src/builder.rs",
+        "rust/kona/crates/node/disc/src/driver.rs",
+        "rust/kona/crates/node/disc/src/error.rs",
+        "rust/kona/crates/node/disc/src/lib.rs",
+        "rust/kona/crates/node/disc/src/metrics.rs",
+        "rust/kona/crates/node/disc/src/scope.rs",
+        "rust/kona/crates/node/disc/src/test_utils.rs",
+        "rust/kona/crates/node/service/tests/actors/network/mocks/builder.rs",
+        "rust/kona/crates/node/service/tests/actors/network/p2p.rs",
+        "rust/kona/bin/node/src/flags/p2p.rs",
+        "rust/kona/crates/node/peers/src/lib.rs",
+        "rust/kona/crates/node/peers/src/store.rs",
+        "rust/kona/crates/node/peers/src/utils.rs",
+        "rust/kona/crates/node/service/src/actors/network/builder.rs",
+        "rust/kona/crates/node/service/src/actors/network/config.rs",
+        "rust/kona/examples/gossip/src/main.rs",
+        "rust/kona/crates/node/disc/src/filter.rs",
+        "rust/kona/examples/discovery/src/main.rs",
+        "rust/kona/crates/node/service/tests/actors/network/sequencer.rs",
+        "rust/kona/crates/node/peers/src/enr.rs"
       ]
     },
     {
@@ -1173,6 +1508,47 @@
         "rust/kona/crates/node/gossip/src/driver/tests/signer.rs",
         "rust/kona/crates/node/gossip/src/driver/tests/start.rs",
         "rust/kona/crates/node/gossip/src/driver/tests/static_peers.rs"
+      ]
+    },
+    {
+      "title": "op-devstack,op-acceptance-tests: read L2 blocks through the partitioned accessors",
+      "prNumber": 23863,
+      "type": "tests",
+      "body": "The same go-ethereum problem, for the op-devstack DSL, the acceptance tests, check-karst and interopsmoke: their L2 block-body and receipt reads move to the `op-service/sources` accessors. `sources.L2Client` now returns an error instead of ",
+      "files": [
+        "op-acceptance-tests/tests/base/transfer_test.go",
+        "op-acceptance-tests/tests/batcher/throttling/throttling_test.go",
+        "op-acceptance-tests/tests/fjord/check_scripts_test.go",
+        "op-acceptance-tests/tests/fjord/fees_test.go",
+        "op-acceptance-tests/tests/fusaka/fusaka_test.go",
+        "op-acceptance-tests/tests/interop/message/interop_mon_test.go",
+        "op-acceptance-tests/tests/interop/upgrade/finalized_activation_test.go",
+        "op-acceptance-tests/tests/interop/upgrade/post_test.go",
+        "op-acceptance-tests/tests/interop/upgrade/pre_test.go",
+        "op-acceptance-tests/tests/jovian/bpo2/joviantest/cases.go",
+        "op-acceptance-tests/tests/jovian/da_footprint.go",
+        "op-acceptance-tests/tests/jovian/min_base_fee.go",
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/workload.go",
+        "op-acceptance-tests/tests/sync_tester/sync_tester_hfs/sync_tester_hfs_test.go",
+        "op-chain-ops/cmd/check-karst/karsttest/checks.go",
+        "op-chain-ops/cmd/check-karst/main.go",
+        "op-chain-ops/interopsmoke/smoke.go",
+        "op-chain-ops/interopsmoke/smoke_test.go",
+        "op-devstack/dsl/bridge.go",
+        "op-devstack/dsl/ecotone_fees.go",
+        "op-devstack/dsl/fjord_fees.go",
+        "op-devstack/dsl/l2_el.go",
+        "op-devstack/dsl/l2_network.go",
+        "op-devstack/dsl/operator_fee.go",
+        "op-devstack/presets/rpc_frontends.go",
+        "op-service/sources/l2_client.go",
+        "op-service/sources/l2_client_test.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go",
+        "op-acceptance-tests/tests/supernode/interop/reorg/rpc_gate_test.go"
       ]
     },
     {
@@ -1870,6 +2246,16 @@
       ]
     },
     {
+      "title": "security: Update module github.com/klauspost/compress to v1.20.2 [SECURITY]",
+      "prNumber": 23965,
+      "type": "other",
+      "body": "This PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [github.com/klauspost/compress](https:/",
+      "files": [
+        "go.mod",
+        "go.sum"
+      ]
+    },
+    {
       "title": "op-reth: Update interop endpoint_up from the failsafe poll",
       "prNumber": 23964,
       "type": "other",
@@ -1924,6 +2310,31 @@
         "op-acceptance-tests/tests/interop/upgrade/finalized_activation_test.go",
         "op-acceptance-tests/tests/proofs/zk/honest_challenger_test.go",
         "op-acceptance-tests/tests/supernode/interop/head_progression_test.go"
+      ]
+    },
+    {
+      "title": "kona-sp1: add HashDoS regression checks and docs",
+      "prNumber": 24017,
+      "type": "other",
+      "body": "Closes https://github.com/ethereum-optimism/proofs-team/issues/58. Stacked on #24016.\r\n\r\nGuards the prover-seeded guest hashing against regressions:\r\n- `check-sp1-guest-hashers` (in `lint-sp1-guest`, so on every PR) fails if a guest links a",
+      "files": [
+        ".circleci/continue/rust-e2e.yml",
+        ".claude/agents/kona-sp1-cost-reviewer.md",
+        "docs/ai/kona-sp1-proof-limits.md",
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/justfile",
+        "rust/kona/sp1/README.md",
+        "rust/kona/sp1/crates/super-range-executor/Cargo.toml",
+        "rust/kona/sp1/crates/super-range-executor/examples/hashdos_check.rs",
+        "rust/kona/sp1/crates/super-range-executor/src/consolidation_tests.rs",
+        "rust/kona/sp1/crates/super-range-executor/tests/log_commitment.rs",
+        "rust/kona/sp1/justfile",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/kona/sp1/programs/Cargo.toml",
+        "rust/kona/sp1/programs/foldhash-seeded/src/lib.rs",
+        "rust/kona/sp1/programs/tests/hashdos-check/Cargo.toml",
+        "rust/kona/sp1/programs/tests/hashdos-check/src/main.rs"
       ]
     },
     {
@@ -2191,6 +2602,19 @@
       ]
     },
     {
+      "title": "contracts-bedrock: add VisionPolicyV1",
+      "prNumber": 24033,
+      "type": "other",
+      "body": "**Description**\n\nAdds `VisionPolicyV1` so `ComplianceModule` can screen deposits and withdrawals using address lists and expiring clearances from a designated verdict writer. The deny list takes precedence, and held value requires a valid c",
+      "files": [
+        "packages/contracts-bedrock/interfaces/compliance/IVisionPolicyV1.sol",
+        "packages/contracts-bedrock/snapshots/abi/VisionPolicyV1.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/VisionPolicyV1.json",
+        "packages/contracts-bedrock/src/compliance/VisionPolicyV1.sol",
+        "packages/contracts-bedrock/test/compliance/VisionPolicyV1.t.sol"
+      ]
+    },
+    {
       "title": "kona-client,ci: make the FPVM binary dependencies optional",
       "prNumber": 24032,
       "type": "other",
@@ -2218,6 +2642,27 @@
       "files": [
         ".circleci/continue/helpers.yml",
         ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: add ComplianceModule bridge hook",
+      "prNumber": 24025,
+      "type": "other",
+      "body": "**Description**\n\nAdds `ComplianceModule` so deposits and withdrawals can wait for policy clearance, then complete on their original terms. The module holds deferred value, and a replaceable policy decides whether it can move.\n\n**Tests**\n\nAd",
+      "files": [
+        "packages/contracts-bedrock/interfaces/compliance/IComplianceModule.sol",
+        "packages/contracts-bedrock/interfaces/compliance/IPolicy.sol",
+        "packages/contracts-bedrock/interfaces/compliance/IVisionPolicyV1.sol",
+        "packages/contracts-bedrock/scripts/checks/interfaces/main.go",
+        "packages/contracts-bedrock/snapshots/abi/ComplianceModule.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/storageLayout/ComplianceModule.json",
+        "packages/contracts-bedrock/src/compliance/ComplianceModule.sol",
+        "packages/contracts-bedrock/test/compliance/ComplianceModule.t.sol",
+        "packages/contracts-bedrock/test/fixtures/bridge-hook-items.json",
+        "packages/contracts-bedrock/test/invariants/ComplianceModule.t.sol",
+        "packages/contracts-bedrock/test/vendor/Initializable.t.sol",
+        ".semgrep/rules/sol-rules.yaml"
       ]
     },
     {
@@ -2314,6 +2759,79 @@
       ]
     },
     {
+      "title": "op-core: Test that the message expiry period exceeds the expiry window",
+      "prNumber": 24083,
+      "type": "tests",
+      "body": "A source chain can expire a message after `L2_TO_L2_MESSAGE_EXPIRY_PERIOD` (8 days). A destination accepts an executing message for `MessageExpiryTimeSecondsInterop` (7 days). If the period is not longer than the window, a destination can r",
+      "files": [
+        "op-core/interop/depset/depset_test.go",
+        "op-acceptance-tests/tests/interop/expiry/messageexpiry_test.go"
+      ]
+    },
+    {
+      "title": "op-interop-filter: Require backfill to cover the message expiry window",
+      "prNumber": 24082,
+      "type": "other",
+      "body": "The filter now refuses to start when `--backfill-duration` is shorter than `--message-expiry-window`. With a shorter backfill, the logs DB does not hold old blocks that valid initiating messages can be in. The filter then returns `SkippedDa",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-interop-filter.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-interop-filter.mdx",
+        "op-devstack/sysgo/interop_filter.go",
+        "op-interop-filter/filter/config.go",
+        "op-interop-filter/filter/config_test.go",
+        "op-interop-filter/flags/flags.go"
+      ]
+    },
+    {
+      "title": "docs: Document interop message and expiry limitations",
+      "prNumber": 24081,
+      "type": "docs",
+      "body": "The interop docs do not list the cases where a send's assets can be lost or a relay can't happen. This PR documents them, so the public docs act as the known issue register.\n\n`L2ToL2CrossDomainMessenger.sendMessage` and `SuperchainETHBridge",
+      "files": [
+        "docs/public-docs/app-developers/guides/interoperability/message-expiration.mdx",
+        "docs/public-docs/app-developers/guides/interoperability/message-passing.mdx",
+        "docs/public-docs/op-stack/interop/superchain-eth-bridge.mdx"
+      ]
+    },
+    {
+      "title": "op-reth: follow the op-v2.7.0-1 reth fixes in mirrored get_proof and build_pending_env",
+      "prNumber": 24077,
+      "type": "bugfix",
+      "body": "Brings op-reth's own copies of two upstream reth symbols in line with fixes picked onto the `op-v2.7.0` fork branch in ethereum-optimism/reth#44, which will become `op-v2.7.0-1`. A newer reth pin does not fix these copies.\n\n- **Proofs-histo",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/Cargo.toml",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/evm/src/lib.rs",
+        "rust/op-reth/crates/hardforks/src/lib.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/pending_block.rs",
+        "rust/op-reth/crates/rpc/src/eth/proofs.rs",
+        "rust/op-reth/crates/rpc/src/eth/transaction.rs",
+        "rust/op-reth/crates/rpc/src/state.rs",
+        "rust/op-reth/crates/trie/src/db/store/metrics.rs",
+        "rust/op-reth/crates/trie/src/initialize.rs",
+        "rust/op-reth/crates/trie/src/provider.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs"
+      ]
+    },
+    {
+      "title": "op-node,op-acceptance-tests: run the gap_clp2p INVALID-payload test on any EL and CL",
+      "prNumber": 24073,
+      "type": "tests",
+      "body": "Stacked on https://github.com/ethereum-optimism/optimism/pull/23827.\n\n`TestCLUnsafeNotRewoundOnInvalidDuringELSync` forced an INVALID response by sending the EL a payload with malformed `extraData` whose parent the EL does not have. Only op",
+      "files": [
+        "op-acceptance-tests/tests/sync/elsync/gap_clp2p/sync_test.go",
+        "op-node/rollup/engine/engine_el_sync_completion_test.go"
+      ]
+    },
+    {
       "title": "rust: require a tag reth pin before a reth PR leaves draft",
       "prNumber": 24071,
       "type": "other",
@@ -2351,6 +2869,20 @@
       ]
     },
     {
+      "title": "contracts-bedrock: add compliance module deploy and configure scripts",
+      "prNumber": 24068,
+      "type": "other",
+      "body": "Adds two forge scripts under `scripts/deploy/compliance/`. Both run independently of op-deployer:\r\n\r\n- `DeployComplianceModule` deploys the ComplianceModule implementation and a proxy whose admin is the deployer, before the chain exists. Th",
+      "files": [
+        "packages/contracts-bedrock/interfaces/compliance/IComplianceModule.sol",
+        "packages/contracts-bedrock/interfaces/compliance/IVisionPolicyV1.sol",
+        "packages/contracts-bedrock/scripts/deploy/compliance/ConfigureComplianceModule.s.sol",
+        "packages/contracts-bedrock/scripts/deploy/compliance/DeployComplianceModule.s.sol",
+        "packages/contracts-bedrock/test/scripts/ConfigureComplianceModule.t.sol",
+        "packages/contracts-bedrock/test/scripts/DeployComplianceModule.t.sol"
+      ]
+    },
+    {
       "title": "op-deployer: add --deploy-mock-sp1-verifier to bootstrap implementations",
       "prNumber": 24064,
       "type": "other",
@@ -2383,37 +2915,254 @@
       "files": [
         "packages/contracts-bedrock/test/scripts/GenerateNUTBundle.t.sol"
       ]
+    },
+    {
+      "title": "op-e2e: run the Super interop L1 at 3s blocks",
+      "prNumber": 24116,
+      "type": "other",
+      "body": "- The 26 Super cannon tests mostly wait for L1 blocks, since each game move and resolution waits for one. That makes `op-e2e-cannon-tests` take about 35 min on every develop commit, the slowest job on develop.\n- The interop SuperSystem now ",
+      "files": [
+        "op-e2e/faultproofs/super_test.go",
+        "op-e2e/interop/supersystem.go"
+      ]
+    },
+    {
+      "title": "ci: bump circleci-utils orb to 1.0.34",
+      "prNumber": 24113,
+      "type": "other",
+      "body": "Bumps the circleci-utils orb to 1.0.34, which scopes the mise caches by branch (ethereum-optimism/circleci-utils#58). The first few pipelines after merge will install mise from scratch until `develop` saves its cache. Also sets `trusted_bra",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/continue/rust-e2e.yml"
+      ]
+    },
+    {
+      "title": "docs: align Lagoon interop notice dates with the current schedule",
+      "prNumber": 24112,
+      "type": "docs",
+      "body": "The interop activation prep notice is out of date with the current Lagoon (U22) schedule:\n\n- **Sepolia** (OP Sepolia + Unichain Sepolia): December 3 → **December 10, 2026**\n- **Mainnet** (OP Mainnet + Unichain): the body already said Januar",
+      "files": [
+        "docs/public-docs/ko/notices/interop-prep.mdx",
+        "docs/public-docs/notices/interop-prep.mdx"
+      ]
+    },
+    {
+      "title": "kona-disc: Split the driver tests out of driver.rs",
+      "prNumber": 24111,
+      "type": "tests",
+      "body": "Moves the `Discv5Driver` tests out of `driver.rs` into `driver/tests/`, one file per topic, as #23866 did for the gossip driver. The upcoming discovery follow-ups (address filtering, the advertised ENR, table limits) each add tests, and `dr",
+      "files": [
+        "rust/kona/crates/node/disc/src/driver.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/bans.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/bootnodes.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/bootstore.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/dial.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/lifecycle.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/local_enr.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/mod.rs"
+      ]
+    },
+    {
+      "title": "Fix translation drift",
+      "prNumber": 24110,
+      "type": "bugfix",
+      "body": "## Summary\nSync Korean (`ko`) pages with English doc changes from 2026-11-10 to 2026-11-12.\n\n## Changes\n- op-deployer: `forge` and `anvil` runtime deps (installation), rewritten scripting engine page, bundle copies in artifacts locators, `-",
+      "files": [
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/installation.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/reference/architecture/engine.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/reference/artifacts-locators.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/apply.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/bootstrap.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx"
+      ]
+    },
+    {
+      "title": "op-service,op-node,op-e2e: fix doubled \"the\" in test comments",
+      "prNumber": 24109,
+      "type": "bugfix",
+      "body": "Fixes typos in test comments. No effect on users.\n\nComment-only change, so the review agents and tests were skipped.\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "files": [
+        "op-e2e/system/bridge/bridge_test.go",
+        "op-node/rollup/sequencing/origin_selector_test.go",
+        "op-service/txmgr/txmgr_test.go"
+      ]
+    },
+    {
+      "title": "ci: let agent approval check runs finish",
+      "prNumber": 24104,
+      "type": "other",
+      "body": "## Summary\n\nBump the reusable agent approval check workflow to https://github.com/ethereum-optimism/factory/commit/cbc049cd7e7fdd7f25524fa681e47aab7f98c2a5. It drops `cancel-in-progress`, so overlapping runs on a pull request finish instead",
+      "files": [
+        ".github/workflows/agent-approval-check.yaml"
+      ]
+    },
+    {
+      "title": "op-reth: Name the DA footprint in the txpool rejection error",
+      "prNumber": 24102,
+      "type": "other",
+      "body": "A transaction whose DA footprint exceeds the gas limit of the blocks this node builds is rejected with a message that misnames what was compared. The pool error reads \"transaction's gas limit X exceeds maximum per-transaction gas limit Y\", ",
+      "files": [
+        "rust/op-reth/crates/txpool/src/error.rs",
+        "rust/op-reth/crates/txpool/src/lib.rs",
+        "rust/op-reth/crates/txpool/src/validator.rs"
+      ]
+    },
+    {
+      "title": "rust: list the op-v2.7.0 forward fixes as carried reth patches",
+      "prNumber": 24101,
+      "type": "bugfix",
+      "body": "Updates the \"Carried patches\" list in `UPDATING-RETH.md` for the next base bump:\n\n- Adds the upstream fixes that ethereum-optimism/reth#44 picked onto `op-v2.7.0`. Eight of them are newer than v2.8.1, so the next bump has to pick them again",
+      "files": [
+        "rust/UPDATING-RETH.md"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: emit the dispute game on withdrawal prove",
+      "prNumber": 24093,
+      "type": "other",
+      "body": "**Why.** The dispute game a withdrawal proof is pinned to is only written to `provenWithdrawals` storage; neither `WithdrawalProven` nor `WithdrawalProvenExtension1` carries it. Off-chain tooling that needs the game for a proof must read th",
+      "files": [
+        "op-devstack/dsl/bridge.go",
+        "packages/contracts-bedrock/interfaces/L1/IOptimismPortal2.sol",
+        "packages/contracts-bedrock/snapshots/abi/OptimismPortal2.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/setup/Events.sol"
+      ]
+    },
+    {
+      "title": "op-e2e: run all system tests on op-reth",
+      "prNumber": 24091,
+      "type": "tests",
+      "body": "The op-e2e system tests that are still pinned to the in-process op-geth L2 EL either test op-geth-only behaviour or don't test what their name says. This resolves each of them, so that the op-geth L2 EL can be removed from op-e2e (#21744). ",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-e2e/e2eutils/geth/peers.go",
+        "op-e2e/system/da/da_throttling_test.go",
+        "op-e2e/system/fees/fees_test.go",
+        "op-e2e/system/p2p/tx_forwarding_test.go",
+        "op-e2e/system/p2p/txpool_test.go",
+        "op-e2e/system/verifier/legacy_pending_test.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: build go-ffi deposit txs with op-core types",
+      "prNumber": 24090,
+      "type": "other",
+      "body": "The go-ffi helper that encodes and hashes deposits for the Solidity differential tests builds them with op-geth's `types.DepositTx`, which upstream go-ethereum lacks. It now uses `optypes.DepositTx`. The output is byte-identical: both go-ff",
+      "files": [
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "packages/contracts-bedrock/scripts/go-ffi/differential-testing.go",
+        "packages/contracts-bedrock/scripts/go-ffi/utils.go"
+      ]
+    },
+    {
+      "title": "op-devstack,op-acceptance-tests!: return opparams.ChainConfig from L2 networks",
+      "prNumber": 24089,
+      "type": "tests",
+      "body": "op-devstack hands tests the go-ethereum `*params.ChainConfig` of an L2 network. On upstream go-ethereum its OP-unaware methods (`ElasticityMultiplier`, `BaseFeeChangeDenominator`, `LatestFork`, …) still compile but return Ethereum values, a",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-acceptance-tests/tests/interop/loadtest/interop_load_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/invalid_msg_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/l2.go",
+        "op-acceptance-tests/tests/interop/loadtest/relay_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/schedule.go",
+        "op-acceptance-tests/tests/interop/loadtest/schedule_test.go",
+        "op-devstack/presets/networks.go",
+        "op-devstack/stack/l1_network.go",
+        "op-devstack/stack/l2_network.go",
+        "op-devstack/stack/network.go",
+        "op-devstack/sysgo/l2_network.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 951.6847677288505,
-      "prScore": 624.7147677288506,
-      "issueScore": 8.1,
-      "reviewScore": 316,
-      "commentScore": 2.8699999999999997,
+      "totalScore": 1270.5758191622942,
+      "prScore": 883.1678191622942,
+      "issueScore": 22.1,
+      "reviewScore": 362,
+      "commentScore": 3.308,
       "summary": null
     },
     {
       "username": "einar-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/236345408?v=4",
-      "totalScore": 850.9942517866632,
+      "totalScore": 915.1322517866632,
       "prScore": 407.1622517866632,
-      "issueScore": 18.2,
-      "reviewScore": 423,
-      "commentScore": 2.6319999999999997,
+      "issueScore": 32.2,
+      "reviewScore": 472.5,
+      "commentScore": 3.2699999999999996,
       "summary": null
     },
     {
       "username": "falcorocks",
       "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 541.3813597283771,
-      "prScore": 450.98135972837713,
+      "totalScore": 629.7465843057133,
+      "prScore": 539.3465843057133,
       "issueScore": 0,
       "reviewScore": 90,
       "commentScore": 0.4,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 625.2629614467576,
+      "prScore": 364.4829614467575,
+      "issueScore": 4,
+      "reviewScore": 255.5,
+      "commentScore": 1.28,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 585.5107786873059,
+      "prScore": 500.01077868730596,
+      "issueScore": 0,
+      "reviewScore": 85.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 583.4091116998125,
+      "prScore": 255.0291116998124,
+      "issueScore": 2,
+      "reviewScore": 325.5,
+      "commentScore": 0.8799999999999999,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 575.7994010411243,
+      "prScore": 476.3614010411243,
+      "issueScore": 0,
+      "reviewScore": 99,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 548.6192582173256,
+      "prScore": 356.4292582173257,
+      "issueScore": 16.1,
+      "reviewScore": 173.5,
+      "commentScore": 2.59,
       "summary": null
     },
     {
@@ -2427,46 +3176,6 @@
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 488.8112280781915,
-      "prScore": 323.2312280781915,
-      "issueScore": 4,
-      "reviewScore": 160.5,
-      "commentScore": 1.08,
-      "summary": null
-    },
-    {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 441.8890782869621,
-      "prScore": 347.4510782869621,
-      "issueScore": 0,
-      "reviewScore": 94,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 439.0003569204972,
-      "prScore": 239.12035692049716,
-      "issueScore": 2,
-      "reviewScore": 197,
-      "commentScore": 0.8799999999999999,
-      "summary": null
-    },
-    {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 425.08034191499,
-      "prScore": 344.58034191499,
-      "issueScore": 0,
-      "reviewScore": 80.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
       "totalScore": 422.3559367778434,
@@ -2477,112 +3186,102 @@
       "summary": null
     },
     {
-      "username": "aakoshh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
-      "totalScore": 402.1543398603349,
-      "prScore": 280.9023398603349,
-      "issueScore": 14.1,
-      "reviewScore": 105,
-      "commentScore": 2.1519999999999997,
-      "summary": null
-    },
-    {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 293.6195016449059,
-      "prScore": 179.98150164490588,
+      "totalScore": 371.52085708954064,
+      "prScore": 200.3828570895406,
       "issueScore": 6,
-      "reviewScore": 107,
+      "reviewScore": 164.5,
       "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
-      "username": "donoso-eth",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 238.93068296442394,
-      "prScore": 205.69068296442396,
-      "issueScore": 2,
-      "reviewScore": 30.5,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 313.9317730712746,
+      "prScore": 219.9137730712746,
+      "issueScore": 0,
+      "reviewScore": 92.5,
+      "commentScore": 1.5179999999999998,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 261.9496221441326,
+      "prScore": 106.20962214413262,
+      "issueScore": 0,
+      "reviewScore": 155,
       "commentScore": 0.74,
       "summary": null
     },
     {
       "username": "lumoswiz",
       "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
-      "totalScore": 233.3134839455582,
+      "totalScore": 246.8134839455582,
       "prScore": 87.3134839455582,
       "issueScore": 2,
-      "reviewScore": 144,
+      "reviewScore": 157.5,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 225.37709336669812,
-      "prScore": 156.6990933666981,
-      "issueScore": 0,
-      "reviewScore": 67.5,
-      "commentScore": 1.178,
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 244.13068296442395,
+      "prScore": 205.69068296442396,
+      "issueScore": 2,
+      "reviewScore": 35.5,
+      "commentScore": 0.94,
       "summary": null
     },
     {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
-      "totalScore": 180.29123608005028,
+      "totalScore": 243.79123608005028,
       "prScore": 47.2912360800503,
       "issueScore": 0,
-      "reviewScore": 133,
+      "reviewScore": 196.5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 179.59114838769648,
-      "prScore": 164.59114838769648,
+      "totalScore": 231.66091986708295,
+      "prScore": 211.46091986708294,
       "issueScore": 0,
-      "reviewScore": 15,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "oplabs-renovate",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 176.2305712560761,
-      "prScore": 176.0305712560761,
-      "issueScore": 0,
-      "reviewScore": 0,
+      "reviewScore": 20,
       "commentScore": 0.2,
       "summary": null
     },
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 170.89665769368844,
-      "prScore": 167.63065769368842,
+      "totalScore": 216.5628707442714,
+      "prScore": 212.8588707442714,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 3.2659999999999996,
+      "commentScore": 3.7039999999999997,
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 159.30027430406724,
-      "prScore": 23.560274304067242,
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 191.38739155418673,
+      "prScore": 190.98739155418673,
       "issueScore": 0,
-      "reviewScore": 135,
-      "commentScore": 0.74,
+      "reviewScore": 0,
+      "commentScore": 0.4,
       "summary": null
     },
     {
       "username": "0xOneTony",
       "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
-      "totalScore": 122.05286652053134,
+      "totalScore": 135.55286652053135,
       "prScore": 65.15286652053135,
       "issueScore": 0,
-      "reviewScore": 56.5,
+      "reviewScore": 70,
       "commentScore": 0.4,
       "summary": null
     },
@@ -2627,6 +3326,16 @@
       "summary": null
     },
     {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 101.24635424232065,
+      "prScore": 86.24635424232065,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "wiz-0f98cca50a",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 100.578,
@@ -2657,23 +3366,33 @@
       "summary": null
     },
     {
-      "username": "pcw109550",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
-      "totalScore": 60.99297467267604,
-      "prScore": 45.99297467267604,
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 83.98034642463477,
+      "prScore": 29.980346424634774,
       "issueScore": 0,
-      "reviewScore": 15,
+      "reviewScore": 54,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "raffaele-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
-      "totalScore": 60,
+      "totalScore": 80,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 60,
+      "reviewScore": 80,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Joxess",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
+      "totalScore": 53.25566248977032,
+      "prScore": 8.05566248977032,
+      "issueScore": 0,
+      "reviewScore": 45,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -2687,26 +3406,6 @@
       "summary": null
     },
     {
-      "username": "Joxess",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
-      "totalScore": 48.75566248977032,
-      "prScore": 8.05566248977032,
-      "issueScore": 0,
-      "reviewScore": 40.5,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "0xarktos",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
-      "totalScore": 39.59983686600433,
-      "prScore": 8.09983686600433,
-      "issueScore": 0,
-      "reviewScore": 31.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "ihooni",
       "avatarUrl": "https://avatars.githubusercontent.com/u/37792049?u=5d5dfa80bc54fd29248ecec7b4a6d259f56450c1&v=4",
       "totalScore": 37.704312155610594,
@@ -2714,6 +3413,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 30.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 30,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -2727,6 +3436,16 @@
       "summary": null
     },
     {
+      "username": "tremarkley",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/15234569?u=b2a30602eb3a6a6fbd8e7b2ee2eef68888738704&v=4",
+      "totalScore": 27.176879734614026,
+      "prScore": 22.176879734614026,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "PeaStew",
       "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
       "totalScore": 22.434658162586587,
@@ -2737,16 +3456,6 @@
       "summary": null
     },
     {
-      "username": "Ethnical",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
-      "totalScore": 20,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "syszery",
       "avatarUrl": "https://avatars.githubusercontent.com/u/66296529?u=6abf057ea157bc59293cae3ec31406fbe10d8c77&v=4",
       "totalScore": 17.889487437162853,
@@ -2754,6 +3463,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?u=f827e4edffd5a9407141e223985a4d49d2b1675b&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -2813,16 +3532,6 @@
       "prScore": 10.993612288668109,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "jefr90",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?u=f827e4edffd5a9407141e223985a4d49d2b1675b&v=4",
-      "totalScore": 10,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
@@ -2927,6 +3636,26 @@
       "summary": null
     },
     {
+      "username": "Abed1234560",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/200540826?v=4",
+      "totalScore": 4,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "krlosMata",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44141767?u=cf136a476a93555ead18bb728519282f3a138afe&v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
       "username": "paranoiacblack",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1035296?u=4293e54a12b84115c552a1581cc80470c29cf11a&v=4",
       "totalScore": 0.2,
@@ -2987,6 +3716,16 @@
       "summary": null
     },
     {
+      "username": "Nealo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3241395?u=cb9c29bc24e32fd7d7ce35c4d68b335e610ea058&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "Jordy-Baby",
       "avatarUrl": "https://avatars.githubusercontent.com/u/82444671?u=3de390402be769cca2a0569d7e09dac394fd24c0&v=4",
       "totalScore": 0.2,
@@ -2997,9 +3736,9 @@
       "summary": null
     }
   ],
-  "newPRs": 194,
-  "mergedPRs": 123,
-  "newIssues": 51,
-  "closedIssues": 31,
-  "activeContributors": 71
+  "newPRs": 216,
+  "mergedPRs": 158,
+  "newIssues": 67,
+  "closedIssues": 54,
+  "activeContributors": 78
 }
