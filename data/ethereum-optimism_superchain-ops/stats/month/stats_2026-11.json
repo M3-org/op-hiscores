@@ -5,8 +5,33 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/superchain-ops",
-  "overview": "From 2026-11-01 to 2026-12-01, ethereum-optimism/superchain-ops had 30 new PRs (26 merged), 0 new issues, and 42 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-11-01 to 2026-12-01, ethereum-optimism/superchain-ops had 35 new PRs (31 merged), 1 new issues, and 42 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOKIsnqM8AAAABWJiejQ",
+      "title": "OPCMUpgradeX: Support Interop/Lagoon upgrade and migration templates",
+      "author": "0xOneTony",
+      "number": 1573,
+      "repository": "ethereum-optimism/superchain-ops",
+      "body": "Create a new template that will be used for performing the interop upgrade and a template for performing a migration to a shared dispute sytstem.",
+      "createdAt": "2026-10-09T16:28:35Z",
+      "closedAt": "2026-11-13T18:27:47Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOKIsnqM8AAAABe3S-qQ",
+      "title": "simulate-stack is RPC-latency bound (~2 min/run): pin fork block, reuse cache, simulate all child safes in one pass",
+      "author": "sbvegan",
+      "number": 1629,
+      "repository": "ethereum-optimism/superchain-ops",
+      "body": "## Problem\n\nEach `just simulate-stack` call takes about 2 minutes, and reviewing a stacked task needs many of them. The PR #1628 review made 8 calls:\n\n- 084, 085 and 087 on both the `foundation` and `council` child safes,\n- 086,\n- the full `just simulate-stack eth`.\n\nThat took about 16 minutes, measured on 2026-11-12 with the default publicnode RPC. Each run took 108–125 s. Adding more tasks to the stack barely changes this, because the U21 upgrade (eth/084) dominates and every later target re-runs it.\n\n## Where the time goes\n\n**About 95% of each run is spent waiting on the RPC, not compiling or executing.**\n\n- **Network-bound.** Sampling the running `forge` process showed about 2.3 s of CPU over about 105 s of wall time, with one HTTPS connection open to `ethereum.publicnode.com` (`foundry.toml` `[rpc_endpoints] mainnet`).\n- **About 800 reads, one at a time.** Foundry's per-block cache file (`~/.foundry/cache/rpc/mainnet/<block>`) shows each run fetched about 190 accounts and 600 storage slots. At about 0.13 s per request that is about 105 s, which matches the measured time.\n- **The cache is never reused.** No task `.env` sets `FORK_BLOCK_NUMBER`, so `_get-fork-block-args` (`src/justfile`) forks at the latest block. Foundry writes the cache for that block, but the next run forks a newer block and fetches everything again.\n  - Test: a separate 80-slot fork script pinned to one block took 14.4 s cold and 2.4 s on the second run.\n- **The same state is fetched for every run.** All calls in a review fetch the same ~800 values cold: about 6,400 sequential requests to rebuild the same state 8 times. For a nested task, each child safe re-runs the whole stack.\n- **Compiling is not the bottleneck.** Logs show \"No files changed, compilation skipped\". The optimizer is off and `via_ir` is not used.\n- **Fixed overhead is about 4 s per call:** the separate `forge script … listStack` process, the welcome message and the get-safe step.\n- **L2 forks also float.** Tasks that fork the L2 (e.g. `FeeVaultUpgradeTemplate`, `vm.createSelectFork(l2RpcUrls[i])`) always use the L2 head, so pinning the L1 block does not cache them. They are small (~45 KB of state).\n- **Flaky runs.** With the block unpinned, publicnode's load balancer sometimes returns `block not found`.\n\n## Recommendations (ranked by gain vs effort)\n\nGains below are estimates unless marked measured.\n\n1. **Pin the fork block for review batches (no code change).**\n   - Command: `export FORK_BLOCK_NUMBER=$(cast block-number --rpc-url https://ethereum.publicnode.com)` before running the batch.\n   - Expected: the first run stays ~2 min, later runs at the same block about 8–12 s, so the 8-call review drops from 16 min to about 3 min.\n   - Optional code change: have `_get-fork-block-args` default to rounding the head down (e.g. `latest - latest % 50`) for `simulate*` recipes, so runs within ~10 min share the cache automatically. `sign*` recipes keep using latest.\n   - Caveat: results are frozen at that block, so re-pin before signing and after any on-chain execution.\n2. **Warm the cache once, then run the rest in parallel.** Each warm run uses about 2–3 s of CPU, so the whole batch takes about as long as the slowest single run (~15 s).\n   - Don't run cold runs in parallel against publicnode: it rate-limits (429) and returns `block not found`.\n   - Concurrent runs overwrite the same cache file. The last write wins, which is harmless.\n3. **Simulate every child safe in one process** (about 50 lines, `src/tasks/StackedSimulator.sol` `_simulateStack`).\n   - For each nested task: take a snapshot (`vm.snapshotState`), `executeTask` once per owner safe of the root safe, revert between them, then run once with no child safe to advance.\n   - This prints hashes for every task and child safe in one run: 8 processes become 1, about 2 min cold or about 8 s warm.\n4. **Faster or local RPC.**\n   - `OVERRIDE_RPC_URL` already works (`src/script/get-rpc-url.sh`). Cold time scales with latency: an RPC at ~30 ms is about 4–5x faster, and a local node at ~1 ms makes cold runs as fast as warm ones. It also removes the publicnode flakes.\n   - Alternative: one shared `anvil --fork-url $RPC --fork-block-number $B`, with every run pointed at `OVERRIDE_RPC_URL=http://127.0.0.1:8545`. All runs share one in-memory fork, so there is no cache-file race.\n5. **Pre-warm the cache for a new block (advanced, fragile).** Take the account and slot list from the previous cache file, batch-fetch it at the new block, and write the new cache file. Cold runs at a fresh block drop from ~110 s to ~10 s, but this depends on Foundry's internal cache format.\n6. **Cut the fixed overhead.** Drop the separate `listStack` process, since the simulation already prints the stack. Warm runs go from ~8–10 s to ~4–5 s.\n\n**Not worth it:** compiler settings and print-suppression flags. `FETCH_TASKS_ONLY` skips the preceding tasks, which breaks Safe nonces and therefore the hashes whenever tasks share a Safe.\n\n## Realistic totals for the 8-call review\n\n| Approach | Time | Speedup |\n|---|---|---|\n| Today (measured) | ~16 min | 1x |\n| Pinned block (#1) | ~3 min | ~5x |\n| Pinned + warm cache + parallel (#1 + #2) | ~15 s | ~60x |\n| All child safes in one process (#3), warm cache or local node (#1/#4/#5), less overhead (#6) | ~5–8 s | ~120–200x |\n\nGetting much below that needs a long-running simulator process: forge startup and loading artifacts take ~1–2 s, plus ~1 s of CPU to execute the stack.\n\n## Suggested first steps\n\n- Document the `FORK_BLOCK_NUMBER` + warm-cache workflow for reviewers (#1, #2). This needs no code change.\n- Implement simulating all child safes in one pass in `StackedSimulator` (#3).\n- Default `simulate*` to a rounded-down block (#1, optional part).\n",
+      "createdAt": "2026-11-13T06:33:43Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
       "id": "PR_kwDOKIsnqM8AAAABOxM2QQ",
@@ -33,6 +58,18 @@
       "deletions": 15
     },
     {
+      "id": "PR_kwDOKIsnqM8AAAABI4w3bg",
+      "title": "feat(template): add OPCMMigrateV900",
+      "author": "0xOneTony",
+      "number": 1582,
+      "body": "Adds `OPCMMigrateV900`, a template that calls `OPContractsManagerV2.migrate` to move a set of chains onto a shared `ETHLockbox`, `DisputeGameFactory` and `AnchorStateRegistry` in one delegatecall from the ProxyAdmin owner, then checks the result with `StandardValidator.validateMigratedChain`. It registers `SUPER_PERMISSIONED` and `SUPER_CANNON_KONA` on the shared factory, requires `l2chains` in ascending chain ID order, and takes the shared addresses for validation from the contracts the migration creates, since their CREATE2 salt includes `block.timestamp`.\n\nThe example task `sep/044-opcm-migrate-v900` uses placeholder values and is skipped in `simulate-all-templates` until a v9 OPCM exists and the chains are upgraded to it.\n\nCloses https://github.com/ethereum-optimism/superchain-ops/issues/1573",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-10-16T16:34:21Z",
+      "mergedAt": "2026-11-13T18:27:46Z",
+      "additions": 1295,
+      "deletions": 0
+    },
+    {
       "id": "PR_kwDOKIsnqM8AAAABNXwN7w",
       "title": "sep/900-902: Whitechain Sepolia U19, U20 and U21 tasks",
       "author": "donoso-eth",
@@ -55,25 +92,13 @@
       "mergedAt": "2026-11-04T21:25:12Z",
       "additions": 1039,
       "deletions": 0
-    },
-    {
-      "id": "PR_kwDOKIsnqM8AAAABNH7J7w",
-      "title": "eth/089: OP Mainnet unsafe block signer renumber (088 → 089) and FUS nonce re-pin (84 → 85)",
-      "author": "Wazabie",
-      "number": 1613,
-      "body": "Renumbers the OP Mainnet unsafe block signer task to **eth/089** and moves it to FoundationUpgradeSafe nonce **85**, after U21 and the Soneium Mainnet tasks.\n\n## Change\n\n| | Before | After |\n|---|---|---|\n| Task | `eth/088-op-mainnet-set-unsafe-signer` | `eth/089-op-mainnet-set-unsafe-signer` |\n| FoundationUpgradeSafe nonce | 84 | **85** |\n| Message hash | `0xe001da1e…0414b` | **`0xb091d40b179d6d63ae01adeea4d6c3e460e2aaf748603a0016e1ef62271af1f8`** |\n| Calldata | — | unchanged |\n\n> [!WARNING]\n> Anyone who signed the old eth/088 at nonce 84 must re-sign.\n\n## Why\n\nU21 (eth/084) took nonce 81, which moved the Soneium tasks (#1566) to 82–84. Nonce 84 then collided with eth/087, and the stacked simulation failed. The new number frees eth/088 for the Soneium rollback (#1588).\n\n## FoundationUpgradeSafe sequence\n\n| Nonce | Task | PR |\n|---|---|---|\n| 81 | eth/084 U21 | main |\n| 82 | eth/085 Soneium proposer | #1566 |\n| 83 | eth/086 Soneium batcher and unsafe signer | #1566 |\n| 84 | eth/087 Soneium fee vaults, *or* eth/088 rollback | #1566 / #1588 |\n| **85** | **eth/089 OP Mainnet unsafe signer** | **this PR** |\n\n## Verification\n\n`just simulate-stack eth 089-op-mainnet-set-unsafe-signer` passes on this branch and with #1566 stacked on top, with the same hash.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/superchain-ops",
-      "createdAt": "2026-11-05T17:18:17Z",
-      "mergedAt": "2026-11-09T18:26:32Z",
-      "additions": 709,
-      "deletions": 13
     }
   ],
   "codeChanges": {
-    "additions": 14364,
-    "deletions": 238,
-    "files": 207,
-    "commitCount": 152
+    "additions": 16231,
+    "deletions": 321,
+    "files": 216,
+    "commitCount": 171
   },
   "completedItems": [
     {
@@ -242,6 +267,30 @@
         "src/tasks/sep/117-soneium-minato-set-batcher-unsafe-signer/README.md",
         "src/tasks/sep/117-soneium-minato-set-batcher-unsafe-signer/VALIDATION.md",
         "src/tasks/sep/117-soneium-minato-set-batcher-unsafe-signer/config.toml"
+      ]
+    },
+    {
+      "title": "feat(template): add OPCMMigrateV900",
+      "prNumber": 1582,
+      "type": "feature",
+      "body": "Adds `OPCMMigrateV900`, a template that calls `OPContractsManagerV2.migrate` to move a set of chains onto a shared `ETHLockbox`, `DisputeGameFactory` and `AnchorStateRegistry` in one delegatecall from the ProxyAdmin owner, then checks the r",
+      "files": [
+        "src/ci.just",
+        "src/template/OPCMMigrateV900.sol",
+        "test/tasks/example/sep/044-opcm-migrate-v900/.env",
+        "test/tasks/example/sep/044-opcm-migrate-v900/config.toml",
+        "test/template/OPCMMigrateV900Setup.t.sol",
+        "test/tasks/Regression.t.sol",
+        "test/tasks/example/sep/046-opcm-migrate-v900/.env",
+        "test/tasks/example/sep/046-opcm-migrate-v900/config.toml",
+        "test/template/OPCMMigrateV900.t.sol",
+        "test/tasks/example/sep/047-opcm-migrate-v900/.env",
+        "test/tasks/example/sep/047-opcm-migrate-v900/config.toml",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/.env",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/README.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/VALIDATION.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/addresses.json",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/config.toml"
       ]
     },
     {
@@ -510,6 +559,28 @@
       ]
     },
     {
+      "title": "eth: cancel 082/083/089, keep eth/084 U21 calldata, re-pin 084-087",
+      "prNumber": 1628,
+      "type": "other",
+      "body": "## Summary\n\n- **eth/082, eth/083, eth/089** → `CANCELLED`.\n- **eth/084 (U21)** stays eth/084 with **byte-identical calldata**. That calldata sets OP Mainnet's `SUPER_PERMISSIONED` proposer to `0xc27ba3E0Fc01567a5E57Ae0c391AA98cECBA5bE0`, wh",
+      "files": [
+        "src/tasks/eth/082-op-mainnet-set-batcher/README.md",
+        "src/tasks/eth/083-op-mainnet-proposer-rotation/README.md",
+        "src/tasks/eth/084-U21-op-ink-soneium-uni/README.md",
+        "src/tasks/eth/084-U21-op-ink-soneium-uni/VALIDATION.md",
+        "src/tasks/eth/084-U21-op-ink-soneium-uni/config.toml",
+        "src/tasks/eth/085-soneium-proposer-rotation/VALIDATION.md",
+        "src/tasks/eth/085-soneium-proposer-rotation/config.toml",
+        "src/tasks/eth/086-soneium-set-batcher-unsafe-signer/VALIDATION.md",
+        "src/tasks/eth/086-soneium-set-batcher-unsafe-signer/config.toml",
+        "src/tasks/eth/087-soneium-fee-vault/VALIDATION.md",
+        "src/tasks/eth/087-soneium-fee-vault/config.toml",
+        "src/tasks/eth/089-op-mainnet-set-unsafe-signer/README.md",
+        "src/template/OPCMUpgradeV900.sol",
+        "test/template/OPCMUpgradeV900Setup.t.sol"
+      ]
+    },
+    {
       "title": "ci: bump circleci-utils orb to 1.0.34",
       "prNumber": 1625,
       "type": "other",
@@ -546,17 +617,53 @@
       "files": [
         ".github/workflows/agent-approval-check.yaml"
       ]
+    },
+    {
+      "title": "docs: mark sep task 125 as EXECUTED",
+      "prNumber": 1632,
+      "type": "docs",
+      "body": "- Mark sep/125 (sepolia-devnet-4/5 OPCM migrate) as EXECUTED.\r\n- Execution tx: https://sepolia.etherscan.io/tx/0x0d52a31e01af58767efb790efe6815f68b46ccb53008cd35c85df4e4d7729c70",
+      "files": [
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/README.md"
+      ]
+    },
+    {
+      "title": "sep/125: kona interop prestate built from the registry depset",
+      "prNumber": 1631,
+      "type": "other",
+      "body": "Follow-up to #1630 / #1582. Updates sep/125 (OPCM v9 migrate for sepolia-devnet-4 and -5) to the `cannon64-kona-interop` prestate `0x03db2e9bdc15db95cb3a13bb695ae237d7d57dec409120e6e25a76e3873f16c9`.\n\nThe previous prestate (`0x03384d2c…9ea0",
+      "files": [
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/VALIDATION.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/config.toml"
+      ]
+    },
+    {
+      "title": "sep/125: OPCM v9 migrate for sepolia-devnet-4 and -5",
+      "prNumber": 1630,
+      "type": "other",
+      "body": "Adds sep/125: one `OPCMv2.migrate` call (OPCMMigrateV900, OPCM `0x160f…39cc`, v9.0.3) that moves sepolia-devnet-4 and -5 onto shared dispute contracts as one interop set, from the staging ProxyAdminOwner `0xe934…40ff` (1-of-1, nonce 157). B",
+      "files": [
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/.env",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/README.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/VALIDATION.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/addresses.json",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/config.toml",
+        "test/tasks/Regression.t.sol",
+        "test/tasks/example/sep/047-opcm-migrate-v900/.env",
+        "test/tasks/example/sep/047-opcm-migrate-v900/config.toml",
+        "test/template/OPCMMigrateV900.t.sol"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 1270.5758191622942,
-      "prScore": 883.1678191622942,
-      "issueScore": 22.1,
-      "reviewScore": 362,
-      "commentScore": 3.308,
+      "totalScore": 1526.1121817289938,
+      "prScore": 1038.7661817289938,
+      "issueScore": 28.1,
+      "reviewScore": 455.5,
+      "commentScore": 3.7459999999999996,
       "summary": null
     },
     {
@@ -570,6 +677,36 @@
       "summary": null
     },
     {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 855.9260877544464,
+      "prScore": 547.7080877544464,
+      "issueScore": 6,
+      "reviewScore": 300.5,
+      "commentScore": 1.718,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 831.5459399468148,
+      "prScore": 454.9659399468148,
+      "issueScore": 2,
+      "reviewScore": 373.5,
+      "commentScore": 1.08,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 704.0910078055516,
+      "prScore": 618.5910078055516,
+      "issueScore": 0,
+      "reviewScore": 85.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "falcorocks",
       "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
       "totalScore": 629.7465843057133,
@@ -580,33 +717,13 @@
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 625.2629614467576,
-      "prScore": 364.4829614467575,
-      "issueScore": 4,
-      "reviewScore": 255.5,
-      "commentScore": 1.28,
-      "summary": null
-    },
-    {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 585.5107786873059,
-      "prScore": 500.01077868730596,
-      "issueScore": 0,
-      "reviewScore": 85.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "wwared",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 583.4091116998125,
-      "prScore": 255.0291116998124,
-      "issueScore": 2,
-      "reviewScore": 325.5,
-      "commentScore": 0.8799999999999999,
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 626.0555195510645,
+      "prScore": 412.4275195510646,
+      "issueScore": 18.1,
+      "reviewScore": 192.5,
+      "commentScore": 3.0279999999999996,
       "summary": null
     },
     {
@@ -620,23 +737,13 @@
       "summary": null
     },
     {
-      "username": "aakoshh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
-      "totalScore": 548.6192582173256,
-      "prScore": 356.4292582173257,
-      "issueScore": 16.1,
-      "reviewScore": 173.5,
-      "commentScore": 2.59,
-      "summary": null
-    },
-    {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 499.9212956816401,
+      "totalScore": 515.1212956816402,
       "prScore": 264.54529568164014,
       "issueScore": 6,
-      "reviewScore": 228.5,
-      "commentScore": 0.8759999999999999,
+      "reviewScore": 243.5,
+      "commentScore": 1.0759999999999998,
       "summary": null
     },
     {
@@ -652,31 +759,31 @@
     {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 371.52085708954064,
+      "totalScore": 381.52085708954064,
       "prScore": 200.3828570895406,
       "issueScore": 6,
-      "reviewScore": 164.5,
+      "reviewScore": 174.5,
       "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 313.9317730712746,
-      "prScore": 219.9137730712746,
+      "totalScore": 364.78790255653587,
+      "prScore": 265.76990255653584,
       "issueScore": 0,
-      "reviewScore": 92.5,
+      "reviewScore": 97.5,
       "commentScore": 1.5179999999999998,
       "summary": null
     },
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 261.9496221441326,
+      "totalScore": 269.1496221441326,
       "prScore": 106.20962214413262,
-      "issueScore": 0,
-      "reviewScore": 155,
-      "commentScore": 0.74,
+      "issueScore": 2,
+      "reviewScore": 160,
+      "commentScore": 0.94,
       "summary": null
     },
     {
@@ -710,6 +817,16 @@
       "summary": null
     },
     {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 239.05605224820025,
+      "prScore": 238.45605224820022,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.6000000000000001,
+      "summary": null
+    },
+    {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
       "totalScore": 231.66091986708295,
@@ -722,21 +839,21 @@
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 216.5628707442714,
+      "totalScore": 217.0008707442714,
       "prScore": 212.8588707442714,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 3.7039999999999997,
+      "commentScore": 4.1419999999999995,
       "summary": null
     },
     {
-      "username": "oplabs-renovate",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 191.38739155418673,
-      "prScore": 190.98739155418673,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.4,
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 187.14589909366467,
+      "prScore": 147.60589909366468,
+      "issueScore": 6,
+      "reviewScore": 33,
+      "commentScore": 0.54,
       "summary": null
     },
     {
@@ -770,12 +887,12 @@
       "summary": null
     },
     {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 104.94960877851578,
-      "prScore": 70.40960877851577,
-      "issueScore": 6,
-      "reviewScore": 28,
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 103.45490589281164,
+      "prScore": 49.91490589281163,
+      "issueScore": 16,
+      "reviewScore": 37,
       "commentScore": 0.54,
       "summary": null
     },
@@ -810,16 +927,6 @@
       "summary": null
     },
     {
-      "username": "teddyknox",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
-      "totalScore": 98.45490589281164,
-      "prScore": 49.91490589281163,
-      "issueScore": 16,
-      "reviewScore": 32,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
       "username": "zkfrov",
       "avatarUrl": "https://avatars.githubusercontent.com/u/220007267?u=4ac22607296ed648df3ee0ac8832dad44bec1fdf&v=4",
       "totalScore": 83.9888642567265,
@@ -850,6 +957,16 @@
       "summary": null
     },
     {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 60.960306144334055,
+      "prScore": 21.920306144334052,
+      "issueScore": 0,
+      "reviewScore": 38.5,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
       "username": "Joxess",
       "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
       "totalScore": 53.25566248977032,
@@ -860,13 +977,13 @@
       "summary": null
     },
     {
-      "username": "ZakAyesh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
-      "totalScore": 50.960306144334055,
-      "prScore": 21.920306144334052,
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 48.2,
+      "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 28.5,
-      "commentScore": 0.54,
+      "reviewScore": 48,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -882,20 +999,10 @@
     {
       "username": "Ethnical",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
-      "totalScore": 30.2,
+      "totalScore": 35.2,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 30,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "op-will",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
-      "totalScore": 29.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 29,
+      "reviewScore": 35,
       "commentScore": 0.2,
       "summary": null
     },
@@ -980,13 +1087,23 @@
       "summary": null
     },
     {
+      "username": "erkancamli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/107792368?u=1d0297910a73f78a88cb47d6a22e46d361a859c3&v=4",
+      "totalScore": 12.082918433002165,
+      "prScore": 12.082918433002165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 11.012612288668109,
+      "totalScore": 11.45061228866811,
       "prScore": 10.13661228866811,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0.8759999999999999,
+      "commentScore": 1.3139999999999998,
       "summary": null
     },
     {
@@ -1064,6 +1181,16 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/170245230?u=f16b77922393e2539521b2cad3bb9f86a56caa67&v=4",
       "totalScore": 6.664306144334055,
       "prScore": 6.664306144334055,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nodeflareapp",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/302281547?u=99c41c455480d133b07ee371d496f73fe6506bcb&v=4",
+      "totalScore": 6.502955074527657,
+      "prScore": 6.502955074527657,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -1200,9 +1327,9 @@
       "summary": null
     }
   ],
-  "newPRs": 30,
-  "mergedPRs": 26,
-  "newIssues": 0,
-  "closedIssues": 0,
+  "newPRs": 35,
+  "mergedPRs": 31,
+  "newIssues": 1,
+  "closedIssues": 1,
   "activeContributors": 42
 }

@@ -5,9 +5,70 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/superchain-ops",
-  "overview": "From 2026-11-13 to 2026-11-14, ethereum-optimism/superchain-ops had 1 new PRs (0 merged), 0 new issues, and 3 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-11-13 to 2026-11-14, ethereum-optimism/superchain-ops had 6 new PRs (5 merged), 1 new issues, and 18 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDOKIsnqM8AAAABWJiejQ",
+      "title": "OPCMUpgradeX: Support Interop/Lagoon upgrade and migration templates",
+      "author": "0xOneTony",
+      "number": 1573,
+      "repository": "ethereum-optimism/superchain-ops",
+      "body": "Create a new template that will be used for performing the interop upgrade and a template for performing a migration to a shared dispute sytstem.",
+      "createdAt": "2026-10-09T16:28:35Z",
+      "closedAt": "2026-11-13T18:27:47Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDOKIsnqM8AAAABe3S-qQ",
+      "title": "simulate-stack is RPC-latency bound (~2 min/run): pin fork block, reuse cache, simulate all child safes in one pass",
+      "author": "sbvegan",
+      "number": 1629,
+      "repository": "ethereum-optimism/superchain-ops",
+      "body": "## Problem\n\nEach `just simulate-stack` call takes about 2 minutes, and reviewing a stacked task needs many of them. The PR #1628 review made 8 calls:\n\n- 084, 085 and 087 on both the `foundation` and `council` child safes,\n- 086,\n- the full `just simulate-stack eth`.\n\nThat took about 16 minutes, measured on 2026-11-12 with the default publicnode RPC. Each run took 108–125 s. Adding more tasks to the stack barely changes this, because the U21 upgrade (eth/084) dominates and every later target re-runs it.\n\n## Where the time goes\n\n**About 95% of each run is spent waiting on the RPC, not compiling or executing.**\n\n- **Network-bound.** Sampling the running `forge` process showed about 2.3 s of CPU over about 105 s of wall time, with one HTTPS connection open to `ethereum.publicnode.com` (`foundry.toml` `[rpc_endpoints] mainnet`).\n- **About 800 reads, one at a time.** Foundry's per-block cache file (`~/.foundry/cache/rpc/mainnet/<block>`) shows each run fetched about 190 accounts and 600 storage slots. At about 0.13 s per request that is about 105 s, which matches the measured time.\n- **The cache is never reused.** No task `.env` sets `FORK_BLOCK_NUMBER`, so `_get-fork-block-args` (`src/justfile`) forks at the latest block. Foundry writes the cache for that block, but the next run forks a newer block and fetches everything again.\n  - Test: a separate 80-slot fork script pinned to one block took 14.4 s cold and 2.4 s on the second run.\n- **The same state is fetched for every run.** All calls in a review fetch the same ~800 values cold: about 6,400 sequential requests to rebuild the same state 8 times. For a nested task, each child safe re-runs the whole stack.\n- **Compiling is not the bottleneck.** Logs show \"No files changed, compilation skipped\". The optimizer is off and `via_ir` is not used.\n- **Fixed overhead is about 4 s per call:** the separate `forge script … listStack` process, the welcome message and the get-safe step.\n- **L2 forks also float.** Tasks that fork the L2 (e.g. `FeeVaultUpgradeTemplate`, `vm.createSelectFork(l2RpcUrls[i])`) always use the L2 head, so pinning the L1 block does not cache them. They are small (~45 KB of state).\n- **Flaky runs.** With the block unpinned, publicnode's load balancer sometimes returns `block not found`.\n\n## Recommendations (ranked by gain vs effort)\n\nGains below are estimates unless marked measured.\n\n1. **Pin the fork block for review batches (no code change).**\n   - Command: `export FORK_BLOCK_NUMBER=$(cast block-number --rpc-url https://ethereum.publicnode.com)` before running the batch.\n   - Expected: the first run stays ~2 min, later runs at the same block about 8–12 s, so the 8-call review drops from 16 min to about 3 min.\n   - Optional code change: have `_get-fork-block-args` default to rounding the head down (e.g. `latest - latest % 50`) for `simulate*` recipes, so runs within ~10 min share the cache automatically. `sign*` recipes keep using latest.\n   - Caveat: results are frozen at that block, so re-pin before signing and after any on-chain execution.\n2. **Warm the cache once, then run the rest in parallel.** Each warm run uses about 2–3 s of CPU, so the whole batch takes about as long as the slowest single run (~15 s).\n   - Don't run cold runs in parallel against publicnode: it rate-limits (429) and returns `block not found`.\n   - Concurrent runs overwrite the same cache file. The last write wins, which is harmless.\n3. **Simulate every child safe in one process** (about 50 lines, `src/tasks/StackedSimulator.sol` `_simulateStack`).\n   - For each nested task: take a snapshot (`vm.snapshotState`), `executeTask` once per owner safe of the root safe, revert between them, then run once with no child safe to advance.\n   - This prints hashes for every task and child safe in one run: 8 processes become 1, about 2 min cold or about 8 s warm.\n4. **Faster or local RPC.**\n   - `OVERRIDE_RPC_URL` already works (`src/script/get-rpc-url.sh`). Cold time scales with latency: an RPC at ~30 ms is about 4–5x faster, and a local node at ~1 ms makes cold runs as fast as warm ones. It also removes the publicnode flakes.\n   - Alternative: one shared `anvil --fork-url $RPC --fork-block-number $B`, with every run pointed at `OVERRIDE_RPC_URL=http://127.0.0.1:8545`. All runs share one in-memory fork, so there is no cache-file race.\n5. **Pre-warm the cache for a new block (advanced, fragile).** Take the account and slot list from the previous cache file, batch-fetch it at the new block, and write the new cache file. Cold runs at a fresh block drop from ~110 s to ~10 s, but this depends on Foundry's internal cache format.\n6. **Cut the fixed overhead.** Drop the separate `listStack` process, since the simulation already prints the stack. Warm runs go from ~8–10 s to ~4–5 s.\n\n**Not worth it:** compiler settings and print-suppression flags. `FETCH_TASKS_ONLY` skips the preceding tasks, which breaks Safe nonces and therefore the hashes whenever tasks share a Safe.\n\n## Realistic totals for the 8-call review\n\n| Approach | Time | Speedup |\n|---|---|---|\n| Today (measured) | ~16 min | 1x |\n| Pinned block (#1) | ~3 min | ~5x |\n| Pinned + warm cache + parallel (#1 + #2) | ~15 s | ~60x |\n| All child safes in one process (#3), warm cache or local node (#1/#4/#5), less overhead (#6) | ~5–8 s | ~120–200x |\n\nGetting much below that needs a long-running simulator process: forge startup and loading artifacts take ~1–2 s, plus ~1 s of CPU to execute the stack.\n\n## Suggested first steps\n\n- Document the `FORK_BLOCK_NUMBER` + warm-cache workflow for reviewers (#1, #2). This needs no code change.\n- Implement simulating all child safes in one pass in `StackedSimulator` (#3).\n- Default `simulate*` to a rounded-down block (#1, optional part).\n",
+      "createdAt": "2026-11-13T06:33:43Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDOKIsnqM8AAAABI4w3bg",
+      "title": "feat(template): add OPCMMigrateV900",
+      "author": "0xOneTony",
+      "number": 1582,
+      "body": "Adds `OPCMMigrateV900`, a template that calls `OPContractsManagerV2.migrate` to move a set of chains onto a shared `ETHLockbox`, `DisputeGameFactory` and `AnchorStateRegistry` in one delegatecall from the ProxyAdmin owner, then checks the result with `StandardValidator.validateMigratedChain`. It registers `SUPER_PERMISSIONED` and `SUPER_CANNON_KONA` on the shared factory, requires `l2chains` in ascending chain ID order, and takes the shared addresses for validation from the contracts the migration creates, since their CREATE2 salt includes `block.timestamp`.\n\nThe example task `sep/044-opcm-migrate-v900` uses placeholder values and is skipped in `simulate-all-templates` until a v9 OPCM exists and the chains are upgraded to it.\n\nCloses https://github.com/ethereum-optimism/superchain-ops/issues/1573",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-10-16T16:34:21Z",
+      "mergedAt": "2026-11-13T18:27:46Z",
+      "additions": 1295,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDOKIsnqM8AAAABOxyKeQ",
+      "title": "tasks(eth): cancel 082/083/084/089, add U21 as eth/090, re-pin 085-087",
+      "author": "sbvegan",
+      "number": 1627,
+      "body": "## Summary\n\neth/082 (OP Mainnet batcher) and eth/083 (OP Mainnet proposer rotation) are cancelled. Re-pinning eth/084 (U21) without them changed its calldata, so it no longer matched the governance-approved bytes. Instead of updating it, this PR cancels eth/084 and eth/089 and adds U21 as a new task, **eth/090**, which needs its own governance approval. The Soneium tasks 085–087 move up to use the freed nonces.\n\n| Task | Change | Nonces (L1PAO / FuS / SC), old → new | Calldata | Status |\n|---|---|---|---|---|\n| 082 | Cancelled | – | – | `CANCELLED` |\n| 083 | Cancelled | – | – | `CANCELLED` |\n| 084 U21 | Cancelled; files identical to `main` apart from the status line | – | – | `CANCELLED` |\n| 085 Soneium proposer | Re-pinned; hashes and `approvedHashes` keys regenerated | 50/82/77 → **48/79/75** (live) | Unchanged (byte-identical) | `READY TO SIGN` |\n| 086 Soneium batcher/signer | Re-pinned; hashes regenerated | –/83/– → –/80/– | Unchanged (byte-identical) | `READY TO SIGN` |\n| 087 Soneium fee vault | Re-pinned; hashes and `approvedHashes` keys regenerated | 51/84/78 → 49/81/76 | Unchanged (byte-identical) | `READY TO SIGN` |\n| 089 OP Mainnet unsafe signer | Cancelled (it relied on 082 having set the batcher) | – | – | `CANCELLED` |\n| **090 U21 (new)** | Replaces 084, stacked after 085–087 | **50/82/77** | Differs from 084 in 2 proposer slots (below) | `DRAFT, NOT READY TO SIGN` (pending governance) |\n\n### eth/090 vs the cancelled eth/084\n\n`OPCMUpgradeV900` reads each chain's game-5 (SUPER_PERMISSIONED) proposer from live state, so 090's proposers follow from the new stack order. A byte-level diff against 084's calldata on `main` finds exactly 2 changed slots:\n\n| Chain | eth/084 (cancelled) | eth/090 | Why |\n|---|---|---|---|\n| OP Mainnet | `0xc27ba3E0Fc01567a5E57Ae0c391AA98cECBA5bE0` | `0x473300df21D047806A082244b417f96b32f13A33` | 083's rotation was cancelled, so the current proposer is carried forward |\n| Soneium | `0x400c164C4a8cA84385B70EEd6eB03ea847c8E1b8` | `0x49Cc743aE58FB4ae6cb8F72f000960da5b299B37` | 085 (the OPE proposer rotation) now executes before U21 |\n\nInk (`0x3832…D177`) and Unichain (`0x86b3…75b7`) are unchanged, as are the OPCM, prestate, bonds, respected game types and extra instructions. Running U21 after 085 also removes the ordering risk the Soneium maintenance proposal flagged, where U21 would have restored Sony's proposer.\n\n**Signatures:** every signing hash for 085–087 changed, and 090 is new. Signatures collected against the old 084–087 hashes are void.\n\n### New hashes\n\n| Task | FoundationUpgradeSafe message hash | SecurityCouncil message hash | Root / Safe tx hash |\n|---|---|---|---|\n| 085 | `0x33acc5b8adf72f359b16879e6163f99c5a94767937d6b6a62660612a3d4d5c3e` | `0x260d17f0bd9d8a960af0667fe14f3e910015d9bbed0106cc050f7ea82d44be29` | `0x4826f8c4d4c9f19af31ed8256881e4f48ba94846314e9e7eb9b9fe0b92ed9eef` |\n| 086 | `0xdcb360b8b7bc13f80e75c40d0d7ad844379aff0450ded4084e91538c68ff11ad` | – | `0x4383a575b867e260d0282c22b544f0be7516971b3ef9d4b0aa3672fbe8ea0be1` |\n| 087 | `0x3ac19fb7cb074d47135d16e4998eb5fb1fb4a019794fb1ca9c309326dccf3125` | `0x27cf60a1775eda61c1a09cf0eaf6d3c626043d14a26612fa839bc7f3c9196952` | `0x58aac2bce325bf48e150327f240fc7754e281f1530121401c6958d9922e0efd5` |\n| 090 | `0xccff95975f8ed978d72b62b955550864c2ff61ab8311474f8f1be86bc14533bf` | `0xaa92636572cd230530c78c255c3083d5f688a6df46e3e1bdca440163c8dd1e5c` | `0x70997fcc721d2bf89469444c501f30d5c10b34b0bd579434f52e04cf6553faa9` |\n\nDomain hashes are unchanged (FoundationUpgradeSafe `0xa4a9c312…2672`, SecurityCouncil `0xdf53d510…e967`). The new `approvedHashes` keys were derived with `cast index bytes32 <root> $(cast index address <child> 8)`; the same command reproduces the old documented keys from the old roots.\n\n### Verification run\n\n- `just simulate-stack eth <task> [foundation|council]`: exit 0 for 085 (both child safes), 086, 087 (both) and 090 (both), each against its updated `VALIDATION.md`.\n- `just simulate-stack eth` (the `stacked_simulation_eth` CI job): exit 0, running 085 → 086 → 087 → 090.\n- Calldata compared byte-for-byte: 085, 086 and 087 match the bytes on `main`; 090 differs from 084 only in the 2 proposer slots above.\n- `check-task-statuses.sh` and `check-task-names.sh` pass.\n\n---\n\n## For Task PRs\n\n**Task path**: `src/tasks/eth/082-op-mainnet-set-batcher`, `083-op-mainnet-proposer-rotation`, `084-U21-op-ink-soneium-uni`, `085-soneium-proposer-rotation`, `086-soneium-set-batcher-unsafe-signer`, `087-soneium-fee-vault`, `089-op-mainnet-set-unsafe-signer`, `090-U21-op-ink-soneium-uni`\n\n**Tenderly simulation link**: <!-- stacked-simulation Tenderly links are >2000 chars and may not render; paste a Virtual TestNet link here after review -->\n\n### Simulation Checklist\n\n> These boxes must be checked before your PR can be merged.\n\n- [ ] I have run a Tenderly simulation for this task\n- [ ] I have reviewed and understand all state changes in the simulation\n- [ ] I have verified that every state change reflects the **exact expected value** (e.g., if setting an `absolutePrestate`, confirm the precise `bytes32` hash matches expectations)\n- [ ] All state changes match the expected behavior documented in `VALIDATION.md`\n- [ ] I can explain every state diff to reviewers and signers\n\n### Task Checklist\n\n- [x] `README.md` is complete with accurate task description\n- [x] `VALIDATION.md` documents expected state changes with correct domain/message hashes\n- [x] Task status is set appropriately\n- [x] All TODOs in generated files have been addressed\n\n---\n\n## Additional context\n\n- eth/090 needs a new governance approval before it moves to READY TO SIGN; its README spells out the differences from 084.\n- If the OP Mainnet OPE proposer rotation (`0xc27b…`) or the OP Mainnet batcher/unsafe-signer rotation (082/089) is still wanted, it needs new tasks.\n- The Soneium maintenance governance draft still describes the old ordering, where U21 ran before 085.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-11-12T23:03:00Z",
+      "mergedAt": null,
+      "additions": 402,
+      "deletions": 49
+    },
+    {
+      "id": "PR_kwDOKIsnqM8AAAABO9hpfQ",
+      "title": "sep/125: OPCM v9 migrate for sepolia-devnet-4 and -5",
+      "author": "Wazabie",
+      "number": 1630,
+      "body": "Adds sep/125: one `OPCMv2.migrate` call (OPCMMigrateV900, OPCM `0x160f…39cc`, v9.0.3) that moves sepolia-devnet-4 and -5 onto shared dispute contracts as one interop set, from the staging ProxyAdminOwner `0xe934…40ff` (1-of-1, nonce 157). Both chains stay on SUPER_CANNON_KONA (9), with a two-chain kona interop prestate `0x0338…9ea0`.\n\nStacked on #1582 (`OPCMMigrateV900` template); retarget to `main` once it merges. Also fixes the template tests' `045` → `046-opcm-upgrade-v900` fixture path.\n\n**Not ready to sign.** Status, how the prestate was built, and open items (prestate review/upload, registry depset, infra, refresh before signing) are in **[this comment](https://github.com/ethereum-optimism/superchain-ops/pull/1630#issuecomment-6858759292)**.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-11-13T16:21:52Z",
+      "mergedAt": "2026-11-13T18:04:29Z",
+      "additions": 269,
+      "deletions": 8
+    },
     {
       "id": "PR_kwDOKIsnqM8AAAABOztzvg",
       "title": "eth: cancel 082/083/089, keep eth/084 U21 calldata, re-pin 084-087",
@@ -16,19 +77,194 @@
       "body": "## Summary\n\n- **eth/082, eth/083, eth/089** → `CANCELLED`.\n- **eth/084 (U21)** stays eth/084 with **byte-identical calldata**. That calldata sets OP Mainnet's `SUPER_PERMISSIONED` proposer to `0xc27ba3E0Fc01567a5E57Ae0c391AA98cECBA5bE0`, which the template previously read from fork state after eth/083. With eth/083 cancelled, the value is now pinned in `config.toml` through a new optional `[[proposerOverrides]]` entry, so U21 performs the proposer rotation itself.\n- **`OPCMUpgradeV900`**: optional `proposerOverrides` (per chain). Used for the game-5 args and for the standard-validator input. No override → unchanged behaviour. Setup tests added.\n- **Nonce re-pins** (live: L1PAO 48, FUS 79, SC 75), domain/message hashes, root safe hashes and `approvedHashes` keys regenerated:\n\n| Task | L1PAO | FUS | SC | Calldata |\n|---|---|---|---|---|\n| eth/084 | 49 → 48 | 81 → 79 | 76 → 75 | unchanged |\n| eth/085 | 50 → 49 | 82 → 80 | 77 → 76 | unchanged |\n| eth/086 | – | 83 → 81 | – | unchanged |\n| eth/087 | 51 → 50 | 84 → 82 | 78 → 77 | unchanged |\n\n## Verification\n\n- eth/084 simulated calldata equals the calldata already in `VALIDATION.md` (17,354 hex chars, identical).\n- `just simulate-stack eth 087-soneium-fee-vault council` and `… foundation` pass (084 → 087).\n- `forge test --match-path test/template/OPCMUpgradeV900Setup.t.sol`: 15 passed.\n\n## Notes\n\n- Signers must sign the new eth/084 hashes; earlier signatures are invalid.\n- Alternative to #1627.\n- #1588 (eth/088 rollback) pins FUS 84 and needs 82 after this.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
       "repository": "ethereum-optimism/superchain-ops",
       "createdAt": "2026-11-13T02:11:28Z",
-      "mergedAt": null,
+      "mergedAt": "2026-11-13T06:35:47Z",
       "additions": 140,
       "deletions": 64
+    },
+    {
+      "id": "PR_kwDOKIsnqM8AAAABPBbskA",
+      "title": "feat: add sep-devnets task network for OP Labs devnets",
+      "author": "Wazabie",
+      "number": 1634,
+      "body": "## Summary\n\nAdds `src/tasks/sep-devnets/`, a separate task network for OP Labs devnets that settle to Sepolia. Devnet tasks no longer share numbering, stacked simulation or CI failure status with production Sepolia tasks in `sep/`.\n\nA task goes in `sep-devnets/` only if every Safe it touches is devnet-only. Tasks that also touch a production Sepolia Safe stay in `sep/`, so the stacked simulation sees all of that Safe's nonces.\n\n## Changes\n\n- `src/script/get-rpc-url.sh`: `sep-devnets` maps to the `sepolia` RPC alias. `simulate-stack`, `sign-stack` and the single-task recipes resolve the RPC from the dir name.\n- `src/script/get-safe.sh`: tasks under `/sep-devnets/` use the `[sep]` table in `addresses.toml`, the same as `sep/`.\n- `src/script/select-network.sh`: `just new task` offers `sep-devnets`.\n- `.circleci/config.yml`: new `stacked_simulation_sep_devnets` job.\n- `src/tasks/sep-devnets/README.md`: placement rule and usage. The file also keeps the dir present, so the stacked sim has a dir to scan.\n- `AGENTS.md`, `README.md`, `docs/NEW_TASK_GUIDE.md`: list the new network.\n\nNo changes are needed in `StackedSimulator`, `TaskManager`, `fetch-tasks.sh`, `check-task-names.sh` or `check-task-statuses.sh`: they take the network as a dir name or already scan every `src/tasks/*` dir. The address registries key off `block.chainid`, not the dir.\n\nDevnet tasks that have already executed (for example `sep/122`, `sep/123`, `sep/125`) stay in `sep/`. Moving them would break their repo-relative `fallbackAddressesJsonPath` values and existing links. No devnet task is pending.\n\nThe new CI job reuses the Sepolia job's Slack mention. Reviewers can suggest a different group if devnet failures should page someone else.\n\n## Testing\n\n- `just list-stack sep-devnets` and `just simulate-stack sep-devnets`: run, and report no non-terminal tasks\n- `check-task-names.sh` and `check-task-statuses.sh`: pass\n- `get-rpc-url.sh sep-devnets` → `sepolia`. `fetch-tasks.sh sep-devnets`: empty, exit 0\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/superchain-ops",
+      "createdAt": "2026-11-13T21:27:55Z",
+      "mergedAt": null,
+      "additions": 31,
+      "deletions": 7
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 1867,
+    "deletions": 83,
+    "files": 30,
+    "commitCount": 20
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "feat(template): add OPCMMigrateV900",
+      "prNumber": 1582,
+      "type": "feature",
+      "body": "Adds `OPCMMigrateV900`, a template that calls `OPContractsManagerV2.migrate` to move a set of chains onto a shared `ETHLockbox`, `DisputeGameFactory` and `AnchorStateRegistry` in one delegatecall from the ProxyAdmin owner, then checks the r",
+      "files": [
+        "src/ci.just",
+        "src/template/OPCMMigrateV900.sol",
+        "test/tasks/example/sep/044-opcm-migrate-v900/.env",
+        "test/tasks/example/sep/044-opcm-migrate-v900/config.toml",
+        "test/template/OPCMMigrateV900Setup.t.sol",
+        "test/tasks/Regression.t.sol",
+        "test/tasks/example/sep/046-opcm-migrate-v900/.env",
+        "test/tasks/example/sep/046-opcm-migrate-v900/config.toml",
+        "test/template/OPCMMigrateV900.t.sol",
+        "test/tasks/example/sep/047-opcm-migrate-v900/.env",
+        "test/tasks/example/sep/047-opcm-migrate-v900/config.toml",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/.env",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/README.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/VALIDATION.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/addresses.json",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/config.toml"
+      ]
+    },
+    {
+      "title": "eth: cancel 082/083/089, keep eth/084 U21 calldata, re-pin 084-087",
+      "prNumber": 1628,
+      "type": "other",
+      "body": "## Summary\n\n- **eth/082, eth/083, eth/089** → `CANCELLED`.\n- **eth/084 (U21)** stays eth/084 with **byte-identical calldata**. That calldata sets OP Mainnet's `SUPER_PERMISSIONED` proposer to `0xc27ba3E0Fc01567a5E57Ae0c391AA98cECBA5bE0`, wh",
+      "files": [
+        "src/tasks/eth/082-op-mainnet-set-batcher/README.md",
+        "src/tasks/eth/083-op-mainnet-proposer-rotation/README.md",
+        "src/tasks/eth/084-U21-op-ink-soneium-uni/README.md",
+        "src/tasks/eth/084-U21-op-ink-soneium-uni/VALIDATION.md",
+        "src/tasks/eth/084-U21-op-ink-soneium-uni/config.toml",
+        "src/tasks/eth/085-soneium-proposer-rotation/VALIDATION.md",
+        "src/tasks/eth/085-soneium-proposer-rotation/config.toml",
+        "src/tasks/eth/086-soneium-set-batcher-unsafe-signer/VALIDATION.md",
+        "src/tasks/eth/086-soneium-set-batcher-unsafe-signer/config.toml",
+        "src/tasks/eth/087-soneium-fee-vault/VALIDATION.md",
+        "src/tasks/eth/087-soneium-fee-vault/config.toml",
+        "src/tasks/eth/089-op-mainnet-set-unsafe-signer/README.md",
+        "src/template/OPCMUpgradeV900.sol",
+        "test/template/OPCMUpgradeV900Setup.t.sol"
+      ]
+    },
+    {
+      "title": "docs: mark sep task 125 as EXECUTED",
+      "prNumber": 1632,
+      "type": "docs",
+      "body": "- Mark sep/125 (sepolia-devnet-4/5 OPCM migrate) as EXECUTED.\r\n- Execution tx: https://sepolia.etherscan.io/tx/0x0d52a31e01af58767efb790efe6815f68b46ccb53008cd35c85df4e4d7729c70",
+      "files": [
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/README.md"
+      ]
+    },
+    {
+      "title": "sep/125: kona interop prestate built from the registry depset",
+      "prNumber": 1631,
+      "type": "other",
+      "body": "Follow-up to #1630 / #1582. Updates sep/125 (OPCM v9 migrate for sepolia-devnet-4 and -5) to the `cannon64-kona-interop` prestate `0x03db2e9bdc15db95cb3a13bb695ae237d7d57dec409120e6e25a76e3873f16c9`.\n\nThe previous prestate (`0x03384d2c…9ea0",
+      "files": [
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/VALIDATION.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/config.toml"
+      ]
+    },
+    {
+      "title": "sep/125: OPCM v9 migrate for sepolia-devnet-4 and -5",
+      "prNumber": 1630,
+      "type": "other",
+      "body": "Adds sep/125: one `OPCMv2.migrate` call (OPCMMigrateV900, OPCM `0x160f…39cc`, v9.0.3) that moves sepolia-devnet-4 and -5 onto shared dispute contracts as one interop set, from the staging ProxyAdminOwner `0xe934…40ff` (1-of-1, nonce 157). B",
+      "files": [
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/.env",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/README.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/VALIDATION.md",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/addresses.json",
+        "src/tasks/sep/125-sepolia-devnet-4-5-opcm-migrate-v900/config.toml",
+        "test/tasks/Regression.t.sol",
+        "test/tasks/example/sep/047-opcm-migrate-v900/.env",
+        "test/tasks/example/sep/047-opcm-migrate-v900/config.toml",
+        "test/template/OPCMMigrateV900.t.sol"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 255.53636256669964,
+      "prScore": 155.59836256669965,
+      "issueScore": 6,
+      "reviewScore": 93.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 248.13682824700237,
+      "prScore": 199.93682824700238,
+      "issueScore": 0,
+      "reviewScore": 48,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 230.66312630768888,
+      "prScore": 183.2251263076889,
+      "issueScore": 2,
+      "reviewScore": 45,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 118.58022911824571,
+      "prScore": 118.58022911824571,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 82.19629031514889,
+      "prScore": 77.19629031514889,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 77.43626133373895,
+      "prScore": 55.99826133373895,
+      "issueScore": 2,
+      "reviewScore": 19,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 50.85612948526126,
+      "prScore": 45.85612948526126,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 47.668660694013504,
+      "prScore": 47.4686606940135,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
     {
       "username": "Wazabie",
       "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
@@ -36,6 +272,56 @@
       "prScore": 40.38804989569204,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 19,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 15.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "erkancamli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/107792368?u=1d0297910a73f78a88cb47d6a22e46d361a859c3&v=4",
+      "totalScore": 12.082918433002165,
+      "prScore": 12.082918433002165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
       "commentScore": 0,
       "summary": null
     },
@@ -50,6 +336,36 @@
       "summary": null
     },
     {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 7.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nodeflareapp",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/302281547?u=99c41c455480d133b07ee371d496f73fe6506bcb&v=4",
+      "totalScore": 6.502955074527657,
+      "prScore": 6.502955074527657,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
       "totalScore": 5,
@@ -58,11 +374,41 @@
       "reviewScore": 5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 0.43799999999999994,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 3
+  "newPRs": 6,
+  "mergedPRs": 5,
+  "newIssues": 1,
+  "closedIssues": 1,
+  "activeContributors": 18
 }

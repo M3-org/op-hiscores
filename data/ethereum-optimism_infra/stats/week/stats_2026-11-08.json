@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-11-08 to 2026-11-15, ethereum-optimism/infra had 7 new PRs (7 merged), 0 new issues, and 37 active contributors.",
+  "overview": "From 2026-11-08 to 2026-11-15, ethereum-optimism/infra had 8 new PRs (7 merged), 0 new issues, and 37 active contributors.",
   "topIssues": [],
   "topPRs": [
     {
@@ -33,6 +33,18 @@
       "deletions": 12
     },
     {
+      "id": "PR_kwDOL-xLQ88AAAABPA9tTA",
+      "title": "security: Update module go.opentelemetry.io/otel/trace to v1.47.0 [SECURITY]",
+      "author": "oplabs-renovate",
+      "number": 804,
+      "body": "> ℹ️ **Note**\n> \n> This PR body was truncated due to platform limits.\n\nThis PR contains the following updates:\n\n| Package | Change | [Age](https://docs.renovatebot.com/merge-confidence/) | [Confidence](https://docs.renovatebot.com/merge-confidence/) |\n|---|---|---|---|\n| [go.opentelemetry.io/otel/trace](https://redirect.github.com/open-telemetry/opentelemetry-go) | `v1.42.0` → `v1.47.0` | ![age](https://developer.mend.io/api/mc/badges/age/go/go.opentelemetry.io%2fotel%2ftrace/v1.47.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/go/go.opentelemetry.io%2fotel%2ftrace/v1.42.0/v1.47.0?slim=true) |\n| [go.opentelemetry.io/otel/trace](https://redirect.github.com/open-telemetry/opentelemetry-go) | `v1.44.0` → `v1.47.0` | ![age](https://developer.mend.io/api/mc/badges/age/go/go.opentelemetry.io%2fotel%2ftrace/v1.47.0?slim=true) | ![confidence](https://developer.mend.io/api/mc/badges/confidence/go/go.opentelemetry.io%2fotel%2ftrace/v1.44.0/v1.47.0?slim=true) |\n\n---\n\n### opentelemetry-go: AttributeValueLengthLimit is fully bypassed by attribute values composed of valid U+FFFD runes\n[CVE-2026-128085](https://nvd.nist.gov/vuln/detail/CVE-2026-128085) / [GHSA-q7gw-24fr-5p69](https://redirect.github.com/advisories/GHSA-q7gw-24fr-5p69)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\nThe `AttributeValueLengthLimit` span/log-record limit can be bypassed entirely with attribute values that consist of valid U+FFFD (REPLACEMENT CHARACTER) runes. The counting-based truncation introduced by the fix for GHSA-p9f8-wvj8-2fg8 (commit `e016a78c9`, first released in v1.33.0) has an \"optimistic\" fast path that skips every U+FFFD without counting it and without falling back to the correct slow path. A value of 1000 U+FFFD runes (3000 bytes) is stored verbatim even with a limit of 5 characters (15 bytes). The same defect affects the attribute truncation paths in `go.opentelemetry.io/otel/sdk/trace` (`sdk/internal/attrnorm`), `go.opentelemetry.io/otel/sdk/log` (`sdk/log/internal/attrnorm`), and the auto-instrumentation tracer in `go.opentelemetry.io/otel/trace` (`trace/auto.go`, introduced in `v1.35.0`).\n\nThis is an incomplete-fix issue: it is a distinct defect in the replacement code that GHSA-p9f8-wvj8-2fg8 introduced, affecting exactly the versions that advisory says are fixed (>= v1.33.0). The original advisory covers only the pre-v1.33.0 code.\n\n##### Details\n\nThe shared truncation helper is generated from `internal/shared/attrnorm/truncate.go.tmpl`. In the v1.46.0 release, the generated copies are `sdk/internal/attrnorm/truncate.go` and `sdk/log/internal/attrnorm/truncate.go` (identical logic, different package names). The optimistic path (v1.46.0, `sdk/internal/attrnorm/truncate.go:175-199`) is:\n\n```go\n// Optimistically, assume all valid UTF-8.\nvar b strings.Builder\ncount := 0\nfor i, c := range s {\n    if c != utf8.RuneError {\n        count++\n        if count > limit {\n            return s[:i]\n        }\n        continue\n    }\n    _, size := utf8.DecodeRuneInString(s[i:])\n    if size == 1 {\n        // invalid encoding: fall through to the correct slow path\n        ...\n        break\n    }\n}\n```\n\n`range` over a string yields `utf8.RuneError` both for invalid bytes (size 1) and for a legitimately encoded U+FFFD (size 3). Only the size-1 case enters the slow path. A valid U+FFFD rune is therefore neither counted nor truncating: the loop slides over it. Consequences:\n\n1. A value made only of valid U+FFFD runes never increments `count`, so no truncation ever triggers and the value is returned unchanged, whatever its length.\n2. In a mixed string, every U+FFFD contributes 3 bytes that are not counted, and the final `return s[:i]` keeps all previously skipped U+FFFD runes, so the retained size grows linearly with the number of U+FFFD runes and is not bounded by `limit`.\n\nThe OpenTelemetry specification states that truncation applies \"counting any character in it as 1\". A valid U+FFFD is one character and must count as 1; here it counts as 0. The regression test suite of the repository contains no U+FFFD case, which is why this went unnoticed.\n\nCall chains (v1.46.0):\n\n- trace: `span.SetAttributes` -> `sdk/trace/span.go` (`normAttr`) -> `attrnorm.Truncate` -> `sdk/internal/attrnorm/truncate.go` (`truncate`)\n- log: `Record.AddAttributes` / `SetAttributes` -> `sdk/log/record.go` (`attrnorm.TruncateValue`) -> `sdk/log/internal/attrnorm/truncate.go` (`truncate`)\n\nDeduplication: GHSA-p9f8-wvj8-2fg8 describes the pre-v1.33.0 helper (`safeTruncateValidUTF8`), which gave up truncating entirely for strings containing RuneError. The rewrite in `e016a78c9` replaced that code; this report concerns the rewritten code, is present only in versions that the advisory lists as fixed, and no public issue or advisory describes it.\n\n##### PoC\n\nMinimal reproduction with the published release (no repository checkout needed). Go 1.25+ is required (the release declares `go 1.25.0`; any recent toolchain auto-selects one).\n\nCreate a directory with these files.\n\n`go.mod` (then run `go mod tidy` once to fill `go.sum`):\n\n```\nmodule otelpoc\n\ngo 1.25.0\n\nrequire (\n\tgo.opentelemetry.io/otel v1.46.0\n\tgo.opentelemetry.io/otel/log v0.22.0\n\tgo.opentelemetry.io/otel/sdk v1.46.0\n\tgo.opentelemetry.io/otel/sdk/log v0.22.0\n\tgo.opentelemetry.io/otel/trace v1.46.0\n)\n```\n\n`otelgo_truncate_test.go`:\n\n```go\npackage otelpoc\n\nimport (\n\t\"context\"\n\t\"strings\"\n\t\"testing\"\n\t\"unicode/utf8\"\n\n\t\"go.opentelemetry.io/otel/attribute\"\n\tsdktrace \"go.opentelemetry.io/otel/sdk/trace\"\n\t\"go.opentelemetry.io/otel/sdk/trace/tracetest\"\n\t\"go.opentelemetry.io/otel/trace\"\n)\n\n// limitsWithLen returns span limits with AttributeValueLengthLimit=limit and\n// everything else unlimited, isolating the length-limit enforcement under test.\nfunc limitsWithLen(limit int) sdktrace.SpanLimits {\n\tlim := sdktrace.NewSpanLimits()\n\tlim.AttributeValueLengthLimit = limit\n\tlim.AttributeCountLimit = -1\n\tlim.AttributePerEventCountLimit = -1\n\tlim.AttributePerLinkCountLimit = -1\n\tlim.EventCountLimit = -1\n\tlim.LinkCountLimit = -1\n\treturn lim\n}\n\nfunc captureOneSpan(t *testing.T, limit int, attrs ...attribute.KeyValue) []attribute.KeyValue {\n\tt.Helper()\n\tsr := tracetest.NewSpanRecorder()\n\ttp := sdktrace.NewTracerProvider(\n\t\tsdktrace.WithSpanProcessor(sr),\n\t\tsdktrace.WithSpanLimits(limitsWithLen(limit)),\n\t)\n\tdefer func() { _ = tp.Shutdown(context.Background()) }()\n\n\ttr := tp.Tracer(\"poc\")\n\t_, span := tr.Start(context.Background(), \"op\")\n\tspan.SetAttributes(attrs...)\n\tspan.End()\n\n\tended := sr.Ended()\n\tif len(ended) != 1 {\n\t\tt.Fatalf(\"expected 1 ended span, got %d\", len(ended))\n\t}\n\treturn ended[0].Attributes()\n}\n\n// TestOT001_FFFDOnlyStringBypassesTraceLengthLimit demonstrates that a string\n// attribute composed of valid U+FFFD runes is stored completely untruncated\n// although AttributeValueLengthLimit=5.\nfunc TestOT001_FFFDOnlyStringBypassesTraceLengthLimit(t *testing.T) {\n\tconst limit = 5\n\tval := strings.Repeat(\"\\uFFFD\", 1000) // 1000 chars, 3000 bytes\n\n\tgot := captureOneSpan(t, limit, attribute.String(\"k\", val))\n\tif len(got) != 1 {\n\t\tt.Fatalf(\"expected 1 attribute, got %d\", len(got))\n\t}\n\tstored := got[0].Value.AsString()\n\tt.Logf(\"input: %d chars / %d bytes; stored: %d chars / %d bytes; limit=%d\",\n\t\tutf8.RuneCountInString(val), len(val),\n\t\tutf8.RuneCountInString(stored), len(stored), limit)\n\t// Per OTel spec (\"counting any character in it as 1\") the stored value\n\t// must be at most `limit` characters (<= 15 bytes for U+FFFD).\n\tif maxBytes := 3 * limit; len(stored) > maxBytes {\n\t\tt.Fatalf(\"BYPASS: AttributeValueLengthLimit=%d but %d bytes stored (expected <=%d)\",\n\t\t\tlimit, len(stored), maxBytes)\n\t}\n}\n\n// TestOT001_FFFDMixedStringOverRetains demonstrates that valid U+FFFD runes\n// are not counted in the optimistic truncation path: every U+FFFD adds 3\n// uncounted bytes to the retained value.\nfunc TestOT001_FFFDMixedStringOverRetains(t *testing.T) {\n\tconst limit = 5\n\tval := strings.Repeat(\"\\uFFFD\", 100) + strings.Repeat(\"A\", 6) // 106 chars, 306 bytes\n\n\tgot := captureOneSpan(t, limit, attribute.String(\"k\", val))\n\tstored := got[0].Value.AsString()\n\tt.Logf(\"input: %d chars / %d bytes; stored: %d chars / %d bytes; limit=%d\",\n\t\tutf8.RuneCountInString(val), len(val),\n\t\tutf8.RuneCountInString(stored), len(stored), limit)\n\tif chars := utf8.RuneCountInString(stored); chars > limit {\n\t\tt.Fatalf(\"BYPASS: AttributeValueLengthLimit=%d but %d chars / %d bytes stored\",\n\t\t\tlimit, chars, len(stored))\n\t}\n}\n\n// TestOT001_ASCIIControl is the control case: plain ASCII over-limit values\n// ARE truncated, proving the length limit is active in the same setup.\nfunc TestOT001_ASCIIControl(t *testing.T) {\n\tconst limit = 5\n\tval := strings.Repeat(\"B\", 20)\n\n\tgot := captureOneSpan(t, limit, attribute.String(\"k\", val))\n\tstored := got[0].Value.AsString()\n\tt.Logf(\"input: %d chars / %d bytes; stored: %d chars / %d bytes; limit=%d\",\n\t\tutf8.RuneCountInString(val), len(val),\n\t\tutf8.RuneCountInString(stored), len(stored), limit)\n\tif len(stored) != limit {\n\t\tt.Fatalf(\"control failed: ASCII value not truncated (stored %d bytes)\", len(stored))\n\t}\n}\n\n// TestOT001_EventAttributesNotLengthTruncated documents that span-event\n// attributes bypass AttributeValueLengthLimit entirely (no attrnorm.Truncate\n// call in recordingSpan.addEvent).\nfunc TestOT001_EventAttributesNotLengthTruncated(t *testing.T) {\n\tconst limit = 5\n\tval := strings.Repeat(\"C\", 100)\n\n\tsr := tracetest.NewSpanRecorder()\n\ttp := sdktrace.NewTracerProvider(\n\t\tsdktrace.WithSpanProcessor(sr),\n\t\tsdktrace.WithSpanLimits(limitsWithLen(limit)),\n\t)\n\tdefer func() { _ = tp.Shutdown(context.Background()) }()\n\ttr := tp.Tracer(\"poc\")\n\t_, span := tr.Start(context.Background(), \"op\")\n\tspan.AddEvent(\"ev\", trace.WithAttributes(attribute.String(\"k\", val)))\n\tspan.End()\n\n\tended := sr.Ended()\n\tevents := ended[0].Events()\n\tif len(events) != 1 {\n\t\tt.Fatalf(\"expected 1 event, got %d\", len(events))\n\t}\n\tstored := events[0].Attributes[0].Value.AsString()\n\tt.Logf(\"event attribute input: %d bytes; stored: %d bytes; limit=%d\", len(val), len(stored), limit)\n\tif len(stored) > limit {\n\t\tt.Logf(\"CONFIRMED: event attribute not length-truncated (%d bytes > limit %d)\", len(stored), limit)\n\t}\n}\n```\n\n(The `-run` pattern above selects the three truncation cases plus the control; the fourth test function is included because it is part of the exact file that produced the output below - it compiles but is not selected by the pattern, and its output does not appear.)\n\n`otelgo_log_truncate_test.go`:\n\n```go\npackage otelpoc\n\nimport (\n\t\"context\"\n\t\"strings\"\n\t\"sync\"\n\t\"testing\"\n\t\"unicode/utf8\"\n\n\t\"go.opentelemetry.io/otel/attribute\"\n\tapisdk \"go.opentelemetry.io/otel/log\"\n\tsdklog \"go.opentelemetry.io/otel/sdk/log\"\n)\n\ntype captureProcessor struct {\n\tmu   sync.Mutex\n\trecs []*sdklog.Record\n}\n\nfunc (c *captureProcessor) Enabled(context.Context, sdklog.EnabledParameters) bool { return true }\n\nfunc (c *captureProcessor) OnEmit(_ context.Context, r *sdklog.Record) error {\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tclone := r.Clone()\n\tc.recs = append(c.recs, &clone)\n\treturn nil\n}\n\nfunc (c *captureProcessor) Shutdown(context.Context) error { return nil }\nfunc (c *captureProcessor) ForceFlush(context.Context) error {\n\treturn nil\n}\n\n// TestOT001_FFFDOnlyStringBypassesLogLengthLimit repeats the bypass against\n// the sdk/log attribute path (sdk/log/internal/attrnorm, same template).\nfunc TestOT001_FFFDOnlyStringBypassesLogLengthLimit(t *testing.T) {\n\tconst limit = 5\n\tcp := &captureProcessor{}\n\tlp := sdklog.NewLoggerProvider(\n\t\tsdklog.WithProcessor(cp),\n\t\tsdklog.WithAttributeValueLengthLimit(limit),\n\t)\n\tdefer func() { _ = lp.Shutdown(context.Background()) }()\n\n\tlogger := lp.Logger(\"poc\")\n\tvar r apisdk.Record\n\tr.SetSeverity(apisdk.SeverityInfo)\n\tr.AddAttributes(attribute.String(\"k\", strings.Repeat(\"\\uFFFD\", 1000)))\n\tlogger.Emit(context.Background(), r)\n\n\tcp.mu.Lock()\n\tif len(cp.recs) != 1 {\n\t\tt.Fatalf(\"expected 1 record, got %d\", len(cp.recs))\n\t}\n\trec := cp.recs[0]\n\tcp.mu.Unlock()\n\n\tstored := \"\"\n\trec.WalkAttributes(func(kv attribute.KeyValue) bool {\n\t\tif string(kv.Key) == \"k\" {\n\t\t\tstored = kv.Value.AsString()\n\t\t}\n\t\treturn true\n\t})\n\tt.Logf(\"sdk/log input: 1000 chars / 3000 bytes; stored: %d chars / %d bytes; limit=%d\",\n\t\tutf8.RuneCountInString(stored), len(stored), limit)\n\tif maxBytes := 3 * limit; len(stored) > maxBytes {\n\t\tt.Fatalf(\"BYPASS: sdk/log WithAttributeValueLengthLimit=%d but %d bytes stored (expected <=%d)\",\n\t\t\tlimit, len(stored), maxBytes)\n\t}\n}\n```\n\nRun:\n\n```\ngo mod tidy\ngo test -count=1 -v -run \"TestOT001_FFFDOnlyStringBypassesTraceLengthLimit|TestOT001_FFFDMixedStringOverRetains|TestOT001_ASCIIControl|TestOT001_FFFDOnlyStringBypassesLogLengthLimit\" .\n```\n\nExpected output (captured against the published v1.46.0 modules; the three FAIL lines are the bypass being triggered and the PASS control proves the limit is active in the same setup; the only varying parts are the durations in parentheses and the total on the `FAIL\totelpoc` summary line):\n\n```\n=== RUN   TestOT001_FFFDOnlyStringBypassesLogLengthLimit\n    otelgo_log_truncate_test.go:66: sdk/log input: 1000 chars / 3000 bytes; stored: 1000 chars / 3000 bytes; limit=5\n    otelgo_log_truncate_test.go:69: BYPASS: sdk/log WithAttributeValueLengthLimit=5 but 3000 bytes stored (expected <=15)\n--- FAIL: TestOT001_FFFDOnlyStringBypassesLogLengthLimit (0.00s)\n=== RUN   TestOT001_FFFDOnlyStringBypassesTraceLengthLimit\n    otelgo_truncate_test.go:61: input: 1000 chars / 3000 bytes; stored: 1000 chars / 3000 bytes; limit=5\n    otelgo_truncate_test.go:67: BYPASS: AttributeValueLengthLimit=5 but 3000 bytes stored (expected <=15)\n--- FAIL: TestOT001_FFFDOnlyStringBypassesTraceLengthLimit (0.00s)\n=== RUN   TestOT001_FFFDMixedStringOverRetains\n    otelgo_truncate_test.go:81: input: 106 chars / 306 bytes; stored: 105 chars / 305 bytes; limit=5\n    otelgo_truncate_test.go:85: BYPASS: AttributeValueLengthLimit=5 but 105 chars / 305 bytes stored\n--- FAIL: TestOT001_FFFDMixedStringOverRetains (0.00s)\n=== RUN   TestOT001_ASCIIControl\n    otelgo_truncate_test.go:98: input: 20 chars / 20 bytes; stored: 5 chars / 5 bytes; limit=5\n--- PASS: TestOT001_ASCIIControl (0.00s)\nFAIL\nFAIL\totelpoc\t0.059s\nFAIL\n```\n\nThe mixed-string case stores 105 characters for a limit of 5: the 100 U+FFFD runes (300 uncounted bytes) are all retained, plus 5 of the 6 ASCII characters.\n\n##### Impact\n\nApplications that enable `AttributeValueLengthLimit` (or `WithAttributeValueLengthLimit` for logs) to bound attribute memory do not get that bound for values containing valid U+FFFD runes. Span and log-record attribute values are routinely derived from untrusted input (HTTP headers, request bodies, database fields), so an attacker can inflate per-span memory retention linearly, defeating the memory protection the operator explicitly enabled and accumulating increased memory usage over the span/log pipeline. Confidentiality and integrity are not affected.\n\n##### Suggested fix\n\nIn the optimistic loop, count every rune of size > 1 (including the legitimately encoded U+FFFD) and only divert size-1 invalid bytes to the slow path. Add regression cases for: pure U+FFFD strings, U+FFFD-dominated mixed strings, and a truncation point landing after a U+FFFD (the current `truncate_test.go` has no U+FFFD case).\n\n#### Severity\n- CVSS Score: 5.3 / 10 (Medium)\n- Vector String: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L`\n\n#### References\n- [https://github.com/open-telemetry/opentelemetry-go/security/advisories/GHSA-q7gw-24fr-5p69](https://redirect.github.com/open-telemetry/opentelemetry-go/security/advisories/GHSA-q7gw-24fr-5p69)\n- [https://github.com/open-telemetry/opentelemetry-go/commit/017b08c7f1018b619991aaf6b2299d4beb9da1d3](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/017b08c7f1018b619991aaf6b2299d4beb9da1d3)\n- [https://github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/log/v1.47.0](https://redirect.github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/log/v1.47.0)\n- [https://github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/v1.47.0](https://redirect.github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/v1.47.0)\n- [https://github.com/open-telemetry/opentelemetry-go/releases/tag/trace/v1.47.0](https://redirect.github.com/open-telemetry/opentelemetry-go/releases/tag/trace/v1.47.0)\n- [https://github.com/advisories/GHSA-q7gw-24fr-5p69](https://redirect.github.com/advisories/GHSA-q7gw-24fr-5p69)\n\nThis data is provided by the [GitHub Advisory Database](https://redirect.github.com/advisories/GHSA-q7gw-24fr-5p69) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### opentelemetry-go: AttributeValueLengthLimit is fully bypassed by attribute values composed of valid U+FFFD runes\n[CVE-2026-128085](https://nvd.nist.gov/vuln/detail/CVE-2026-128085) / [GHSA-q7gw-24fr-5p69](https://redirect.github.com/advisories/GHSA-q7gw-24fr-5p69)\n\n<details>\n<summary>More information</summary>\n\n#### Details\n##### Summary\n\nThe `AttributeValueLengthLimit` span/log-record limit can be bypassed entirely with attribute values that consist of valid U+FFFD (REPLACEMENT CHARACTER) runes. The counting-based truncation introduced by the fix for GHSA-p9f8-wvj8-2fg8 (commit `e016a78c9`, first released in v1.33.0) has an \"optimistic\" fast path that skips every U+FFFD without counting it and without falling back to the correct slow path. A value of 1000 U+FFFD runes (3000 bytes) is stored verbatim even with a limit of 5 characters (15 bytes). The same defect affects the attribute truncation paths in `go.opentelemetry.io/otel/sdk/trace` (`sdk/internal/attrnorm`), `go.opentelemetry.io/otel/sdk/log` (`sdk/log/internal/attrnorm`), and the auto-instrumentation tracer in `go.opentelemetry.io/otel/trace` (`trace/auto.go`, introduced in `v1.35.0`).\n\nThis is an incomplete-fix issue: it is a distinct defect in the replacement code that GHSA-p9f8-wvj8-2fg8 introduced, affecting exactly the versions that advisory says are fixed (>= v1.33.0). The original advisory covers only the pre-v1.33.0 code.\n\n##### Details\n\nThe shared truncation helper is generated from `internal/shared/attrnorm/truncate.go.tmpl`. In the v1.46.0 release, the generated copies are `sdk/internal/attrnorm/truncate.go` and `sdk/log/internal/attrnorm/truncate.go` (identical logic, different package names). The optimistic path (v1.46.0, `sdk/internal/attrnorm/truncate.go:175-199`) is:\n\n```go\n// Optimistically, assume all valid UTF-8.\nvar b strings.Builder\ncount := 0\nfor i, c := range s {\n    if c != utf8.RuneError {\n        count++\n        if count > limit {\n            return s[:i]\n        }\n        continue\n    }\n    _, size := utf8.DecodeRuneInString(s[i:])\n    if size == 1 {\n        // invalid encoding: fall through to the correct slow path\n        ...\n        break\n    }\n}\n```\n\n`range` over a string yields `utf8.RuneError` both for invalid bytes (size 1) and for a legitimately encoded U+FFFD (size 3). Only the size-1 case enters the slow path. A valid U+FFFD rune is therefore neither counted nor truncating: the loop slides over it. Consequences:\n\n1. A value made only of valid U+FFFD runes never increments `count`, so no truncation ever triggers and the value is returned unchanged, whatever its length.\n2. In a mixed string, every U+FFFD contributes 3 bytes that are not counted, and the final `return s[:i]` keeps all previously skipped U+FFFD runes, so the retained size grows linearly with the number of U+FFFD runes and is not bounded by `limit`.\n\nThe OpenTelemetry specification states that truncation applies \"counting any character in it as 1\". A valid U+FFFD is one character and must count as 1; here it counts as 0. The regression test suite of the repository contains no U+FFFD case, which is why this went unnoticed.\n\nCall chains (v1.46.0):\n\n- trace: `span.SetAttributes` -> `sdk/trace/span.go` (`normAttr`) -> `attrnorm.Truncate` -> `sdk/internal/attrnorm/truncate.go` (`truncate`)\n- log: `Record.AddAttributes` / `SetAttributes` -> `sdk/log/record.go` (`attrnorm.TruncateValue`) -> `sdk/log/internal/attrnorm/truncate.go` (`truncate`)\n\nDeduplication: GHSA-p9f8-wvj8-2fg8 describes the pre-v1.33.0 helper (`safeTruncateValidUTF8`), which gave up truncating entirely for strings containing RuneError. The rewrite in `e016a78c9` replaced that code; this report concerns the rewritten code, is present only in versions that the advisory lists as fixed, and no public issue or advisory describes it.\n\n##### PoC\n\nMinimal reproduction with the published release (no repository checkout needed). Go 1.25+ is required (the release declares `go 1.25.0`; any recent toolchain auto-selects one).\n\nCreate a directory with these files.\n\n`go.mod` (then run `go mod tidy` once to fill `go.sum`):\n\n```\nmodule otelpoc\n\ngo 1.25.0\n\nrequire (\n\tgo.opentelemetry.io/otel v1.46.0\n\tgo.opentelemetry.io/otel/log v0.22.0\n\tgo.opentelemetry.io/otel/sdk v1.46.0\n\tgo.opentelemetry.io/otel/sdk/log v0.22.0\n\tgo.opentelemetry.io/otel/trace v1.46.0\n)\n```\n\n`otelgo_truncate_test.go`:\n\n```go\npackage otelpoc\n\nimport (\n\t\"context\"\n\t\"strings\"\n\t\"testing\"\n\t\"unicode/utf8\"\n\n\t\"go.opentelemetry.io/otel/attribute\"\n\tsdktrace \"go.opentelemetry.io/otel/sdk/trace\"\n\t\"go.opentelemetry.io/otel/sdk/trace/tracetest\"\n\t\"go.opentelemetry.io/otel/trace\"\n)\n\n// limitsWithLen returns span limits with AttributeValueLengthLimit=limit and\n// everything else unlimited, isolating the length-limit enforcement under test.\nfunc limitsWithLen(limit int) sdktrace.SpanLimits {\n\tlim := sdktrace.NewSpanLimits()\n\tlim.AttributeValueLengthLimit = limit\n\tlim.AttributeCountLimit = -1\n\tlim.AttributePerEventCountLimit = -1\n\tlim.AttributePerLinkCountLimit = -1\n\tlim.EventCountLimit = -1\n\tlim.LinkCountLimit = -1\n\treturn lim\n}\n\nfunc captureOneSpan(t *testing.T, limit int, attrs ...attribute.KeyValue) []attribute.KeyValue {\n\tt.Helper()\n\tsr := tracetest.NewSpanRecorder()\n\ttp := sdktrace.NewTracerProvider(\n\t\tsdktrace.WithSpanProcessor(sr),\n\t\tsdktrace.WithSpanLimits(limitsWithLen(limit)),\n\t)\n\tdefer func() { _ = tp.Shutdown(context.Background()) }()\n\n\ttr := tp.Tracer(\"poc\")\n\t_, span := tr.Start(context.Background(), \"op\")\n\tspan.SetAttributes(attrs...)\n\tspan.End()\n\n\tended := sr.Ended()\n\tif len(ended) != 1 {\n\t\tt.Fatalf(\"expected 1 ended span, got %d\", len(ended))\n\t}\n\treturn ended[0].Attributes()\n}\n\n// TestOT001_FFFDOnlyStringBypassesTraceLengthLimit demonstrates that a string\n// attribute composed of valid U+FFFD runes is stored completely untruncated\n// although AttributeValueLengthLimit=5.\nfunc TestOT001_FFFDOnlyStringBypassesTraceLengthLimit(t *testing.T) {\n\tconst limit = 5\n\tval := strings.Repeat(\"\\uFFFD\", 1000) // 1000 chars, 3000 bytes\n\n\tgot := captureOneSpan(t, limit, attribute.String(\"k\", val))\n\tif len(got) != 1 {\n\t\tt.Fatalf(\"expected 1 attribute, got %d\", len(got))\n\t}\n\tstored := got[0].Value.AsString()\n\tt.Logf(\"input: %d chars / %d bytes; stored: %d chars / %d bytes; limit=%d\",\n\t\tutf8.RuneCountInString(val), len(val),\n\t\tutf8.RuneCountInString(stored), len(stored), limit)\n\t// Per OTel spec (\"counting any character in it as 1\") the stored value\n\t// must be at most `limit` characters (<= 15 bytes for U+FFFD).\n\tif maxBytes := 3 * limit; len(stored) > maxBytes {\n\t\tt.Fatalf(\"BYPASS: AttributeValueLengthLimit=%d but %d bytes stored (expected <=%d)\",\n\t\t\tlimit, len(stored), maxBytes)\n\t}\n}\n\n// TestOT001_FFFDMixedStringOverRetains demonstrates that valid U+FFFD runes\n// are not counted in the optimistic truncation path: every U+FFFD adds 3\n// uncounted bytes to the retained value.\nfunc TestOT001_FFFDMixedStringOverRetains(t *testing.T) {\n\tconst limit = 5\n\tval := strings.Repeat(\"\\uFFFD\", 100) + strings.Repeat(\"A\", 6) // 106 chars, 306 bytes\n\n\tgot := captureOneSpan(t, limit, attribute.String(\"k\", val))\n\tstored := got[0].Value.AsString()\n\tt.Logf(\"input: %d chars / %d bytes; stored: %d chars / %d bytes; limit=%d\",\n\t\tutf8.RuneCountInString(val), len(val),\n\t\tutf8.RuneCountInString(stored), len(stored), limit)\n\tif chars := utf8.RuneCountInString(stored); chars > limit {\n\t\tt.Fatalf(\"BYPASS: AttributeValueLengthLimit=%d but %d chars / %d bytes stored\",\n\t\t\tlimit, chars, len(stored))\n\t}\n}\n\n// TestOT001_ASCIIControl is the control case: plain ASCII over-limit values\n// ARE truncated, proving the length limit is active in the same setup.\nfunc TestOT001_ASCIIControl(t *testing.T) {\n\tconst limit = 5\n\tval := strings.Repeat(\"B\", 20)\n\n\tgot := captureOneSpan(t, limit, attribute.String(\"k\", val))\n\tstored := got[0].Value.AsString()\n\tt.Logf(\"input: %d chars / %d bytes; stored: %d chars / %d bytes; limit=%d\",\n\t\tutf8.RuneCountInString(val), len(val),\n\t\tutf8.RuneCountInString(stored), len(stored), limit)\n\tif len(stored) != limit {\n\t\tt.Fatalf(\"control failed: ASCII value not truncated (stored %d bytes)\", len(stored))\n\t}\n}\n\n// TestOT001_EventAttributesNotLengthTruncated documents that span-event\n// attributes bypass AttributeValueLengthLimit entirely (no attrnorm.Truncate\n// call in recordingSpan.addEvent).\nfunc TestOT001_EventAttributesNotLengthTruncated(t *testing.T) {\n\tconst limit = 5\n\tval := strings.Repeat(\"C\", 100)\n\n\tsr := tracetest.NewSpanRecorder()\n\ttp := sdktrace.NewTracerProvider(\n\t\tsdktrace.WithSpanProcessor(sr),\n\t\tsdktrace.WithSpanLimits(limitsWithLen(limit)),\n\t)\n\tdefer func() { _ = tp.Shutdown(context.Background()) }()\n\ttr := tp.Tracer(\"poc\")\n\t_, span := tr.Start(context.Background(), \"op\")\n\tspan.AddEvent(\"ev\", trace.WithAttributes(attribute.String(\"k\", val)))\n\tspan.End()\n\n\tended := sr.Ended()\n\tevents := ended[0].Events()\n\tif len(events) != 1 {\n\t\tt.Fatalf(\"expected 1 event, got %d\", len(events))\n\t}\n\tstored := events[0].Attributes[0].Value.AsString()\n\tt.Logf(\"event attribute input: %d bytes; stored: %d bytes; limit=%d\", len(val), len(stored), limit)\n\tif len(stored) > limit {\n\t\tt.Logf(\"CONFIRMED: event attribute not length-truncated (%d bytes > limit %d)\", len(stored), limit)\n\t}\n}\n```\n\n(The `-run` pattern above selects the three truncation cases plus the control; the fourth test function is included because it is part of the exact file that produced the output below - it compiles but is not selected by the pattern, and its output does not appear.)\n\n`otelgo_log_truncate_test.go`:\n\n```go\npackage otelpoc\n\nimport (\n\t\"context\"\n\t\"strings\"\n\t\"sync\"\n\t\"testing\"\n\t\"unicode/utf8\"\n\n\t\"go.opentelemetry.io/otel/attribute\"\n\tapisdk \"go.opentelemetry.io/otel/log\"\n\tsdklog \"go.opentelemetry.io/otel/sdk/log\"\n)\n\ntype captureProcessor struct {\n\tmu   sync.Mutex\n\trecs []*sdklog.Record\n}\n\nfunc (c *captureProcessor) Enabled(context.Context, sdklog.EnabledParameters) bool { return true }\n\nfunc (c *captureProcessor) OnEmit(_ context.Context, r *sdklog.Record) error {\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\tclone := r.Clone()\n\tc.recs = append(c.recs, &clone)\n\treturn nil\n}\n\nfunc (c *captureProcessor) Shutdown(context.Context) error { return nil }\nfunc (c *captureProcessor) ForceFlush(context.Context) error {\n\treturn nil\n}\n\n// TestOT001_FFFDOnlyStringBypassesLogLengthLimit repeats the bypass against\n// the sdk/log attribute path (sdk/log/internal/attrnorm, same template).\nfunc TestOT001_FFFDOnlyStringBypassesLogLengthLimit(t *testing.T) {\n\tconst limit = 5\n\tcp := &captureProcessor{}\n\tlp := sdklog.NewLoggerProvider(\n\t\tsdklog.WithProcessor(cp),\n\t\tsdklog.WithAttributeValueLengthLimit(limit),\n\t)\n\tdefer func() { _ = lp.Shutdown(context.Background()) }()\n\n\tlogger := lp.Logger(\"poc\")\n\tvar r apisdk.Record\n\tr.SetSeverity(apisdk.SeverityInfo)\n\tr.AddAttributes(attribute.String(\"k\", strings.Repeat(\"\\uFFFD\", 1000)))\n\tlogger.Emit(context.Background(), r)\n\n\tcp.mu.Lock()\n\tif len(cp.recs) != 1 {\n\t\tt.Fatalf(\"expected 1 record, got %d\", len(cp.recs))\n\t}\n\trec := cp.recs[0]\n\tcp.mu.Unlock()\n\n\tstored := \"\"\n\trec.WalkAttributes(func(kv attribute.KeyValue) bool {\n\t\tif string(kv.Key) == \"k\" {\n\t\t\tstored = kv.Value.AsString()\n\t\t}\n\t\treturn true\n\t})\n\tt.Logf(\"sdk/log input: 1000 chars / 3000 bytes; stored: %d chars / %d bytes; limit=%d\",\n\t\tutf8.RuneCountInString(stored), len(stored), limit)\n\tif maxBytes := 3 * limit; len(stored) > maxBytes {\n\t\tt.Fatalf(\"BYPASS: sdk/log WithAttributeValueLengthLimit=%d but %d bytes stored (expected <=%d)\",\n\t\t\tlimit, len(stored), maxBytes)\n\t}\n}\n```\n\nRun:\n\n```\ngo mod tidy\ngo test -count=1 -v -run \"TestOT001_FFFDOnlyStringBypassesTraceLengthLimit|TestOT001_FFFDMixedStringOverRetains|TestOT001_ASCIIControl|TestOT001_FFFDOnlyStringBypassesLogLengthLimit\" .\n```\n\nExpected output (captured against the published v1.46.0 modules; the three FAIL lines are the bypass being triggered and the PASS control proves the limit is active in the same setup; the only varying parts are the durations in parentheses and the total on the `FAIL\totelpoc` summary line):\n\n```\n=== RUN   TestOT001_FFFDOnlyStringBypassesLogLengthLimit\n    otelgo_log_truncate_test.go:66: sdk/log input: 1000 chars / 3000 bytes; stored: 1000 chars / 3000 bytes; limit=5\n    otelgo_log_truncate_test.go:69: BYPASS: sdk/log WithAttributeValueLengthLimit=5 but 3000 bytes stored (expected <=15)\n--- FAIL: TestOT001_FFFDOnlyStringBypassesLogLengthLimit (0.00s)\n=== RUN   TestOT001_FFFDOnlyStringBypassesTraceLengthLimit\n    otelgo_truncate_test.go:61: input: 1000 chars / 3000 bytes; stored: 1000 chars / 3000 bytes; limit=5\n    otelgo_truncate_test.go:67: BYPASS: AttributeValueLengthLimit=5 but 3000 bytes stored (expected <=15)\n--- FAIL: TestOT001_FFFDOnlyStringBypassesTraceLengthLimit (0.00s)\n=== RUN   TestOT001_FFFDMixedStringOverRetains\n    otelgo_truncate_test.go:81: input: 106 chars / 306 bytes; stored: 105 chars / 305 bytes; limit=5\n    otelgo_truncate_test.go:85: BYPASS: AttributeValueLengthLimit=5 but 105 chars / 305 bytes stored\n--- FAIL: TestOT001_FFFDMixedStringOverRetains (0.00s)\n=== RUN   TestOT001_ASCIIControl\n    otelgo_truncate_test.go:98: input: 20 chars / 20 bytes; stored: 5 chars / 5 bytes; limit=5\n--- PASS: TestOT001_ASCIIControl (0.00s)\nFAIL\nFAIL\totelpoc\t0.059s\nFAIL\n```\n\nThe mixed-string case stores 105 characters for a limit of 5: the 100 U+FFFD runes (300 uncounted bytes) are all retained, plus 5 of the 6 ASCII characters.\n\n##### Impact\n\nApplications that enable `AttributeValueLengthLimit` (or `WithAttributeValueLengthLimit` for logs) to bound attribute memory do not get that bound for values containing valid U+FFFD runes. Span and log-record attribute values are routinely derived from untrusted input (HTTP headers, request bodies, database fields), so an attacker can inflate per-span memory retention linearly, defeating the memory protection the operator explicitly enabled and accumulating increased memory usage over the span/log pipeline. Confidentiality and integrity are not affected.\n\n##### Suggested fix\n\nIn the optimistic loop, count every rune of size > 1 (including the legitimately encoded U+FFFD) and only divert size-1 invalid bytes to the slow path. Add regression cases for: pure U+FFFD strings, U+FFFD-dominated mixed strings, and a truncation point landing after a U+FFFD (the current `truncate_test.go` has no U+FFFD case).\n\n#### Severity\n- CVSS Score: 5.3 / 10 (Medium)\n- Vector String: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L`\n\n#### References\n- [https://github.com/open-telemetry/opentelemetry-go/security/advisories/GHSA-q7gw-24fr-5p69](https://redirect.github.com/open-telemetry/opentelemetry-go/security/advisories/GHSA-q7gw-24fr-5p69)\n- [https://github.com/open-telemetry/opentelemetry-go/commit/017b08c7f1018b619991aaf6b2299d4beb9da1d3](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/017b08c7f1018b619991aaf6b2299d4beb9da1d3)\n- [https://github.com/open-telemetry/opentelemetry-go](https://redirect.github.com/open-telemetry/opentelemetry-go)\n- [https://github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/log/v1.47.0](https://redirect.github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/log/v1.47.0)\n- [https://github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/v1.47.0](https://redirect.github.com/open-telemetry/opentelemetry-go/releases/tag/sdk/v1.47.0)\n- [https://github.com/open-telemetry/opentelemetry-go/releases/tag/trace/v1.47.0](https://redirect.github.com/open-telemetry/opentelemetry-go/releases/tag/trace/v1.47.0)\n\nThis data is provided by [OSV](https://osv.dev/vulnerability/GHSA-q7gw-24fr-5p69) and the [GitHub Advisory Database](https://redirect.github.com/github/advisory-database) ([CC-BY 4.0](https://redirect.github.com/github/advisory-database/blob/main/LICENSE.md)).\n</details>\n\n---\n\n### Release Notes\n\n<details>\n<summary>open-telemetry/opentelemetry-go (go.opentelemetry.io/otel/trace)</summary>\n\n### [`v1.47.0`](https://redirect.github.com/open-telemetry/opentelemetry-go/releases/tag/v1.47.0): /v0.69.0/v0.23.0/v0.1.0\n\n[Compare Source](https://redirect.github.com/open-telemetry/opentelemetry-go/compare/v1.46.0...v1.47.0)\n\nThis release contains the first stable release of the OpenTelemetry Go Logs API and SDK.\nOur project stability guarantees now apply to the following modules:\n\n- `go.opentelemetry.io/otel/log`\n- `go.opentelemetry.io/otel/sdk/log`\n\nSee our [versioning policy](https://redirect.github.com/open-telemetry/opentelemetry-go/blob/main/VERSIONING.md) for more information about these stability guarantees.\n\n##### Added\n\n- Add `String` method for `KeyValue` type in `go.opentelemetry.io/otel/attribute`. ([#&#8203;8205](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8205))\n- Add `String` method for `Set` type in `go.opentelemetry.io/otel/attribute`. ([#&#8203;8347](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8347))\n- Add `WithMaxExportBatchSize` to `go.opentelemetry.io/otel/sdk/metric` to configure the maximum export batch size for `PeriodicReader`. ([#&#8203;8960](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8960))\n- Add `WithAttributeValueDepthLimit`, `DefaultAttributeValueDepthLimit`, and `SpanLimits.AttributeValueDepthLimit` in `go.opentelemetry.io/otel/sdk/trace` to configure the maximum depth of span, event, link, and instrumentation scope attribute values. ([#&#8203;8938](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8938))\n- Add `WithAttributeValueDepthLimit` in `go.opentelemetry.io/otel/sdk/log` to configure the maximum depth of log record and instrumentation scope attribute values. ([#&#8203;8938](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8938))\n- Add `WithMaxResponseSize` to `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp`,\n  `go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp`, and\n  `go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp`. ([#&#8203;8941](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8941))\n- Add experimental `ProbabilitySampler` in `go.opentelemetry.io/otel/sdk/trace/x` that conforms to the [OpenTelemetry specification's threshold-based sampling algorithm](https://opentelemetry.io/docs/specs/otel/trace/sdk/#probabilitysampler). ([#&#8203;8123](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8123))\n- Add experimental `*Binder` extension interfaces in `go.opentelemetry.io/otel/metric/x` for instruments that support binding attributes ahead of time. ([#&#8203;8760](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8760))\n- Add the experimental `Finisher` synchronous metric instrument extension interface to `go.opentelemetry.io/otel/metric/x`. ([#&#8203;8906](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8906))\n\n##### Changed\n\n- Use the [OpenTelemetry Attribute Collection representation for non-OTLP protocols](https://opentelemetry.io/docs/specs/otel/common/#attribute-collection-representation-for-non-otlp) for metric data diffs in `go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest`. ([#&#8203;8993](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8993))\n- Apply a maximum depth of 64 by default to span, event, link, log record, and instrumentation scope attribute values in `go.opentelemetry.io/otel/sdk/trace` and `go.opentelemetry.io/otel/sdk/log`. ([#&#8203;8938](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8938))\n- Reduce allocations when applying attribute value length limits in `go.opentelemetry.io/otel/sdk/trace` and `go.opentelemetry.io/otel/sdk/log` by rebuilding composite values only when truncation is needed. ([#&#8203;8912](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8912))\n- Decode `traceparent` using a hex lookup table in `go.opentelemetry.io/otel/propagation`, which rejects the specification-disallowed upper-case characters without a separate scan of the header. ([#&#8203;8739](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8739))\n- Decode all characters at constant indices in `TraceIDFromHex` and `SpanIDFromHex` in `go.opentelemetry.io/otel/trace` to eliminate bounds checks. ([#&#8203;8740](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8740))\n\n##### Fixed\n\n- Count valid U+FFFD replacement characters toward attribute value length limits in `go.opentelemetry.io/otel/trace`, `go.opentelemetry.io/otel/sdk/trace`, and `go.opentelemetry.io/otel/sdk/log`.\n- Truncate string attribute values to empty strings when the configured length limit is zero, including malformed UTF-8, in `go.opentelemetry.io/otel/trace`, `go.opentelemetry.io/otel/sdk/trace`, and `go.opentelemetry.io/otel/sdk/log`. ([#&#8203;9054](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/9054))\n- Fix a data race in `NewPeriodicReader` where `r.inst` was assigned after the background goroutine was launched in `go.opentelemetry.io/otel/sdk/metric`. ([#&#8203;9028](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/9028))\n- Prevent precision loss for large `int64` values in `Sum`, `Histogram`, and `ExponentialHistogram` aggregations in `go.opentelemetry.io/otel/sdk/metric`. ([#&#8203;8981](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8981))\n- Ensure `grpc.DialOption` values passed via `WithDialOption` take precedence over conflicting internally-computed defaults in\n  `go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc`,\n  `go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc`, and\n  `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc`. ([#&#8203;8805](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8805), [#&#8203;8834](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8834), [#&#8203;8836](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8836))\n- Treat overflowing `OTEL_METRIC_EXPORT_INTERVAL` and `OTEL_METRIC_EXPORT_TIMEOUT` values as invalid in `go.opentelemetry.io/otel/sdk/metric`. ([#&#8203;8800](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8800))\n- Prevent a panic in `NewFixedSizeReservoir` and `FixedSizeReservoirProvider` when given a negative size in `go.opentelemetry.io/otel/sdk/metric/exemplar`; negative sizes are now clamped to zero, consistent with a size of zero. ([#&#8203;8832](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8832))\n- Preserve exponential histogram `ZeroThreshold` during OTLP metric export in `go.opentelemetry.io/otel/exporters/otlp/otlpmetric`. ([#&#8203;8801](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8801))\n- Ensure metric helpers in `go.opentelemetry.io/otel/semconv/v1.32.0`, `go.opentelemetry.io/otel/semconv/v1.33.0`, and `go.opentelemetry.io/otel/semconv/v1.34.0` record measurements only once when no attributes are provided. ([#&#8203;8849](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8849))\n- Treat empty `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` values as unset in `go.opentelemetry.io/otel/sdk/trace`. ([#&#8203;8873](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8873))\n- Normalize global `OTEL_EXPORTER_OTLP_ENDPOINT` path joining in `go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp` so trailing-slash base URLs do not produce double-slash log export paths. ([#&#8203;8864](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8864))\n- Prevent a deadlock when formatting an error passed to `RecordError` calls back into the span in `go.opentelemetry.io/otel/sdk/trace`. ([#&#8203;8815](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8815))\n- Prevent `SimpleSpanProcessor.Shutdown` from panicking when constructed with a nil exporter in `go.opentelemetry.io/otel/sdk/trace`. ([#&#8203;8844](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8844))\n- Propagate invalid exponential histogram scale errors to Prometheus exporter self-observability metrics in `go.opentelemetry.io/otel/exporters/prometheus`. ([#&#8203;8839](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8839))\n- Retain instrument advisory attributes configured with `go.opentelemetry.io/otel/metric/x.WithDefaultAttributes` when a matching View in `go.opentelemetry.io/otel/sdk/metric` does not specify an attribute filter. ([#&#8203;8859](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8859))\n- Ignore HTTP URL paths when building OTLP/gRPC metric exporter targets from `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, while preserving `unix://` and `unix-abstract://` targets; treat `unix-abstract://` endpoints as insecure in `go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc` and `go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp`. ([#&#8203;8862](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8862))\n- Ignore HTTP(S) paths when deriving gRPC trace exporter endpoints from `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc`. ([#&#8203;8852](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8852))\n- Bound memory used while parsing dense W3C property metadata by storing it compactly and materializing `Property` values on demand in `go.opentelemetry.io/otel/baggage` and `go.opentelemetry.io/otel/propagation`.\n\n##### Removed\n\n- Remove the experimental `OTEL_GO_X_METRIC_EXPORT_BATCH_SIZE` environment variable in `go.opentelemetry.io/otel/sdk/metric`.\n  Use the `WithMaxExportBatchSize` option instead. ([#&#8203;8960](https://redirect.github.com/open-telemetry/opentelemetry-go/issues/8960))\n\n##### What's Changed\n\n- Prevent panic in FixedSizeReservoir for negative sizes by [@&#8203;chiliec](https://redirect.github.com/chiliec) in [#&#8203;8832](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8832)\n- fix(metric): reject overflowing export durations by [@&#8203;maithilijoshi20](https://redirect.github.com/maithilijoshi20) in [#&#8203;8800](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8800)\n- chore(deps): update module github.com/gofrs/flock to v0.13.1 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8885](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8885)\n- chore(deps): update module github.com/4meepo/tagalign to v1.4.4 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8900](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8900)\n- fix(deps): update googleapis to [`18b4a75`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/18b4a75) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8907](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8907)\n- fix(deps): update module github.com/prometheus/client\\_model to v0.6.3 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8908](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8908)\n- chore(deps): update module github.com/prometheus/procfs to v0.22.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8894](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8894)\n- chore(deps): update module github.com/godoc-lint/godoc-lint to v0.11.4 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8897](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8897)\n- chore(deps): update github.com/charmbracelet/ultraviolet digest to [`d60c349`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/d60c349) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8909](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8909)\n- fix(deps): update module github.com/prometheus/common to v0.71.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8911](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8911)\n- chore(deps): update golang.org/x/telemetry digest to [`86cb573`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/86cb573) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8895](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8895)\n- fix(deps): update github.com/opentracing-contrib/go-grpc/test digest to [`7bb06b0`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/7bb06b0) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8902](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8902)\n- chore(deps): update module github.com/timonwong/loggercheck to v0.12.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8898](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8898)\n- \\[otlptracegrpc] Grpc dialoption override bug by [@&#8203;ps-mir](https://redirect.github.com/ps-mir) in [#&#8203;8805](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8805)\n- otlpmetricgrpc: fix preference for user supplied dialOptions by [@&#8203;ps-mir](https://redirect.github.com/ps-mir) in [#&#8203;8834](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8834)\n- Do not panic on nil exporter in SimpleSpanProcessor.Shutdown by [@&#8203;ShreeyashPatil2708](https://redirect.github.com/ShreeyashPatil2708) in [#&#8203;8844](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8844)\n- \\[chore] Add doc comments to exported internal symbols (1/N) by [@&#8203;om7057](https://redirect.github.com/om7057) in [#&#8203;8752](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8752)\n- \\[chore] Add doc comments to exported internal symbols (3/N) by [@&#8203;om7057](https://redirect.github.com/om7057) in [#&#8203;8869](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8869)\n- \\[chore] docs: mark Logs as release candidate by [@&#8203;pellared](https://redirect.github.com/pellared) in [#&#8203;8910](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8910)\n- chore(deps): update module github.com/mattn/go-runewidth to v0.0.29 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8917](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8917)\n- chore(deps): update github.com/charmbracelet/ultraviolet digest to [`af8eda3`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/af8eda3) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8915](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8915)\n- chore(deps): update github.com/golangci/rowserrcheck digest to [`241134d`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/241134d) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8913](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8913)\n- fix(deps): update module go.opentelemetry.io/collector/pdata to v1.66.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8918](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8918)\n- chore(deps): update otel/weaver docker tag to v0.26.1 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8922](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8922)\n- chore(deps): update open-telemetry/shared-workflows action to v0.13.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8921](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8921)\n- chore(deps): update github.com/charmbracelet/ultraviolet digest to [`043ea8a`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/043ea8a) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8919](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8919)\n- fix(otlploggrpc): honor custom dial option precedence by [@&#8203;jstar0](https://redirect.github.com/jstar0) in [#&#8203;8836](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8836)\n- Define bound instrument API in metric/x by [@&#8203;dashpole](https://redirect.github.com/dashpole) in [#&#8203;8760](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8760)\n- fix(prometheus): report invalid histogram scale errors by [@&#8203;jstar0](https://redirect.github.com/jstar0) in [#&#8203;8839](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8839)\n- Add experimental metric Finisher interface by [@&#8203;MrAlias](https://redirect.github.com/MrAlias) in [#&#8203;8906](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8906)\n- chore(deps): update github.com/charmbracelet/ultraviolet digest to [`ae99b73`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/ae99b73) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8923](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8923)\n- chore(deps): update golang.org/x by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8920](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8920)\n- sdk/trace/x: Add experimental `ProbabilitySampler` by [@&#8203;yuanyuanzhao3](https://redirect.github.com/yuanyuanzhao3) in [#&#8203;8123](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8123)\n- sdk/trace/x: Adding GoDev badge. by [@&#8203;yuanyuanzhao3](https://redirect.github.com/yuanyuanzhao3) in [#&#8203;8927](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8927)\n- perf(propagation): use a hex lookup table to decode traceparent by [@&#8203;itssaharsh](https://redirect.github.com/itssaharsh) in [#&#8203;8739](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8739)\n- chore(deps): update github.com/charmbracelet/ultraviolet digest to [`0277a17`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/0277a17) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8931](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8931)\n- fix(deps): update googleapis to [`f8649dd`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/f8649dd) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8929](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8929)\n- chore(deps): update module github.com/dlclark/regexp2/v2 to v2.8.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8930](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8930)\n- \\[chore] Add doc comments to exported internal symbols (5/N) by [@&#8203;om7057](https://redirect.github.com/om7057) in [#&#8203;8934](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8934)\n- \\[chore] Add doc comments to exported internal symbols (4/N) by [@&#8203;om7057](https://redirect.github.com/om7057) in [#&#8203;8926](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8926)\n- sdk: optimize composite attribute truncation by [@&#8203;pellared](https://redirect.github.com/pellared) in [#&#8203;8912](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8912)\n- chore(deps): update module github.com/go-critic/go-critic to v0.15.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8924](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8924)\n- chore(deps): update module go.augendre.info/fatcontext to v0.10.1 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8939](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8939)\n- chore(deps): update module mvdan.cc/gofumpt to v0.12.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8935](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8935)\n- chore(deps): update module dev.gaijin.team/go/exhaustruct/v5 to v5.2.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8928](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8928)\n- fix(deps): update golang.org/x by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8936](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8936)\n- chore(deps): update module github.com/ghostiam/protogetter to v1.0.1 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8940](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8940)\n- fix(trace): avoid reentrant RecordError deadlock by [@&#8203;jstar0](https://redirect.github.com/jstar0) in [#&#8203;8815](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8815)\n- \\[chore] Add doc comments to exported internal symbols (6/6), remove exclusion by [@&#8203;om7057](https://redirect.github.com/om7057) in [#&#8203;8937](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8937)\n- otlploghttp: normalize global endpoint path joining by [@&#8203;RedZapdos123](https://redirect.github.com/RedZapdos123) in [#&#8203;8864](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8864)\n- sdk/trace: treat empty sampler env values as unset by [@&#8203;RedZapdos123](https://redirect.github.com/RedZapdos123) in [#&#8203;8873](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8873)\n- Run full benchmarks weekly by [@&#8203;XSAM](https://redirect.github.com/XSAM) in [#&#8203;8932](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8932)\n- fix(semconv): avoid duplicate metric recording without attributes by [@&#8203;jstar0](https://redirect.github.com/jstar0) in [#&#8203;8849](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8849)\n- chore(deps): update module github.com/mattn/go-runewidth to v0.0.30 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8946](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8946)\n- chore(deps): update ubuntu:26.04 docker digest to [`e5a4d62`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/e5a4d62) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8945](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8945)\n- chore(deps): update github/codeql-action action to v4.38.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8944](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8944)\n- chore(deps): update golang.org/x/telemetry digest to [`55ac43c`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/55ac43c) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8943](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8943)\n- otlptracegrpc: fix env endpoint URL parsing by [@&#8203;RedZapdos123](https://redirect.github.com/RedZapdos123) in [#&#8203;8852](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8852)\n- otlpmetricgrpc: preserve gRPC env endpoint targets by [@&#8203;RedZapdos123](https://redirect.github.com/RedZapdos123) in [#&#8203;8862](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8862)\n- chore(deps): update module github.com/sourcegraph/go-diff to v0.9.0 by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8947](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8947)\n- feat(otlphttp): configure maximum response size by [@&#8203;pellared](https://redirect.github.com/pellared) in [#&#8203;8941](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8941)\n- fix(otlpmetric): preserve exponential histogram zero threshold by [@&#8203;maithilijoshi20](https://redirect.github.com/maithilijoshi20) in [#&#8203;8801](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8801)\n- chore(deps): update golang.org/x/telemetry digest to [`15ceca2`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/15ceca2) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8948](https://redirect.github.com/open-telemetry/opentelemetry-go/pull/8948)\n- chore(deps): update github.com/charmbracelet/ultraviolet digest to [`6c9e17d`](https://redirect.github.com/open-telemetry/opentelemetry-go/commit/6c9e17d) by [@&#8203;renovate](https://redirect.github.com/renovate)\\[bot] in [#&#8203;8950](https://redirect.github.com/open-telemetry\n\n> ✂ **Note**\n> \n> PR body was truncated to here.\n\n\n</details>\n\n---\n\n### Configuration\n\n📅 **Schedule**: (UTC)\n\n- Branch creation\n  - At any time (no schedule defined)\n- Automerge\n  - At any time (no schedule defined)\n\n🚦 **Automerge**: Enabled.\n\n♻ **Rebasing**: Whenever PR is behind base branch, or you tick the rebase/retry checkbox.\n\n🔕 **Ignore**: Close this PR and you won't be reminded about these updates again.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n---\n\nThis PR has been generated by [Mend Renovate](https://redirect.github.com/renovatebot/renovate).\n<!--renovate-debug:eyJjcmVhdGVkSW5WZXIiOiI0My4yODguMCIsInVwZGF0ZWRJblZlciI6IjQzLjI4OC4wIiwidGFyZ2V0QnJhbmNoIjoibWFpbiIsImxhYmVscyI6WyJyZW5vdmF0ZS1jdmUiLCJzZWN1cml0eSJdfQ==-->\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-11-13T20:47:20Z",
+      "mergedAt": null,
+      "additions": 161,
+      "deletions": 135
+    },
+    {
       "id": "PR_kwDOL-xLQ88AAAABObejAg",
       "title": "security: Update module golang.org/x/crypto to v0.59.0 [SECURITY]",
       "author": "oplabs-renovate",
@@ -55,25 +67,13 @@
       "mergedAt": "2026-11-09T19:01:51Z",
       "additions": 95,
       "deletions": 0
-    },
-    {
-      "id": "PR_kwDOL-xLQ88AAAABNbv-_Q",
-      "title": "fix(proxyd): rate limit method override semantics",
-      "author": "yashvardhan-kukreja",
-      "number": 796,
-      "body": "Signed-off-by: Yashvardhan Kukreja <yashvardhan@oplabs.co>\r\n\r\n<!-- Contributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md -->\r\n\r\n**Description**\r\n\r\nThe rate-limit-method-overrides never overrode the base rate-limits. Instead they applied on top of the base-rate-limits. That doesn't make much sense with the concept of \"overrides\" and makes it impossible to loosen the rate limit of a specific method compared to the base rate.\r\n\r\nThis PR fixes that by either applying the base-rate-limit on the incoming request OR the method-override if it exists for the incoming request's RPC method.\r\n\r\n**Tests**\r\n\r\nPlease describe any tests you've added. If you've added no tests, or left important behavior untested, please explain why not.\r\n\r\n**Additional context**\r\n\r\nAdd any other context about the problem you're solving.\r\n\r\n**Metadata**\r\n\r\n- Fixes #[Link to Issue]\r\n",
-      "repository": "ethereum-optimism/infra",
-      "createdAt": "2026-11-06T23:56:30Z",
-      "mergedAt": "2026-11-09T19:30:29Z",
-      "additions": 20,
-      "deletions": 16
     }
   ],
   "codeChanges": {
     "additions": 1308,
     "deletions": 72,
     "files": 17,
-    "commitCount": 20
+    "commitCount": 21
   },
   "completedItems": [
     {
@@ -162,41 +162,61 @@
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 869.0065065053556,
-      "prScore": 590.1545065053556,
-      "issueScore": 20.1,
-      "reviewScore": 257,
-      "commentScore": 1.7519999999999998,
-      "summary": null
-    },
-    {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 404.0508260085485,
-      "prScore": 210.11282600854852,
-      "issueScore": 0,
-      "reviewScore": 193.5,
-      "commentScore": 0.43799999999999994,
+      "totalScore": 1124.542869072055,
+      "prScore": 745.7528690720552,
+      "issueScore": 26.1,
+      "reviewScore": 350.5,
+      "commentScore": 2.1899999999999995,
       "summary": null
     },
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 332.6889414400159,
-      "prScore": 134.1489414400159,
+      "totalScore": 580.8257696870182,
+      "prScore": 334.0857696870183,
       "issueScore": 0,
-      "reviewScore": 198,
-      "commentScore": 0.54,
+      "reviewScore": 246,
+      "commentScore": 0.74,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 498.6466659762027,
+      "prScore": 280.4686659762027,
+      "issueScore": 4,
+      "reviewScore": 213,
+      "commentScore": 1.178,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 419.25082600854853,
+      "prScore": 210.11282600854852,
+      "issueScore": 0,
+      "reviewScore": 208.5,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 404.16627860029814,
+      "prScore": 394.66627860029814,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "aakoshh",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
-      "totalScore": 314.52873994001317,
-      "prScore": 165.11473994001318,
-      "issueScore": 6.1,
-      "reviewScore": 142,
-      "commentScore": 1.3139999999999998,
+      "totalScore": 391.96500127375214,
+      "prScore": 221.11300127375216,
+      "issueScore": 8.1,
+      "reviewScore": 161,
+      "commentScore": 1.7519999999999998,
       "summary": null
     },
     {
@@ -210,16 +230,6 @@
       "summary": null
     },
     {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 285.58604948205243,
-      "prScore": 276.08604948205243,
-      "issueScore": 0,
-      "reviewScore": 9.5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
       "username": "falcorocks",
       "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
       "totalScore": 282.0325094225548,
@@ -230,13 +240,13 @@
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 267.9835396685138,
-      "prScore": 97.2435396685138,
-      "issueScore": 2,
-      "reviewScore": 168,
-      "commentScore": 0.74,
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 234.29758308641385,
+      "prScore": 160.41758308641386,
+      "issueScore": 0,
+      "reviewScore": 73,
+      "commentScore": 0.8799999999999999,
       "summary": null
     },
     {
@@ -250,13 +260,13 @@
       "summary": null
     },
     {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 183.44145360115257,
-      "prScore": 114.56145360115258,
-      "issueScore": 0,
-      "reviewScore": 68,
-      "commentScore": 0.8799999999999999,
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 184.34665483210836,
+      "prScore": 75.70865483210834,
+      "issueScore": 4,
+      "reviewScore": 104,
+      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -267,16 +277,6 @@
       "issueScore": 0,
       "reviewScore": 10,
       "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 174.34665483210836,
-      "prScore": 75.70865483210834,
-      "issueScore": 4,
-      "reviewScore": 94,
-      "commentScore": 0.6379999999999999,
       "summary": null
     },
     {
@@ -292,11 +292,11 @@
     {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 153.95614746540184,
+      "totalScore": 161.15614746540186,
       "prScore": 99.25614746540185,
-      "issueScore": 0,
-      "reviewScore": 54.5,
-      "commentScore": 0.2,
+      "issueScore": 2,
+      "reviewScore": 59.5,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -310,13 +310,23 @@
       "summary": null
     },
     {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 118.19552892232944,
+      "prScore": 117.59552892232944,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.6000000000000001,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 116.13927542206588,
+      "totalScore": 116.57727542206587,
       "prScore": 114.38727542206587,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.7519999999999998,
+      "commentScore": 2.1899999999999995,
       "summary": null
     },
     {
@@ -340,6 +350,26 @@
       "summary": null
     },
     {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 87.19629031514889,
+      "prScore": 77.19629031514889,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 81.49095081828398,
+      "prScore": 41.650950818283974,
+      "issueScore": 16,
+      "reviewScore": 23.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
       "username": "donoso-eth",
       "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
       "totalScore": 79.07475352301603,
@@ -360,16 +390,6 @@
       "summary": null
     },
     {
-      "username": "teddyknox",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
-      "totalScore": 76.49095081828398,
-      "prScore": 41.650950818283974,
-      "issueScore": 16,
-      "reviewScore": 18.5,
-      "commentScore": 0.33999999999999997,
-      "summary": null
-    },
-    {
       "username": "wiz-0f98cca50a",
       "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 72.97800000000001,
@@ -377,16 +397,6 @@
       "issueScore": 0,
       "reviewScore": 72,
       "commentScore": 0.978,
-      "summary": null
-    },
-    {
-      "username": "oplabs-renovate",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 70.52686822831593,
-      "prScore": 70.12686822831594,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -420,6 +430,16 @@
       "summary": null
     },
     {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 48.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 48,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "pcw109550",
       "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
       "totalScore": 40.25337956964461,
@@ -440,13 +460,13 @@
       "summary": null
     },
     {
-      "username": "op-will",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
-      "totalScore": 29.2,
-      "prScore": 0,
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 36.92030614433405,
+      "prScore": 21.920306144334052,
       "issueScore": 0,
-      "reviewScore": 29,
-      "commentScore": 0.2,
+      "reviewScore": 15,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -454,16 +474,6 @@
       "avatarUrl": "https://avatars.githubusercontent.com/u/15234569?u=b2a30602eb3a6a6fbd8e7b2ee2eef68888738704&v=4",
       "totalScore": 27.176879734614026,
       "prScore": 22.176879734614026,
-      "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "ZakAyesh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
-      "totalScore": 26.920306144334052,
-      "prScore": 21.920306144334052,
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
@@ -500,6 +510,16 @@
       "summary": null
     },
     {
+      "username": "Ethnical",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
+      "totalScore": 15.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "yoshidan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/958174?u=92c499463e0f943c1fedfbe63c5144321a6a5bde&v=4",
       "totalScore": 14.030057329615259,
@@ -510,6 +530,16 @@
       "summary": null
     },
     {
+      "username": "erkancamli",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/107792368?u=1d0297910a73f78a88cb47d6a22e46d361a859c3&v=4",
+      "totalScore": 12.082918433002165,
+      "prScore": 12.082918433002165,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "bczak",
       "avatarUrl": "https://avatars.githubusercontent.com/u/42911767?v=4",
       "totalScore": 10.993612288668109,
@@ -517,16 +547,6 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "Ethnical",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23560242?u=9ed72d81ef2ef3f0b627c89a24c0e86e9108ff75&v=4",
-      "totalScore": 10.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -590,28 +610,28 @@
       "summary": null
     },
     {
-      "username": "opgitgovernance",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
-      "totalScore": 5.068306144334055,
-      "prScore": 5.068306144334055,
+      "username": "nodeflareapp",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/302281547?u=99c41c455480d133b07ee371d496f73fe6506bcb&v=4",
+      "totalScore": 6.502955074527657,
+      "prScore": 6.502955074527657,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "sjonpaulbrown",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
-      "totalScore": 5,
-      "prScore": 0,
+      "username": "opgitgovernance",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
+      "totalScore": 5.506306144334054,
+      "prScore": 5.068306144334055,
       "issueScore": 0,
-      "reviewScore": 5,
-      "commentScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "username": "sjonpaulbrown",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/33456632?u=b952f2888f001c1e70e368b8eaab32cc759cd642&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -690,7 +710,7 @@
       "summary": null
     }
   ],
-  "newPRs": 7,
+  "newPRs": 8,
   "mergedPRs": 7,
   "newIssues": 0,
   "closedIssues": 0,
