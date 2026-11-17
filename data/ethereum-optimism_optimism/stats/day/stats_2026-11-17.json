@@ -1,0 +1,187 @@
+{
+  "interval": {
+    "intervalStart": "2026-11-17T00:00:00.000Z",
+    "intervalEnd": "2026-11-18T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-11-17 to 2026-11-18, ethereum-optimism/optimism had 5 new PRs (4 merged), 0 new issues, and 11 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABPsCbaw",
+      "title": "kona-node,op-devstack!: boot the sequencer stopped and always serve the admin API",
+      "author": "joshklop",
+      "number": 24206,
+      "body": "kona-node accepted `--rpc.admin-state` and then ignored it. A sequencer stopped through the admin RPC was therefore active again after a restart, and without op-conductor that can leave two active sequencers. This PR doesn't implement op-node's state-file persistence. It removes the boot-time choice:\n\n- A kona sequencer always boots stopped, after every restart. `admin_startSequencer` and `admin_stopSequencer` (called by op-conductor, an operator or a test harness) are the only controls.\n- The admin namespace is always served on the RPC port. A separate admin listener was considered and rejected.\n- `--rpc.addr` defaults to `127.0.0.1`, so a node with default settings doesn't expose the admin API.\n\nProduction kona sequencers already run this way: the node chart sets `KONA_NODE_SEQUENCER_STOPPED=true` and `KONA_NODE_RPC_ENABLE_ADMIN=true` on every kona-node, and op-conductor starts the leader. Supersedes op-rs/kona#3124.\n\nOther effects:\n- The `kona_node_sequencer_state` gauge now resets the label set it replaces to 0. Every sequencer now boots `active=\"false\"`, so without this the \"Sequencer Active\" Grafana panel would show `false` and `true` together after a start.\n- The kona Docker recipes bind `--rpc.addr 0.0.0.0` inside the container and publish the RPC port on the host's loopback only.\n- In op-devstack, a kona sequencer outside a conductor cluster is started at its unsafe head after every start of the node. A devstack op-node sequencer boots active on every restart, because it has no admin-state file, so tests see the same behaviour from both CLs. op-node behaviour is unchanged. The new `TestSequencerResumesAfterRestart` covers the restart path under both CLs.\n\nBREAKING CHANGE: `kona-node` removes `--sequencer.stopped`, `--rpc.enable-admin` and `--rpc.admin-state`. It always boots its sequencer stopped, always serves the admin API, and binds its RPC to `127.0.0.1` by default. Operators need to know:\n- **Removed flags vs. env vars.** A removed flag passed on the command line fails at parse time. A leftover `KONA_NODE_SEQUENCER_STOPPED`, `KONA_NODE_RPC_ENABLE_ADMIN` or `KONA_NODE_RPC_ADMIN_STATE` env var is silently ignored. A sequencer that ran without a conductor (with `KONA_NODE_SEQUENCER_STOPPED=false` or unset) now boots stopped. Use op-conductor, or call `admin_startSequencer` with the current unsafe head after every start.\n- **The admin API is always on, in every mode, validators included.** Anyone binding a non-loopback `--rpc.addr` must firewall the RPC port. The admin API is unauthenticated, and `admin_postUnsafePayload` checks only the block hash, not a signature (`rust/kona/crates/node/rpc/src/admin.rs:124`).\n- **Default RPC address.** Set `--rpc.addr` (`KONA_NODE_RPC_ADDR`) explicitly wherever op-conductor, op-batcher, op-proposer, op-challenger or health probes reach the node over the network. `docker run -p` users now need `--rpc.addr 0.0.0.0`, and should publish the port on a trusted interface only.\n\n**Follow-ups outside the monorepo**\n- The netchef node chart (0.52.1, `charts/kona-node/defaults.yaml`) still sets `KONA_NODE_RPC_ENABLE_ADMIN` and `KONA_NODE_SEQUENCER_STOPPED`, which are now ignored. It also points `KONA_NODE_CONDUCTOR_RPC` at `op-conductor` even when a chain has no conductor.\n- Netchef has no kona-node equivalent of the op-node `OP_NODE_SEQUENCER_STOPPED: false` it uses for sequencers without a conductor. Those deployments need a way to call `admin_startSequencer` after each start.\n\n**For reviewers**\n- Review commit by commit. Each one compiles, and together they give the tree that was tested. The PR is squash-merged.\n  1. `kona-node!: always serve the admin API`: removes `--rpc.enable-admin` and `--rpc.admin-state`.\n  2. `kona-node!: always boot the sequencer stopped`: removes `--sequencer.stopped`.\n  3. `op-devstack: start kona sequencers through the admin API`: includes the new restart test. Between commits 2 and 3, devstack kona sequencers stay stopped.\n  4. `kona-node!: bind the RPC to 127.0.0.1 by default`: includes the Docker recipes.\n  5. `kona-node: reset the replaced sequencer state gauge label`\n  6. `docs: document kona-node's stopped sequencer and always-on admin API`\n- Three kona `base/conductor` acceptance tests fail locally on this branch and also on unmodified `develop` (macOS, same failures): `TestLeadershipTransferMovesActiveSequencer`, `TestLeadershipTransferSelectsAnotherActiveSequencer` and `TestConductorProxyServesOnlyLeader`. This PR doesn't change the conductor path: those nodes already booted stopped with admin enabled.\n- Review findings left out, to confirm:\n  - No unit test asserts that the admin module is registered. Building the RPC module set in a unit test needs gossip and discovery handles. Every kona acceptance test now goes through `admin_startSequencer`, so CI fails if admin is missing.\n  - No deprecated no-op flags were kept for a release. The change is a hard break, flagged with `!`.\n  - The admin API is not limited to sequencer mode, and there is no separate admin listener, as decided.\n  - `RpcBuilder` is left as a one-field wrapper. Simplifying it to `Option<SocketAddr>` is unrelated cleanup.\n  - The devstack start runs on the test context, not the `StartControlled` context, and holds the node's lock while it retries (at most about 45s, ended early if the process exits).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-17T00:20:03Z",
+      "mergedAt": null,
+      "additions": 276,
+      "deletions": 220
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABPsAb7w",
+      "title": "kona-genesis: serialize l2_chain_id as a number",
+      "author": "joshklop",
+      "number": 24205,
+      "body": "kona-node's `optimism_rollupConfig` returned `l2_chain_id` as a chain-name string (`\"optimism\"`, `\"base\"`, `\"optimism-sepolia\"`, `\"unichain\"`, …) on every chain that alloy-chains names, because the field is an `alloy_chains::Chain` and that type serializes named chains by name. op-node returns a JSON number, and Go's `RollupClient.RollupConfig` fails with `cannot unmarshal \"optimism\" into *big.Int`. So op-batcher, and anything else using that client (op-conductor's rollupConfig proxy included), cannot start against a kona-node on OP Mainnet, Base, the Sepolias, Unichain and similar chains. Devnet chain IDs such as 901 have no alloy name, which is why existing tests and devnets did not catch it. kona-node now returns the number, as op-node does.\n\nThe fix is on the type (`serialize_with` on the field), not only at the RPC layer: every other place that serializes a `RollupConfig` also benefits from op-node's shape, and an RPC-only fix would need a parallel copy of the whole struct. Deserialization is unchanged and still accepts a number or a name, so existing rollup.json files and preimages keep loading. The other serializers are all inside kona: kona-host's `L2_ROLLUP_CONFIG_KEY` local preimages, the SP1 executor's test-config preimages, and test helpers. Each one only feeds kona's own deserializer. No serialized `RollupConfig` is hashed or committed anywhere, and the registry embeds `ChainConfig`, whose chain ID is already a `u64`. The fault-proof client never serializes a `RollupConfig`, so the prestate does not change. The `release-client-lto` builds of `kona-client` and `kona-client-int` are byte-identical with and without this change. That comparison used native builds, because Docker was unavailable for a cannon prestate build.\n\n`rollup_config_named_chain.json` is a golden vector across both languages. kona's serializer must reproduce it exactly. op-node must decode it into the expected `rollup.Config`, and that config must pass `Check()` as op-batcher requires at startup. If kona's serialization changes later, the fixture has to be updated, and the Go test then checks it again.\n\nKnown follow-ups, out of scope here: kona's `optimism_rollupConfig` still differs from op-node in other fields. Go ignores unknown keys, so none of these makes decoding fail, but Go clients silently drop the values:\n- the genesis `system_config` keys: kona writes `eip1559Denominator`/`eip1559Elasticity`/`operatorFeeScalar`/`operatorFeeConstant` separately, where op-node reads packed `eip1559Params`/`operatorFeeParams`, so those decode to zero. The Go test records this gap explicitly.\n- `alt_da.da_challenge_address` vs `da_challenge_contract_address`.\n- `granite_channel_timeout`, which op-node has no field for, and fields op-node omits with `omitempty`.\n\nReviews: rust-code-reviewer, go-code-reviewer and kona-sp1-cost-reviewer (no guest cost change). The reviewers' optional nits were dismissed. One was to widen the fixture with more optional fields, which belongs to the field-name follow-ups. The other was to inline the fixture const, which is kept because its doc comment points to the Go test.\n\nUnrelated to this diff, two kona recipes fail locally on `develop`:\n- `just l` fails in `lint-docs` on an unresolved intra-doc link in `reth-optimism-node`. The doc lint for `kona-genesis` and the workspace clippy pass.\n- `just t` (`nextest --release --workspace --all-features`) fails 52 log-capture tests. op-reth's `min-error-logs` feature enables `tracing/release_max_level_error`, and feature unification applies it across the whole workspace, so those tests capture no logs. Every test in the affected kona packages passes when run without op-reth in the feature set.\n\nCloses https://github.com/ethereum-optimism/protocol-team/issues/593\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-17T00:17:30Z",
+      "mergedAt": null,
+      "additions": 149,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABN9xwLw",
+      "title": "docs/public-docs: mark monitorism as an OP Enterprise feature",
+      "author": "sbvegan",
+      "number": 24019,
+      "body": "The chain monitoring and launch-paths pages now present `monitorism` as an OP Enterprise customers premium service. \n\nGated sections now use a shared availability marker, `snippets/op-enterprise-feature.mdx`. It is a gray `sm` badge with a small Optimism Red square, plus one line that links to the same UTM-tagged OP Enterprise URL as the other OP Enterprise snippets. \n\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T22:21:47Z",
+      "mergedAt": "2026-11-17T03:46:33Z",
+      "additions": 142,
+      "deletions": 35
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABPsdGbw",
+      "title": "ci: split memory-all tests on PRs by develop's timings",
+      "author": "mds1",
+      "number": 24207,
+      "body": "PR memory-all splits used stale timings: CircleCI times the split from the branch's own last green run, which can predate slow tests added on develop since. After #23787 re-enabled `TestExecuteStep_CannonKona` (about 400 s), it weighed about 0 on such branches and landed late on an already full node. That set the end of 12 of the 30 slowest PR pipelines since 11-13 (slowest node 603 to 709 s, typical 433 to 445 s, measured), and it happened again on 11-16 under the 4 x 16 layout from #24145. Modeled on 118 PR pipelines: PR p90 18.8 to 15.9 min.\n\n## Change\n\n- New `memory-all-shard-timings` job (no context, `small.gen2`). On PR branches it reads develop's latest green memory-all results from CircleCI's API, keeps top-level tests (a parent's time includes its subtests), and writes one timings file per memory-all job. Both memory-all jobs require it, so every node splits from the same file and each test still runs exactly once.\n- `shard-tests.sh` passes that file to `circleci tests split --timings-file` when it exists. Without it the split works exactly as today, and a test missing from the file keeps the existing 1m default.\n- No cache. The data comes from CircleCI's record of develop runs, which no branch can write. Develop, tags, the merge queue and `proposal/*` skip the fetch and keep CircleCI's own timings.\n- Any API failure (timeout, rate limit, outage) logs one line, writes no file, and the split runs as today. The fetch gives up within about 80 s at worst (no new call after 60 s, each call capped including retry waits). memory-all requires the job as `terminal`, so even a failed or cancelled timings job never blocks it.\n- The API needs no token while the project is public. If it goes private, set `CIRCLE_TIMINGS_TOKEN` (a personal API token, the v2 API rejects project tokens) as a project env var.\n\n## Checks\n\n- `circleci config validate --next` on the merged config, `test-decision-tree.sh` 25 passed.\n- Against live develop data: 281 top-level tests per job, the same count each memory-all job runs, with CannonKona at 406 s.\n- An earlier cache-based version of the same split was benched in [140318](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/140318): CannonKona ran first, slowest node 426 s and 481 s against develop's 452 s and 446 s, 281 tests per job, none missing or doubled. It was dropped because a branch can write any cache.\n- Bench of this API version, [140329](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/140329): the fetch took 4 s, all 4 nodes of both jobs used the same file, CannonKona ran first, 281 tests per job with none missing or doubled, all green. Slowest node 443 s (op-node) and 441 s (kona) against 452 s and 446 s on develop at the same base ([140312](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/140312), n=1). memory-all started no later than on develop. A bad host, unreachable address, 404 and 401 each exit 0 and write no file (local).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-17T00:56:39Z",
+      "mergedAt": "2026-11-17T02:12:46Z",
+      "additions": 90,
+      "deletions": 1
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABAfYG8Q",
+      "title": "kona-node: repeat beacon blob query parameters",
+      "author": "joshklop",
+      "number": 22594,
+      "body": "## Description\n\nEncode the Beacon API `versioned_hashes` array as repeated query parameters instead of joining all hashes into one comma-separated value:\n\n```text\n?versioned_hashes=hash1&versioned_hashes=hash2\n```\n\nThe [Beacon API](https://github.com/ethereum/beacon-APIs/blob/master/apis/beacon/blobs/blobs.yaml) defines this field as an array. Grandine and Lodestar reject or misinterpret the previous comma-separated encoding, while Prysm and Teku accept both forms.\n\nUpdate the existing provider test to require two separate `versioned_hashes` parameters so this does not regress.\n\nThis PR is stacked on #22553.\n\n## Validation\n\n- `cargo +nightly-2026-08-18 fmt --all -- --check`\n- `cargo test --locked -p kona-providers-alloy` — 11 passed\n- `cargo clippy --locked -p kona-providers-alloy --all-targets --all-features -- -D warnings`\n- `cargo check --locked -p kona-node`\n- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps -p kona-providers-alloy`\n- Live provider check against Plataberget Gloas slot 49,164 retrieved all seven requested blobs through Grandine, Lodestar, and Teku routes\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-08-21T01:30:25Z",
+      "mergedAt": null,
+      "additions": 49,
+      "deletions": 29
+    }
+  ],
+  "codeChanges": {
+    "additions": 249,
+    "deletions": 77,
+    "files": 16,
+    "commitCount": 36
+  },
+  "completedItems": [
+    {
+      "title": "docs/public-docs: mark monitorism as an OP Enterprise feature",
+      "prNumber": 24019,
+      "type": "feature",
+      "body": "The chain monitoring and launch-paths pages now present `monitorism` as an OP Enterprise customers premium service. \n\nGated sections now use a shared availability marker, `snippets/op-enterprise-feature.mdx`. It is a gray `sm` badge with a ",
+      "files": [
+        "docs/public-docs/chain-operators/launch-paths.mdx",
+        "docs/public-docs/chain-operators/tools/chain-monitoring.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/snippets/op-enterprise-feature.mdx",
+        "docs/public-docs/styles/op-enterprise.css",
+        "docs/public-docs/chain-operators/guides/management/network-architecture.mdx"
+      ]
+    },
+    {
+      "title": "docs/public-docs: remove the Upgrade 21 pending-governance callouts",
+      "prNumber": 24209,
+      "type": "docs",
+      "body": "Upgrade 21 passed governance and ran on Mainnet, so four pages still told readers it was pending approval. This PR removes that wording. The pages now state availability by contract version (`op-contracts/v9.0.0` or later) because chains th",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "docs/public-docs/ko/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "docs/public-docs/ko/op-stack/bridging/withdrawal-flow.mdx",
+        "docs/public-docs/ko/op-stack/security/exchanges-and-bridges.mdx",
+        "docs/public-docs/ko/op-stack/security/pause.mdx",
+        "docs/public-docs/op-stack/bridging/withdrawal-flow.mdx",
+        "docs/public-docs/op-stack/security/exchanges-and-bridges.mdx",
+        "docs/public-docs/op-stack/security/pause.mdx"
+      ]
+    },
+    {
+      "title": "ci: log missing shard timings, clarify timings job comments",
+      "prNumber": 24208,
+      "type": "other",
+      "body": "Follow-up to #24207 for the review comments there. No change to how tests are split.\n\n- `shard-tests.sh` logs `No fetched timings for <job>, splitting by CircleCI's own` when the `_shard-timings` dir is in the workspace but has no file for ",
+      "files": [
+        ".circleci/continue/main.yml",
+        "ops/scripts/shard-tests.sh"
+      ]
+    },
+    {
+      "title": "ci: split memory-all tests on PRs by develop's timings",
+      "prNumber": 24207,
+      "type": "tests",
+      "body": "PR memory-all splits used stale timings: CircleCI times the split from the branch's own last green run, which can predate slow tests added on develop since. After #23787 re-enabled `TestExecuteStep_CannonKona` (about 400 s), it weighed abou",
+      "files": [
+        ".circleci/continue/main.yml",
+        "ops/scripts/shard-tests.sh"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 86.56886988570554,
+      "prScore": 76.56886988570554,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 76.60569872610435,
+      "prScore": 58.60569872610435,
+      "issueScore": 0,
+      "reviewScore": 18,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 39.62816765420849,
+      "prScore": 39.62816765420849,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 0.33999999999999997,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    }
+  ],
+  "newPRs": 5,
+  "mergedPRs": 4,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 11
+}

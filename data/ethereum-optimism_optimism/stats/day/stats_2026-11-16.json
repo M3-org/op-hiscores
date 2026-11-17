@@ -5,20 +5,784 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-16 to 2026-11-17, ethereum-optimism/optimism had 0 new PRs (0 merged), 0 new issues, and 0 active contributors.",
-  "topIssues": [],
-  "topPRs": [],
+  "overview": "From 2026-11-16 to 2026-11-17, ethereum-optimism/optimism had 26 new PRs (26 merged), 6 new issues, and 25 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABOjLWFQ",
+      "title": "op-reth: pending block env uses parent.timestamp + 12 (L1 slot time) on OP chains",
+      "author": "sebastianst",
+      "number": 22685,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nop-reth's `pending` block environment is dated `parent.timestamp + 12` — Ethereum's L1 slot time, inherited verbatim from upstream reth:\n\nhttps://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/op-reth/crates/evm/src/config.rs#L28-L39\n\nOn a 2-second OP chain that is up to **5 blocks / 10 seconds ahead** of the block the sequencer will actually produce, so `eth_call` / `eth_estimateGas` against `pending` can execute under a hardfork the real next block will not have activated.\n\n## What is actually served today\n\n**Without flashblocks: op-reth never builds a pending block from the txpool.** [`OpEthApi`'s `LoadPendingBlock` impl](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/op-reth/crates/rpc/src/eth/pending_block.rs#L66-L86) overrides `local_pending_block` to return the latest canonical header (with an explicit pointer to op-geth's `miner/worker.go`), and `local_pending_state` to return `None` — so upstream's `build_pool_pending_block` → `build_block` path, which would execute pooled transactions, is never reached. Pending *state* falls through to `state_by_block_id(Pending)`, i.e. the `newPayload`-not-yet-FCU block if one exists, else `latest`.\n\n**With flashblocks** (`--flashblocks-url`, off by default) the pending block and pending state come from the flashblock overlay, and *that* block carries the sequencer's real timestamp via [`From<OpFlashblockPayloadBase> for OpNextBlockEnvAttributes`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/op-reth/crates/evm/src/config.rs#L55-L66).\n\n**But the EVM *env* is `+12` either way.** `eth_call` at `pending` gets its state from the flashblock overlay and its `CfgEnv`/`BlockEnv` from `pending_block_env_and_cfg()` → `build_pending_env(latest_header)`. The real next-block timestamp is sitting in `OpFlashblockPayloadBase` and is not used for the env. So flashblocks fix the state path and not the timestamp path.\n\n**RPCs that consult the `+12` env:** `eth_call`, `eth_estimateGas`, `eth_createAccessList`, `debug_traceCall`, `trace_call`/`trace_callMany`, `eth_callBundle`, `mev_simBundle` — and **every** `eth_simulateV1` block at any base block id, because upstream computes `pending_env_attributes` before applying block overrides, so an explicit `time` override corrects `block_env.timestamp` but not the spec already chosen from `+12`. `eth_feeHistory` rewrites `pending` → `latest` first and `eth_gasPrice` never touches it; both are unaffected.\n\n**Why the fork boundary matters, concretely.** The pending timestamp reaches [`spec_by_timestamp_after_bedrock`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/alloy-op-evm/src/env.rs#L125), which picks the `OpSpecId`. That spec then drives [`L1BlockInfo::try_fetch`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/op-revm/src/handler.rs#L150), which reads **different `L1Block` storage slots per fork** and selects a different L1-fee/operator-fee formula. Across an Isthmus or Jovian boundary a `pending` call reads the next fork's slots against pre-fork state. Base fee is largely immune (`OpChainSpec::next_block_base_fee` branches on the *parent* timestamp for the Holocene/Jovian paths).\n\nAside found while confirming this: `--rollup.compute-pending-block` is plumbed into `OpPayloadBuilder.compute_pending_block` and never read — `is_compute_pending_block()` has zero call sites. The override above unconditionally wins, so the flag is a no-op and should probably be removed or wired up.\n\n## What op-geth does\n\nop-geth **serves the head block as `pending`** on every OP chain by default — [`miner.Pending()`](https://github.com/ethereum-optimism/op-geth/blob/v1.101702.3-rc.6/miner/miner.go#L167-L189):\n\n```go\nif miner.chainConfig.Optimism != nil && !miner.config.RollupComputePendingBlock {\n    // For compatibility when not computing a pending block, we serve the latest block as \"pending\"\n```\n\n`RollupComputePendingBlock` defaults to false. This landed in [op-geth#93](https://github.com/ethereum-optimism/op-geth/pull/93) (\"miner,eth: latest block as pending block on rollup\", merged 2023-05-26), for two reasons: not leaking txpool contents before the sequencer commits to them, and not paying to rebuild a pending block every 2 seconds. op-geth also skips upstream's nil-ing of `hash`/`nonce`/`miner` on OP chains, so `eth_getBlockByNumber(\"pending\")` returns a real canonical block identical to `latest`.\n\n**Consequence: op-geth has no timestamp to get wrong.** `pending` ≡ `latest`, so `eth_call` at `pending` executes under the head header — a real, past timestamp. There is no `+12` and no L2 block-time constant anywhere in that path. (The opt-in `--rollup.computependingblock` path uses `now()` floored at `parent.Time + 1`, inherited from upstream geth. Upstream go-ethereum itself still builds a pending block from the txpool and is actively maintaining that code.)\n\n## Options\n\n1. **Derive the timestamp from the chain's block time.** The EL has no block time: `OpChainSpec` is a single-field newtype over reth's `ChainSpec`, and neither has any notion of slot duration. The value *is* already inside the binary — `block_time = 2` ships in the embedded `res/superchain-configs.tar` — and is dropped by the 3-field [`ChainMetadata`](https://github.com/ethereum-optimism/optimism/blob/68b009443f67cf830990e913bcbde8536cb15327/rust/op-reth/crates/chainspec/src/superchain/chain_metadata.rs#L15-L19) deserializer. Plumbing it in means widening `ChainMetadata` → `ChainConfigExtraFields` → `From<Genesis> for OpChainSpec` → a field/accessor on `OpChainSpec`, then a custom `PendingEnvBuilder` (today `NextEnv = ()` dispatches to the chainspec-less `BuildPendingEnv`). Moderate, and it still leaves non-registry devnets uncovered without a CLI flag. kona's `RollupConfig.block_time` exists but op-reth has zero references to `RollupConfig`.\n2. **`parent.timestamp + 1`.** One line. It is the lower bound of the next block's timestamp for every OP block time, so `pending` can never activate a fork ahead of the real next block. It under-approximates by `block_time - 1` seconds, which means `pending` behaves like `latest` w.r.t. forks — exactly what op-geth does. (`max(parent+1, now)` is worse: on a lagging or syncing node `now` overshoots arbitrarily.)\n3. **Stop serving a locally built pending block.** Already the case — op-reth mirrors op-geth here. Nothing to do; the gap is only the env.\n\n## Recommendation\n\n**Option 2**, implemented in [#22691](https://github.com/ethereum-optimism/optimism/pull/22691). It removes the L1 slot-time assumption, makes `pending` conservative in the direction that cannot execute under a not-yet-active fork, and matches what op-geth already returns. Option 1 remains the \"right\" long-term answer if `pending` should ever model the *actual* next block (and would also let flashblocks supply their real timestamp to the env) — worth a follow-up, but it is a chainspec-plumbing change, not a one-liner.\n\nThere are no tests and no TODOs on `build_pending_env` today; the fix adds a fork-boundary regression test.\n\n🤖 *Co-created with Claude Fable 5*\n\n",
+      "createdAt": "2026-08-27T19:30:04Z",
+      "closedAt": "2026-11-16T20:26:49Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABbPxCfw",
+      "title": "Improve monitoring for message expiry",
+      "author": "karlfloersch",
+      "number": 23804,
+      "repository": "ethereum-optimism/optimism",
+      "body": "",
+      "createdAt": "2026-10-30T16:59:23Z",
+      "closedAt": "2026-11-16T20:41:35Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABclTSsQ",
+      "title": "op-interop-mon: Alert when the ETHLiquidity balance is low",
+      "author": "ajsutton",
+      "number": 23936,
+      "repository": "ethereum-optimism/optimism",
+      "body": "`ETHLiquidity.mint` reverts if the contract does not have enough ETH. Then `relayETH` fails, and users' ETH stays stuck until an L2 hard fork refills the balance.\n\nop-interop-mon must check the `ETHLiquidity` balance on each interop chain and alert when it is low. The check is in ethereum-optimism/optimism-premium#361. This issue tracks the merge and deployment of that check. ethereum-optimism/optimism#23804 tracks the expiry checks from the same PR.\n\nBlocks launch.\n\nFiled by Claude from the Lagoon interop FMA (FM13).",
+      "createdAt": "2026-11-04T23:07:53Z",
+      "closedAt": "2026-11-16T03:52:42Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM7VHL9Q",
+      "title": "Increase log verbosity for pre-computed contract that already deployed.",
+      "author": "Ethnical",
+      "number": 18099,
+      "repository": "ethereum-optimism/optimism",
+      "body": "We shoud ensure that the logs are more explicit when there are already deployed contracts at the same address instead of skipping silently and not showing any output on this contract address. \nFor example in the logs below there is missing `Address already deployed at address:`\n```\ngit checkout op-contracts/v5.0.0-rc.1\ncd op-deployer\njust build-contracts\njust copy-contract-artifacts\njust build-go\n\n\nPRIVATE_KEY=<redacted> NETWORK=sepolia ETH_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com just deploy-opcm 'op-contracts/v5.0.0-rc.1'\n\nUsing artifacts locator: embedded\nINFO [10-23|22:18:55.729] Load database journal from disk\nINFO [10-23|22:18:55.729] State snapshot generator is not found\nINFO [10-23|22:18:55.729] Initialized path database                readonly=true triecache=0.00B statecache=0.00B buffer=0.00B history=\"entire chain\"\nINFO [10-23|22:19:03.405] Running chain assertions on the DelayedWETH implementation at 0x33Dadc2d1aA9BB613A7AE6B28425eA00D44c6998 sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:03.450] Running chain assertions on the DisputeGameFactory implementation at 0x74Fac1D45B98bae058F8F566201c9A81B85C7D50 sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:03.621] Running chain assertions on the L1CrossDomainMessenger implementation at 0xb686F13AfF1e427a1f993F29ab0F2E7383729FE0 sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nWARN [10-23|22:19:03.877] Fault                                    addr=0xb686F13AfF1e427a1f993F29ab0F2E7383729FE0 label=L1CrossDomainMessengerImpl err=\"execution reverted\" depth=2 op=253 byte4=0x3e47158c\nWARN [10-23|22:19:03.877] callframe                                depth=1 byte4=0x329aa281 addr=0xfdAf657f7146c1AB9db4d70cEd5FDEa7dC4906c0 callsite= label=DeployImplementations\nWARN [10-23|22:19:03.877] callframe                                depth=2 byte4=0x3e47158c addr=0xb686F13AfF1e427a1f993F29ab0F2E7383729FE0 callsite= label=L1CrossDomainMessengerImpl\nWARN [10-23|22:19:03.877] Revert                                   addr=0xb686F13AfF1e427a1f993F29ab0F2E7383729FE0 label=L1CrossDomainMessengerImpl err=\"execution reverted\" revertData=0x54e433cd depth=1\nINFO [10-23|22:19:03.878] Running chain assertions on the L1ERC721Bridge implementation at 0x74f1aC50EB0BE98853805D381C884f5f9abDEcf9 sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nWARN [10-23|22:19:04.132] Fault                                    addr=0x74f1aC50EB0BE98853805D381C884f5f9abDEcf9 label=L1ERC721BridgeImpl         err=\"execution reverted\" depth=2 op=253 byte4=0x3e47158c\nWARN [10-23|22:19:04.132] callframe                                depth=1 byte4=0x329aa281 addr=0xfdAf657f7146c1AB9db4d70cEd5FDEa7dC4906c0 callsite= label=DeployImplementations\nWARN [10-23|22:19:04.132] callframe                                depth=2 byte4=0x3e47158c addr=0x74f1aC50EB0BE98853805D381C884f5f9abDEcf9 callsite= label=L1ERC721BridgeImpl\nWARN [10-23|22:19:04.132] Revert                                   addr=0x74f1aC50EB0BE98853805D381C884f5f9abDEcf9 label=L1ERC721BridgeImpl         err=\"execution reverted\" revertData=0x54e433cd depth=1\nINFO [10-23|22:19:04.132] Running chain assertions on the L1StandardBridge implementation at 0x61525EaaCDdB97D9184aFc205827E6A4fd0Bf62A sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:04.296] Running chain assertions on the MIPS at 0x305D1C0EED9a0291686f3BfDf1F5E54aaeeF80e4 sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:04.296] Running chain assertions on the OPContractsManager at 0x6aF7ecE7d6506bE573841B8Cf29096638dF5FC4F sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:04.441] Running chain assertions on the OptimismMintableERC20Factory implementation at 0x8ee6fB13c6c9a7e401531168E196Fbf8b05cEabB sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:04.523] Running chain assertions on the OptimismPortal2 implementation at 0x7Cf803296662e8C72A6C1d6450572209aCF7f202 sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:04.767] Running chain assertions on the ETHLockbox implementation at 0x784d2F03593A42A6E4676A012762F18775ecbBe6 sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:04.859] Running chain assertions on the SystemConfig impl at 0x2fA28989fc559836E9d66dFf3010C7F7f41c65ED sender=0x67D29AAa07AadEbD0f1098F3c986beB7395d977c\nINFO [10-23|22:19:05.807] transaction broadcasted                  id=bf3f0c..0160d7 nonce=0\nINFO [10-23|22:19:05.807] Publishing transaction                   service=transactor tx=0xb30430077cee0d96c6d9890a536730766268bc06d5ea4ce3e655256f9187daee nonce=12 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=3,235,113\nINFO [10-23|22:19:05.850] Transaction successfully published       service=transactor tx=0xb30430077cee0d96c6d9890a536730766268bc06d5ea4ce3e655256f9187daee nonce=12 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=3,235,113 tx=b30430..87daee\nINFO [10-23|22:19:05.919] transaction broadcasted                  id=d1101d..47dc6a nonce=0\nINFO [10-23|22:19:05.919] Publishing transaction                   service=transactor tx=0x4f7016dc7ce911b23634fcf7f7886f642f08af5a576b19b74bb550efafe41398 nonce=13 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=1,320,548\nINFO [10-23|22:19:05.959] Transaction successfully published       service=transactor tx=0x4f7016dc7ce911b23634fcf7f7886f642f08af5a576b19b74bb550efafe41398 nonce=13 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=1,320,548 tx=4f7016..e41398\nINFO [10-23|22:19:06.031] transaction broadcasted                  id=7a73bb..1b5148 nonce=0\nINFO [10-23|22:19:06.031] Publishing transaction                   service=transactor tx=0x9305d5d5a04e4df502f1c5ccebba2c8aebc5f1198e347eae8dd5bfe8957d9489 nonce=14 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=3,970,550\nINFO [10-23|22:19:06.078] Transaction successfully published       service=transactor tx=0x9305d5d5a04e4df502f1c5ccebba2c8aebc5f1198e347eae8dd5bfe8957d9489 nonce=14 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=3,970,550 tx=9305d5..7d9489\nINFO [10-23|22:19:06.147] transaction broadcasted                  id=f9baa2..d470a1 nonce=0\nINFO [10-23|22:19:06.147] Publishing transaction                   service=transactor tx=0xab9e1bc38d7bd5a2001f111620f7208da79db6025ae16953e592d1307d6a2501 nonce=15 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=4,361,071\nINFO [10-23|22:19:06.190] Transaction successfully published       service=transactor tx=0xab9e1bc38d7bd5a2001f111620f7208da79db6025ae16953e592d1307d6a2501 nonce=15 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=4,361,071 tx=ab9e1b..6a2501\nINFO [10-23|22:19:06.299] transaction broadcasted                  id=767213..b68ec2 nonce=0\nINFO [10-23|22:19:06.299] Publishing transaction                   service=transactor tx=0x892bbb3230404e85d7ae9586db9fd311ead2b01503d03b29328cef5f343c98c8 nonce=16 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=3,942,951\nINFO [10-23|22:19:06.342] Transaction successfully published       service=transactor tx=0x892bbb3230404e85d7ae9586db9fd311ead2b01503d03b29328cef5f343c98c8 nonce=16 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=3,942,951 tx=892bbb..3c98c8\nINFO [10-23|22:19:06.420] transaction broadcasted                  id=8b792b..17c7fd nonce=0\nINFO [10-23|22:19:06.420] Publishing transaction                   service=transactor tx=0xc2910173d0c093384ad96ed31760d0a5f4dbb029faa74103ccd527e442344d1a nonce=17 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=3,654,202\nINFO [10-23|22:19:06.463] Transaction successfully published       service=transactor tx=0xc2910173d0c093384ad96ed31760d0a5f4dbb029faa74103ccd527e442344d1a nonce=17 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=3,654,202 tx=c29101..344d1a\nINFO [10-23|22:19:06.542] transaction broadcasted                  id=47840a..be3ddd nonce=0\nINFO [10-23|22:19:06.542] Publishing transaction                   service=transactor tx=0xf0ec55caec59cb9ab2787ae47f417ab47b7c7a6ebea7e8985eff0fd8cc4f05db nonce=18 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=5,627,227\nINFO [10-23|22:19:06.605] Transaction successfully published       service=transactor tx=0xf0ec55caec59cb9ab2787ae47f417ab47b7c7a6ebea7e8985eff0fd8cc4f05db nonce=18 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=5,627,227 tx=f0ec55..4f05db\nWARN [10-23|22:19:06.661] Failed to create a transaction, will retry service=transactor err=\"failed to call: execution reverted, reason: 0x\"\nWARN [10-23|22:19:08.773] Failed to create a transaction, will retry service=transactor err=\"failed to call: execution reverted, reason: 0x\"\nWARN [10-23|22:19:10.896] Failed to create a transaction, will retry service=transactor err=\"failed to call: execution reverted, reason: 0x\"\nINFO [10-23|22:19:12.966] Transaction confirmed                    service=transactor tx=b30430..87daee block=395e95..ac9fb2:9475564 effectiveGasPrice=1,000,000,009\nINFO [10-23|22:19:13.075] transaction broadcasted                  id=77f163..dbe2d8 nonce=0\nINFO [10-23|22:19:13.075] transaction confirmed                    id=bf3f0c..0160d7 completed=1 total=8 hash=0xb30430077cee0d96c6d9890a536730766268bc06d5ea4ce3e655256f9187daee nonce=0 creation=0x0000000000000000000000000000000000000000\nINFO [10-23|22:19:13.075] Publishing transaction                   service=transactor tx=0xa8e1688ce44d9c19c4813ebcdbfea5d8cab7bd7bceca448027c11813326c13b3 nonce=19 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=2,767,832\nINFO [10-23|22:19:13.079] Transaction confirmed                    service=transactor tx=4f7016..e41398 block=395e95..ac9fb2:9475564 effectiveGasPrice=1,000,000,009\nINFO [10-23|22:19:13.079] transaction confirmed                    id=d1101d..47dc6a completed=2 total=8 hash=0x4f7016dc7ce911b23634fcf7f7886f642f08af5a576b19b74bb550efafe41398 nonce=0 creation=0x0000000000000000000000000000000000000000\nINFO [10-23|22:19:13.159] Transaction successfully published       service=transactor tx=0xa8e1688ce44d9c19c4813ebcdbfea5d8cab7bd7bceca448027c11813326c13b3 nonce=19 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=2,767,832 tx=a8e168..6c13b3\nINFO [10-23|22:19:13.192] Transaction confirmed                    service=transactor tx=9305d5..7d9489 block=395e95..ac9fb2:9475564 effectiveGasPrice=1,000,000,009\nINFO [10-23|22:19:13.192] transaction confirmed                    id=7a73bb..1b5148 completed=3 total=8 hash=0x9305d5d5a04e4df502f1c5ccebba2c8aebc5f1198e347eae8dd5bfe8957d9489 nonce=0 creation=0x0000000000000000000000000000000000000000\nINFO [10-23|22:19:13.461] Transaction confirmed                    service=transactor tx=892bbb..3c98c8 block=395e95..ac9fb2:9475564 effectiveGasPrice=1,000,000,009\nINFO [10-23|22:19:13.578] Transaction confirmed                    service=transactor tx=c29101..344d1a block=395e95..ac9fb2:9475564 effectiveGasPrice=1,000,000,009\nINFO [10-23|22:19:13.719] Transaction confirmed                    service=transactor tx=f0ec55..4f05db block=395e95..ac9fb2:9475564 effectiveGasPrice=1,000,000,009\nINFO [10-23|22:19:14.300] Transaction confirmed                    service=transactor tx=ab9e1b..6a2501 block=395e95..ac9fb2:9475564 effectiveGasPrice=1,000,000,009\nINFO [10-23|22:19:14.300] transaction confirmed                    id=f9baa2..d470a1 completed=4 total=8 hash=0xab9e1bc38d7bd5a2001f111620f7208da79db6025ae16953e592d1307d6a2501 nonce=0 creation=0x0000000000000000000000000000000000000000\nINFO [10-23|22:19:14.300] transaction confirmed                    id=767213..b68ec2 completed=5 total=8 hash=0x892bbb3230404e85d7ae9586db9fd311ead2b01503d03b29328cef5f343c98c8 nonce=0 creation=0x0000000000000000000000000000000000000000\nINFO [10-23|22:19:14.300] transaction confirmed                    id=8b792b..17c7fd completed=6 total=8 hash=0xc2910173d0c093384ad96ed31760d0a5f4dbb029faa74103ccd527e442344d1a nonce=0 creation=0x0000000000000000000000000000000000000000\nINFO [10-23|22:19:14.300] transaction confirmed                    id=47840a..be3ddd completed=7 total=8 hash=0xf0ec55caec59cb9ab2787ae47f417ab47b7c7a6ebea7e8985eff0fd8cc4f05db nonce=0 creation=0x0000000000000000000000000000000000000000\nINFO [10-23|22:19:25.159] Publishing transaction                   service=transactor tx=0xa8e1688ce44d9c19c4813ebcdbfea5d8cab7bd7bceca448027c11813326c13b3 nonce=19 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=2,767,832\nINFO [10-23|22:19:25.282] Transaction confirmed                    service=transactor tx=a8e168..6c13b3 block=54aa5a..a0e8f0:9475565 effectiveGasPrice=1,000,000,010\nINFO [10-23|22:19:25.282] Transaction receipt not found            service=transactor tx=0xa8e1688ce44d9c19c4813ebcdbfea5d8cab7bd7bceca448027c11813326c13b3 nonce=19 gasTipCap=1,000,000,000 gasFeeCap=3,000,000,000 gasLimit=2,767,832 err=\"context canceled\"\nINFO [10-23|22:19:25.282] transaction confirmed                    id=77f163..dbe2d8 completed=8 total=8 hash=0xa8e1688ce44d9c19c4813ebcdbfea5d8cab7bd7bceca448027c11813326c13b3 nonce=0 creation=0x0000000000000000000000000000000000000000\nINFO [10-23|22:19:25.282] deployed implementations\n```",
+      "createdAt": "2025-10-31T15:34:45Z",
+      "closedAt": "2026-11-16T16:40:51Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABIvEDQA",
+      "title": "opgeth-decoupling: retire the in-process op-geth L2 EL in op-e2e system tests and op-devstack/sysgo",
+      "author": "sebastianst",
+      "number": 21744,
+      "repository": "ethereum-optimism/optimism",
+      "body": "\nPart of #20257. See §17 of the [op-geth decoupling doc](https://github.com/ethereum-optimism/optimism/blob/develop/docs/ai/opgeth-decoupling.md). **Blocks #20266.**\n\n## Problem\n\nop-e2e system tests and op-devstack/sysgo can still run **op-geth in-process as the L2 EL**:\n`op-e2e/e2eutils/geth.InitL2` (selected via the `e2eutils/el.InitL2` factory's `ELKindOpGeth`)\nand `op-devstack/sysgo/l2_el_opgeth.go`. After the go.mod flip (#20266) these would silently run\n**upstream** go-ethereum as the L2 EL — wrong OP state transition, no compile error to warn us.\n(The in-process **L1** geth miner is unaffected: plain Ethereum semantics are exactly right for it\nunder upstream.)\n\nThe seams already exist: `el.InitL2` selects between in-process op-geth and external-process\nop-reth, sysgo has `l2_el_opreth.go`, and op-acceptance-tests already sequence op-reth-only for\nKarst+ (#21182).\n\n## Work\n\n- Make op-reth the only L2 EL kind: remove `ELKindOpGeth`, `e2eutils/geth.InitL2`, and\n  `sysgo/l2_el_opgeth.go` (and the geth-only knobs plumbing, e.g. `GethOptions`).\n- Resolve every test currently pinned to the op-geth EL, case by case: migrate to op-reth, or\n  delete with rationale. Derive the current pin list by grepping for `ELKindOpGeth` /\n  `GethOption` rather than trusting a snapshot here.\n- **Folds in #21451**: the pre-Regolith tests are geth-pinned because op-reth returns\n  `IsSystemTx` as a string on pre-Regolith blocks. Resolve per that issue's options — likely\n  delete the pre-Regolith tests and require bedrock/regolith co-activation.\n\n## Acceptance criteria\n\n- No in-process op-geth L2 EL construction remains in op-e2e or op-devstack.\n- System/devstack test suites green on op-reth-only L2 ELs.\n- #21451 closed by this work or explicitly re-scoped.\n\n🤖 *Generated by Claude Code*\n",
+      "createdAt": "2026-07-14T08:15:25Z",
+      "closedAt": "2026-11-16T11:01:20Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABKyc1IQ",
+      "title": "op-deployer,op-chain-ops!: run every deploy script on forge and delete the Go script host",
+      "author": "nonsense",
+      "number": 23647,
+      "body": "This PR is split into a stack for review: #23663 → #23664 → #23665 → #23666 → #23667 → #23668 → #23669. The stack has later review fixes; this PR stays open as the CI-green reference.\n\nop-deployer ran its deploy scripts on `op-chain-ops/script`, an in-process Go EVM. That host needs EVM hooks that only op-geth has (cheatcode precompiles, pranks, no code-size limit), so it blocks the move to upstream go-ethereum (#20266). After this PR, forge is the only script engine, and the Go host and `op-chain-ops/interopgen` are deleted.\n\n**Effect on users**\n\n- op-deployer runs forge for every deployment, and anvil for `prepare` and `continue`. It downloads the pinned Foundry release on Linux and macOS when the tools are not on PATH. The Docker images ship both.\n- Genesis deployments (`apply --deployment-target genesis`, op-e2e, sysgo) run the scripts offline on forge. The L1 and L2 genesis output does not change: before the switch, a differential test found equal state roots from both engines on eight reference intents.\n- Live `apply` and `bootstrap` broadcast with forge, one transaction at a time, and no longer through op-service's txmgr. As txmgr did, each transaction gets the node's gas estimate just before forge sends it, a tip of at least 1 gwei, and a fee cap of twice the base fee (at least 1 gwei) plus the tip. Unlike txmgr, forge does not bump the fee of, or resubmit, a stuck transaction. forge gets the deployer key in a temporary encrypted keystore that only the user can read, never on its command line.\n- `prepare` and `continue` simulate the deployment on an ephemeral anvil fork of the L1, as the deployer, without its key. `continue` then checks the simulated transactions and replays them to L1 through txmgr.\n- op-deployer never compiles. It refuses a contracts bundle that would make forge compile, or whose scripts have no `runWithBytes` entrypoint, and it stops forge as soon as forge starts to compile. So a bundle must come from the contracts release of the same op-deployer release: an `https://` or `file://` bundle of an earlier release is refused (`tag://` locators were already rejected). The default, `embedded`, works.\n- A contracts bundle is a forge project, so op-deployer does not trust its `foundry.toml`: scripts run without the FFI cheatcode, with file access only to the artifacts and to op-deployer's state directory, and forge scripts and anvil inherit only the environment variables that they need (`verify-contract` keeps the full environment, for its API key). anvil listens on loopback without CORS.\n- forge runs need the `lib/` sources of the bundle but no solc compiler. Each forge script loads every artifact of the project, about 1.3 GB, so forge runs take one of `GOMAXPROCS/2` slots per host.\n- forge's output goes to stderr. A failed script reports its revert reason.\n- Removed: the `calldata` and `noop` deployment targets, `op-deployer manage`, the `--use-forge` and `--forge-slow-broadcast` flags, the Windows release binaries and `DeploymentCalldata` in `state.json`. contracts-bedrock loses the `InteropMigration` script and `DummyCaller`.\n\n**Reasons the diff does not show**\n\n- Every forge run uses its own copy of the compile cache and its own broadcast directory, so that concurrent runs (devstack) do not interfere.\n- Each broadcast sends one transaction at a time. Without `--slow`, forge waited forever when a node dropped one of several transactions that it sent at once.\n- Bundle builds run one `forge script` to warm the script cache, as CI's `forge-build` already does. A single script's compile can choose other solc versions than the project build, and then forge compiles on the first run. The builds then check that a second run compiles nothing, and fail if it does.\n- The interop harness and sysgo now run the interop migration on a live L1 through an EIP-7702 delegation from the ProxyAdmin owner, not in the genesis state. The L1 activates Prague at genesis for this.\n- The test `RetryProxy` (op-service) now gives a client error (4xx, but not 429) to the client at once. forge calls methods such as `anvil_nodeInfo` that a proxyd endpoint answers with 403, and the proxy held each of these calls for about 40 s of retries, so the Sepolia tests of `init` timed out.\n- sysgo waits for the L1 transaction index before it deploys: geth rejects receipt queries until its first indexing pass is done, and forge stops after a few quick retries.\n- #23309 (genesis-output changes) is not in this PR, on purpose. It changes genesis output, which this PR must not do.\n- CI jobs that run op-deployer from the checkout (op-e2e, sysgo, kona proof tests) now check out the contracts `lib/` submodules: forge reads the sources to check its compile cache, where the Go host read only artifact JSON.\n- forge runs are not `--offline`: offline, forge requires every solc version of the cache installed even when it compiles nothing. Online, it resolves them from its built-in list and runs the cached artifacts.\n- The `forge` package tests (anvil fork, compile stop, sandbox, environment, slots) run in CI only after #23643, which removes the package from the CI exclusion list.\n\n**Review findings not fixed here**\n\n- Live `apply`/`bootstrap` could keep txmgr by simulating on an anvil fork and replaying, as `continue` does. The #23300 plan chose `forge script --broadcast` for live deploys; this is a follow-up if fee bumping matters for these one-time deployments.\n- The op-e2e interop harness and sysgo could share one `opcm.MigrateInput` type, and sysgo could check that its rollup configs and dependency set name the same chains, as interopgen did. Both are follow-ups.\n- `opcm.NewForgeClient` takes no context for the forge download, and `opcm.PermissionedGameStartingAnchorRoot` now has only test users. Both are unchanged.\n- Security review, not fixed: `continue` checks the sender, target, type and value of the call it replays, but not its calldata against the prepared input (that needs the script's encoding in Go); the RPC URL stays on the command line of forge and anvil, which have no environment binding for it; a crash during a broadcast can leave the encrypted keystore and its password file in a directory that only the user can read (forge refuses a password pipe); and a forge binary in the cache directory is trusted by its version.\n\nCloses #23300, #23301, #23302, #23304, #23305, #23306, #23307 and #23308.\n\nBREAKING CHANGE: The Go packages `op-chain-ops/script`, `op-chain-ops/interopgen`, `op-deployer/pkg/env`, `op-deployer/pkg/deployer/manage` and `op-deployer/pkg/deployer/upgrade` are removed. So are `opcm.Scripts`, the script-host `opcm` constructors, the `opcm.*ViaForge` functions (now `opcm.DeploySuperchain`, `opcm.DeployImplementations`, `opcm.DeployOPChain`, `opcm.DeployAltDA`, `opcm.DeployDisputeGame`, `opcm.DeployMIPS`, `opcm.DeployAlphabetVM`, `opcm.ReadImplementationAddresses` and `opcm.ReadSuperchainDeployment`, which take an `opcm.ForgeEnv`), `ApplyPipelineOpts.PrivateKey`, `UseForge` and `ReceiptQueryInterval`, and in `broadcaster` the `Broadcaster` interface, `CalldataBroadcaster`, `CaptureBroadcaster`, `NoopBroadcaster` and `BroadcastCreate2`. Go programs run Solidity scripts with forge, for example through op-deployer's `forge` package, take the upgrade input types from `opcm`, and build interop test worlds with an op-deployer intent. op-deployer users get forge and anvil from the release images, or let op-deployer download them. Users of `--use-forge`, `--forge-slow-broadcast`, or the `calldata` and `noop` targets drop them; forge is always used. Intents that point at an `https://` or `file://` bundle of an earlier contracts release use `embedded` instead. To move chains to interop, call `OPContractsManagerV2.migrate` as a delegatecall from the chains' ProxyAdmin owner, for example from a superchain-ops task.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-26T14:16:52Z",
+      "mergedAt": null,
+      "additions": 4835,
+      "deletions": 17919
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABOeHpYg",
+      "title": "op-reth: warm the proofs-history page cache ahead of persistence",
+      "author": "jelias2",
+      "number": 24075,
+      "body": "Stacked on #24055; this PR contains its commit too. Review only the commits after it.\n\nThe proofs-history engine persists on a single thread. It reads B-tree pages one at a time through mmap faults, so on network-attached disks it waits on one read of about 1 ms at a time. On op-mainnet hardware (n4-standard-16, Hyperdisk Balanced 20k IOPS) persisting a block waits on about 900 to 1,200 such reads and takes about 700 ms, while the disk runs far below its IOPS limit and the CPUs are idle. During heavy periods the engine cannot keep up and proofs fall behind the tip. This PR reads the same pages earlier, from parallel read-only transactions, so the persistence transaction finds them in the page cache.\n\nEffect on operators: none by default. `--proofs-history.prefetch-threads N` (default 0, off; 0–64) enables warming:\n- When a block enters the engine's buffer, the pages its write will touch are read.\n- When a batch has been persisted, the pages the prunes of the next two batches will touch are read. Two batches, so that a prune's pages are read a whole batch before it runs.\n- Warming only reads. Work that is dropped, late or failed costs performance, never correctness.\n\nMeasured on a pair of op-mainnet followers with production hardware (devnets-private#2562), with 8 threads. Each row compares the two nodes over the same blocks.\n\nAt the tip, persistence time per block:\n\n| | control | with warming |\n|---|---|---|\n| first commit | 721 ms | 244 ms |\n| second commit | 645 ms | 190 ms |\n| second commit, ten minutes of heavier blocks (about twice the keys) | 1,354 ms | 323 ms |\n\nIn the second commit's 190 ms the write takes 25 ms, the prune 89 ms and the commit 76 ms; the control spends 110, 459 and 76 ms. The persistence thread waits on about 70 disk reads per block instead of about 790.\n\nOne node catching up, so that persistence was saturated, persisted 1.44 blocks per second before, 2.6 to 2.8 with the first commit and 2.7 with the second. The first commit left about 260 reads per block in the prune, because its prune pass started when the previous batch finished and scanned changesets on one thread. The second commit removed them (prune 280 to 80 ms per block), and the limit moved to the disk: at 2.7 blocks per second it runs at its provisioned 20,000 IOPS, with about 4,800 page writes and 1,300 reads per block, so commits wait on their writes (71 to 199 ms per block). Catching up also re-executes each block on the engine thread, which takes about 310 ms per block.\n\nNew metrics:\n- `reth_optimism_trie_engine_prefetch_{write,prune}_duration_seconds` and `..._{write,prune}_keys_total`.\n- `reth_optimism_trie_engine_prefetch_dropped_jobs_total`: block writes that were not warmed because warming fell behind persistence. `..._failed_jobs_total`: warming jobs that failed.\n- `reth_optimism_trie_storage_phase_major_faults{operation,phase,table}` and `reth_optimism_trie_storage_write_state_major_faults`: major page faults on the persistence thread per phase, which are the disk reads it waited on. They are read from `/proc/thread-self/stat` and are `0` off Linux.\n\nChoices the diff does not explain:\n- The store receives the block diff and a block range, not key lists, so it derives the keys the way its own write and prune paths do. Tests compare the warmed keys with the keys those paths record.\n- When warming falls behind, the queue drops the oldest buffered block and serves prune passes first. The oldest block is persisted soonest, so warming it helps least, and the prune is the larger share of persistence time.\n- Each job spawns scoped threads instead of using a pool. A spawn costs microseconds against reads of about a millisecond, and the crate gets no new dependency.\n- The live test marks each block as persisted by reth (the `Finish` checkpoint), because the pruner never prunes past reth's persisted head. Without that, no prune ran in the live tests.\n\nReviews: `rust-code-reviewer` ran on both commits. The second commit fixes its findings on the first: the queue policy under overload, the prune range arithmetic, a warming thread that a panic could end, the API shape, and missing tests. On the second commit it found no high-severity issue. Fixed from that review: blocks that stayed queued after an unwind or after a save completed outside the event loop (the queue now holds the buffer's blocks weakly), tests for the pass limit, a moved window and the completed-save hook, and smaller simplifications.\n\nDismissed, with the author's confirmation:\n- A failure to spawn the warming thread panics at startup. The engine's two other service threads do the same, and one of them is spawned next.\n- A save that completes while the engine waits for it (unwind, shutdown) does not request a prune pass. Each pass covers two batches, so the next completed save makes up for it.\n- Blocks in the batch being saved are still warmed. A batch is written in order, so its later blocks still benefit.\n- `spawn_with_thresholds` could be folded into `spawn_with_config`. It predates this PR, and the exex tests use it.\n- The live test does not assert that warming ran. Unit tests assert each hook (`buffered_blocks_are_warmed`, `completed_saves_warm_the_next_prunes`, the prefetcher tests); the live test checks that persistence and pruning stay correct with warming on.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-11T20:06:56Z",
+      "mergedAt": "2026-11-16T21:21:00Z",
+      "additions": 1590,
+      "deletions": 67
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABPgZaZw",
+      "title": "go.mod: build against upstream go-ethereum v1.17.10",
+      "author": "sebastianst",
+      "number": 24176,
+      "body": "**Draft to run CI on the cutover. Not for review or merge in this form.**\n\nRemoves the op-geth `replace` and builds the whole tree against upstream go-ethereum v1.17.10. The tree has never run its tests against upstream go-ethereum, so this PR exists to find what fails at run time.\n\nThe first nine commits still build on op-geth. They move into PRs of their own and land first (#24172); this PR then shrinks to the last four:\n\n- `go.mod`: drop the replace, require v1.17.10, and rewrite the APIs that differ.\n- `op-core/params`: embed both chain configs in the JSON codec (#23200).\n- Remove the op-geth ratchet, the op-geth version check and the `update-op-geth` recipes.\n- Docs describe the monorepo on upstream go-ethereum.\n\nFound so far, beyond what the ratchet's allowlist lists:\n\n- Five places decoded full L2 blocks into go-ethereum types and would fail at run time: op-sync-tester, op-wheel, `check-jovian`, the superroot tool and op-node's consolidation diagnostics. Fixed in the pre-cutover commits.\n- go-ethereum's rpc client treats a successful response that carries `\"error\": null` as an error from v1.17.7 on.\n- Upstream does not build a Prague L1 block unless the EIP-7002 and EIP-7251 queue contracts are in genesis.\n\nCloses #20266\nCloses #23200\n\n🤖 *Co-created with Claude Opus 5.5 and Claude Fable 5.2*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-16T10:47:57Z",
+      "mergedAt": null,
+      "additions": 1356,
+      "deletions": 4532
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABPilLeg",
+      "title": "op-core,op-chain-ops,op-node: pin golden vectors for the values only op-geth pins",
+      "author": "sebastianst",
+      "number": 24187,
+      "body": "The op-geth differential tests are deleted at the cutover to upstream go-ethereum, and some op-core values lose their only pin with them. This pins those values as golden vectors while op-geth is still there to prove them. Test files only.\n\nEvery literal is op-geth's output, and this PR's CI proves it: the existing differential tests now run over the same case tables as the golden tests, or a new assertion compares op-geth's output with the literal. The op-geth half goes with the differential tests; the tables and literal assertions stay, and the files that stay use nothing that only op-geth provides.\n\nPinned:\n- **Deposit transactions:** binary encoding, hash and JSON for nil mint, nil value, empty data, the system-tx flag and extreme values; JSON with a nonce and without the `isSystemTx` key.\n- **Receipts:** trie preimage, binary and RLP encodings of deposit receipts before Regolith, before Canyon and after it, with and without logs; a post-exec receipt; the receipts root over a mixed list.\n- **Fees:** `L1CostBedrock`, `L1CostFjord` (including a zero FastLZ size and large sizes with maximal scalars), and `TxRollupCostData` per transaction type, unsigned and signed.\n- **DA footprint:** the constants, every error path of the scalar extraction, and the footprint for the transaction-type mix, extra deposits and boundary scalars.\n- **Chain config and genesis:** the exact chain-config JSON (key set and order), decoding op-geth-written configs and genesis files with and without `osakaTime`, the genesis header hash per fork schedule and message-passer variant, the full genesis JSON, and `NewL2Genesis` per schedule.\n- **Other encodings:** post-exec transaction JSON, receipt JSON including `l1FeeScalar`, and the span-batch fields of a post-exec transaction.\n\n`TestFjordL1CostParity` now runs over the golden table instead of its previous parameter grid.\n\nStacked on #24184, whose `CalcDAFootprint` takes binary-encoded transactions: the DA footprint vectors hold deposits, which a go-ethereum transaction cannot hold after the cutover.\n\nPart of #24172.\n\n🤖 *Co-created with Claude Opus 5.5 and Claude Fable 5.2*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-16T13:27:02Z",
+      "mergedAt": null,
+      "additions": 1163,
+      "deletions": 227
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABPkLRDg",
+      "title": "kona,op-reth: pin the fork-boundary execution rules op-e2e/opgeth tested",
+      "author": "nonsense",
+      "number": 24193,
+      "body": "The deleted `op-e2e/opgeth` tests pinned fork-boundary execution rules on op-geth. Several of them had no op-reth or kona equivalent, although op-reth now syncs, and kona proves, the history those rules govern. This adds the missing coverage. Nothing changes for users.\n\n| op-geth test | Rule | How this PR handles it |\n|---|---|---|\n| `TestPreregolith` UnusedGasConsumed, `TestRegolith` ReturnUnusedGasToPool | Before Regolith a deposit takes its whole gas limit from the block gas pool. From Regolith its unused gas returns to the pool. | **No new test.** `TestDepositGasParity` already pins the gas each deposit reports at Bedrock, Regolith and Karst, and the gas pool is the block gas limit minus that sum. No registry chain has a pre-Regolith block. |\n| `TestPreCanyon` | Blocks have no withdrawals before Canyon. `PUSH0` is rejected. | **`PUSH0`:** `TestForkActivationEVMRules`, Canyon case. **Withdrawals:** no new test. op-reth rejects attributes with withdrawals before Canyon (`validate_withdrawals_presence`). `TestDepositGasParity` proves pre-Canyon blocks, and kona assembles those headers with its own code. |\n| `TestPreEcotone`, `TestEcotone` | `TSTORE` is rejected before Ecotone and accepted after. | `TestForkActivationEVMRules`, Ecotone case. It also checks that a KZG input whose proof does not verify succeeds before Ecotone and halts after. |\n| `TestPreFjord` | P256VERIFY is absent before Fjord. | New `p256Verify` fixture in `TestPrecompiles`. It returns no output at Ecotone, and `1` at every fork from Fjord to Karst. |\n| `TestFjord` RIP7212_ActivateAfterGenesis | P256VERIFY appears when Fjord activates after genesis. A valid signature returns `1`; an invalid one returns no output. | `TestForkActivationEVMRules`, Fjord case. |\n| `TestIsthmus` EIP2537_* | From Isthmus each BLS12-381 precompile rejects malformed input, also when Isthmus activates after genesis. | `TestForkActivationEVMRules`, Isthmus case. It checks valid outputs, plus one EIP-2537 failure vector per precompile, which must halt and spend the whole gas limit.<br><br>A new kona-client unit test sends the same vectors, an off-curve bn254 point and a failing KZG proof through the precompiles that kona asks the host to compute. It runs at every spec and compares each result with the provider op-reth runs. Before this PR, no test reached the path where the host rejects an input. |\n| `TestInvalidDepositInFCU` | A failing deposit still yields a block. | `TestDepositGasParity`, new `OrdinaryDepositUnfunded` variant. A portal deposit whose value exceeds the sender's balance plus mint must fail, keep the mint, bump the nonce and report its whole gas limit. It runs at Bedrock, Regolith and Karst. |\n| `TestMissingGasLimit` | Payload attributes without a gas limit are rejected; op-geth answers `-38003`. | **Rejection:** no new test. `ensure_well_formed_payload_attributes_rejects_each_rule` already covers it, and op-node always sets the gas limit. **Error code:** op-reth keeps `-32602`. The new comment on `ensure_well_formed_payload_attributes` gives the reason. |\n| `TestPreregolith` DepositNonce, `TestRegolith` DepositNonceCorrect | No `depositNonce` before Regolith. From Regolith it is the sender's nonce before the deposit. | `TestDepositGasParity` now checks the values of `depositNonce` and `depositReceiptVersion` and the nonce increment, with a nonzero sender nonce. op-reth and kona build these receipts with shared code, so a proof alone cannot catch a mistake that both make.<br><br>**Not covered:** the pre-Regolith `contractAddress` quirk, Regolith activating after genesis, and the deposit's RPC `nonce`. No registry chain has a pre-Regolith block, and the RPC fields only present the receipt's value. |\n\nMapping Canyon to the pre-Shanghai spec in op-revm makes `TestForkActivationEVMRules` fail, although op-reth and kona still agree with each other. Making kona-client treat a host rejection as empty output makes the new kona-client test fail.\n\nop-e2e's `TestPrecompile` also picks up the new P256VERIFY fixture. It runs only in the fault-proof CI jobs and was not run locally. The kona proof job gains 17 subtests, about 2% of its CPU time.\n\nThe go-code-reviewer and rust-code-reviewer findings are fixed, except for four that were dismissed:\n- A Karst CLZ probe. It is outside what the op-geth tests covered.\n- Driving the BLS vectors from the in-tree EIP-2537 JSON files. That needs a cross-crate testdata path.\n- A shared constant for the host-failure message. The existing Lagoon limits test matches its message the same way.\n- Dropping an assertion that repeats another. It stays for its clearer failure message.\n\ndeposit-reviewer and kona-sp1-cost-reviewer were skipped: the diff changes only tests and a comment.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/24088\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-16T15:10:06Z",
+      "mergedAt": null,
+      "additions": 568,
+      "deletions": 38
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 5075,
+    "deletions": 2755,
+    "files": 195,
+    "commitCount": 121
   },
-  "completedItems": [],
-  "topContributors": [],
-  "newPRs": 0,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 0
+  "completedItems": [
+    {
+      "title": "ci: shell-quote TARGET_BRANCH when writing it to BASH_ENV",
+      "prNumber": 23773,
+      "type": "other",
+      "body": "CircleCI wrote the PR's target branch into `BASH_ENV` unquoted, in the setup job (`BASE_REVISION`) and in `get-target-branch` (`TARGET_BRANCH`). Git and GitHub allow `$(…)`, backticks and `;` in branch names, so anyone with push access coul",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: only replay registry OPCMs older than the in-tree one",
+      "prNumber": 23954,
+      "type": "other",
+      "body": "`PastUpgrades` fetches the standard-versions list from superchain-registry `main` and replays every final OPCM before applying the in-tree upgrade. Once a release's final registry entry merges, that list includes the OPCM the branch itself ",
+      "files": [
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/setup/ForkL1Live.s.sol",
+        "packages/contracts-bedrock/test/setup/PastUpgrades.sol"
+      ]
+    },
+    {
+      "title": "kona-gossip: record dial and connection counts as counters, not gauges",
+      "prNumber": 23984,
+      "type": "other",
+      "body": "<!--\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\n-->\n\n**Description**\n\n<!--\nA clear and concise description of the features you're adding in this pull request.\n-->\n\n`kona_node_dial_pee",
+      "files": [
+        "rust/kona/crates/node/gossip/src/driver.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/mod.rs",
+        "rust/kona/crates/node/gossip/src/gater.rs",
+        "rust/kona/crates/node/gossip/src/metrics/mod.rs"
+      ]
+    },
+    {
+      "title": "op-reth: add proofs-history persistence flags and phase metrics",
+      "prNumber": 24055,
+      "type": "other",
+      "body": "On op-mainnet, the proofs-history engine falls hundreds to ~1,800 blocks behind the chain for several hours a week. Its persistence batch (write + prune + commit) takes about 3.1s per 5 blocks on average and reaches 90%+ of wall time during",
+      "files": [
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/node.mdx",
+        "docs/public-docs/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/trie/src/db/store/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store/phase.rs",
+        "rust/op-reth/crates/trie/src/db/store/provider_rw.rs",
+        "rust/op-reth/crates/trie/src/db/store/write.rs",
+        "rust/op-reth/crates/trie/src/engine/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/mod.rs",
+        "rust/op-reth/crates/trie/src/engine/persistence/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/persistence/service.rs",
+        "rust/op-reth/crates/trie/src/engine/runner.rs",
+        "rust/op-reth/crates/trie/src/prune/pruner.rs",
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/trie/Cargo.toml"
+      ]
+    },
+    {
+      "title": "op-reth: default the pending block timestamp to the chain's block time",
+      "prNumber": 24078,
+      "type": "other",
+      "body": "Pending-state RPCs date the pending block 12 s, Ethereum's slot time, after its parent. On a 2 s OP chain that runs them up to 10 s ahead. From about five blocks before a hardfork, `eth_call`, `eth_estimateGas`, `eth_createAccessList`, `deb",
+      "files": [
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/pending_block.rs",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "rust/op-reth/bin/src/main.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/chain_metadata.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/configs.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/mod.rs",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs"
+      ]
+    },
+    {
+      "title": "op-reth: warm the proofs-history page cache ahead of persistence",
+      "prNumber": 24075,
+      "type": "other",
+      "body": "Stacked on #24055; this PR contains its commit too. Review only the commits after it.\n\nThe proofs-history engine persists on a single thread. It reads B-tree pages one at a time through mmap faults, so on network-attached disks it waits on ",
+      "files": [
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/node.mdx",
+        "docs/public-docs/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/trie/src/api.rs",
+        "rust/op-reth/crates/trie/src/db/store/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store/phase.rs",
+        "rust/op-reth/crates/trie/src/db/store/prefetch.rs",
+        "rust/op-reth/crates/trie/src/db/store/provider_rw.rs",
+        "rust/op-reth/crates/trie/src/db/store/write.rs",
+        "rust/op-reth/crates/trie/src/engine/buffer/state.rs",
+        "rust/op-reth/crates/trie/src/engine/handle.rs",
+        "rust/op-reth/crates/trie/src/engine/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/mod.rs",
+        "rust/op-reth/crates/trie/src/engine/persistence/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/persistence/service.rs",
+        "rust/op-reth/crates/trie/src/engine/prefetch.rs",
+        "rust/op-reth/crates/trie/src/engine/runner.rs",
+        "rust/op-reth/crates/trie/src/engine/state.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/execute_block.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/index_block.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/reorg.rs",
+        "rust/op-reth/crates/trie/src/metrics.rs",
+        "rust/op-reth/crates/trie/src/prune/metrics.rs",
+        "rust/op-reth/crates/trie/src/prune/pruner.rs",
+        "rust/op-reth/crates/trie/tests/live.rs"
+      ]
+    },
+    {
+      "title": "docs/public-docs: answer operator questions about the interop topology",
+      "prNumber": 24115,
+      "type": "docs",
+      "body": "Node operators preparing for Lagoon keep asking support the same questions:\n- Do they have to run the other chain's execution client?\n- Can they follow someone else's supernode?\n- How much history does that client need?\n- What happens to th",
+      "files": [
+        "docs/public-docs/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/node-operators/guides/configuration/supernode.mdx",
+        "docs/public-docs/notices/interop-prep.mdx",
+        "docs/public-docs/notices/specialized-node-topology.mdx",
+        "docs/public-docs/op-stack/interop/explainer.mdx",
+        "docs/public-docs/op-stack/interop/index.mdx",
+        "docs/public-docs/op-stack/interop/supernode.mdx"
+      ]
+    },
+    {
+      "title": "op-devstack: remove the in-process op-geth L2 EL and the EL-kind selector",
+      "prNumber": 24156,
+      "type": "other",
+      "body": "op-devstack/sysgo could still start an in-process op-geth as the L2 EL, selected with `DEVSTACK_L2EL_KIND=op-geth`. CI only ever ran op-reth and no test pins op-geth any more, so this removes the op-geth EL and the EL-kind selector. After t",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "docs/ai/acceptance-tests.md",
+        "docs/ai/opgeth-decoupling.md",
+        "docs/ai/rust-dev.md",
+        "op-acceptance-tests/justfile",
+        "op-acceptance-tests/tests/derivation/confirmations/confirmations_test.go",
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-acceptance-tests/tests/safedb_parity/init_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/system.go",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go",
+        "op-acceptance-tests/tests/sync/el_restart/el_restart_test.go",
+        "op-devstack/README.md",
+        "op-devstack/presets/singlechain_from_runtime.go",
+        "op-devstack/presets/twol2.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/el_node_identity.go",
+        "op-devstack/sysgo/l2_el.go",
+        "op-devstack/sysgo/l2_el_opgeth.go",
+        "op-devstack/sysgo/l2_el_opreth.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_supernode_synctester_variant.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "op-e2e/e2eutils/geth/geth.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "rust/kona/tests/README.md",
+        "rust/kona/tests/justfile",
+        "rust/kona/tests/node/utils/mixed_preset.go",
+        "rust/kona/tests/node/utils/test_sequencer_preset_test.go",
+        "rust/op-reth/tests/README.md",
+        "rust/op-reth/tests/justfile",
+        "rust/op-reth/tests/proofs/utils/preset.go"
+      ]
+    },
+    {
+      "title": "ci: run the memory-all acceptance tests on 4 nodes, 16 at a time",
+      "prNumber": 24145,
+      "type": "tests",
+      "body": "- The memory-all acceptance tests mostly wait on blocks, so each node sits at about 22% CPU while running 8 tests at once. This runs them on 4 nodes, 16 at a time, instead of 8 nodes, 8 at a time. Same tests, half the machines.\n- Job time i",
+      "files": [
+        ".circleci/continue/main.yml",
+        "op-acceptance-tests/justfile"
+      ]
+    },
+    {
+      "title": "alloy-op-hardforks!: remove hardcoded chain fork schedules",
+      "prNumber": 24142,
+      "type": "other",
+      "body": "`alloy-op-hardforks` published its own copy of the OP Mainnet/Sepolia and Base Mainnet/Sepolia fork schedules. Production code never reads it: op-node, op-reth and kona all take fork times from the superchain-registry. The copy still had to",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/alloy-op-evm/src/block/tests.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/alloy-op-hardforks/Cargo.toml",
+        "rust/alloy-op-hardforks/README.md",
+        "rust/alloy-op-hardforks/src/base/mainnet.rs",
+        "rust/alloy-op-hardforks/src/base/mod.rs",
+        "rust/alloy-op-hardforks/src/base/sepolia.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/alloy-op-hardforks/src/optimism/mainnet.rs",
+        "rust/alloy-op-hardforks/src/optimism/mod.rs",
+        "rust/alloy-op-hardforks/src/optimism/sepolia.rs",
+        "rust/kona/crates/proof/executor/src/db/mod.rs",
+        "rust/kona/crates/protocol/registry/Cargo.toml",
+        "rust/kona/crates/protocol/registry/src/lib.rs",
+        "rust/kona/crates/protocol/registry/src/superchain.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/op_mainnet.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/op_sepolia.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/op-reth/crates/chainspec/src/lib.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/configs.rs",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/node/tests/it/rpc.rs",
+        "rust/op-reth/crates/rpc/src/eth/capabilities.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt/tests.rs",
+        "rust/op-reth/crates/chainspec/Cargo.toml"
+      ]
+    },
+    {
+      "title": "rust: keep shared reth update guidance in UPDATING-RETH",
+      "prNumber": 24132,
+      "type": "other",
+      "body": "Makes `rust/UPDATING-RETH.md` the single source for guidance that both the reth updater and the reviewer need. The review guide, the `reth-update-reviewer` agent and the `update-reth` skill now keep only what one of them needs, and point at",
+      "files": [
+        ".claude/agents/reth-update-reviewer.md",
+        ".claude/skills/update-reth/SKILL.md",
+        "docs/ai/reth-update-review.md",
+        "docs/ai/reth-upstream-mirrors.md",
+        "docs/ai/rust-dev.md",
+        "rust/UPDATING-RETH.md",
+        "rust/RETH-CARRIED-PATCHES.md",
+        "rust/UPSTREAM-ASSUMPTIONS.md"
+      ]
+    },
+    {
+      "title": "op-deployer,contracts-bedrock: log deployed and reused deterministic contracts",
+      "prNumber": 24128,
+      "type": "other",
+      "body": "op-deployer skipped a contract that already existed at its deterministic address without saying so, so an operator could not tell which implementations and blueprints a run deployed and which it reused. Each deterministic contract and bluep",
+      "files": [
+        "op-deployer/pkg/deployer/opcm/implementations_test.go",
+        "packages/contracts-bedrock/scripts/libraries/DeployUtils.sol",
+        "packages/contracts-bedrock/test/libraries/DeployUtils.t.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol"
+      ]
+    },
+    {
+      "title": "op-devstack: configure sysgo op-nodes for an op-reth engine",
+      "prNumber": 24163,
+      "type": "other",
+      "body": "sysgo built its op-node sync config with `SupportsPostFinalizationELSync: false`, the op-geth value, while every L2 EL it starts is op-reth. An EL-sync op-node restarted against an EL that already had a finalized block took the geth-only br",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-devstack/sysgo/l2_el.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go"
+      ]
+    },
+    {
+      "title": "docs: check CI jobs that never run on a PR in the CI config review",
+      "prNumber": 24200,
+      "type": "docs",
+      "body": "#24103 changed a contracts-bedrock justfile recipe and merged with green CI. The recipe change broke `contracts-bedrock-build` in the nightly `scheduled-shipped-binaries` workflow, which passes its own `--deny-warnings` and never runs on a ",
+      "files": [
+        ".claude/agents/ci-config-reviewer.md",
+        "AGENTS.md",
+        "docs/ai/ci-config-review.md"
+      ]
+    },
+    {
+      "title": "docs: add the Upgrade 21 Cantina security review",
+      "prNumber": 24199,
+      "type": "docs",
+      "body": "Adds Cantina's final report for Upgrade 21 to the published security reviews, with its README row. The review ran from October 14 to 27 on commit 8fdb2775, which `op-contracts/v9.0.0` contains. It found 19 low-risk and 15 informational issu",
+      "files": [
+        "docs/security-reviews/2026_11-U21-Cantina.pdf",
+        "docs/security-reviews/README.md"
+      ]
+    },
+    {
+      "title": "release-notes: let pr-facts.sh parse under macOS bash 3.2",
+      "prNumber": 24198,
+      "type": "other",
+      "body": "The release-notes skill's `pr-facts.sh` fails before it runs on a Mac's default `/bin/bash` (3.2): `syntax error near unexpected token ';;'` at line 122.\n\nbash 3.2 misreads the `)` of a `case` pattern inside `$(...)`. This replaces that `ca",
+      "files": [
+        ".claude/skills/release-notes/scripts/pr-facts.sh"
+      ]
+    },
+    {
+      "title": "docs: describe op-deployer releases without a registry entry",
+      "prNumber": 24196,
+      "type": "docs",
+      "body": "The release workflow page lists the superchain-registry update and the `CurrentTag` bump as required for every new contract version. The allowlist variant release skipped both: chains select its OPCM with `opcmAddress` in a `custom` or `sta",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/release-workflows.mdx"
+      ]
+    },
+    {
+      "title": "rust: bump crates for 7 RustSec advisories and check advisories daily",
+      "prNumber": 24194,
+      "type": "other",
+      "body": "Lockfile-only bumps that clear 7 RustSec vulnerabilities in the crates op-reth and kona-node use, plus a daily `rust-deny-advisories` job so new ones get noticed. The job never blocks a PR.\n\n| Crate | From | To | Advisory |\n|---|---|---|---",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/routing.yml",
+        ".circleci/scripts/test-decision-tree.sh",
+        "docs/ai/rust-dev.md",
+        "rust/Cargo.lock",
+        "rust/deny.toml",
+        "rust/kona/sp1/programs/Cargo.lock"
+      ]
+    },
+    {
+      "title": "ci: five small Rust CI fixes (toolchain pin, pin drift check, duplicate doc tests, clippy and udeps size, --locked)",
+      "prNumber": 24192,
+      "type": "bugfix",
+      "body": "Five small Rust CI changes. Bench [140132](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/140132) (equivalent bench branch, 38 of 38 jobs green) against develop [140093](https://app.circleci.com/pipelines/github/ethere",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        "rust/rust-toolchain.toml"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: faster Kontrol CI, a bounded PublishedGas invariant, and a robust solady import",
+      "prNumber": 24191,
+      "type": "other",
+      "body": "Three independent changes, one commit each.\n\n## 1. Kontrol: faster setup, drop the unused deployment summary\n\n- `check-kontrol-build` drops `docker_layer_caching`. It never hit (14 of 14 runs pulled the full image) and added about 70 s befo",
+      "files": [
+        ".circleci/continue/main.yml",
+        "packages/contracts-bedrock/justfile",
+        "packages/contracts-bedrock/scripts/checks/check-kontrol-summaries-unchanged.sh",
+        "packages/contracts-bedrock/test/L1/L1CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/L1/L1ERC721Bridge.t.sol",
+        "packages/contracts-bedrock/test/L1/L1StandardBridge.t.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/invariants/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/kontrol/README.md",
+        "packages/contracts-bedrock/test/kontrol/proofs/utils/DeploymentSummary.sol",
+        "packages/contracts-bedrock/test/kontrol/proofs/utils/DeploymentSummaryCode.sol",
+        "packages/contracts-bedrock/test/kontrol/scripts/common.sh",
+        "packages/contracts-bedrock/test/kontrol/scripts/make-summary-deployment.sh",
+        "packages/contracts-bedrock/test/libraries/SemverComp.t.sol"
+      ]
+    },
+    {
+      "title": "ci: prune Go build caches, gen2 for defaulted jobs, blobless checkout, faster develop contracts tests",
+      "prNumber": 24190,
+      "type": "tests",
+      "body": "Five independent CircleCI changes, one commit each, plus two small review fixups. Each reverts on its own.\n\n## 1. Prune the memory-all and go-lint Go build caches, skip Go cache saves in the queue\n\n- Since #24028 these caches only grow. op-",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "op-deployer: measure forge's peak memory and size slots for bundles without the AST",
+      "prNumber": 24180,
+      "type": "other",
+      "body": "op-deployer's forge slots counted 1.5 GiB per run, sized for artifacts with the AST. Since #24003, forge runs only on bundles without the AST unless op-deployer cannot copy the build, and a run peaks at about a quarter of that. Nothing kept",
+      "files": [
+        "op-deployer/pkg/deployer/forge/client.go",
+        "op-deployer/pkg/deployer/forge/memlimit_linux.go",
+        "op-deployer/pkg/deployer/forge/memlimit_linux_test.go",
+        "op-deployer/pkg/deployer/forge/peakmem_darwin.go",
+        "op-deployer/pkg/deployer/forge/peakmem_linux.go",
+        "op-deployer/pkg/deployer/forge/peakmem_other.go",
+        "op-deployer/pkg/deployer/forge/peakmem_test.go",
+        "op-deployer/pkg/deployer/forge/slots.go",
+        "op-deployer/pkg/deployer/forge/slots_test.go",
+        "op-deployer/pkg/deployer/integration_test/forge_memory_test.go"
+      ]
+    },
+    {
+      "title": "kona-genesis!: remove hardcoded Base chain and chain-ID base-fee configs",
+      "prNumber": 24179,
+      "type": "other",
+      "body": "Follows #24142, which removed Base's fork schedules. This drops the rest of kona's hand-maintained Base (8453 / 84532) config: the chain-ID constants and the Base EIP-1559 constants, params and configs in kona-genesis, plus the tests built ",
+      "files": [
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/run/binary.mdx",
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/run/binary.mdx",
+        "rust/kona/bin/node/src/cli.rs",
+        "rust/kona/bin/node/src/flags/globals.rs",
+        "rust/kona/crates/node/peers/src/enr.rs",
+        "rust/kona/crates/node/peers/src/nodes.rs",
+        "rust/kona/crates/protocol/genesis/src/chain/config.rs",
+        "rust/kona/crates/protocol/genesis/src/chain/mod.rs",
+        "rust/kona/crates/protocol/genesis/src/lib.rs",
+        "rust/kona/crates/protocol/genesis/src/params.rs",
+        "rust/kona/crates/protocol/genesis/src/rollup.rs",
+        "rust/kona/crates/protocol/registry/src/lib.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/op_sepolia.rs",
+        "rust/kona/crates/utilities/cli/src/flags/globals.rs"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests,kona: drop leftovers of the op-geth L2 EL",
+      "prNumber": 24175,
+      "type": "tests",
+      "body": "Follow-up to the review of #24156: removes what still referred to the op-geth L2 EL after it.\n\n- `interopTxRejectedError` no longer matches `\"transaction filtered out\"`, op-geth's interop txpool rejection. Nothing in the suite returns it, s",
+      "files": [
+        "op-acceptance-tests/tests/interop/filter/interop_filter_test.go",
+        "op-acceptance-tests/tests/interop/seqwindow/expiry_test.go",
+        "op-acceptance-tests/tests/interop/upgrade/pre_test.go",
+        "op-devstack/sysgo/l2_el.go",
+        "rust/kona/tests/README.md",
+        "rust/kona/tests/justfile"
+      ]
+    },
+    {
+      "title": "ops: type-check the op-geth ratchet against the cutover target v1.17.10",
+      "prNumber": 24174,
+      "type": "other",
+      "body": "The ratchet type-checked the tree against go-ethereum v1.17.2, the release op-geth is based on. The cutover (#20266) moves to v1.17.10, and upstream changed further APIs in between, so the allowlist was not the full list of what the cutover",
+      "files": [
+        ".circleci/continue/main.yml",
+        "docs/ai/go-dev.md",
+        "docs/ai/opgeth-decoupling.md",
+        "justfile",
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "ops/scripts/opgeth-ratchet/collect.go",
+        "ops/scripts/opgeth-ratchet/collect_test.go",
+        "ops/scripts/opgeth-ratchet/main.go",
+        "ops/scripts/opgeth-ratchet/main_test.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/fork/types/types.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/g/g.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/h/h.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/i/i.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/j/j.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/upstream/types/types.go",
+        "ops/scripts/opgeth-ratchet/upstream.go"
+      ]
+    },
+    {
+      "title": "op-deployer!: reject a deployer L1 prefund in a genesis apply",
+      "prNumber": 24173,
+      "type": "other",
+      "body": "`op-deployer apply --deployment-target genesis` now fails before any stage runs when `l1DevGenesisParams.prefund` has an entry for the deployer. Before, the apply removed the deployer's account from the L1 genesis after its deployments and ",
+      "files": [
+        "op-deployer/pkg/deployer/apply.go",
+        "op-deployer/pkg/deployer/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 457.2654857414301,
+      "prScore": 384.8274857414301,
+      "issueScore": 10,
+      "reviewScore": 62,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 226.9714085526421,
+      "prScore": 185.9714085526421,
+      "issueScore": 0,
+      "reviewScore": 41,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 173.04416503265725,
+      "prScore": 130.10616503265726,
+      "issueScore": 0,
+      "reviewScore": 42.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 109.76518862080083,
+      "prScore": 61.827188620800825,
+      "issueScore": 0,
+      "reviewScore": 47.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 100.88212714140991,
+      "prScore": 86.38212714140991,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 54,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 54,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 46.78917136791702,
+      "prScore": 46.78917136791702,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 32.664306144334056,
+      "prScore": 22.664306144334056,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 30,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 30,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 28.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 28.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 24,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 24,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 19.97789428852452,
+      "prScore": 9.97789428852452,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Qumeric",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3511113?u=bfe1b7d38772c72538a25cc8e7d84825b9baa62b&v=4",
+      "totalScore": 9.482189633918262,
+      "prScore": 9.482189633918262,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 4.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "asdv23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "benjichat",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/63160791?u=a1ccf58928ad4564666f1aec67847ffcb44a5422&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 26,
+  "mergedPRs": 26,
+  "newIssues": 6,
+  "closedIssues": 9,
+  "activeContributors": 25
 }

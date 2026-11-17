@@ -5,7 +5,7 @@
     "intervalType": "month"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-01 to 2026-12-01, ethereum-optimism/optimism had 253 new PRs (174 merged), 74 new issues, and 85 active contributors.",
+  "overview": "From 2026-11-01 to 2026-12-01, ethereum-optimism/optimism had 284 new PRs (204 merged), 80 new issues, and 86 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABaMk1Eg",
@@ -106,6 +106,18 @@
       "deletions": 104
     },
     {
+      "id": "PR_kwDODjvEJM8AAAABKyc1IQ",
+      "title": "op-deployer,op-chain-ops!: run every deploy script on forge and delete the Go script host",
+      "author": "nonsense",
+      "number": 23647,
+      "body": "This PR is split into a stack for review: #23663 → #23664 → #23665 → #23666 → #23667 → #23668 → #23669. The stack has later review fixes; this PR stays open as the CI-green reference.\n\nop-deployer ran its deploy scripts on `op-chain-ops/script`, an in-process Go EVM. That host needs EVM hooks that only op-geth has (cheatcode precompiles, pranks, no code-size limit), so it blocks the move to upstream go-ethereum (#20266). After this PR, forge is the only script engine, and the Go host and `op-chain-ops/interopgen` are deleted.\n\n**Effect on users**\n\n- op-deployer runs forge for every deployment, and anvil for `prepare` and `continue`. It downloads the pinned Foundry release on Linux and macOS when the tools are not on PATH. The Docker images ship both.\n- Genesis deployments (`apply --deployment-target genesis`, op-e2e, sysgo) run the scripts offline on forge. The L1 and L2 genesis output does not change: before the switch, a differential test found equal state roots from both engines on eight reference intents.\n- Live `apply` and `bootstrap` broadcast with forge, one transaction at a time, and no longer through op-service's txmgr. As txmgr did, each transaction gets the node's gas estimate just before forge sends it, a tip of at least 1 gwei, and a fee cap of twice the base fee (at least 1 gwei) plus the tip. Unlike txmgr, forge does not bump the fee of, or resubmit, a stuck transaction. forge gets the deployer key in a temporary encrypted keystore that only the user can read, never on its command line.\n- `prepare` and `continue` simulate the deployment on an ephemeral anvil fork of the L1, as the deployer, without its key. `continue` then checks the simulated transactions and replays them to L1 through txmgr.\n- op-deployer never compiles. It refuses a contracts bundle that would make forge compile, or whose scripts have no `runWithBytes` entrypoint, and it stops forge as soon as forge starts to compile. So a bundle must come from the contracts release of the same op-deployer release: an `https://` or `file://` bundle of an earlier release is refused (`tag://` locators were already rejected). The default, `embedded`, works.\n- A contracts bundle is a forge project, so op-deployer does not trust its `foundry.toml`: scripts run without the FFI cheatcode, with file access only to the artifacts and to op-deployer's state directory, and forge scripts and anvil inherit only the environment variables that they need (`verify-contract` keeps the full environment, for its API key). anvil listens on loopback without CORS.\n- forge runs need the `lib/` sources of the bundle but no solc compiler. Each forge script loads every artifact of the project, about 1.3 GB, so forge runs take one of `GOMAXPROCS/2` slots per host.\n- forge's output goes to stderr. A failed script reports its revert reason.\n- Removed: the `calldata` and `noop` deployment targets, `op-deployer manage`, the `--use-forge` and `--forge-slow-broadcast` flags, the Windows release binaries and `DeploymentCalldata` in `state.json`. contracts-bedrock loses the `InteropMigration` script and `DummyCaller`.\n\n**Reasons the diff does not show**\n\n- Every forge run uses its own copy of the compile cache and its own broadcast directory, so that concurrent runs (devstack) do not interfere.\n- Each broadcast sends one transaction at a time. Without `--slow`, forge waited forever when a node dropped one of several transactions that it sent at once.\n- Bundle builds run one `forge script` to warm the script cache, as CI's `forge-build` already does. A single script's compile can choose other solc versions than the project build, and then forge compiles on the first run. The builds then check that a second run compiles nothing, and fail if it does.\n- The interop harness and sysgo now run the interop migration on a live L1 through an EIP-7702 delegation from the ProxyAdmin owner, not in the genesis state. The L1 activates Prague at genesis for this.\n- The test `RetryProxy` (op-service) now gives a client error (4xx, but not 429) to the client at once. forge calls methods such as `anvil_nodeInfo` that a proxyd endpoint answers with 403, and the proxy held each of these calls for about 40 s of retries, so the Sepolia tests of `init` timed out.\n- sysgo waits for the L1 transaction index before it deploys: geth rejects receipt queries until its first indexing pass is done, and forge stops after a few quick retries.\n- #23309 (genesis-output changes) is not in this PR, on purpose. It changes genesis output, which this PR must not do.\n- CI jobs that run op-deployer from the checkout (op-e2e, sysgo, kona proof tests) now check out the contracts `lib/` submodules: forge reads the sources to check its compile cache, where the Go host read only artifact JSON.\n- forge runs are not `--offline`: offline, forge requires every solc version of the cache installed even when it compiles nothing. Online, it resolves them from its built-in list and runs the cached artifacts.\n- The `forge` package tests (anvil fork, compile stop, sandbox, environment, slots) run in CI only after #23643, which removes the package from the CI exclusion list.\n\n**Review findings not fixed here**\n\n- Live `apply`/`bootstrap` could keep txmgr by simulating on an anvil fork and replaying, as `continue` does. The #23300 plan chose `forge script --broadcast` for live deploys; this is a follow-up if fee bumping matters for these one-time deployments.\n- The op-e2e interop harness and sysgo could share one `opcm.MigrateInput` type, and sysgo could check that its rollup configs and dependency set name the same chains, as interopgen did. Both are follow-ups.\n- `opcm.NewForgeClient` takes no context for the forge download, and `opcm.PermissionedGameStartingAnchorRoot` now has only test users. Both are unchanged.\n- Security review, not fixed: `continue` checks the sender, target, type and value of the call it replays, but not its calldata against the prepared input (that needs the script's encoding in Go); the RPC URL stays on the command line of forge and anvil, which have no environment binding for it; a crash during a broadcast can leave the encrypted keystore and its password file in a directory that only the user can read (forge refuses a password pipe); and a forge binary in the cache directory is trusted by its version.\n\nCloses #23300, #23301, #23302, #23304, #23305, #23306, #23307 and #23308.\n\nBREAKING CHANGE: The Go packages `op-chain-ops/script`, `op-chain-ops/interopgen`, `op-deployer/pkg/env`, `op-deployer/pkg/deployer/manage` and `op-deployer/pkg/deployer/upgrade` are removed. So are `opcm.Scripts`, the script-host `opcm` constructors, the `opcm.*ViaForge` functions (now `opcm.DeploySuperchain`, `opcm.DeployImplementations`, `opcm.DeployOPChain`, `opcm.DeployAltDA`, `opcm.DeployDisputeGame`, `opcm.DeployMIPS`, `opcm.DeployAlphabetVM`, `opcm.ReadImplementationAddresses` and `opcm.ReadSuperchainDeployment`, which take an `opcm.ForgeEnv`), `ApplyPipelineOpts.PrivateKey`, `UseForge` and `ReceiptQueryInterval`, and in `broadcaster` the `Broadcaster` interface, `CalldataBroadcaster`, `CaptureBroadcaster`, `NoopBroadcaster` and `BroadcastCreate2`. Go programs run Solidity scripts with forge, for example through op-deployer's `forge` package, take the upgrade input types from `opcm`, and build interop test worlds with an op-deployer intent. op-deployer users get forge and anvil from the release images, or let op-deployer download them. Users of `--use-forge`, `--forge-slow-broadcast`, or the `calldata` and `noop` targets drop them; forge is always used. Intents that point at an `https://` or `file://` bundle of an earlier contracts release use `embedded` instead. To move chains to interop, call `OPContractsManagerV2.migrate` as a delegatecall from the chains' ProxyAdmin owner, for example from a superchain-ops task.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-26T14:16:52Z",
+      "mergedAt": null,
+      "additions": 4835,
+      "deletions": 17919
+    },
+    {
       "id": "PR_kwDODjvEJM8AAAABOFn79w",
       "title": "contracts-bedrock: add ComplianceModule bridge hook",
       "author": "lumoswiz",
@@ -116,25 +128,13 @@
       "mergedAt": "2026-11-12T12:36:58Z",
       "additions": 4762,
       "deletions": 16
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABK5d_Eg",
-      "title": "op-deployer!: run live apply and bootstrap on forge by default",
-      "author": "nonsense",
-      "number": 23664,
-      "body": "Stack 2/7, merge in order: #23663 → #23664 → #23665 → #23666 → #23667 → #23668 → #23669. The whole change, with green CI, is #23647.\n\nThe Go script host needs EVM hooks that only op-geth has, so it blocks the move to upstream go-ethereum (#20266). op-deployer already had an opt-in forge path for live deployments. This PR makes that path dependable and the default for live `apply` and `bootstrap`. Genesis deployments, the L2 genesis, `prepare` and `continue` still run on the Go script host; later PRs of the stack move them.\n\n**Effect on users**\n\n- Live `apply` and `bootstrap` run on forge. `--use-forge=false` still runs them on the Go script host, until #23308 removes the flag. `--forge-slow-broadcast` is removed: every broadcast sends one transaction at a time.\n- As txmgr did, each transaction gets the node's gas estimate just before forge sends it, a tip of at least 1 gwei, and a fee cap of twice the base fee (at least 1 gwei) plus the tip. Unlike txmgr, forge does not bump the fee of, or resubmit, a stuck transaction.\n- forge gets the deployer key in a temporary encrypted keystore that only the user can read, never on its command line.\n- op-deployer never compiles. It refuses a contracts bundle whose scripts have no `runWithBytes` entrypoint, and it stops forge as soon as forge starts to compile. So a live deployment needs the contracts release of the same op-deployer release: an `https://` or `file://` bundle of an earlier release is refused (`tag://` locators were already rejected). The default, `embedded`, works, and `--use-forge=false` keeps the Go script host until #23308.\n- A contracts bundle is a forge project, so op-deployer does not trust its `foundry.toml`: scripts run without FFI, with file access only to the artifacts, and forge inherits only the environment variables that it needs (`verify-contract` keeps the full environment, for its API key). Each forge script loads every artifact of the project, about 1.3 GB, so forge runs take one of `GOMAXPROCS/2` slots per host.\n- forge's output goes to stderr. A failed script reports its revert reason.\n- The artifacts-locators page no longer lists `tag://` locators, which op-deployer already rejects. The manual Sepolia test script no longer offers the Go script host as its default engine.\n- The forge download detects musl, uses `--cache-dir`, and gives a clear error without network access. The Windows release binaries are no longer built.\n\n**Reasons the diff does not show**\n\n- Each broadcast sends one transaction at a time: without `--slow`, forge waited forever when a node dropped one of several transactions that it sent at once.\n- forge runs are not `--offline`: offline, forge requires every solc version of the cache installed even when it compiles nothing. A compile watcher enforces \"never compile\" instead.\n- Every forge run uses its own copy of the compile cache and its own broadcast directory, so that concurrent runs (devstack) do not interfere.\n- Bundle builds (Docker, melange, `just forge-build`) run one `forge script` to warm the script cache, and fail when a second run would compile: a single script's compile can choose other solc versions than the project build.\n- CI jobs that run op-deployer from the checkout now check out the contracts `lib/` submodules: forge reads the sources to check its compile cache.\n- sysgo waits for the L1 transaction index before it deploys chains: geth rejects receipt queries until its first indexing pass, and forge gives up after a few quick retries.\n- The test `RetryProxy` gives a client error (4xx, not 429) to the client at once: forge calls methods such as `anvil_nodeInfo` that a proxyd endpoint answers with 403, and the retries held each call for about 40 s.\n- The `forge` package tests run in CI only after #23643, which removes the package from the CI exclusion list.\n\n**Reviews**\n\ngo-code-reviewer on the transitional code of this PR and the next two. Fixed: the BREAKING CHANGE text named `tag://` instead of `https://`/`file://` bundles, and `--use-forge=false` had no test (a live subtest now covers it).\n\n**Known limits, not fixed here**\n\nLive deploys could keep txmgr by simulating on an anvil fork and replaying, as `continue` does (#23306); the #23300 plan chose `forge script --broadcast`. The RPC URL stays on the command line of forge, which has no environment binding for it. A crash during a broadcast can leave the encrypted keystore and its password file in a directory that only the user can read (forge refuses a password pipe). A forge binary in the cache directory is trusted by its version.\n\nCloses #23302.\n\nBREAKING CHANGE: `op-deployer apply` and `op-deployer bootstrap` run on forge by default; `--use-forge=false` runs them on the Go script host until a later release removes it. `--forge-slow-broadcast` is removed. An `https://` or `file://` bundle of an earlier contracts release is refused for live `apply` and `bootstrap`; use `embedded`, or `--use-forge=false` until the Go script host is removed. Go callers replace `ApplyPipelineOpts.UseForge`, `ForgeSlowBroadcast` and `PrivateKey` with `UseScriptHost` (zero value: forge) and `DeployerPrivateKey`; `pipeline.Env`'s `ForgeClient`, `UseForge`, `L1RPCUrl` and `PrivateKey` with `Forge`; and bootstrap's `UseForge` and `ForgeSlowBroadcast` with `UseScriptHost`. `forge.ScriptCaller` returns `(output, error)` without the recompiled flag, and `forge.Client.SlowBroadcast` is removed. The Windows release binaries are no longer built.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-10-26T23:41:36Z",
-      "mergedAt": "2026-11-10T15:08:36Z",
-      "additions": 3485,
-      "deletions": 853
     }
   ],
   "codeChanges": {
-    "additions": 74254,
-    "deletions": 35682,
-    "files": 1106,
-    "commitCount": 1579
+    "additions": 79578,
+    "deletions": 38514,
+    "files": 1223,
+    "commitCount": 1770
   },
   "completedItems": [
     {
@@ -692,6 +692,16 @@
         ".circleci/continue/main.yml",
         ".circleci/scripts/test-go-mod-cache.py",
         "docs/ai/ci-ops.md"
+      ]
+    },
+    {
+      "title": "ci: shell-quote TARGET_BRANCH when writing it to BASH_ENV",
+      "prNumber": 23773,
+      "type": "other",
+      "body": "CircleCI wrote the PR's target branch into `BASH_ENV` unquoted, in the setup job (`BASE_REVISION`) and in `get-target-branch` (`TARGET_BRANCH`). Git and GitHub allow `$(…)`, backticks and `;` in branch names, so anyone with push access coul",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/main.yml"
       ]
     },
     {
@@ -2073,6 +2083,17 @@
       ]
     },
     {
+      "title": "contracts-bedrock: only replay registry OPCMs older than the in-tree one",
+      "prNumber": 23954,
+      "type": "other",
+      "body": "`PastUpgrades` fetches the standard-versions list from superchain-registry `main` and replays every final OPCM before applying the in-tree upgrade. Once a release's final registry entry merges, that list includes the OPCM the branch itself ",
+      "files": [
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol",
+        "packages/contracts-bedrock/test/setup/ForkL1Live.s.sol",
+        "packages/contracts-bedrock/test/setup/PastUpgrades.sol"
+      ]
+    },
+    {
       "title": "op-deployer: deploy OP Private private chains on their settlement chain",
       "prNumber": 23953,
       "type": "other",
@@ -2370,6 +2391,18 @@
       ]
     },
     {
+      "title": "kona-gossip: record dial and connection counts as counters, not gauges",
+      "prNumber": 23984,
+      "type": "other",
+      "body": "<!--\nContributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md\n-->\n\n**Description**\n\n<!--\nA clear and concise description of the features you're adding in this pull request.\n-->\n\n`kona_node_dial_pee",
+      "files": [
+        "rust/kona/crates/node/gossip/src/driver.rs",
+        "rust/kona/crates/node/gossip/src/driver/tests/mod.rs",
+        "rust/kona/crates/node/gossip/src/gater.rs",
+        "rust/kona/crates/node/gossip/src/metrics/mod.rs"
+      ]
+    },
+    {
       "title": "op-acceptance-tests: use time travel for L1 finality in slow memory-all tests",
       "prNumber": 24021,
       "type": "tests",
@@ -2378,6 +2411,20 @@
         "op-acceptance-tests/tests/interop/upgrade/finalized_activation_test.go",
         "op-acceptance-tests/tests/proofs/zk/honest_challenger_test.go",
         "op-acceptance-tests/tests/supernode/interop/head_progression_test.go"
+      ]
+    },
+    {
+      "title": "docs/public-docs: mark monitorism as an OP Enterprise feature",
+      "prNumber": 24019,
+      "type": "feature",
+      "body": "The chain monitoring and launch-paths pages now present `monitorism` as an OP Enterprise customers premium service. \n\nGated sections now use a shared availability marker, `snippets/op-enterprise-feature.mdx`. It is a gray `sm` badge with a ",
+      "files": [
+        "docs/public-docs/chain-operators/launch-paths.mdx",
+        "docs/public-docs/chain-operators/tools/chain-monitoring.mdx",
+        "docs/public-docs/docs.json",
+        "docs/public-docs/snippets/op-enterprise-feature.mdx",
+        "docs/public-docs/styles/op-enterprise.css",
+        "docs/public-docs/chain-operators/guides/management/network-architecture.mdx"
       ]
     },
     {
@@ -2576,6 +2623,32 @@
         ".circleci/continue/main.yml",
         ".circleci/scripts/forge-junit-add-file.py",
         "packages/contracts-bedrock/test/setup/DeployVariations.t.sol"
+      ]
+    },
+    {
+      "title": "op-reth: add proofs-history persistence flags and phase metrics",
+      "prNumber": 24055,
+      "type": "other",
+      "body": "On op-mainnet, the proofs-history engine falls hundreds to ~1,800 blocks behind the chain for several hours a week. Its persistence batch (write + prune + commit) takes about 3.1s per 5 blocks on average and reaches 90%+ of wall time during",
+      "files": [
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/node.mdx",
+        "docs/public-docs/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/trie/src/db/store/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store/phase.rs",
+        "rust/op-reth/crates/trie/src/db/store/provider_rw.rs",
+        "rust/op-reth/crates/trie/src/db/store/write.rs",
+        "rust/op-reth/crates/trie/src/engine/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/mod.rs",
+        "rust/op-reth/crates/trie/src/engine/persistence/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/persistence/service.rs",
+        "rust/op-reth/crates/trie/src/engine/runner.rs",
+        "rust/op-reth/crates/trie/src/prune/pruner.rs",
+        "rust/Cargo.lock",
+        "rust/op-reth/crates/trie/Cargo.toml"
       ]
     },
     {
@@ -2862,6 +2935,25 @@
       ]
     },
     {
+      "title": "op-reth: default the pending block timestamp to the chain's block time",
+      "prNumber": 24078,
+      "type": "other",
+      "body": "Pending-state RPCs date the pending block 12 s, Ethereum's slot time, after its parent. On a 2 s OP chain that runs them up to 10 s ahead. From about five blocks before a hardfork, `eth_call`, `eth_estimateGas`, `eth_createAccessList`, `deb",
+      "files": [
+        "rust/op-reth/crates/evm/src/config.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/pending_block.rs",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "rust/op-reth/bin/src/main.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/chain_metadata.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/configs.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/mod.rs",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs"
+      ]
+    },
+    {
       "title": "op-reth: follow the op-v2.7.0-1 reth fixes in mirrored get_proof and build_pending_env",
       "prNumber": 24077,
       "type": "bugfix",
@@ -2887,6 +2979,42 @@
         "rust/op-reth/crates/trie/src/initialize.rs",
         "rust/op-reth/crates/trie/src/provider.rs",
         "rust/op-reth/crates/txpool/src/validator.rs"
+      ]
+    },
+    {
+      "title": "op-reth: warm the proofs-history page cache ahead of persistence",
+      "prNumber": 24075,
+      "type": "other",
+      "body": "Stacked on #24055; this PR contains its commit too. Review only the commits after it.\n\nThe proofs-history engine persists on a single thread. It reads B-tree pages one at a time through mmap faults, so on network-attached disks it waits on ",
+      "files": [
+        "docs/public-docs/node-operators/op-reth/cli/op-reth/node.mdx",
+        "docs/public-docs/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "rust/op-reth/crates/cli/tests/snapshots/cli.snap",
+        "rust/op-reth/crates/exex/src/lib.rs",
+        "rust/op-reth/crates/node/src/args.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/trie/src/api.rs",
+        "rust/op-reth/crates/trie/src/db/store/mod.rs",
+        "rust/op-reth/crates/trie/src/db/store/phase.rs",
+        "rust/op-reth/crates/trie/src/db/store/prefetch.rs",
+        "rust/op-reth/crates/trie/src/db/store/provider_rw.rs",
+        "rust/op-reth/crates/trie/src/db/store/write.rs",
+        "rust/op-reth/crates/trie/src/engine/buffer/state.rs",
+        "rust/op-reth/crates/trie/src/engine/handle.rs",
+        "rust/op-reth/crates/trie/src/engine/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/mod.rs",
+        "rust/op-reth/crates/trie/src/engine/persistence/metrics.rs",
+        "rust/op-reth/crates/trie/src/engine/persistence/service.rs",
+        "rust/op-reth/crates/trie/src/engine/prefetch.rs",
+        "rust/op-reth/crates/trie/src/engine/runner.rs",
+        "rust/op-reth/crates/trie/src/engine/state.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/execute_block.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/index_block.rs",
+        "rust/op-reth/crates/trie/src/engine/tasks/reorg.rs",
+        "rust/op-reth/crates/trie/src/metrics.rs",
+        "rust/op-reth/crates/trie/src/prune/metrics.rs",
+        "rust/op-reth/crates/trie/src/prune/pruner.rs",
+        "rust/op-reth/crates/trie/tests/live.rs"
       ]
     },
     {
@@ -2992,6 +3120,21 @@
       "files": [
         "op-e2e/faultproofs/super_test.go",
         "op-e2e/interop/supersystem.go"
+      ]
+    },
+    {
+      "title": "docs/public-docs: answer operator questions about the interop topology",
+      "prNumber": 24115,
+      "type": "docs",
+      "body": "Node operators preparing for Lagoon keep asking support the same questions:\n- Do they have to run the other chain's execution client?\n- Can they follow someone else's supernode?\n- How much history does that client need?\n- What happens to th",
+      "files": [
+        "docs/public-docs/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/node-operators/guides/configuration/supernode.mdx",
+        "docs/public-docs/notices/interop-prep.mdx",
+        "docs/public-docs/notices/specialized-node-topology.mdx",
+        "docs/public-docs/op-stack/interop/explainer.mdx",
+        "docs/public-docs/op-stack/interop/index.mdx",
+        "docs/public-docs/op-stack/interop/supernode.mdx"
       ]
     },
     {
@@ -3223,6 +3366,52 @@
       ]
     },
     {
+      "title": "op-devstack: remove the in-process op-geth L2 EL and the EL-kind selector",
+      "prNumber": 24156,
+      "type": "other",
+      "body": "op-devstack/sysgo could still start an in-process op-geth as the L2 EL, selected with `DEVSTACK_L2EL_KIND=op-geth`. CI only ever ran op-reth and no test pins op-geth any more, so this removes the op-geth EL and the EL-kind selector. After t",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-e2e.yml",
+        "docs/ai/acceptance-tests.md",
+        "docs/ai/opgeth-decoupling.md",
+        "docs/ai/rust-dev.md",
+        "op-acceptance-tests/justfile",
+        "op-acceptance-tests/tests/derivation/confirmations/confirmations_test.go",
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-acceptance-tests/tests/safedb_parity/init_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/system.go",
+        "op-acceptance-tests/tests/superfaultproofs/superfaultproofs.go",
+        "op-acceptance-tests/tests/supernode/interop/reorg/invalid_message_reorg_test.go",
+        "op-acceptance-tests/tests/sync/el_restart/el_restart_test.go",
+        "op-devstack/README.md",
+        "op-devstack/presets/singlechain_from_runtime.go",
+        "op-devstack/presets/twol2.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/el_node_identity.go",
+        "op-devstack/sysgo/l2_el.go",
+        "op-devstack/sysgo/l2_el_opgeth.go",
+        "op-devstack/sysgo/l2_el_opreth.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_supernode_synctester_variant.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "op-e2e/e2eutils/geth/geth.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "rust/kona/tests/README.md",
+        "rust/kona/tests/justfile",
+        "rust/kona/tests/node/utils/mixed_preset.go",
+        "rust/kona/tests/node/utils/test_sequencer_preset_test.go",
+        "rust/op-reth/tests/README.md",
+        "rust/op-reth/tests/justfile",
+        "rust/op-reth/tests/proofs/utils/preset.go"
+      ]
+    },
+    {
       "title": "ci: build cannon-prestate on a gen2 machine",
       "prNumber": 24152,
       "type": "other",
@@ -3242,6 +3431,16 @@
       ]
     },
     {
+      "title": "ci: run the memory-all acceptance tests on 4 nodes, 16 at a time",
+      "prNumber": 24145,
+      "type": "tests",
+      "body": "- The memory-all acceptance tests mostly wait on blocks, so each node sits at about 22% CPU while running 8 tests at once. This runs them on 4 nodes, 16 at a time, instead of 8 nodes, 8 at a time. Same tests, half the machines.\n- Job time i",
+      "files": [
+        ".circleci/continue/main.yml",
+        "op-acceptance-tests/justfile"
+      ]
+    },
+    {
       "title": "ci: skip publish-contract-artifacts early when the artifacts already exist",
       "prNumber": 24144,
       "type": "other",
@@ -3249,6 +3448,41 @@
       "files": [
         ".circleci/continue/main.yml",
         "packages/contracts-bedrock/scripts/ops/publish-artifacts.sh"
+      ]
+    },
+    {
+      "title": "alloy-op-hardforks!: remove hardcoded chain fork schedules",
+      "prNumber": 24142,
+      "type": "other",
+      "body": "`alloy-op-hardforks` published its own copy of the OP Mainnet/Sepolia and Base Mainnet/Sepolia fork schedules. Production code never reads it: op-node, op-reth and kona all take fork times from the superchain-registry. The copy still had to",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/alloy-op-evm/src/block/tests.rs",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/alloy-op-evm/src/env.rs",
+        "rust/alloy-op-hardforks/Cargo.toml",
+        "rust/alloy-op-hardforks/README.md",
+        "rust/alloy-op-hardforks/src/base/mainnet.rs",
+        "rust/alloy-op-hardforks/src/base/mod.rs",
+        "rust/alloy-op-hardforks/src/base/sepolia.rs",
+        "rust/alloy-op-hardforks/src/lib.rs",
+        "rust/alloy-op-hardforks/src/optimism/mainnet.rs",
+        "rust/alloy-op-hardforks/src/optimism/mod.rs",
+        "rust/alloy-op-hardforks/src/optimism/sepolia.rs",
+        "rust/kona/crates/proof/executor/src/db/mod.rs",
+        "rust/kona/crates/protocol/registry/Cargo.toml",
+        "rust/kona/crates/protocol/registry/src/lib.rs",
+        "rust/kona/crates/protocol/registry/src/superchain.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/op_mainnet.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/op_sepolia.rs",
+        "rust/kona/sp1/programs/Cargo.lock",
+        "rust/op-reth/crates/chainspec/src/lib.rs",
+        "rust/op-reth/crates/chainspec/src/superchain/configs.rs",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/node/tests/it/rpc.rs",
+        "rust/op-reth/crates/rpc/src/eth/capabilities.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt/tests.rs",
+        "rust/op-reth/crates/chainspec/Cargo.toml"
       ]
     },
     {
@@ -3335,6 +3569,22 @@
       ]
     },
     {
+      "title": "rust: keep shared reth update guidance in UPDATING-RETH",
+      "prNumber": 24132,
+      "type": "other",
+      "body": "Makes `rust/UPDATING-RETH.md` the single source for guidance that both the reth updater and the reviewer need. The review guide, the `reth-update-reviewer` agent and the `update-reth` skill now keep only what one of them needs, and point at",
+      "files": [
+        ".claude/agents/reth-update-reviewer.md",
+        ".claude/skills/update-reth/SKILL.md",
+        "docs/ai/reth-update-review.md",
+        "docs/ai/reth-upstream-mirrors.md",
+        "docs/ai/rust-dev.md",
+        "rust/UPDATING-RETH.md",
+        "rust/RETH-CARRIED-PATCHES.md",
+        "rust/UPSTREAM-ASSUMPTIONS.md"
+      ]
+    },
+    {
       "title": "op-deployer!: reject artifacts-only contract layouts",
       "prNumber": 24129,
       "type": "other",
@@ -3356,12 +3606,36 @@
       ]
     },
     {
+      "title": "op-deployer,contracts-bedrock: log deployed and reused deterministic contracts",
+      "prNumber": 24128,
+      "type": "other",
+      "body": "op-deployer skipped a contract that already existed at its deterministic address without saying so, so an operator could not tell which implementations and blueprints a run deployed and which it reused. Each deterministic contract and bluep",
+      "files": [
+        "op-deployer/pkg/deployer/opcm/implementations_test.go",
+        "packages/contracts-bedrock/scripts/libraries/DeployUtils.sol",
+        "packages/contracts-bedrock/test/libraries/DeployUtils.t.sol",
+        "packages/contracts-bedrock/scripts/deploy/DeployImplementations.s.sol"
+      ]
+    },
+    {
       "title": "op-chain-ops: delete the unused WithdrawalNetwork.ToABI",
       "prNumber": 24127,
       "type": "other",
       "body": "`WithdrawalNetwork.ToABI` has had no caller since the Go script host was deleted. The host's cheatcode precompile was its only user: it ABI-encoded deploy config values through an `interface{ ToABI() []byte }` check.\n\nNo effect on users. Th",
       "files": [
         "op-chain-ops/genesis/withdrawal_network.go"
+      ]
+    },
+    {
+      "title": "op-devstack: configure sysgo op-nodes for an op-reth engine",
+      "prNumber": 24163,
+      "type": "other",
+      "body": "sysgo built its op-node sync config with `SupportsPostFinalizationELSync: false`, the op-geth value, while every L2 EL it starts is op-reth. An EL-sync op-node restarted against an EL that already had a finalized block took the geth-only br",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-devstack/sysgo/l2_el.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go"
       ]
     },
     {
@@ -3372,17 +3646,263 @@
       "files": [
         ".circleci/continue/main.yml"
       ]
+    },
+    {
+      "title": "docs/public-docs: remove the Upgrade 21 pending-governance callouts",
+      "prNumber": 24209,
+      "type": "docs",
+      "body": "Upgrade 21 passed governance and ran on Mainnet, so four pages still told readers it was pending approval. This PR removes that wording. The pages now state availability by contract version (`op-contracts/v9.0.0` or later) because chains th",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "docs/public-docs/ko/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "docs/public-docs/ko/op-stack/bridging/withdrawal-flow.mdx",
+        "docs/public-docs/ko/op-stack/security/exchanges-and-bridges.mdx",
+        "docs/public-docs/ko/op-stack/security/pause.mdx",
+        "docs/public-docs/op-stack/bridging/withdrawal-flow.mdx",
+        "docs/public-docs/op-stack/security/exchanges-and-bridges.mdx",
+        "docs/public-docs/op-stack/security/pause.mdx"
+      ]
+    },
+    {
+      "title": "ci: log missing shard timings, clarify timings job comments",
+      "prNumber": 24208,
+      "type": "other",
+      "body": "Follow-up to #24207 for the review comments there. No change to how tests are split.\n\n- `shard-tests.sh` logs `No fetched timings for <job>, splitting by CircleCI's own` when the `_shard-timings` dir is in the workspace but has no file for ",
+      "files": [
+        ".circleci/continue/main.yml",
+        "ops/scripts/shard-tests.sh"
+      ]
+    },
+    {
+      "title": "ci: split memory-all tests on PRs by develop's timings",
+      "prNumber": 24207,
+      "type": "tests",
+      "body": "PR memory-all splits used stale timings: CircleCI times the split from the branch's own last green run, which can predate slow tests added on develop since. After #23787 re-enabled `TestExecuteStep_CannonKona` (about 400 s), it weighed abou",
+      "files": [
+        ".circleci/continue/main.yml",
+        "ops/scripts/shard-tests.sh"
+      ]
+    },
+    {
+      "title": "docs: check CI jobs that never run on a PR in the CI config review",
+      "prNumber": 24200,
+      "type": "docs",
+      "body": "#24103 changed a contracts-bedrock justfile recipe and merged with green CI. The recipe change broke `contracts-bedrock-build` in the nightly `scheduled-shipped-binaries` workflow, which passes its own `--deny-warnings` and never runs on a ",
+      "files": [
+        ".claude/agents/ci-config-reviewer.md",
+        "AGENTS.md",
+        "docs/ai/ci-config-review.md"
+      ]
+    },
+    {
+      "title": "docs: add the Upgrade 21 Cantina security review",
+      "prNumber": 24199,
+      "type": "docs",
+      "body": "Adds Cantina's final report for Upgrade 21 to the published security reviews, with its README row. The review ran from October 14 to 27 on commit 8fdb2775, which `op-contracts/v9.0.0` contains. It found 19 low-risk and 15 informational issu",
+      "files": [
+        "docs/security-reviews/2026_11-U21-Cantina.pdf",
+        "docs/security-reviews/README.md"
+      ]
+    },
+    {
+      "title": "release-notes: let pr-facts.sh parse under macOS bash 3.2",
+      "prNumber": 24198,
+      "type": "other",
+      "body": "The release-notes skill's `pr-facts.sh` fails before it runs on a Mac's default `/bin/bash` (3.2): `syntax error near unexpected token ';;'` at line 122.\n\nbash 3.2 misreads the `)` of a `case` pattern inside `$(...)`. This replaces that `ca",
+      "files": [
+        ".claude/skills/release-notes/scripts/pr-facts.sh"
+      ]
+    },
+    {
+      "title": "docs: describe op-deployer releases without a registry entry",
+      "prNumber": 24196,
+      "type": "docs",
+      "body": "The release workflow page lists the superchain-registry update and the `CurrentTag` bump as required for every new contract version. The allowlist variant release skipped both: chains select its OPCM with `opcmAddress` in a `custom` or `sta",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/release-workflows.mdx"
+      ]
+    },
+    {
+      "title": "rust: bump crates for 7 RustSec advisories and check advisories daily",
+      "prNumber": 24194,
+      "type": "other",
+      "body": "Lockfile-only bumps that clear 7 RustSec vulnerabilities in the crates op-reth and kona-node use, plus a daily `rust-deny-advisories` job so new ones get noticed. The job never blocks a PR.\n\n| Crate | From | To | Advisory |\n|---|---|---|---",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/rust-ci.yml",
+        ".circleci/routing.yml",
+        ".circleci/scripts/test-decision-tree.sh",
+        "docs/ai/rust-dev.md",
+        "rust/Cargo.lock",
+        "rust/deny.toml",
+        "rust/kona/sp1/programs/Cargo.lock"
+      ]
+    },
+    {
+      "title": "ci: five small Rust CI fixes (toolchain pin, pin drift check, duplicate doc tests, clippy and udeps size, --locked)",
+      "prNumber": 24192,
+      "type": "bugfix",
+      "body": "Five small Rust CI changes. Bench [140132](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/140132) (equivalent bench branch, 38 of 38 jobs green) against develop [140093](https://app.circleci.com/pipelines/github/ethere",
+      "files": [
+        ".circleci/continue/main.yml",
+        ".circleci/continue/rust-ci.yml",
+        "rust/rust-toolchain.toml"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: faster Kontrol CI, a bounded PublishedGas invariant, and a robust solady import",
+      "prNumber": 24191,
+      "type": "other",
+      "body": "Three independent changes, one commit each.\n\n## 1. Kontrol: faster setup, drop the unused deployment summary\n\n- `check-kontrol-build` drops `docker_layer_caching`. It never hit (14 of 14 runs pulled the full image) and added about 70 s befo",
+      "files": [
+        ".circleci/continue/main.yml",
+        "packages/contracts-bedrock/justfile",
+        "packages/contracts-bedrock/scripts/checks/check-kontrol-summaries-unchanged.sh",
+        "packages/contracts-bedrock/test/L1/L1CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/L1/L1ERC721Bridge.t.sol",
+        "packages/contracts-bedrock/test/L1/L1StandardBridge.t.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/invariants/OptimismPortal2.t.sol",
+        "packages/contracts-bedrock/test/kontrol/README.md",
+        "packages/contracts-bedrock/test/kontrol/proofs/utils/DeploymentSummary.sol",
+        "packages/contracts-bedrock/test/kontrol/proofs/utils/DeploymentSummaryCode.sol",
+        "packages/contracts-bedrock/test/kontrol/scripts/common.sh",
+        "packages/contracts-bedrock/test/kontrol/scripts/make-summary-deployment.sh",
+        "packages/contracts-bedrock/test/libraries/SemverComp.t.sol"
+      ]
+    },
+    {
+      "title": "ci: prune Go build caches, gen2 for defaulted jobs, blobless checkout, faster develop contracts tests",
+      "prNumber": 24190,
+      "type": "tests",
+      "body": "Five independent CircleCI changes, one commit each, plus two small review fixups. Each reverts on its own.\n\n## 1. Prune the memory-all and go-lint Go build caches, skip Go cache saves in the queue\n\n- Since #24028 these caches only grow. op-",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/main.yml"
+      ]
+    },
+    {
+      "title": "op-deployer: measure forge's peak memory and size slots for bundles without the AST",
+      "prNumber": 24180,
+      "type": "other",
+      "body": "op-deployer's forge slots counted 1.5 GiB per run, sized for artifacts with the AST. Since #24003, forge runs only on bundles without the AST unless op-deployer cannot copy the build, and a run peaks at about a quarter of that. Nothing kept",
+      "files": [
+        "op-deployer/pkg/deployer/forge/client.go",
+        "op-deployer/pkg/deployer/forge/memlimit_linux.go",
+        "op-deployer/pkg/deployer/forge/memlimit_linux_test.go",
+        "op-deployer/pkg/deployer/forge/peakmem_darwin.go",
+        "op-deployer/pkg/deployer/forge/peakmem_linux.go",
+        "op-deployer/pkg/deployer/forge/peakmem_other.go",
+        "op-deployer/pkg/deployer/forge/peakmem_test.go",
+        "op-deployer/pkg/deployer/forge/slots.go",
+        "op-deployer/pkg/deployer/forge/slots_test.go",
+        "op-deployer/pkg/deployer/integration_test/forge_memory_test.go"
+      ]
+    },
+    {
+      "title": "kona-genesis!: remove hardcoded Base chain and chain-ID base-fee configs",
+      "prNumber": 24179,
+      "type": "other",
+      "body": "Follows #24142, which removed Base's fork schedules. This drops the rest of kona's hand-maintained Base (8453 / 84532) config: the chain-ID constants and the Base EIP-1559 constants, params and configs in kona-genesis, plus the tests built ",
+      "files": [
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/run/binary.mdx",
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/run/binary.mdx",
+        "rust/kona/bin/node/src/cli.rs",
+        "rust/kona/bin/node/src/flags/globals.rs",
+        "rust/kona/crates/node/peers/src/enr.rs",
+        "rust/kona/crates/node/peers/src/nodes.rs",
+        "rust/kona/crates/protocol/genesis/src/chain/config.rs",
+        "rust/kona/crates/protocol/genesis/src/chain/mod.rs",
+        "rust/kona/crates/protocol/genesis/src/lib.rs",
+        "rust/kona/crates/protocol/genesis/src/params.rs",
+        "rust/kona/crates/protocol/genesis/src/rollup.rs",
+        "rust/kona/crates/protocol/registry/src/lib.rs",
+        "rust/kona/crates/protocol/registry/src/test_utils/op_sepolia.rs",
+        "rust/kona/crates/utilities/cli/src/flags/globals.rs"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests,kona: drop leftovers of the op-geth L2 EL",
+      "prNumber": 24175,
+      "type": "tests",
+      "body": "Follow-up to the review of #24156: removes what still referred to the op-geth L2 EL after it.\n\n- `interopTxRejectedError` no longer matches `\"transaction filtered out\"`, op-geth's interop txpool rejection. Nothing in the suite returns it, s",
+      "files": [
+        "op-acceptance-tests/tests/interop/filter/interop_filter_test.go",
+        "op-acceptance-tests/tests/interop/seqwindow/expiry_test.go",
+        "op-acceptance-tests/tests/interop/upgrade/pre_test.go",
+        "op-devstack/sysgo/l2_el.go",
+        "rust/kona/tests/README.md",
+        "rust/kona/tests/justfile"
+      ]
+    },
+    {
+      "title": "ops: type-check the op-geth ratchet against the cutover target v1.17.10",
+      "prNumber": 24174,
+      "type": "other",
+      "body": "The ratchet type-checked the tree against go-ethereum v1.17.2, the release op-geth is based on. The cutover (#20266) moves to v1.17.10, and upstream changed further APIs in between, so the allowlist was not the full list of what the cutover",
+      "files": [
+        ".circleci/continue/main.yml",
+        "docs/ai/go-dev.md",
+        "docs/ai/opgeth-decoupling.md",
+        "justfile",
+        "ops/scripts/opgeth-ratchet/allowlist.txt",
+        "ops/scripts/opgeth-ratchet/collect.go",
+        "ops/scripts/opgeth-ratchet/collect_test.go",
+        "ops/scripts/opgeth-ratchet/main.go",
+        "ops/scripts/opgeth-ratchet/main_test.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/fork/types/types.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/g/g.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/h/h.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/i/i.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/mod/j/j.go",
+        "ops/scripts/opgeth-ratchet/testdata/toy/upstream/types/types.go",
+        "ops/scripts/opgeth-ratchet/upstream.go"
+      ]
+    },
+    {
+      "title": "op-deployer!: reject a deployer L1 prefund in a genesis apply",
+      "prNumber": 24173,
+      "type": "other",
+      "body": "`op-deployer apply --deployment-target genesis` now fails before any stage runs when `l1DevGenesisParams.prefund` has an entry for the deployer. Before, the apply removed the deployer's account from the L1 genesis after its deployments and ",
+      "files": [
+        "op-deployer/pkg/deployer/apply.go",
+        "op-deployer/pkg/deployer/apply_test.go",
+        "op-deployer/pkg/deployer/integration_test/apply_test.go"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 1550.3990596873266,
-      "prScore": 1053.0530596873268,
-      "issueScore": 28.1,
-      "reviewScore": 465.5,
-      "commentScore": 3.7459999999999996,
+      "totalScore": 2007.6645454287568,
+      "prScore": 1437.880545428757,
+      "issueScore": 38.1,
+      "reviewScore": 527.5,
+      "commentScore": 4.183999999999999,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 1028.9702527871036,
+      "prScore": 677.8142527871037,
+      "issueScore": 6,
+      "reviewScore": 343,
+      "commentScore": 2.1559999999999997,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 1012.668115084298,
+      "prScore": 863.168115084298,
+      "issueScore": 0,
+      "reviewScore": 149.5,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -3396,33 +3916,43 @@
       "summary": null
     },
     {
-      "username": "nonsense",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 855.9260877544464,
-      "prScore": 547.7080877544464,
-      "issueScore": 6,
-      "reviewScore": 300.5,
-      "commentScore": 1.718,
-      "summary": null
-    },
-    {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 831.5459399468148,
+      "totalScore": 851.5459399468148,
       "prScore": 454.9659399468148,
       "issueScore": 2,
-      "reviewScore": 373.5,
+      "reviewScore": 393.5,
       "commentScore": 1.08,
       "summary": null
     },
     {
-      "username": "mds1",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 709.0910078055516,
-      "prScore": 618.5910078055516,
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 656.0555195510645,
+      "prScore": 412.4275195510646,
+      "issueScore": 18.1,
+      "reviewScore": 222.5,
+      "commentScore": 3.0279999999999996,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 632.5885724090413,
+      "prScore": 523.1505724090413,
       "issueScore": 0,
-      "reviewScore": 90.5,
-      "commentScore": 0,
+      "reviewScore": 109,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 630.1901655673457,
+      "prScore": 341.1141655673457,
+      "issueScore": 6,
+      "reviewScore": 282,
+      "commentScore": 1.0759999999999998,
       "summary": null
     },
     {
@@ -3436,33 +3966,23 @@
       "summary": null
     },
     {
-      "username": "aakoshh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
-      "totalScore": 626.0555195510645,
-      "prScore": 412.4275195510646,
-      "issueScore": 18.1,
-      "reviewScore": 192.5,
-      "commentScore": 3.0279999999999996,
-      "summary": null
-    },
-    {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 575.7994010411243,
-      "prScore": 476.3614010411243,
-      "issueScore": 0,
-      "reviewScore": 99,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 515.1212956816402,
-      "prScore": 264.54529568164014,
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 482.40298423095055,
+      "prScore": 286.7649842309505,
       "issueScore": 6,
-      "reviewScore": 243.5,
-      "commentScore": 1.0759999999999998,
+      "reviewScore": 189,
+      "commentScore": 0.6379999999999999,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 474.5530911773367,
+      "prScore": 327.59709117733667,
+      "issueScore": 0,
+      "reviewScore": 145,
+      "commentScore": 1.956,
       "summary": null
     },
     {
@@ -3476,23 +3996,13 @@
       "summary": null
     },
     {
-      "username": "maurelian",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 381.52085708954064,
-      "prScore": 200.3828570895406,
-      "issueScore": 6,
-      "reviewScore": 174.5,
-      "commentScore": 0.6379999999999999,
-      "summary": null
-    },
-    {
-      "username": "geoknee",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 364.78790255653587,
-      "prScore": 265.76990255653584,
-      "issueScore": 0,
-      "reviewScore": 97.5,
-      "commentScore": 1.5179999999999998,
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 332.77778979834113,
+      "prScore": 145.8377897983411,
+      "issueScore": 2,
+      "reviewScore": 184,
+      "commentScore": 0.94,
       "summary": null
     },
     {
@@ -3506,13 +4016,13 @@
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 269.1496221441326,
-      "prScore": 106.20962214413262,
-      "issueScore": 2,
-      "reviewScore": 160,
-      "commentScore": 0.94,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 285.66091986708295,
+      "prScore": 211.46091986708294,
+      "issueScore": 0,
+      "reviewScore": 74,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -3546,32 +4056,22 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 231.66091986708295,
-      "prScore": 211.46091986708294,
-      "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 217.0008707442714,
+      "totalScore": 217.3408707442714,
       "prScore": 212.8588707442714,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 4.1419999999999995,
+      "commentScore": 4.481999999999999,
       "summary": null
     },
     {
       "username": "karlfloersch",
       "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 187.14589909366467,
+      "totalScore": 191.64589909366467,
       "prScore": 147.60589909366468,
       "issueScore": 6,
-      "reviewScore": 33,
+      "reviewScore": 37.5,
       "commentScore": 0.54,
       "summary": null
     },
@@ -3616,6 +4116,16 @@
       "summary": null
     },
     {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 105.278,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 103.5,
+      "commentScore": 1.778,
+      "summary": null
+    },
+    {
       "username": "teddyknox",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
       "totalScore": 103.45490589281164,
@@ -3633,16 +4143,6 @@
       "issueScore": 0,
       "reviewScore": 15,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 100.578,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 99,
-      "commentScore": 1.5779999999999998,
       "summary": null
     },
     {
@@ -3666,6 +4166,26 @@
       "summary": null
     },
     {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 80.93820043285858,
+      "prScore": 31.898200432858573,
+      "issueScore": 0,
+      "reviewScore": 48.5,
+      "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "op-will",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
+      "totalScore": 80.86430614433405,
+      "prScore": 22.664306144334056,
+      "issueScore": 0,
+      "reviewScore": 58,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "raffaele-oplabs",
       "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
       "totalScore": 80,
@@ -3676,32 +4196,12 @@
       "summary": null
     },
     {
-      "username": "ZakAyesh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
-      "totalScore": 60.960306144334055,
-      "prScore": 21.920306144334052,
-      "issueScore": 0,
-      "reviewScore": 38.5,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
       "username": "Joxess",
       "avatarUrl": "https://avatars.githubusercontent.com/u/91908708?u=600f62845d74a76d00f49d535d86617da7072852&v=4",
       "totalScore": 53.25566248977032,
       "prScore": 8.05566248977032,
       "issueScore": 0,
       "reviewScore": 45,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "op-will",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
-      "totalScore": 48.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 48,
       "commentScore": 0.2,
       "summary": null
     },
@@ -3856,6 +4356,16 @@
       "summary": null
     },
     {
+      "username": "Qumeric",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3511113?u=bfe1b7d38772c72538a25cc8e7d84825b9baa62b&v=4",
+      "totalScore": 9.482189633918262,
+      "prScore": 9.482189633918262,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "pCwOrM",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2254905?v=4",
       "totalScore": 9.454735902799726,
@@ -3946,6 +4456,16 @@
       "summary": null
     },
     {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Agrahm13",
       "avatarUrl": "https://avatars.githubusercontent.com/u/217385645?v=4",
       "totalScore": 5,
@@ -3976,6 +4496,16 @@
       "summary": null
     },
     {
+      "username": "asdv23",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/115535473?u=50c3700729f367e144a3f55baf9bab69a6657a9f&v=4",
+      "totalScore": 2.2,
+      "prScore": 0,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "arunimshukla",
       "avatarUrl": "https://avatars.githubusercontent.com/u/54760103?u=cb1593e1bd293fc5bdd5191d9eaa987355423a91&v=4",
       "totalScore": 0.54,
@@ -3983,6 +4513,16 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.54,
+      "summary": null
+    },
+    {
+      "username": "benjichat",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/63160791?u=a1ccf58928ad4564666f1aec67847ffcb44a5422&v=4",
+      "totalScore": 0.4,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -4036,16 +4576,6 @@
       "summary": null
     },
     {
-      "username": "benjichat",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/63160791?u=a1ccf58928ad4564666f1aec67847ffcb44a5422&v=4",
-      "totalScore": 0.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "akatsukiwork0320",
       "avatarUrl": "https://avatars.githubusercontent.com/u/214928413?v=4",
       "totalScore": 0.2,
@@ -4076,9 +4606,9 @@
       "summary": null
     }
   ],
-  "newPRs": 253,
-  "mergedPRs": 174,
-  "newIssues": 74,
-  "closedIssues": 65,
-  "activeContributors": 85
+  "newPRs": 284,
+  "mergedPRs": 204,
+  "newIssues": 80,
+  "closedIssues": 74,
+  "activeContributors": 86
 }
