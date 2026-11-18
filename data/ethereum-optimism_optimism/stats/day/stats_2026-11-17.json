@@ -5,77 +5,276 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-17 to 2026-11-18, ethereum-optimism/optimism had 5 new PRs (4 merged), 0 new issues, and 11 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-11-17 to 2026-11-18, ethereum-optimism/optimism had 24 new PRs (23 merged), 6 new issues, and 25 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABf_bzXA",
+      "title": "op-service/txmgr: move test and dev L1s to Osaka, then delete the blob-proof path",
+      "author": "geoknee",
+      "number": 24210,
+      "repository": "ethereum-optimism/optimism",
+      "body": "txmgr chooses between blob proofs (sidecar v0) and cell proofs (v1, EIP-7594) by `CellProofTime`. The public L1s (mainnet, Sepolia, Hoodi) all activated Osaka in Oct–Dec 2025. The clients handle the two sidecar versions as follows:\n\n- **reth, after Osaka:** rejects v0 sidecars (`UnexpectedEip4844SidecarAfterOsaka`).\n- **go-ethereum, after Osaka:** converts v0 to v1 at `eth_sendRawTransaction`, but only for a transition period (`TODO: remove in go-ethereum v1.17.x`).\n- **Both, before Osaka:** v1 transactions never get into a block. go-ethereum's block builder asks its pool for v0 transactions, and that pool holds v1 only. op-geth and reth reject v1 sidecars.\n\nSo the blob-proof path only serves pre-Osaka L1s, and today those are our own test and dev L1s.\n\n## Plan\n\nThe test L1s move first, using only the existing cell-proof settings. The production changes then need no test churn.\n\n1. [x] **#24186**: moves the op-e2e system blob tests to an Osaka L1. (Seb)\n2. [x] **#24216**: test L1s to Osaka:\n   - action tests and kona's Go proofs tests: default L1 at Osaka (`op-e2e/e2eutils/setup.go`), and the action batcher sends cell proofs by default\n   - fork-transition tests (`dencun_fork`, `ecotone_fork`, kona `l1_blob_parameter_forks`, `l1_prague_fork`, `pectra_blob_schedule`): keep their pre-Osaka L1 segment, since nodes syncing from genesis still derive from Cancun- and Prague-era L1 blocks, but post blobs only from Osaka on\n   - the op-deployer L1 dev genesis and the op-e2e system default L1 start at Osaka\n   - every test txmgr sends cell proofs: `setuputils.NewTxMgrConfig` stops pinning `CellProofTime: math.MaxUint64`\n   - the Prague Anvil op-deployer test posts no blobs, so it is out of scope\n3. [x] **#24211**: txmgr sends cell proofs by default on every L1.\n4. [ ] **#24213**: txmgr and txplan send cell proofs only, and `--txmgr.cell-proof-time` is deleted outright. It also deletes:\n   - the action batcher's `EnableCellProofs` option\n   - the action L1 miner's pre-Osaka sidecar check: it now requires Osaka for a blob transaction\n   - what #24186 adds: `useCellProofs()`, the `CellProofTime` block in `e2esys/setup.go`, and `CreateEmptyBlobTx`'s `cellProofs` parameter\n5. [ ] Confirm that no supported chain settles on a pre-Osaka L1.\n6. [x] ~~**#24212**: delete the deprecated flag after a release.~~ #24213 deletes it outright.\n\nRelated: #24172.\n\n",
+      "createdAt": "2026-11-17T09:50:21Z",
+      "closedAt": "2026-11-17T21:31:20Z",
+      "state": "CLOSED",
+      "commentCount": 2
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABgBQXlA",
+      "title": "op-service/txmgr: delete the deprecated --txmgr.cell-proof-time flag",
+      "author": "geoknee",
+      "number": 24212,
+      "repository": "ethereum-optimism/optimism",
+      "body": "After #24210, txmgr builds cell-proof sidecars only and ignores `--txmgr.cell-proof-time` (`*_TXMGR_CELL_PROOF_TIME`). The flag is hidden: setting it logs a warning, and a time in the future fails at startup, because that operator expects blob proofs.\n\nOnce a release of op-batcher, op-proposer and op-challenger has shipped with that warning, delete:\n\n- the `txmgr.cell-proof-time` flag, `CellProofTimeFlagName`, and `CLIConfig.CellProofTime` in `op-service/txmgr/cli.go`\n- the warning in `NewConfig`, the future-time check in `CLIConfig.Check`, and their tests\n\n`opql` (`acceptance-tests/opqlnode/fusaka_test.go`) sets `CellProofTime`; it needs updating when it next bumps op-service.\n",
+      "createdAt": "2026-11-17T11:42:57Z",
+      "closedAt": "2026-11-17T19:49:34Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABLn-PVQ",
+      "title": "op-acceptance-tests: run TestUnsafeGapFillAfterUnsafeReorg_RestartCLP2P against kona-node",
+      "author": "joshklop",
+      "number": 22277,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n[`TestUnsafeGapFillAfterUnsafeReorg_RestartCLP2P`](https://github.com/ethereum-optimism/optimism/blob/develop/op-acceptance-tests/tests/sync/elsync/reorg/sync_test.go) is skipped when the acceptance suite runs against kona-node.\n\nKona times out waiting for the expected unsafe-head reorg after CL P2P connectivity is restored.\n\n## Required work\n\nReproduce the P2P restoration path, distinguish test synchronization from Kona unsafe-queue/reorg behavior, fix the responsible layer, and remove the Kona skip.\n\n## Acceptance criteria\n\n- [ ] The root cause and resolution are documented.\n- [ ] `TestUnsafeGapFillAfterUnsafeReorg_RestartCLP2P` no longer skips when `DEVSTACK_L2CL_KIND=kona-node`.\n- [ ] After CL P2P is restored, Kona fills the gap and converges on the expected unsafe chain.\n- [ ] Existing op-node coverage continues to pass.\n\n## Related\n\n- https://github.com/ethereum-optimism/optimism/issues/18676\n- https://github.com/ethereum-optimism/optimism/issues/17694\n- Parent inventory: https://github.com/ethereum-optimism/protocol-team/issues/101\n",
+      "createdAt": "2026-08-05T20:47:37Z",
+      "closedAt": "2026-11-17T19:08:01Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABLn-NZg",
+      "title": "op-acceptance-tests: run TestUnsafeGapFillAfterUnsafeReorg_RestartL2CL against kona-node",
+      "author": "joshklop",
+      "number": 22276,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n[`TestUnsafeGapFillAfterUnsafeReorg_RestartL2CL`](https://github.com/ethereum-optimism/optimism/blob/develop/op-acceptance-tests/tests/sync/elsync/reorg/sync_test.go) is skipped when the acceptance suite runs against kona-node.\n\nKona times out waiting for the expected unsafe-head reorg after the verifier CL is restarted.\n\n## Required work\n\nReproduce the restart path, distinguish persistence/startup synchronization from Kona unsafe-queue behavior, fix the responsible layer, and remove the Kona skip.\n\n## Acceptance criteria\n\n- [ ] The root cause and resolution are documented.\n- [ ] `TestUnsafeGapFillAfterUnsafeReorg_RestartL2CL` no longer skips when `DEVSTACK_L2CL_KIND=kona-node`.\n- [ ] After restarting kona-node, the verifier fills the gap and converges on the expected unsafe chain.\n- [ ] Existing op-node coverage continues to pass.\n\n## Related\n\n- https://github.com/ethereum-optimism/optimism/issues/18676\n- https://github.com/ethereum-optimism/optimism/issues/17694\n- Parent inventory: https://github.com/ethereum-optimism/protocol-team/issues/101\n",
+      "createdAt": "2026-08-05T20:47:32Z",
+      "closedAt": "2026-11-17T19:07:59Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABaX6WjQ",
+      "title": "kona-gossip: Record dial and connection counts as counters, not gauges",
+      "author": "aakoshh",
+      "number": 23699,
+      "repository": "ethereum-optimism/optimism",
+      "body": "kona-gossip records several counts as gauges, although they only ever go up. Found while working on #23661.\n\n### Affected metrics\nFor example `kona_node_dial_peer`, `kona_node_dial_peer_error{type}` and `kona_node_gossipsub_connection{type}`. They're described with `describe_gauge!` ([metrics/mod.rs](https://github.com/ethereum-optimism/optimism/blob/0130abb2f07230ce01c904ba2fbb5d6338ba549f/rust/kona/crates/node/gossip/src/metrics/mod.rs#L87)) and incremented with `metrics::gauge!(..).increment(1)` ([driver.rs](https://github.com/ethereum-optimism/optimism/blob/0130abb2f07230ce01c904ba2fbb5d6338ba549f/rust/kona/crates/node/gossip/src/driver.rs#L324)). op-node uses counters for the same things: `op_node_<proc>_p2p_dials{allow}` and `accepts` are `CounterVec`s.\n\n### Proposal\n- Switch each of these to `counter!` / `describe_counter!`, including the zeroing in `Metrics::zero()`. Do each metric completely, or a gauge and a counter end up sharing one name.\n- The names can stay: kona's exporter (`PrometheusBuilder::new()` in kona-cli) doesn't add a `_total` suffix, and the Grafana dashboards in `rust/kona/docker/recipes/*/grafana/dashboards/overview.json` already use `rate()` on them. Owners of external dashboards and alerts should still hear about it, since some backends store the metric type.\n\n### Related: `already_connected` isn't an error\n`kona_node_dial_peer_error{type=\"already_connected\"}` mostly counts discovery handing over the ENRs of peers we're already connected to, which happens all the time. The \"Peers Dialed / min\" panel plots it next to real errors. The network actor's ENR branch ([actor.rs](https://github.com/ethereum-optimism/optimism/blob/0130abb2f07230ce01c904ba2fbb5d6338ba549f/rust/kona/crates/node/service/src/actors/network/actor.rs#L145)) shouldn't call `dial` for a connected peer at all, which would leave the label for actual mistakes.\n",
+      "createdAt": "2026-10-27T18:00:24Z",
+      "closedAt": "2026-11-17T14:31:17Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
     {
-      "id": "PR_kwDODjvEJM8AAAABPsCbaw",
-      "title": "kona-node,op-devstack!: boot the sequencer stopped and always serve the admin API",
-      "author": "joshklop",
-      "number": 24206,
-      "body": "kona-node accepted `--rpc.admin-state` and then ignored it. A sequencer stopped through the admin RPC was therefore active again after a restart, and without op-conductor that can leave two active sequencers. This PR doesn't implement op-node's state-file persistence. It removes the boot-time choice:\n\n- A kona sequencer always boots stopped, after every restart. `admin_startSequencer` and `admin_stopSequencer` (called by op-conductor, an operator or a test harness) are the only controls.\n- The admin namespace is always served on the RPC port. A separate admin listener was considered and rejected.\n- `--rpc.addr` defaults to `127.0.0.1`, so a node with default settings doesn't expose the admin API.\n\nProduction kona sequencers already run this way: the node chart sets `KONA_NODE_SEQUENCER_STOPPED=true` and `KONA_NODE_RPC_ENABLE_ADMIN=true` on every kona-node, and op-conductor starts the leader. Supersedes op-rs/kona#3124.\n\nOther effects:\n- The `kona_node_sequencer_state` gauge now resets the label set it replaces to 0. Every sequencer now boots `active=\"false\"`, so without this the \"Sequencer Active\" Grafana panel would show `false` and `true` together after a start.\n- The kona Docker recipes bind `--rpc.addr 0.0.0.0` inside the container and publish the RPC port on the host's loopback only.\n- In op-devstack, a kona sequencer outside a conductor cluster is started at its unsafe head after every start of the node. A devstack op-node sequencer boots active on every restart, because it has no admin-state file, so tests see the same behaviour from both CLs. op-node behaviour is unchanged. The new `TestSequencerResumesAfterRestart` covers the restart path under both CLs.\n\nBREAKING CHANGE: `kona-node` removes `--sequencer.stopped`, `--rpc.enable-admin` and `--rpc.admin-state`. It always boots its sequencer stopped, always serves the admin API, and binds its RPC to `127.0.0.1` by default. Operators need to know:\n- **Removed flags vs. env vars.** A removed flag passed on the command line fails at parse time. A leftover `KONA_NODE_SEQUENCER_STOPPED`, `KONA_NODE_RPC_ENABLE_ADMIN` or `KONA_NODE_RPC_ADMIN_STATE` env var is silently ignored. A sequencer that ran without a conductor (with `KONA_NODE_SEQUENCER_STOPPED=false` or unset) now boots stopped. Use op-conductor, or call `admin_startSequencer` with the current unsafe head after every start.\n- **The admin API is always on, in every mode, validators included.** Anyone binding a non-loopback `--rpc.addr` must firewall the RPC port. The admin API is unauthenticated, and `admin_postUnsafePayload` checks only the block hash, not a signature (`rust/kona/crates/node/rpc/src/admin.rs:124`).\n- **Default RPC address.** Set `--rpc.addr` (`KONA_NODE_RPC_ADDR`) explicitly wherever op-conductor, op-batcher, op-proposer, op-challenger or health probes reach the node over the network. `docker run -p` users now need `--rpc.addr 0.0.0.0`, and should publish the port on a trusted interface only.\n\n**Follow-ups outside the monorepo**\n- The netchef node chart (0.52.1, `charts/kona-node/defaults.yaml`) still sets `KONA_NODE_RPC_ENABLE_ADMIN` and `KONA_NODE_SEQUENCER_STOPPED`, which are now ignored. It also points `KONA_NODE_CONDUCTOR_RPC` at `op-conductor` even when a chain has no conductor.\n- Netchef has no kona-node equivalent of the op-node `OP_NODE_SEQUENCER_STOPPED: false` it uses for sequencers without a conductor. Those deployments need a way to call `admin_startSequencer` after each start.\n\n**For reviewers**\n- Review commit by commit. Each one compiles, and together they give the tree that was tested. The PR is squash-merged.\n  1. `kona-node!: always serve the admin API`: removes `--rpc.enable-admin` and `--rpc.admin-state`.\n  2. `kona-node!: always boot the sequencer stopped`: removes `--sequencer.stopped`.\n  3. `op-devstack: start kona sequencers through the admin API`: includes the new restart test. Between commits 2 and 3, devstack kona sequencers stay stopped.\n  4. `kona-node!: bind the RPC to 127.0.0.1 by default`: includes the Docker recipes.\n  5. `kona-node: reset the replaced sequencer state gauge label`\n  6. `docs: document kona-node's stopped sequencer and always-on admin API`\n- Three kona `base/conductor` acceptance tests fail locally on this branch and also on unmodified `develop` (macOS, same failures): `TestLeadershipTransferMovesActiveSequencer`, `TestLeadershipTransferSelectsAnotherActiveSequencer` and `TestConductorProxyServesOnlyLeader`. This PR doesn't change the conductor path: those nodes already booted stopped with admin enabled.\n- Review findings left out, to confirm:\n  - No unit test asserts that the admin module is registered. Building the RPC module set in a unit test needs gossip and discovery handles. Every kona acceptance test now goes through `admin_startSequencer`, so CI fails if admin is missing.\n  - No deprecated no-op flags were kept for a release. The change is a hard break, flagged with `!`.\n  - The admin API is not limited to sequencer mode, and there is no separate admin listener, as decided.\n  - `RpcBuilder` is left as a one-field wrapper. Simplifying it to `Option<SocketAddr>` is unrelated cleanup.\n  - The devstack start runs on the test context, not the `StartControlled` context, and holds the node's lock while it retries (at most about 45s, ended early if the process exits).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "id": "PR_kwDODjvEJM8AAAABP2fd3Q",
+      "title": "kona-peers,kona-disc,kona-gossip!: Keep confirmed peers in the bootstore",
+      "author": "aakoshh",
+      "number": 24217,
+      "body": "### What\n\nThe bootstore records how each saved peer was confirmed, and a full store keeps the confirmed ones. Second PR of a stack for #23767, on top of #24155.\n\nFor operators:\n- The file is `{\"version\": 1, \"records\": [...]}`, one record per node, with `udp_verified_at` (a discovery session that lasted five minutes) and `tcp_verified_at` (gossip dialed the node at its record's TCP address). Old files, a plain list, are read and rewritten.\n- A full store evicts unconfirmed records first and peers gossip reached last, so sessions under fresh keys no longer push out peers that work.\n- A public-only node no longer dials back a private node that started a session with it; the private node dials, and can redial. `kona_node_discovery_events{type=\"session_established\"}` no longer counts those sessions.\n- Saved records without a TCP address are no longer handed to gossip, which counted a dial error for each every minute.\n\nBREAKING CHANGE: the bootstore file format changes; earlier kona-node versions fail on it at startup, so delete the file to go back. In kona-peers, `BootStore::open` returns only the store, `SkippedEntry` and `SkipReason` are gone, `valid_peers_with_chain_id` returns an iterator, and `BootStoreError` has a `NewerVersion` variant.\n\n### Why\n\nThe bootstore saved every session's record, with nothing to tell a peer that worked from one that never did, and evicted the oldest when full. Anyone starting sessions under fresh keys could replace every saved peer, so that after a restart the node would bootstrap from the attacker's records.\n\n### How\n\n- Evidence is only what the node saw itself. A session counts once discv5 still holds it after five minutes, which means it answered a ping, much as geth saves a node only after several. A connection counts only if we dialed it: op-node dials from its listen port, so an inbound connection can come from the record's address without showing that we can reach it.\n- Among unconfirmed sessions, the youngest is evicted first, as the attacker picks the rate of fresh ones. Ties are broken at random, not by node ID, which keys can be ground for.\n- Dialing back without saving, from #23766, is reverted: a node that dials a record it doesn't save can never redial it, and its dial can leave the other node with only an inbound connection, which confirms nothing.\n\n### Caveats\n\n- The per-/24 limit on the store is deferred to #23764: one host with many keys can still fill it with records whose addresses work.\n- Evidence uses wall-clock time, so a large clock jump can count a fresh session as lasted.\n- Evidence doesn't expire yet; that's a later PR.\n\n### Alternatives\n\n- An invalid entry is skipped with `serde_with::VecSkipError` and logged with serde's error, rather than parsed entry by entry to log its content.\n- Review agents run: `rust-code-reviewer` and `deletion-reviewer`; each fix has its own commit. Dismissed: the invalid-entry WARN not naming the file or the entry, moving gossip's private `tcp_socket` to kona-peers, and the Korean configuration page, left to the translation PRs. The general code review and security review skills weren't run.\n\n### Potential follow-ups\n\n- Seed discovery from the stored records, and hand gossip only confirmed ones (next PR).\n- Expire evidence, once discovery has heard from the network after a restart.\n\n🤖 Co-created with Claude Opus 5.5\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-17T00:20:03Z",
+      "createdAt": "2026-11-17T14:29:25Z",
       "mergedAt": null,
-      "additions": 276,
-      "deletions": 220
+      "additions": 1838,
+      "deletions": 239
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABPsAb7w",
-      "title": "kona-genesis: serialize l2_chain_id as a number",
+      "id": "PR_kwDODjvEJM8AAAABMa0zKg",
+      "title": "kona-node!: verify L1 RPC data against block headers",
       "author": "joshklop",
-      "number": 24205,
-      "body": "kona-node's `optimism_rollupConfig` returned `l2_chain_id` as a chain-name string (`\"optimism\"`, `\"base\"`, `\"optimism-sepolia\"`, `\"unichain\"`, …) on every chain that alloy-chains names, because the field is an `alloy_chains::Chain` and that type serializes named chains by name. op-node returns a JSON number, and Go's `RollupClient.RollupConfig` fails with `cannot unmarshal \"optimism\" into *big.Int`. So op-batcher, and anything else using that client (op-conductor's rollupConfig proxy included), cannot start against a kona-node on OP Mainnet, Base, the Sepolias, Unichain and similar chains. Devnet chain IDs such as 901 have no alloy name, which is why existing tests and devnets did not catch it. kona-node now returns the number, as op-node does.\n\nThe fix is on the type (`serialize_with` on the field), not only at the RPC layer: every other place that serializes a `RollupConfig` also benefits from op-node's shape, and an RPC-only fix would need a parallel copy of the whole struct. Deserialization is unchanged and still accepts a number or a name, so existing rollup.json files and preimages keep loading. The other serializers are all inside kona: kona-host's `L2_ROLLUP_CONFIG_KEY` local preimages, the SP1 executor's test-config preimages, and test helpers. Each one only feeds kona's own deserializer. No serialized `RollupConfig` is hashed or committed anywhere, and the registry embeds `ChainConfig`, whose chain ID is already a `u64`. The fault-proof client never serializes a `RollupConfig`, so the prestate does not change. The `release-client-lto` builds of `kona-client` and `kona-client-int` are byte-identical with and without this change. That comparison used native builds, because Docker was unavailable for a cannon prestate build.\n\n`rollup_config_named_chain.json` is a golden vector across both languages. kona's serializer must reproduce it exactly. op-node must decode it into the expected `rollup.Config`, and that config must pass `Check()` as op-batcher requires at startup. If kona's serialization changes later, the fixture has to be updated, and the Go test then checks it again.\n\nKnown follow-ups, out of scope here: kona's `optimism_rollupConfig` still differs from op-node in other fields. Go ignores unknown keys, so none of these makes decoding fail, but Go clients silently drop the values:\n- the genesis `system_config` keys: kona writes `eip1559Denominator`/`eip1559Elasticity`/`operatorFeeScalar`/`operatorFeeConstant` separately, where op-node reads packed `eip1559Params`/`operatorFeeParams`, so those decode to zero. The Go test records this gap explicitly.\n- `alt_da.da_challenge_address` vs `da_challenge_contract_address`.\n- `granite_channel_timeout`, which op-node has no field for, and fields op-node omits with `omitempty`.\n\nReviews: rust-code-reviewer, go-code-reviewer and kona-sp1-cost-reviewer (no guest cost change). The reviewers' optional nits were dismissed. One was to widen the fixture with more optional fields, which belongs to the field-name follow-ups. The other was to inline the fixture const, which is kept because its doc comment points to the Go test.\n\nUnrelated to this diff, two kona recipes fail locally on `develop`:\n- `just l` fails in `lint-docs` on an unresolved intra-doc link in `reth-optimism-node`. The doc lint for `kona-genesis` and the workspace clippy pass.\n- `just t` (`nextest --release --workspace --all-features`) fails 52 log-capture tests. op-reth's `min-error-logs` feature enables `tracing/release_max_level_error`, and feature unification applies it across the whole workspace, so those tests capture no logs. Every test in the affected kona packages passes when run without op-reth in the feature set.\n\nCloses https://github.com/ethereum-optimism/protocol-team/issues/593\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "number": 23849,
+      "body": "With an untrusted L1 RPC, kona-node checked only block hashes. A dishonest or buggy L1 RPC could drop batcher transactions or deposits from what derivation sees, or install an unsafe block signer of its choosing, without any error. Unless `--l1-trust-rpc` is set, the node now verifies what it reads through its shared L1 client against the block header, as op-node does: header hashes, block numbers, transactions and receipts roots, and an `eth_getProof` proof of the unsafe block signer.\n\nCloses https://github.com/ethereum-optimism/protocol-team/issues/568\nCloses https://github.com/ethereum-optimism/protocol-team/issues/582\nCloses https://github.com/ethereum-optimism/protocol-team/issues/583\n\n**Stack.** This is part 4 of 5, split out of #23829. Merge them in order:\n1. #23846: delete `DerivationDelegateClient`\n2. #23847: check sync-start L1 origins against the canonical chain\n3. #23848: share one L1 client across the node\n4. #23849: verify L1 RPC data against block headers ← this PR\n5. #23850: resolve pipeline reset bases by hash\n\n**Effect on operators**\n- With `--l1-trust-rpc=false`, the default, the L1 RPC must serve `eth_getProof`, or the node fails to start. The README, the flag help and the operator docs now say so.\n- The chain provider's cache metrics replace the `block_info_and_transactions` value of the `cache` label with `transactions`. The bundled dashboards are unaffected.\n- The L1 watcher waits a full poll interval after each poll, so a slow L1 RPC is not polled again as soon as it answers.\n\nUntil the reset-by-hash PR above this one removes it, the pipeline reset's separate lookup by number goes through the same verification as every other lookup.\n\n**For reviewers.** Each commit is self-contained and builds and passes on its own. Each `!` commit's message states what breaks and how to migrate. Read in this order:\n- verification, from `1b33bce8ea` to `eca5df16df`, then `ae0ab3940b`;\n- the review fixes, from `6ac3383d08`;\n- the docs, `f6ed432cdc` and `d7b86a68ed`.\n\n**Reviews.** On #23829, I ran `rust-code-reviewer`, `deletion-reviewer` and a security review of the L1 verification against op-node over these commits. Here they are unchanged, except that the reset lookup is routed through verification; `rust-code-reviewer` checked that change. I skipped `deposit-reviewer` and `derivation-batch-reviewer`, because nothing here changes how deposits or batches are decoded. Finding dismissed, with the author's agreement:\n- **Two cleanups are left for later:** a shared `BlockInfo`-from-header constructor, and one helper for mapping a missing block to `None`.\n\nOlder gaps the reviews found are tracked in protocol-team: https://github.com/ethereum-optimism/protocol-team/issues/570, https://github.com/ethereum-optimism/protocol-team/issues/571 and https://github.com/ethereum-optimism/protocol-team/issues/572. The L2 provider's verification is https://github.com/ethereum-optimism/protocol-team/issues/569.\n\nBREAKING CHANGE: This affects operators, dashboards and code that uses the `kona-providers-alloy` crate.\n- **Operators:** without `--l1-trust-rpc`, the L1 RPC must serve `eth_getProof`.\n- **Dashboards and alerts:** queries on the chain provider's cache metrics that filter on `cache=\"block_info_and_transactions\"` must use `cache=\"transactions\"`.\n- **Rust API:** `AlloyChainProviderError` gains `HeaderHashMismatch`, `BlockNumberMismatch`, `TransactionsRootMismatch`, `ReceiptsRootMismatch` and `InvalidStorageProof`, and `EmptyRawReceiptsForNonEmptyBlock` loses its `transaction_count` field. `AlloyChainProvider::unsafe_block_signer` returns `Result<Address, AlloyChainProviderError>`. `AlloyChainProvider::latest_block_number` and `AlloyChainProvider::chain_id` are removed.\n\nEach `!` commit's message gives the exact change and the migration.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-17T00:17:30Z",
-      "mergedAt": null,
-      "additions": 149,
-      "deletions": 1
+      "createdAt": "2026-11-02T22:24:53Z",
+      "mergedAt": "2026-11-17T20:46:08Z",
+      "additions": 1236,
+      "deletions": 200
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABN9xwLw",
-      "title": "docs/public-docs: mark monitorism as an OP Enterprise feature",
-      "author": "sbvegan",
-      "number": 24019,
-      "body": "The chain monitoring and launch-paths pages now present `monitorism` as an OP Enterprise customers premium service. \n\nGated sections now use a shared availability marker, `snippets/op-enterprise-feature.mdx`. It is a gray `sm` badge with a small Optimism Red square, plus one line that links to the same UTM-tagged OP Enterprise URL as the other OP Enterprise snippets. \n\n\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-09T22:21:47Z",
-      "mergedAt": "2026-11-17T03:46:33Z",
-      "additions": 142,
-      "deletions": 35
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABPsdGbw",
-      "title": "ci: split memory-all tests on PRs by develop's timings",
-      "author": "mds1",
-      "number": 24207,
-      "body": "PR memory-all splits used stale timings: CircleCI times the split from the branch's own last green run, which can predate slow tests added on develop since. After #23787 re-enabled `TestExecuteStep_CannonKona` (about 400 s), it weighed about 0 on such branches and landed late on an already full node. That set the end of 12 of the 30 slowest PR pipelines since 11-13 (slowest node 603 to 709 s, typical 433 to 445 s, measured), and it happened again on 11-16 under the 4 x 16 layout from #24145. Modeled on 118 PR pipelines: PR p90 18.8 to 15.9 min.\n\n## Change\n\n- New `memory-all-shard-timings` job (no context, `small.gen2`). On PR branches it reads develop's latest green memory-all results from CircleCI's API, keeps top-level tests (a parent's time includes its subtests), and writes one timings file per memory-all job. Both memory-all jobs require it, so every node splits from the same file and each test still runs exactly once.\n- `shard-tests.sh` passes that file to `circleci tests split --timings-file` when it exists. Without it the split works exactly as today, and a test missing from the file keeps the existing 1m default.\n- No cache. The data comes from CircleCI's record of develop runs, which no branch can write. Develop, tags, the merge queue and `proposal/*` skip the fetch and keep CircleCI's own timings.\n- Any API failure (timeout, rate limit, outage) logs one line, writes no file, and the split runs as today. The fetch gives up within about 80 s at worst (no new call after 60 s, each call capped including retry waits). memory-all requires the job as `terminal`, so even a failed or cancelled timings job never blocks it.\n- The API needs no token while the project is public. If it goes private, set `CIRCLE_TIMINGS_TOKEN` (a personal API token, the v2 API rejects project tokens) as a project env var.\n\n## Checks\n\n- `circleci config validate --next` on the merged config, `test-decision-tree.sh` 25 passed.\n- Against live develop data: 281 top-level tests per job, the same count each memory-all job runs, with CannonKona at 406 s.\n- An earlier cache-based version of the same split was benched in [140318](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/140318): CannonKona ran first, slowest node 426 s and 481 s against develop's 452 s and 446 s, 281 tests per job, none missing or doubled. It was dropped because a branch can write any cache.\n- Bench of this API version, [140329](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/140329): the fetch took 4 s, all 4 nodes of both jobs used the same file, CannonKona ran first, 281 tests per job with none missing or doubled, all green. Slowest node 443 s (op-node) and 441 s (kona) against 452 s and 446 s on develop at the same base ([140312](https://app.circleci.com/pipelines/github/ethereum-optimism/optimism/140312), n=1). memory-all started no later than on develop. A bad host, unreachable address, 404 and 401 each exit 0 and write no file (local).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-17T00:56:39Z",
-      "mergedAt": "2026-11-17T02:12:46Z",
-      "additions": 90,
-      "deletions": 1
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABAfYG8Q",
-      "title": "kona-node: repeat beacon blob query parameters",
+      "id": "PR_kwDODjvEJM8AAAABMa0wFw",
+      "title": "kona-node!: share one L1 client across the node",
       "author": "joshklop",
-      "number": 22594,
-      "body": "## Description\n\nEncode the Beacon API `versioned_hashes` array as repeated query parameters instead of joining all hashes into one comma-separated value:\n\n```text\n?versioned_hashes=hash1&versioned_hashes=hash2\n```\n\nThe [Beacon API](https://github.com/ethereum/beacon-APIs/blob/master/apis/beacon/blobs/blobs.yaml) defines this field as an array. Grandine and Lodestar reject or misinterpret the previous comma-separated encoding, while Prysm and Teku accept both forms.\n\nUpdate the existing provider test to require two separate `versioned_hashes` parameters so this does not regress.\n\nThis PR is stacked on #22553.\n\n## Validation\n\n- `cargo +nightly-2026-08-18 fmt --all -- --check`\n- `cargo test --locked -p kona-providers-alloy` — 11 passed\n- `cargo clippy --locked -p kona-providers-alloy --all-targets --all-features -- -D warnings`\n- `cargo check --locked -p kona-node`\n- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps -p kona-providers-alloy`\n- Live provider check against Plataberget Gloas slot 49,164 retrieved all seven requested blobs through Grandine, Lodestar, and Teku routes\n",
+      "number": 23848,
+      "body": "kona-node read L1 through several separately built clients. Derivation, the sequencer, the L1 watcher, the engine and the unsafe block signer lookup each had their own connection, caches and timeouts, so the same L1 data was fetched and cached more than once, and some reads had no deadline. The node now builds one `AlloyChainProvider` at startup and shares it, so every L1 read goes through the same caches and one per-request deadline on the transport. This also gives L1 verification, in the next PR, a single place to live. The engine's sync-start check now reads the canonical L1 block by number through the shared client.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/23745\nCloses https://github.com/ethereum-optimism/protocol-team/issues/579\nCloses https://github.com/ethereum-optimism/protocol-team/issues/580\nCloses https://github.com/ethereum-optimism/protocol-team/issues/581\n\n**Stack.** This is part 3 of 5, split out of #23829. Merge them in order:\n1. #23846: delete `DerivationDelegateClient`\n2. #23847: check sync-start L1 origins against the canonical chain\n3. #23848: share one L1 client across the node ← this PR\n4. #23849: verify L1 RPC data against block headers\n5. #23850: resolve pipeline reset bases by hash\n\n**Effect on operators.** Nothing changes in what the node checks or what the L1 RPC must serve. The L1 metrics change:\n- L1 RPC metrics come from the transport. `kona_providers_chain_rpc_calls` and `kona_providers_chain_rpc_errors` are replaced by `kona_rpc_client_request_duration_seconds{client, method, outcome, error}`. Its `method` label holds JSON-RPC method names, and failures that are not RPC errors, such as receipts that fail to decode, are no longer counted as errors.\n- `kona_providers_cache_memory_bytes`, which nothing set, is removed.\n- The chain provider's cache metrics use new `cache` label values.\n- The bundled dashboards are updated.\n\n**For reviewers.** Each commit is self-contained and builds and passes on its own. Each `!` commit's message states what breaks and how to migrate. Read in this order:\n- the shared client, from `e48420165c` to `71436310ff`;\n- follow-ups to the provider's API, from `968103fdf4` to `ed8eefe1a2` (`213f446544` only ignores local Zed settings);\n- caching and metrics, from `d51bac140e` to `9d86fb8c65`.\n\n**Reviews.** These are #23829's commits, rebased past the moved reset change, plus a test helper that keeps kona-rpc's tests compiling at each commit. On #23829, `rust-code-reviewer`, `deletion-reviewer` and `safedb-reviewer` ran over them. Findings dismissed, with the author's agreement:\n- **The dashboard panel for `kona_providers_cache_memory_bytes` is kept.** It was already empty before this PR.\n- **The request deadline comes from the transport kona-node builds, not from `AlloyChainProvider` itself.** The requirement is documented on `L1ConfigBuilder::provider` and `AlloyChainProvider::new`. Moving the deadline into the provider crate can follow separately.\n- **`kona-engine` now depends on `kona-providers-alloy`.** This is intended: the engine reads L1 through the shared client.\n\nBREAKING CHANGE: This affects dashboards, alerts and code that uses kona's Rust crates.\n- **Dashboards and alerts:** they must move to the metrics above.\n- **Rust API:**\n  - `kona-providers-alloy`: `AlloyChainProvider`'s constructors (`new_http` and the two-argument `new` are removed, and `cache_size` is a `NonZeroUsize`), its `inner` and `trust_rpc` are no longer public, the free `unsafe_block_signer` function is removed, and the `Metrics` constants for RPC calls, errors and cache memory are removed or renamed.\n  - `kona-node-service`: `L1Config`, `L1ConfigBuilder`, `BlockStream`, `L1WatcherActor`, `DelayedL1OriginSelectorProvider`, `L1OriginSelectorError`, `EngineConfig` and `build_engine_client`.\n  - `kona-engine`: the L1 methods on `EngineClient` and `EngineClientBuilder`, and a new `SyncStartError::L1` variant.\n\nEach `!` commit's message gives the exact change and the migration.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-08-21T01:30:25Z",
+      "createdAt": "2026-11-02T22:24:50Z",
+      "mergedAt": "2026-11-17T20:46:07Z",
+      "additions": 1187,
+      "deletions": 587
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABP-J7BQ",
+      "title": "op-reth: add an opt-in sweep prune for the proofs-history index",
+      "author": "jelias2",
+      "number": 24235,
+      "body": "Follows #24075.\n\nWith page-cache warming on, the prune of the history index is the largest part of what persisting a proofs-history block still costs. A prune removes the pruned blocks from the index key by key: for every key those blocks changed, it looks up the key's first shard and rewrites it. On op-mainnet that is about 1,070 lookups per block in random places of four B-trees: 94 of 208 ms and 89 of 105 disk reads per block. Each rewrite also dirties a page that the commit has to write. This PR adds a mode in which a prune leaves those block numbers in the index and cleans a short run of neighbouring rows instead.\n\nEffect on operators: none by default. `--proofs-history.sweep-prune` (default off) changes how a prune cleans the history index:\n- A prune only deletes the changesets of the pruned blocks. Their block numbers stay in the index. Reads do not change: a lookup takes the first block number above the block it reads at, and no block before the proof window is read.\n- Each prune cleans a share of each history table in key order, in proportion to the blocks it prunes, so that a full pass takes about one proof window of blocks. On op-mainnet that is about 75 rows per block.\n- The index grows, because a block number stays in it for up to one more proof window.\n- A database pruned this way cannot be backfilled, also after the flag is turned off: `op-reth proofs backfill` refuses it.\n- `reth_optimism_trie_storage_history_unique_keys` reports the rows a sweep visited under `operation=\"sweep\"` and has no `operation=\"prune\"` series while the flag is on. The phase duration and page-fault metrics keep `operation=\"prune\"`.\n\nMeasured on three op-mainnet followers with production hardware (devnets-private#2644), on the same 126,000 blocks over 70 hours at the tip. Both nodes with warming use 8 threads:\n\n| | no warming | warming | warming and sweep |\n|---|---|---|---|\n| Persistence per block | 1,069 ms | 208 ms | 79 ms |\n| Write, prune, commit | 356, 640, 74 ms | 32, 94, 81 ms | 31, 6, 43 ms |\n| Disk reads the persistence thread waits on, per block | 1,574 | 105 | 23 |\n| Disk write operations of the node, per block | 5,415 | 5,389 | 3,018 |\n| Proofs readable after the block's timestamp, median and p99 | 4.9 s, 235 s | 1.03 s, 2.65 s | 0.40 s, 1.81 s |\n| Most blocks behind the tip | 226 | 5 | 5 |\n\nPer day the node with the sweep took 77, 81 and 83 ms per block. Its prune and commit stayed flat. The rise is in the write step, which rose the same on the node with warming only. The slowest single batch of the 70 hours was on the node with the sweep: readable 12.2 s after its block, against 8.4 s on the node with warming only. Its write and commit were long; its prune was not.\n\nWhat these numbers do not show:\n- The steady state. The node is 22% into its first pass, so the sweep still finds fewer block numbers to remove per row than it will later, and its page writes can still rise. Its four history tables are 34.1 GiB against 29.0 GiB (+18%), and the gap is still growing. A projection for a full pass, not a measurement: 6 to 13 GiB more than without the sweep, about 1% of the 1,050 GiB database.\n- `eth_getProof` latency on the node with the sweep, the sweep without warming, and other chains or disks.\n- The code after review. The numbers come from revision `928514e3` of branch `jelias2/op-reth-proofs-history-sweep`: this change on the warming code before its review. Since then a warming prune pass reads 16 blocks at a time, and the review of this PR changed the per-key prune and the handling of an unreadable position, both described below. The sweep reads and writes the same rows.\n\nChoices the diff does not explain:\n- Backfill is refused, not fixed. Backfill moves the start of the window back. A block number that the sweep has not removed yet is then inside the window again, without a changeset, for any key that the backfilled block's diff does not rewrite, and that key reads wrong without an error. Making backfill safe needs a full sweep before it, or proof that backfill and the live path record the same keys per block. The docs tell operators to backfill before they enable the flag.\n- `V2HistorySweepProgress` is both the position of the sweep and the mark that a database has been swept. The position is written in the prune's transaction, so it cannot disagree with the rows, and it is written also when the sweep stands at the first row or the table is empty. Backfill checks the table, not the flag, so the refusal survives turning the flag off.\n- The per-key prune changes too, for every database: it removes every block number up to the end of its range from the keys it visits, not only the numbers inside the range. On a database that was never swept that is the same set, because a per-key prune leaves no number below its range. On a swept database with the flag turned off again, the numbers the sweep left would otherwise never go, and every later prune of a busy key would walk over all of that key's old shards again.\n- A saved position that cannot be decoded starts the sweep at the first row again, with a warning. Returning the error would fail that prune and every one after it, and the prune shares its transaction with the block writes.\n- A read below the start of the window gives another result than before, and nothing makes such a read: with a block number left in the index it finds the key absent, where it found the value at the start of the window. The RPC checks the window in the transaction it reads in (`rpc/src/state.rs`), and the audit below found no other caller that reads below the window.\n- Warming skips its per-key history reads for a prune that sweeps, and does not warm the sweep. The sweep reads a run of neighbouring rows, about 6 disk reads per block.\n\nReviews: four agents reviewed the change before this PR: `rust-code-reviewer`, a correctness audit (every reader and writer of the history tables, append, unwind, backfill, turning the flag on and off, the cursor handling), a test-coverage review, and a comment and docs review. The audit found no path to a wrong read, a crash or lost data. Fixed from them: the per-key prune over a swept history and the unreadable position (both above), the sweep's stats now go through the prune's `step` helper, a method that shared its name with a field, the metric's help text, comments, and the docs section (unreleased callout, when to enable, measured cost). New tests: the share per prune, the mark on an emptied table, a saved row that was the last one, an unreadable position, the per-key prune after a sweep, the refusal with the flag off, an unwind over a key whose shards two sweeps split, the warming skip and the metric label. The bound on how long a block number waits is now one window; it allowed two. Seven of these tests were checked by breaking the code they cover (the per-key filter, the fallback, the warming skip, the label, the cap on the share, the write of the mark, the speed of the sweep): each failed.\n\nNo separate security review: the change adds one boolean flag and no input surface.\n\nThe Korean pages under `docs/public-docs/ko` do not document the new flag yet.\n\nDismissed, with the author's confirmation:\n- `provider_rw` builds the provider with a struct literal instead of a `with_history_sweep` builder on the provider. The literal is in the module that owns the struct, and a builder would be new API for one caller.\n- Helpers in `sweep_tests.rs` repeat helpers that are private to a module in `tests.rs`. Sharing them means moving helpers out of existing tests; each test file of the crate carries its own today.\n- The casts in `sweep_history_share`. Neither can truncate: a row count widens to `u64`, and `rows` is at most that count.\n- A note that renaming a history table orphans its saved position. A rename needs a migration of the table anyway, and the sweep would start again at the first row.\n- A named helper for \"this history was swept\" in backfill. It has one use, with the reason in a comment at the call.\n- In sweep mode the prune still collects the keys of the changesets it deletes, which only the per-key path reads. Removing that changes the signatures of the four changeset prunes; the reviewer said to leave it.\n- No test that the flag reaches the store from `launch_node`. `launch_node` has no unit tests and its storage setup would have to be split out; the warming flag is wired the same way. A break turns the sweep off, which is the default behaviour, and shows as a missing `operation=\"sweep\"` series.\n- No direct sweep test on the storage tables. The four key types have fixed-length encodings, the saved position is compared as encoded bytes, and the tests that prune through the store sweep and resume all four tables.\n- The backfill error gives no remedy. There is none for that database; the docs say to backfill before enabling the flag.\n- Backfill refuses a swept database at its first block, after `run_with_snapshot` has built its snapshot. Refusing earlier needs a new method on the backfill traits, which every store wrapper would have to forward.\n- Cursor constructors accept a block below the window. This PR does not change that; the callers check.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-17T23:19:51Z",
       "mergedAt": null,
-      "additions": 49,
-      "deletions": 29
+      "additions": 994,
+      "deletions": 47
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABPBX__Q",
+      "title": "kona-peers,kona-disc!: Save the bootstore reliably",
+      "author": "aakoshh",
+      "number": 24155,
+      "body": "### What\n\nkona-node now saves its bootstore, saves it safely, and stops at startup when it can't, instead of running with a store it never saves. First PR of a stack for #23767; the next one changes *what* the bootstore saves.\n\nFor operators:\n- The bootstore is saved at the default path, `~/.kona/<chain_id>/bootstore.json`, or at `--p2p.bootstore`. A missing file and its directory are created at startup.\n- The node doesn't start if the bootstore file can't be read, isn't a JSON list of records, or is missing and can't be created. Entries that aren't node records are logged at WARN and dropped.\n- The file is replaced atomically, only when its records changed, with the mode a newly created file gets.\n- New counter `kona_node_discovery_dropped_enrs`: session records dropped because the channel to gossip was full. `kona_node_enr_store_time` now records only saves that wrote the file.\n- The `kona-node` docker recipe keeps the bootstore in the node's home: its `kona_data` volume is mounted at `/home/app`, and `--p2p.bootstore` is gone.\n\nBREAKING CHANGE: kona-node no longer starts when its bootstore can't be read, isn't a JSON list of records, or is missing and can't be created; before, it silently kept the records in memory and lost them at every restart. This applies to the default path too, so a node without `--p2p.bootstore` needs a writable home directory. Point `--p2p.bootstore` at a file, not a directory (such as `/db/bootstore.json` instead of `/db`), delete a file that isn't a bootstore, or pass `--p2p.no-bootstore`. In the kona-peers and kona-disc APIs, `BootStore::open`, `BootStore::in_memory` and `BootStoreFile::path` replace the `From`/`TryInto` conversions, `Default`, and the public fields; `BootStore::sync` returns whether there were changes; `merge` and `valid_peers` are gone; `Discv5Driver::bootstore` is an opened `BootStore`.\n\n### Why\n\nThe bootstore usually wasn't saved at all. A failed open fell back to a store kept only in memory, without a log. Nothing created the default path's directory, and our docker recipes passed a directory as the path, so after a restart the node only had its bootnodes to start from; #24094 found that on Sepolia only one operator's built-in bootnodes answer. Where a file was saved, it was rewritten every minute by truncating it first, so a reader could see it empty and a crash left it empty. The driver also handed records to gossip from spawned tasks that waited for room in the channel, which piled up while gossip fell behind, and inbound sessions decide how many there are.\n\n### How\n\n- `BootStore` is a path, a private `Records` type with just the file's contents, and a dirty flag. `open` only reads, so that tests and tools can read the file while the node saves it. `Discv5Builder::build` opens it and saves it, which creates a missing file, so the node finds out at startup whether it can.\n- Saves write a temporary file next to the bootstore, `fsync` it and rename it over the bootstore, on a blocking thread that the driver waits for.\n- Records go to gossip with `try_send` from the driver loop. Saved records are shuffled, so each store interval gets a different part of them through, and fill at most half of the channel, leaving the rest for session records, which are handed over only once.\n\n### Caveats\n\n- An existing, valid bootstore in a directory the node can't write doesn't stop it from starting; every save then fails with a WARN. A file that exists was written by the node, so startup only checks a missing one.\n- A symlinked `bootstore.json` is replaced by a regular file at the first save. A crash during a save can leave a `bootstore.json.*.tmp` behind. The directory isn't synced after the rename, so after a power loss the file may be the one from before the save.\n- I couldn't run the docker recipe locally. Unrelated to this PR, it mounts the JWT at `/root/jwt` while the image runs as user 10001, which may not be able to read it.\n\n### Alternatives\n\n- Checking in `open` that the directory is writable, with a throwaway temporary file: rejected, as readers open the store too, and opening shouldn't write.\n- Making the recipe's `/db` volume writable with a one-off service that `chown`s it as root: rejected as awkward next to mounting the node's home, which the image already owns.\n- Review agents run: `rust-code-reviewer`, `deletion-reviewer`, and a general correctness and security review. Each finding fixed has its own commit. Dismissed:\n  - the writability of an existing file (first caveat);\n  - duplicate entries, or entries beyond 2048, in a hand-edited file don't mark the store dirty, so they stay in the file until the next change: the next PR reworks how records are added and can report these with the skipped ones;\n  - the symlink, leftover temporary file and directory sync caveats above;\n  - the \"ENR Store Time\" Grafana panel only sampling saves that wrote, which is intended;\n  - the dev recipe's Dockerfile copying a Sepolia seed to a path nothing reads, which predates this PR;\n  - the Korean configuration page, left to the translation-drift PRs.\n\n### Follow-ups\n\n- The rest of #23767, as stacked PRs: save only records that an outbound gossip connection verified, keep evidence timestamps per record and evict by them, and seed discovery from the saved records; then expire stale records.\n\nPart of #23767.\n\n🤖 Co-created with Claude Opus 5.5\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-13T21:23:10Z",
+      "mergedAt": "2026-11-17T15:06:45Z",
+      "additions": 860,
+      "deletions": 306
     }
   ],
   "codeChanges": {
-    "additions": 249,
-    "deletions": 77,
-    "files": 16,
-    "commitCount": 36
+    "additions": 6188,
+    "deletions": 2351,
+    "files": 179,
+    "commitCount": 247
   },
   "completedItems": [
+    {
+      "title": "kona-node!: verify L1 RPC data against block headers",
+      "prNumber": 23849,
+      "type": "other",
+      "body": "With an untrusted L1 RPC, kona-node checked only block hashes. A dishonest or buggy L1 RPC could drop batcher transactions or deposits from what derivation sees, or install an unsafe block signer of its choosing, without any error. Unless `",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/design/derivation.mdx",
+        "docs/public-docs/node-operators/kona-node/design/engine.mdx",
+        "docs/public-docs/node-operators/kona-node/design/sequencer.mdx",
+        "docs/public-docs/node-operators/kona-node/run/binary.mdx",
+        "docs/public-docs/node-operators/kona-node/run/docker.mdx",
+        "docs/public-docs/node-operators/kona-node/run/rpc-trust.mdx",
+        "rust/Cargo.lock",
+        "rust/kona/bin/node/Cargo.toml",
+        "rust/kona/bin/node/README.md",
+        "rust/kona/bin/node/src/commands/node/command.rs",
+        "rust/kona/bin/node/src/commands/node/tests.rs",
+        "rust/kona/bin/node/src/flags/engine/providers.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/blockstream.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/origin_prefetch_test.rs",
+        "rust/kona/crates/node/service/src/service/builder.rs",
+        "rust/kona/crates/providers/providers-alloy/Cargo.toml",
+        "rust/kona/crates/providers/providers-alloy/src/chain_provider.rs",
+        "rust/kona/crates/providers/providers-alloy/src/chain_provider/cache.rs",
+        "rust/kona/crates/providers/providers-alloy/src/metrics.rs",
+        "rust/kona/bin/node/src/flags/p2p.rs",
+        "rust/kona/crates/providers/providers-alloy/src/lib.rs"
+      ]
+    },
+    {
+      "title": "kona-node!: share one L1 client across the node",
+      "prNumber": 23848,
+      "type": "other",
+      "body": "kona-node read L1 through several separately built clients. Derivation, the sequencer, the L1 watcher, the engine and the unsafe block signer lookup each had their own connection, caches and timeouts, so the same L1 data was fetched and cac",
+      "files": [
+        ".gitignore",
+        "rust/Cargo.lock",
+        "rust/kona/bin/node/Cargo.toml",
+        "rust/kona/bin/node/src/commands/node/command.rs",
+        "rust/kona/bin/node/src/commands/node/middleware.rs",
+        "rust/kona/bin/node/src/commands/node/mod.rs",
+        "rust/kona/bin/node/src/flags/p2p.rs",
+        "rust/kona/crates/node/engine/Cargo.toml",
+        "rust/kona/crates/node/engine/src/client.rs",
+        "rust/kona/crates/node/engine/src/lib.rs",
+        "rust/kona/crates/node/engine/src/sync/error.rs",
+        "rust/kona/crates/node/engine/src/sync/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/test_utils/rpc.rs",
+        "rust/kona/crates/node/rpc/src/superroot/server/safedb_tests/reorg_tests.rs",
+        "rust/kona/crates/node/service/src/actors/engine/config.rs",
+        "rust/kona/crates/node/service/src/actors/engine/tests.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/actor.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/blockstream.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/chain.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/origin_prefetch.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/origin_prefetch_test.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/origin_selector.rs",
+        "rust/kona/crates/node/service/src/service/builder.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs",
+        "rust/kona/crates/providers/providers-alloy/src/chain_provider.rs",
+        "rust/kona/crates/providers/providers-alloy/src/chain_provider/cache.rs",
+        "rust/kona/crates/providers/providers-alloy/src/lib.rs",
+        "rust/kona/crates/providers/providers-alloy/src/metrics.rs",
+        "rust/kona/crates/providers/providers-alloy/src/runtime_config.rs",
+        "rust/kona/docker/recipes/kona-node-dev/grafana/dashboards/overview.json",
+        "rust/kona/docker/recipes/kona-node/grafana/dashboards/overview.json",
+        "rust/kona/crates/node/engine/src/test_utils/mod.rs",
+        "rust/kona/crates/node/rpc/src/superroot/server/safedb_tests/execution_layer.rs",
+        "rust/kona/crates/node/service/src/actors/engine/queue_tests.rs"
+      ]
+    },
+    {
+      "title": "kona-engine: check sync-start L1 origins against the canonical chain",
+      "prNumber": 23847,
+      "type": "other",
+      "body": "After an L1 reorg, an engine reset could keep an unsafe head whose L1 origin was reorged out. `find_starting_forkchoice` accepted an origin if L1 still served its hash, and L1 clients still serve reorged-out blocks by hash. The reset's safe",
+      "files": [
+        "rust/kona/crates/node/engine/src/sync/mod.rs",
+        "rust/kona/crates/node/service/src/actors/engine/tests.rs",
+        "op-acceptance-tests/tests/sync/elsync/reorg/sync_test.go",
+        "rust/kona/crates/node/engine/src/sync/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/canonicalize_test.rs",
+        "rust/kona/crates/node/engine/src/test_utils/blocks.rs",
+        "rust/kona/crates/node/engine/src/test_utils/mod.rs",
+        "rust/kona/crates/node/rpc/src/test_utils.rs",
+        "rust/kona/crates/node/service/src/actors/engine/queue_tests.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/actor/tests/conductor_commit_test.rs",
+        "rust/kona/crates/node/engine/src/test_utils/deposits.rs",
+        "rust/kona/crates/node/engine/src/test_utils/rpc.rs"
+      ]
+    },
+    {
+      "title": "kona-node-service!: delete DerivationDelegateClient",
+      "prNumber": 23846,
+      "type": "other",
+      "body": "kona-node's derivation delegate actor only needs the delegate's sync status, but it was handed a `DerivationDelegateClient` wrapper that fixed its transport and timeout, and a failure to build that client panicked at startup. A node run wit",
+      "files": [
+        "rust/kona/bin/node/src/commands/node/command.rs",
+        "rust/kona/bin/node/src/flags/engine/providers.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/actor.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/client.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/mod.rs",
+        "rust/kona/crates/node/service/src/actors/mod.rs",
+        "rust/kona/crates/node/service/src/lib.rs",
+        "rust/kona/crates/node/service/src/service/builder.rs",
+        "rust/kona/crates/node/service/src/service/mod.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs",
+        "rust/kona/crates/protocol/protocol/src/sync.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/tests.rs"
+      ]
+    },
+    {
+      "title": "kona-engine!: keep delegated finalization pending during EL catch-up",
+      "prNumber": 23908,
+      "type": "other",
+      "body": "A kona-node could stop on a finalization target it could not apply yet, in three ways:\n- **Delegated catch-up (#23675).** The delegate's finalized block was not downloaded yet, the hash-pinned lookup returned nothing, and the task failed wi",
+      "files": [
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/id.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task_test.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/tests.rs",
+        "rust/kona/crates/node/service/src/actors/engine/queue_tests.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/test_utils/mod.rs",
+        "rust/kona/crates/node/engine/src/test_utils/rpc.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/core.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/finalizer.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/actor.rs"
+      ]
+    },
     {
       "title": "docs/public-docs: mark monitorism as an OP Enterprise feature",
       "prNumber": 24019,
@@ -88,6 +287,60 @@
         "docs/public-docs/snippets/op-enterprise-feature.mdx",
         "docs/public-docs/styles/op-enterprise.css",
         "docs/public-docs/chain-operators/guides/management/network-architecture.mdx"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: count the cold xDomainMsgSender read in the relay gas check buffer",
+      "prNumber": 24012,
+      "type": "other",
+      "body": "`L2_RELAY_GAS_CHECK_BUFFER` must cover the gas spent between the `hasMinGas()` check and the CALL in `relayMessage()`. Its sizing counted only the `xDomainMsgSender` write. The reentrancy check also reads that slot, and the read is cold bec",
+      "files": [
+        "docs/ai/contract-dev.md",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/snapshots/upgrades/current-upgrade-bundle.json",
+        "packages/contracts-bedrock/src/L1/L1CrossDomainMessenger.sol",
+        "packages/contracts-bedrock/src/L2/L2CrossDomainMessenger.sol",
+        "packages/contracts-bedrock/src/libraries/GasConstants.sol",
+        "packages/contracts-bedrock/test/L1/L1CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/L2/L2CrossDomainMessenger.t.sol",
+        "packages/contracts-bedrock/test/libraries/GasConstants.t.sol"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: block withdrawals to L1StandardBridge only while a bridge hook is set",
+      "prNumber": 24011,
+      "type": "other",
+      "body": "U22 makes the portal reject every withdrawal that targets the L1StandardBridge, even on chains that never set a bridge hook. A raw `L2ToL1MessagePasser` withdrawal that calls `depositETHTo()` or `bridgeETHTo()` worked before the upgrade. Af",
+      "files": [
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
+        "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol"
+      ]
+    },
+    {
+      "title": "kona-peers,kona-disc!: Save the bootstore reliably",
+      "prNumber": 24155,
+      "type": "other",
+      "body": "### What\n\nkona-node now saves its bootstore, saves it safely, and stops at startup when it can't, instead of running with a store it never saves. First PR of a stack for #23767; the next one changes *what* the bootstore saves.\n\nFor operator",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "rust/Cargo.lock",
+        "rust/kona/bin/node/README.md",
+        "rust/kona/bin/node/src/flags/p2p.rs",
+        "rust/kona/crates/node/disc/src/builder.rs",
+        "rust/kona/crates/node/disc/src/driver.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/bootnodes.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/bootstore.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/dial.rs",
+        "rust/kona/crates/node/disc/src/driver/tests/mod.rs",
+        "rust/kona/crates/node/disc/src/error.rs",
+        "rust/kona/crates/node/disc/src/metrics.rs",
+        "rust/kona/crates/node/peers/Cargo.toml",
+        "rust/kona/crates/node/peers/src/lib.rs",
+        "rust/kona/crates/node/peers/src/store.rs",
+        "rust/kona/crates/node/service/src/actors/network/builder.rs",
+        "rust/kona/docker/recipes/kona-node-dev/compose.yaml",
+        "rust/kona/docker/recipes/kona-node/docker-compose.yaml"
       ]
     },
     {
@@ -125,9 +378,225 @@
         ".circleci/continue/main.yml",
         "ops/scripts/shard-tests.sh"
       ]
+    },
+    {
+      "title": "contracts-bedrock: make the SafeCall invariants fail on handler reverts",
+      "prNumber": 24204,
+      "type": "other",
+      "body": "The `callWithMinGas` success invariant passes without testing value calls to empty accounts. Its actor gives too little gas when `callWithMinGas` reserves `NEW_ACCOUNT_STATE_GAS`, so the wrapper reverts. `vm.expectCallMinGas` then reverts t",
+      "files": [
+        "packages/contracts-bedrock/test/invariants/SafeCall.t.sol"
+      ]
+    },
+    {
+      "title": "op-reth: reconnect a subblocks websocket that goes silent",
+      "prNumber": 24189,
+      "type": "other",
+      "body": "A subblocks upstream that stops sending without closing the connection left `WsFlashBlockStream` parked in `Poll::Pending` forever, because the read registers no timer. The node kept importing canonical blocks while its `pending` block stay",
+      "files": [
+        "rust/op-reth/crates/flashblocks/Cargo.toml",
+        "rust/op-reth/crates/flashblocks/src/service.rs",
+        "rust/op-reth/crates/flashblocks/src/ws/stream.rs"
+      ]
+    },
+    {
+      "title": "op-reth: stop answering pending from a subblock the chain has passed",
+      "prNumber": 24188,
+      "type": "other",
+      "body": "When the subblocks feed stalls, the last subblock stays in place while canonical blocks keep importing, and `pending` reads kept being served from it. Archive nodes returned state behind `latest`, such as an `eth_getTransactionCount(addr, \"",
+      "files": [
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/eth/pending_block.rs",
+        "rust/op-reth/crates/flashblocks/src/service.rs",
+        "rust/op-reth/crates/flashblocks/src/ws/stream.rs"
+      ]
+    },
+    {
+      "title": "op-e2e,op-service: make the L1 blob system tests pass on upstream go-ethereum",
+      "prNumber": 24186,
+      "type": "tests",
+      "body": "Three op-e2e system-test assumptions hold on op-geth but not on upstream go-ethereum v1.17.10. Each change also passes on op-geth.\n\n- **Blob sidecars:** upstream's transaction pool accepts only cell-proof sidecars, and its block builder ask",
+      "files": [
+        "op-e2e/actions/upgrades/dencun_fork_test.go",
+        "op-e2e/e2eutils/transactions/blobs.go",
+        "op-e2e/faultproofs/util.go",
+        "op-e2e/system/da/brotli_batcher_test.go",
+        "op-e2e/system/da/eip4844_test.go",
+        "op-e2e/system/da/osaka_test.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-service/txmgr/test_txmgr.go",
+        "op-service/txmgr/txmgr.go"
+      ]
+    },
+    {
+      "title": "op-core,op-wheel,op-chain-ops,op-node,op-devstack!: read L2 transactions without go-ethereum decoding",
+      "prNumber": 24184,
+      "type": "other",
+      "body": "An L2 block carries deposit and post-exec transactions, which upstream go-ethereum cannot decode. These places decoded L2 transactions into go-ethereum types and would fail at run time after the cutover, although they compile:\n\n- **`op-core",
+      "files": [
+        "op-chain-ops/cmd/check-jovian/main.go",
+        "op-chain-ops/superroot/superroot.go",
+        "op-core/fees/dafootprint.go",
+        "op-core/fees/dafootprint_test.go",
+        "op-devstack/dsl/l2_network.go",
+        "op-node/rollup/attributes/engine_consolidate.go",
+        "op-node/rollup/attributes/engine_consolidate_test.go",
+        "op-wheel/engine/engine.go",
+        "op-wheel/engine/engine_test.go",
+        "op-core/types/deposit_tx.go",
+        "op-core/types/deposit_tx_test.go",
+        "op-core/types/post_exec_tx.go"
+      ]
+    },
+    {
+      "title": "op-service,op-batcher,op-acceptance-tests: drop go-ethereum APIs the cutover target lacks",
+      "prNumber": 24183,
+      "type": "tests",
+      "body": "Removes two uses of go-ethereum APIs that upstream v1.17.10 does not have in this form, where the code can do without them:\n\n- `core.ErrInsufficientBalanceWitness` leaves txinclude's list of fatal errors and the interop load test. Upstream ",
+      "files": [
+        "op-acceptance-tests/tests/interop/loadtest/schedule.go",
+        "op-batcher/batcher/test_batch_submitter.go",
+        "op-service/txinclude/resubmitter.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt"
+      ]
+    },
+    {
+      "title": "op-core: stop carrying OP Stack fields on go-ethereum types",
+      "prNumber": 24182,
+      "type": "other",
+      "body": "`op-core/params.GethChainConfig()` now returns only the Ethereum fork schedule, and op-core receipts stop mirroring `DepositNonce` and `DepositReceiptVersion` into the embedded go-ethereum receipt. Those fields exist only in op-geth, so bot",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-core/genesis/geth.go",
+        "op-core/params/chain_config.go",
+        "op-core/params/chain_config_test.go",
+        "op-core/params/geth.go",
+        "op-core/types/receipt.go",
+        "op-core/types/receipt_consensus.go",
+        "op-core/types/receipt_consensus_test.go",
+        "ops/scripts/opgeth-ratchet/allowlist.txt"
+      ]
+    },
+    {
+      "title": "op-e2e,op-devstack: run the test L1s on Osaka and send cell proofs",
+      "prNumber": 24216,
+      "type": "tests",
+      "body": "Follows #24186. Step 2 of #24210.\n\nThe test L1s now run Osaka from genesis, to better represent public L1 chains, and every test blob sender sends cell proofs. This uses only the existing cell-proof settings, with no production change, so #",
+      "files": [
+        "op-acceptance-tests/tests/fusaka/setup_test.go",
+        "op-acceptance-tests/tests/jovian/pectra/pectra_test.go",
+        "op-devstack/README.md",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/deployer_test.go",
+        "op-e2e/actions/batcher/eip4844_test.go",
+        "op-e2e/actions/helpers/l2_batcher.go",
+        "op-e2e/actions/upgrades/dencun_fork_test.go",
+        "op-e2e/actions/upgrades/ecotone_fork_test.go",
+        "op-e2e/e2eutils/batcher/batcher.go",
+        "op-e2e/e2eutils/disputegame/preimage/preimage_helper.go",
+        "op-e2e/e2eutils/setup.go",
+        "op-e2e/e2eutils/setuputils/utils.go",
+        "op-e2e/faultproofs/util.go",
+        "op-e2e/interop/supersystem_l2.go",
+        "op-e2e/system/da/brotli_batcher_test.go",
+        "op-e2e/system/da/eip4844_test.go",
+        "op-e2e/system/da/osaka_test.go",
+        "op-e2e/system/e2esys/setup.go",
+        "rust/kona/tests/proofs/l1_prague_fork_test.go",
+        "rust/kona/tests/proofs/pectra_blob_schedule_test.go"
+      ]
+    },
+    {
+      "title": "op-node,op-batcher,op-service: use the shared tx type-byte checks",
+      "prNumber": 24215,
+      "type": "other",
+      "body": "Stacked on #24184, which adds `optypes.IsDepositTxBytes` and `optypes.IsPostExecTxBytes`. This PR moves the remaining inline type-byte comparisons on binary-encoded transactions to them, so the check and its empty-input handling live in one",
+      "files": [
+        "docs/ai/go-dev.md",
+        "op-acceptance-tests/tests/sdm/sdmtest/span.go",
+        "op-batcher/batcher/types.go",
+        "op-node/rollup/derive/batches.go",
+        "op-node/rollup/derive/channel_out.go",
+        "op-node/rollup/derive/span_batch_txs.go",
+        "op-node/rollup/engine/build_seal.go",
+        "op-node/rollup/engine/build_seal_test.go",
+        "op-service/eth/types.go",
+        "rust/kona/tests/proofs/span_batch_overlap_test.go"
+      ]
+    },
+    {
+      "title": "op-service/txmgr!: send blob transactions with cell proofs only",
+      "prNumber": 24213,
+      "type": "other",
+      "body": "Follows #24216, which moved every test L1 to Osaka. Step 4 of #24210.\n\nEvery public L1 has activated Osaka. After Osaka, reth rejects blob-proof sidecars and go-ethereum only converts them for a transition period. txmgr and txplan now send ",
+      "files": [
+        "op-e2e/actions/helpers/l1_miner.go",
+        "op-e2e/actions/helpers/l2_batcher.go",
+        "op-e2e/actions/upgrades/dencun_fork_test.go",
+        "op-e2e/e2eutils/transactions/blobs.go",
+        "op-e2e/system/da/osaka_test.go",
+        "op-service/txmgr/cli.go",
+        "op-service/txmgr/cli_test.go",
+        "op-service/txmgr/test_txmgr.go",
+        "op-service/txmgr/txmgr.go",
+        "op-service/txmgr/txmgr_test.go",
+        "op-service/txplan/txplan.go"
+      ]
+    },
+    {
+      "title": "op-service/txmgr!: send cell proofs by default on every L1",
+      "prNumber": 24211,
+      "type": "other",
+      "body": "Blob transactions that txmgr sends now carry cell proofs (EIP-7594) on every L1 by default. Before this change, txmgr sent blob proofs on any L1 other than mainnet, Sepolia and Hoodi unless `--txmgr.cell-proof-time` was set. reth rejects bl",
+      "files": [
+        "op-e2e/interop/supersystem_l2.go",
+        "op-e2e/system/e2esys/setup.go",
+        "op-service/txmgr/cli.go",
+        "op-service/txmgr/cli_test.go"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 233.84811502732038,
+      "prScore": 149.61011502732038,
+      "issueScore": 8.3,
+      "reviewScore": 75.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 172.98621136433928,
+      "prScore": 132.48621136433928,
+      "issueScore": 4,
+      "reviewScore": 36.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 123.93897821896368,
+      "prScore": 87.93897821896368,
+      "issueScore": 4,
+      "reviewScore": 32,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 106.56827545729021,
+      "prScore": 97.56827545729021,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
@@ -149,10 +618,60 @@
       "summary": null
     },
     {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 45.142555017955914,
+      "prScore": 45.142555017955914,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
       "totalScore": 39.62816765420849,
       "prScore": 39.62816765420849,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 28.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 28.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 25,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 21.353306144334052,
+      "prScore": 21.353306144334052,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -169,6 +688,36 @@
       "summary": null
     },
     {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
       "totalScore": 0.33999999999999997,
@@ -179,9 +728,9 @@
       "summary": null
     }
   ],
-  "newPRs": 5,
-  "mergedPRs": 4,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 11
+  "newPRs": 24,
+  "mergedPRs": 23,
+  "newIssues": 6,
+  "closedIssues": 8,
+  "activeContributors": 25
 }

@@ -5,17 +5,70 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-11-17 to 2026-11-18, ethereum-optimism/infra had 0 new PRs (0 merged), 0 new issues, and 3 active contributors.",
+  "overview": "From 2026-11-17 to 2026-11-18, ethereum-optimism/infra had 1 new PRs (0 merged), 0 new issues, and 13 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ88AAAABP8_Unw",
+      "title": "feat(proxyd): consensus_out_of_range_wait for blocks just above consensus",
+      "author": "zhwrd",
+      "number": 806,
+      "body": "## Problem\n\nIn consensus mode, websocket subscriptions and HTTP requests see different heads:\n\n- **WS:** `ProxyWS` connects the client to a single backend, so `newHeads` for block N fires as soon as that backend imports N.\n- **HTTP:** `eth_getBlockByNumber(N)` is checked against the consensus latest block. That is the lowest head across the consensus group, refreshed every `consensus_poller_interval`, plus up to one HA heartbeat when `consensus_ha` is on. While N is above it, proxyd answers `null` itself (#552, #769), and state reads get `-32001`.\n\nOn a 1s-block chain, a client that fetches each block right after its `newHeads` notification loses this race on nearly every block. One example is Blockscout's realtime fetcher, which turns the `null` into `404 Not Found`, doesn't retry, and leaves the block to its catch-up indexer. We saw about one error per block and blocks reaching the explorer ~45s late.\n\n## Change\n\nNew backend group option `consensus_out_of_range_wait`, default `0` (off). When set:\n\n- A request that names a block above the consensus latest block, by at most `consensus_max_block_lag`, waits until consensus reaches that block or the wait elapses.\n- It then goes through the normal rewrite path. Responses still come only from consensus backends, and a block that never reaches consensus is still answered as out of range.\n- Backends are chosen after the wait. Consensus can advance during it by dropping a lagging backend, and that backend must not then serve the request.\n- One HTTP request waits at most `consensus_out_of_range_wait` in total. That includes a batch, which is forwarded as several minibatches (`max_upstream_batch_size`, duplicate-ID groups). A request whose budget is already spent gets outcome `exhausted`. WS messages are forwarded once, so each may wait in full.\n- Startup rejects a wait that is not shorter than the server timeout (`timeout_seconds`, default 10s).\n- Blocks further ahead than `consensus_max_block_lag` can't be on any consensus backend yet, so they are answered immediately as today.\n- CL consensus groups are unaffected.\n\nSupporting changes:\n\n- **Out-of-range error:** the rewrite error is now `*BlockOutOfRangeError{Block}`. It matches `ErrRewriteBlockOutOfRange` via `errors.Is`, so existing checks are unchanged.\n- **Wait loop:** it rechecks the in-memory consensus state every 20ms and stops on timeout or when the client cancels.\n- **Log ranges:** the block scan probes past the first out-of-range block, so a log range with both ends above the head waits for `toBlock`.\n- **New counter:** `proxyd_group_consensus_out_of_range_waits_total{backend_group_name,outcome}` with outcomes `caught_up`, `timeout`, `too_far`, `canceled` and `exhausted`.\n\nWaiting was chosen over routing the request to whichever backend is ahead for three reasons:\n\n1. Consistency guarantees stay the same.\n2. It covers every method the rewriter handles, `eth_getLogs`/`eth_newFilter` ranges included.\n3. Routing ahead would need method-specific retry-on-missing logic and would still race the poller's per-backend head, which can be up to one poll interval old.\n\n**Trade-offs:**\n- A held HTTP request does not take a `max_concurrent_rpcs` slot, since that semaphore is only taken around the backend call. It does hold its connection and goroutine for up to the wait.\n- Over WS, a held message keeps its `max_concurrent_ws_rpcs` slot.\n- Server drain can take up to one wait longer.\n\n**Not covered:** `eth_getBlockByHash` with the hash from `newHeads`, since proxyd can't place a hash relative to the head.\n\n## Testing\n\n- `integration_tests/consensus_out_of_range_wait_test.go` (new config `consensus_out_of_range_wait.toml`) covers:\n  - the block is served once consensus advances mid-wait\n  - `null` after the wait if consensus doesn't advance, without hitting the backend\n  - no wait beyond `consensus_max_block_lag`\n  - no delay for in-range requests\n  - a batch whose elements are forwarded as separate minibatches (`max_upstream_batch_size = 1`) serves every element once consensus reaches its blocks\n  - three minibatches spend one wait in total\n- Unit tests for `highestOutOfRangeBlock`: it finds the max across methods and ranges (both ends of a log range above the head included) and leaves request params untouched.\n- `TestStartRejectsOutOfRangeWaitAtServerTimeout` checks the startup check, with an explicit and with the default server timeout. Further unit tests cover `BlockOutOfRangeError` (`errors.Is`/`errors.As`).\n- Not covered: a group of more than one backend in which consensus advances by dropping a lagging backend mid-wait.\n- Test run: `go test ./...`, `go test -race` on the new test, and `golangci-lint run` (v2.11.4) all pass.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-11-17T21:45:30Z",
+      "mergedAt": null,
+      "additions": 503,
+      "deletions": 3
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 2
   },
   "completedItems": [],
   "topContributors": [
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 233.84811502732038,
+      "prScore": 149.61011502732038,
+      "issueScore": 8.3,
+      "reviewScore": 75.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 172.98621136433928,
+      "prScore": 132.48621136433928,
+      "issueScore": 4,
+      "reviewScore": 36.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 123.93897821896368,
+      "prScore": 87.93897821896368,
+      "issueScore": 4,
+      "reviewScore": 32,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 106.56827545729021,
+      "prScore": 97.56827545729021,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
@@ -37,10 +90,60 @@
       "summary": null
     },
     {
+      "username": "zhwrd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/530849?v=4",
+      "totalScore": 45.142555017955914,
+      "prScore": 45.142555017955914,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 43.5437738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "sbvegan",
       "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
       "totalScore": 39.62816765420849,
       "prScore": 39.62816765420849,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 28.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 28.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 25,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 25,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 21.353306144334052,
+      "prScore": 21.353306144334052,
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
@@ -57,6 +160,36 @@
       "summary": null
     },
     {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
       "totalScore": 0.33999999999999997,
@@ -67,9 +200,9 @@
       "summary": null
     }
   ],
-  "newPRs": 0,
+  "newPRs": 1,
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 3
+  "activeContributors": 13
 }

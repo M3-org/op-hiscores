@@ -1,0 +1,181 @@
+{
+  "interval": {
+    "intervalStart": "2026-11-18T00:00:00.000Z",
+    "intervalEnd": "2026-11-19T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-11-18 to 2026-11-19, ethereum-optimism/optimism had 3 new PRs (1 merged), 1 new issues, and 10 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABgPkNIg",
+      "title": "op-supernode: Stop with an error when an interop DB fails to open",
+      "author": "ajsutton",
+      "number": 24240,
+      "repository": "ethereum-optimism/optimism",
+      "body": "If op-supernode cannot open its interop DBs at start-up, it starts without cross-chain checks.\n\n`interop.New` logs an error and returns nil when the verified DB or a logs DB fails to open (`op-supernode/supernode/activity/interop/interop.go:264-282`). The supernode then skips the interop activity and registers no verifier (`op-supernode/supernode/supernode.go:141-145`). Without a verifier, `FullyVerifiedL2Head` and `FinalizedL2Head` return `VerifierHeadPreActivation` (`chain_container/super_authority.go`). Safe and finalized heads then follow local-safe with no interop check, and proxyd-cl followers can adopt them.\n\n`superroot` still gets a typed nil `*Interop` as its verified reader (`supernode.go:129-130`). `superroot_atTimestamp` then dereferences nil in `VerifiedResultAtTimestamp`.\n\nop-supernode should stop with an error when an interop DB fails to open and interop is configured.\n\nFound in the review of the Combined Lagoon Interop FMA. Filed by Claude.\n",
+      "createdAt": "2026-11-18T02:44:03Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABP-2aZg",
+      "title": "ci: release only from commits with green required CI",
+      "author": "mds1",
+      "number": 24238,
+      "body": "**What**\n- Pushes to `backports/*` now run `op-reth-compact-codec` and `nut-provenance-verify` against the branch as it was before the push (`pipeline.git.base_revision`), not against `develop`. The base revision counts only when it is an ancestor of the pushed commit. Force pushes, API triggers and new branches use the merge-base with `develop` instead, and say so in the log.\n- Release paths now check that the commit they build has green required CI before building anything: images on `*/v*` tags that build an image (`build-images.apko.yaml`), op-deployer binaries (`release-op-deployer.yaml`), kona prestates (`kona-client/v*`) and SP1 prestates (`kona-sp1-program/v*`).\n- The required gates come from the commit's own CircleCI config: `ci-gate`, plus each of `required-rust-ci`, `required-rust-e2e` and `required-contracts-ci` that its `.circleci/` defines. Every one must be success. A gate not posted yet counts as pending. One shared script, `ops/scripts/check-release-ci-green.sh`, does the check.\n- Contract artifact publishing is removed in #24236, so this PR does not gate it. Until #24236 lands, `op-contracts/v*` tags keep publishing ungated, as today. Contract releases ship inside the op-deployer binary, which is gated.\n\n**Why**\n- 5 release commits had red `required-rust-ci` with green `ci-gate` (measured, all statuses read with pagination): e16bffa184 (op-reth/v2.6.1, kona-node/v1.7.3), 43c071cbff (op-node/v1.19.11, op-batcher/v1.17.4, op-supernode/v1.0.6), 595fedd (op-challenger/v1.10.1, op-proposer/v1.16.7, op-dispute-mon/v1.6.3), 739d611 (kona-client and kona-host v1.8.1) and 443aebf (op-conductor/v0.9.6). They were the 10-21 and 10-22 emergency security cherry-picks (#23546, #23567, #23566), pushed straight to node backport branches.\n- All 5 failed in `op-reth-compact-codec`, and that failure was false. Job 5742266 built develop's reth v2.6.0 vectors, then `backports/kona-node/v1.7`'s reth v2.5.2 panicked reading them. #23622 fixed this for PRs and `proposal/*` pushes only.\n- Nothing checked the tagged commit. Node backport branches have no required checks, so a red commit there can be tagged and shipped without anyone deciding to.\n\n**Override**\n- The override names the exact commit: `<full commit SHA>: <reason>`. A value without that commit's SHA is ignored with a warning, so a value left set cannot release a different commit. The check still reads CI once, prints what it found and the reason, then continues.\n- GitHub: dispatch with the input `allow_red_ci_reason` (`build-images.apko.yaml` on the tag with `--ref <tag>`, or `release-op-deployer.yaml` with `tag`).\n- CircleCI: set the project variable `ALLOW_RED_CI_REASON`, rerun the tag workflow from failed, then delete the variable.\n\n**Existing backport branches need this commit**\n- A tag push runs the workflows and CircleCI config at the tagged commit. So existing `backports/*` branches get neither the check nor the codec fix until this commit is cherry-picked into each one: `kona-client/v1.8`, `kona-host/v1.8`, `kona-node/v1.7`, `op-batcher/v1.17`, `op-challenger/v1.10`, `op-conductor/v0.9`, `op-deployer/v0.8`, `op-dispute-mon/v1.6`, `op-node/v1.19`, `op-proposer/v1.16`, `op-reth/v2.6`, `op-supernode/v1.0`.\n- An op-deployer dispatch runs from `develop`, so it checks old tags right away. A commit whose config predates `ci-gate` fails at once with a clear message and needs the override.\n- `develop` pushes still publish kona prestates (`kona-publish-prestates`) without this check. That commit is already on `develop` and nothing tags it.\n\n**Trust boundary**\n- The check reads commit status contexts by name, the same statuses the merge queue trusts. Any token with status write can post them. A later option is to verify each gate through the CircleCI API instead.\n\n**Risks and mitigations**\n- A release tagged right after a merge waits for CI. Develop commits reached their last green gate 16 to 33 min after their first status, median about 29 (measured, n=20). The check polls every 2 min and fails when the next poll would start after 45 min. The jobs have a 55 min limit, so the script's message shows, not a job timeout. A gate can post minutes after the others (measured, n=1 on 72fcf9479e), so a defined gate that has not posted is pending, never absent.\n- A red gate fails at once, so a flake on a hotfix commit blocks the release until CI is rerun or the override is used.\n- The CircleCI override is a project variable, so it reaches every tag pipeline while set. It applies only to the commit it names, and each run prints it.\n- GitHub API limits: 1 or 2 requests per poll (develop commits carry 111 to 134 statuses, measured n=3), at most about 47 over 45 min (modeled). The `GITHUB_TOKEN` limit of 1,000 an hour is shared per repository. A failed request counts as pending and is retried, and curl retries 429s and 5xx.\n- A dispatch of `build-images.apko.yaml` on a tag queues behind a push run of the same tag that is still polling (same concurrency group). Cancel the push run first.\n- Backport base: a force push compares against the merge-base with `develop`, which can cover more than the push. `proposal/*` pushes still compare against themselves, as #23622 chose. The fallback lives in the CircleCI command, not `get-target-branch.sh`, so setup change detection and `check-semver-diff.sh` are unchanged. Both consumers accept a commit SHA (`git checkout FETCH_HEAD`, and `git show <sha>:...` in `nut-provenance-verify-changed.sh`). `TARGET_BRANCH` goes to `BASH_ENV` with `printf %q`.\n- The image check is its own job, not a step in `plan`, because `ubuntu-slim` jobs stop at 15 min. It always runs and succeeds when there is nothing to check, because a skipped job would make `melange` skip too (actions/runner#491). On a tag it uses `plan`'s rule (match `release.tag_regex` and name an image in `.github/images.apko.json`), so `kona-client/v*` is checked and `op-contracts/v*`, `kona-sp1-program/v*` and `op-reth/bench*` are not.\n- `melange` now checks out the commit the check read, not the tag name again. Output is unchanged: image tags come from `publish_tag`, and tags are immutable by org ruleset.\n- op-deployer: the tag format check runs first, before the tag goes into a checkout or API path. `build` fails if it checks out a different commit than the one checked.\n- Permissions: the new GitHub jobs get `contents: read` and `statuses: read` only. Neither runs code from a pull request.\n\n**How it was verified**\n- The script against real data, read-only: all 5 red commits fail and the 3 most recent green release commits pass (72fcf9479e op-reth/v2.9.0, 5080a8cdee op-challenger/v1.12.0, 969931cdf1 op-reth/v2.8.2). Tag names resolve to the peeled commit. An override naming 443aebf continues, one naming another commit fails.\n- `ops/scripts/check-release-ci-green.test.sh`: 62 checks, no network, bash 3.2 and 5, run in `shell-check`. It covers red, pending, missing and failed-on-page-2 gates, the time limit, the gates each commit's config defines, the override, bad refs, the repo default, every job limit against the script's wait, and the `get-target-branch` command on backport, force, proposal and develop pushes.\n- One CircleCI bench pipeline (140140): `release-ci-green` fails on e16bffa184 and passes on 72fcf9479e. A simulated push of e16bffa184 to `backports/kona-node/v1.7` gets its parent as the base, and `op-reth-compact-codec` passes there (12 min) where job 5742266 went red.\n- Two independent code reviews, every finding fixed or answered. Merged CircleCI config and `.circleci/config.yml` pass `circleci config validate --next`. `test-decision-tree.sh` 24 of 24, shellcheck and shfmt clean, changed YAML parses.\n- Not yet proven in CI: a real tag pipeline, the real `pipeline.git.base_revision` on a backport push, and the GitHub jobs on a real tag push and dispatch.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-18T00:26:32Z",
+      "mergedAt": null,
+      "additions": 828,
+      "deletions": 14
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABKAtPgg",
+      "title": "op-reth: run eth_call and eth_estimateGas at pending on the subblock state",
+      "author": "asdv23",
+      "number": 23595,
+      "body": "On a node that follows a subblock stream (`--flashblocks-url`), `eth_call`, `eth_estimateGas` and the other calls at `pending` (`eth_createAccessList`, `debug_traceCall`, `trace_call`, `trace_callMany`) ran on the latest state, in an environment derived from the latest header (`timestamp + 12`, a random `prevrandao`), while the state reads at `pending` served the subblock. They now run on the subblock state, in the subblock's block environment, as the Subblocks specification requires. While a subblock is being built, calls at `pending` now wait up to 50 ms for it, as the state reads already do. Nodes without `--flashblocks-url` are unchanged.\n\nUpstream's `pending_block_env_and_cfg` only consults the provider's pending block, so `OpEthApi` overrides it: it returns the served subblock as the actual pending block and otherwise keeps upstream's body (tagged `UPSTREAM-MIRROR(override)`). The environment is read without the 50 ms wait. It is the same for every subblock of a block, so it can only disagree with the state if the next block's first subblock arrives in between.\n\nCloses #23592. This also gives subblock nodes the real next-block timestamp, the follow-up noted in #22685; the `+12` on nodes without a subblock stream is unchanged.\n\nInteraction with #22817: the state reads and the call environment now both pick the subblock in `current_pending_flashblock()`, so its guard against a subblock the canonical chain has passed belongs there. Until it lands, a frozen stream (#22816) freezes calls at `pending` as well; on `develop` they run on `latest`.\n\nReviews: `rust-code-reviewer` and a correctness review ran. Their findings are applied, except adding the canonical-tip guard here, which is left to #22817 so that it is not duplicated. `security-review` was skipped: there is no new input surface.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-22T11:44:37Z",
+      "mergedAt": null,
+      "additions": 275,
+      "deletions": 4
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABQAlqVQ",
+      "title": "superchain-registry: Remove sunset chains and pair OP with Unichain for interop",
+      "author": "ajsutton",
+      "number": 24242,
+      "body": "Updates the superchain-registry to its latest commit. The update brings in these upstream changes:\n\n- ethereum-optimism/superchain-registry#1416 removes sunset chains: Automata, Lisk, Lisk Sepolia, Mint, Polynomial, Redstone, Superseed and Xterio. op-reth no longer accepts these `--chain` names, and op-node and kona-node no longer embed their configs. It also updates the OP Mainnet proposer address to `0xc27ba3E0…`, which matches the dispute game factory on L1.\n- ethereum-optimism/superchain-registry#1417 puts OP Mainnet with Unichain Mainnet, and OP Sepolia with Unichain Sepolia, into one interop dependency set each.\n- ethereum-optimism/superchain-registry#1412 updates the sepolia-devnet-4/5 dispute contract addresses.\n\nLagoon is already scheduled for these chains: 2026-12-10 on Sepolia and 2027-01-11 on mainnet. With the paired sets, each Lagoon activation block holds 31 transactions instead of 29. Releases and kona prestates for these chains must include this pin before those dates. An op-supernode that runs only one chain of a pair, with no `--dependency-set` flag, now marks valid blocks that hold messages from the other chain as invalid.\n\nThe kona-node and kona-sp1 tests used chains that this update removes or pairs. They now use other registry chains.\n\nThe op-reth CLI reference pages still list the removed chains. Those pages are generated from each release binary, so the next release updates them.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-18T03:26:07Z",
+      "mergedAt": null,
+      "additions": 118,
+      "deletions": 991
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABQARlnQ",
+      "title": "op-supernode: Stop with an error when an interop DB fails to open",
+      "author": "ajsutton",
+      "number": 24241,
+      "body": "op-supernode starts without cross-chain checks when it cannot open an interop DB at start-up. `interop.New` logs the error and returns nil. The supernode then skips the interop activity and registers no verifier. Safe and finalized heads follow local-safe with no interop check. The `superroot` activity also gets a typed nil reader, so `superroot_atTimestamp` can dereference nil.\n\nWith this change, `interop.New` returns an error when the verified DB or a logs DB fails to open. Supernode construction fails with that error, and the process stops. Operators now see a start-up failure instead of a node that runs without interop verification. `interop.New` still closes each DB that it opened before the failure.\n\nThe review agents found no blocking issues. I did not add a test at the `supernode.New` level, because that test needs a live L1 client. The `interop.New` tests cover both DB open failures, and the compiler forces callers to handle the new error.\n\nFixes #24240\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-18T02:52:17Z",
+      "mergedAt": null,
+      "additions": 70,
+      "deletions": 45
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABOw0WWg",
+      "title": "op-node: expose leader override metric and log skipped raft commits",
+      "author": "jelias2",
+      "number": 24117,
+      "body": "After `admin_overrideLeader`, op-node treats itself as leader and stops committing unsafe payloads to raft until it is restarted, with no log or metric. In a recent OP Mainnet incident, a sequencer with a leftover override built 512 blocks that never reached raft. Nobody noticed until leadership moved: every conductor then saw raft 512 blocks behind its node, refused to sequence, and the chain stalled for about 5.5 minutes.\n\nThis PR makes the override observable on op-node:\n- Exports `op_node_conductor_override` (1 once the override is set).\n- Logs a warning for each unsafe-payload commit it skips while overridden.\n\nNo behaviour change.\n\nSplit from #23982. The op-conductor side (raft/node unsafe head metric, runbook) is in a separate PR.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-12T21:41:13Z",
+      "mergedAt": "2026-11-18T01:15:12Z",
+      "additions": 56,
+      "deletions": 0
+    }
+  ],
+  "codeChanges": {
+    "additions": 56,
+    "deletions": 0,
+    "files": 3,
+    "commitCount": 7
+  },
+  "completedItems": [
+    {
+      "title": "op-node: expose leader override metric and log skipped raft commits",
+      "prNumber": 24117,
+      "type": "other",
+      "body": "After `admin_overrideLeader`, op-node treats itself as leader and stops committing unsafe payloads to raft until it is restarted, with no log or metric. In a recent OP Mainnet incident, a sequencer with a leftover override built 512 blocks ",
+      "files": [
+        "op-node/metrics/metrics.go",
+        "op-node/node/conductor.go",
+        "op-node/node/conductor_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 100.18999915423566,
+      "prScore": 88.18999915423566,
+      "issueScore": 2,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 37.57938435300649,
+      "prScore": 37.57938435300649,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/81847?u=577eaff0520b33aadc0f9fb6d11f5cdb2dd9486e&v=4",
+      "totalScore": 26.042306144334056,
+      "prScore": 26.042306144334056,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    }
+  ],
+  "newPRs": 3,
+  "mergedPRs": 1,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 10
+}
