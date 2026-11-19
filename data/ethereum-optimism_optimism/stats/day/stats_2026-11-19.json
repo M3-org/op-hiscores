@@ -1,0 +1,223 @@
+{
+  "interval": {
+    "intervalStart": "2026-11-19T00:00:00.000Z",
+    "intervalEnd": "2026-11-20T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-11-19 to 2026-11-20, ethereum-optimism/optimism had 6 new PRs (3 merged), 0 new issues, and 5 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABeW163A",
+      "title": "kona-node: finalized head does not leave genesis after an EL datadir wipe",
+      "author": "einar-oplabs",
+      "number": 24066,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** After an op-reth follower's datadir is wiped under a kona-node that kept its heads, kona-node resyncs the unsafe and safe heads but its finalized head does not reliably leave genesis.\n\nObserved in `TestFollowerResyncsFromScratchUnderConsensusClientThatKeptItsHeads/el_sync` (`op-acceptance-tests/tests/op_reth_stale_forkchoice`, #23440) under `DEVSTACK_L2CL_KIND=kona-node`, CircleCI job 5705185:\n\n- The first consolidation after the wipe finds no block in the empty engine (``Received `None` block for 186``, `Consolidate(MissingUnsafeL2Block(186))`) and resets. The reset reads the wiped engine's labels (`unsafe=0 safe=0 finalized=0`), the sync-start safe search walks back to genesis, and derivation restarts at L1 genesis.\n- Whenever the derived safe head catches up with the engine's canonical tip while the gossip-fed unsafe head is ahead, the next consolidation finds `None` again and resets again; each reset clears the finalization queue (`L2Finalizer::clear` on `Signal::Reset`).\n- A finalize task that landed after a reset hit `FinalizeTaskError::BlockNotSafe`, which kona-node treats as critical: `Failed to start rollup node service: EngineTask(Finalize(BlockNotSafe))`. The finalized wait then failed with `expected head for label=finalized to advance to target=59, but got current=0`.\n\nop-node passes the same scenario. Note for whoever picks this up: in the same CI log the follower's op-reth answered null by number for block 348 while it had received payload 361, so the EL's behaviour below its highest payload is worth checking too.\n\nThe finalized check in that test cell is skipped under kona-node naming this issue.\n",
+      "createdAt": "2026-11-11T15:58:16Z",
+      "closedAt": "2026-11-19T01:38:54Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABgihpvQ",
+      "title": "flaky test: `TestSuperInvalidateUnsafeProposal` and `TestSuperInvalidateCorrectProposalFutureBlock` hang in batcher stop",
+      "author": "ajsutton",
+      "number": 24265,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** I made this report from the CI logs.\n\n`op-e2e-cannon-tests-super` in `develop-fault-proofs` hung in 3 of its last 48 runs. Each time, CircleCI stopped the job after 90 minutes with no output.\n\n| Job | Hung subtest |\n|---|---|\n| [5941119](https://app.circleci.com/jobs/gh/ethereum-optimism/optimism/5941119) | `TestSuperInvalidateUnsafeProposal/Defend-mt-cannon-next` |\n| [5922649](https://app.circleci.com/jobs/gh/ethereum-optimism/optimism/5922649) | `TestSuperInvalidateUnsafeProposal/Defend-mt-cannon-next` |\n| [5919990](https://app.circleci.com/jobs/gh/ethereum-optimism/optimism/5919990) | `TestSuperInvalidateCorrectProposalFutureBlock/Defend-mt-cannon-next` |\n\nBoth tests stop each batcher with `sys.Batcher(id).Stop(ctx)` and `context.Background()`. In the hung subtest, the test writes no output after its start. After the stop, the batcher logs `Receipt retrieval failed ... err=\"client is closed\"` every 50 ms until CircleCI stops the job. The hung subtest log has about 243,000 of these lines. Passing subtests of the same tests log 0 to 80 of these lines and then continue.\n\nThe batcher `Stop` call probably waits for a transaction receipt after it closes its L1 client. That wait has no end. A fix agent will confirm the cause.\n",
+      "createdAt": "2026-11-18T23:14:02Z",
+      "closedAt": "2026-11-19T01:17:35Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABQRsrGA",
+      "title": "op-reth!: drop the generics that only ever take one type",
+      "author": "joshklop",
+      "number": 24270,
+      "body": "op-reth's crates carried type parameters that every caller, in this repo and in optimism-premium, fills with the same type. They make every bound and signature longer, suggest extension points no one uses, and stand in the way of the next step: turning op-reth into one concrete node with a small, tempo-style overrides API that optimism-premium can wrap instead of re-implementing op-reth's node and launch code.\n\nThis PR removes them in three commits, meant to be reviewed one at a time:\n\n1. **EVM and payload stack** (`db294887a1`). `OpEvmConfig`, `OpBlockAssembler`, the payload builder and payload types, and the debug witness RPCs lose their chain spec, node primitives, receipt builder and payload-attributes parameters.\n2. **Node, RPC, engine and consensus wiring** (`fbe3502e19`). `OpAddOns` becomes `OpAddOns<N>`; `OpEngineTypes`, `OpEngineValidator`, `OpEngineApi`, `OpBeaconConsensus`, `OpExecutionPayloadValidator` and `OpSdmAdminApi` lose their single-instantiation parameters; `OpFullNodeTypes` folds into `OpNodeTypes`.\n3. **Payload transactions, txpool, storage and CLI** (`2bf0e403ab`). `OpPayloadBuilder`'s `Txs` hook and the `OpPayloadTransactions` trait go; `OpPooledTransaction` and `OpStorage` become concrete; `OpCustomTransactionPool` drops its blob-store parameter; `Cli`, `Commands`, `CliApp`, `InitStateCommandOp` and the `proofs` subcommands drop their chain spec parser and RPC validator parameters.\n\nNo effect on operators or chains: no RPC method, wire format, metric, flag or config key changes, and block building, execution and validation run the same code. Only the Rust API changes.\n\nA few changes go slightly past removing parameters, because removing them made something else dead:\n- `OpEngineTypes` moves into the payload crate and replaces `OpPayloadTypes`, which had an identical `PayloadTypes` impl. The RPC crate's `OpEngineApi` needs to name it, and the RPC crate cannot depend on the node crate.\n- `OpEngineValidator` loses its provider, which only the hand-written `Clone` read.\n- `OpAddOns::min_suggested_priority_fee` goes; the value still reaches the eth API through `OpEthApiBuilder`.\n- The `engine-api-access` example goes: it only showed replacing the engine API builder, which `OpAddOns` no longer allows.\n- The `priority` node test goes: it only exercised the removed payload-transactions hook.\n\nKept generic on purpose, because optimism-premium or op-reth-test-engine fills them with their own types: `OpEvmConfig`'s `EvmFactory`; `OpPayloadBuilder`'s `Pool`/`Client`/`Evm`; `OpPayloadBuilderCtx`'s `Evm`; `OpPoolBuilder`'s transaction type, ordering and validator wrapper; `DerivedPayloadServiceBuilder`'s service; `OpEthApi`'s node; `Cli`'s extension args; and the engine type on the `OpEngineApi` RPC trait (premium's in-process tests call `OpEngineApiClient::<OpEngineTypes>`). `OpEngineApi` keeps its `Validator` parameter because the validator type lives in the node crate, which the RPC crate cannot name.\n\noptimism-premium compiles against this branch in ethereum-optimism/optimism-premium#493: its fallout is type-argument edits and one alias (`PremiumCli = Cli<PremiumCliArgs>`).\n\nReviews: rust-code-reviewer and deletion-reviewer ran on each commit. They found no behavior change. Applied: their leftover-docs and orphaned-dependency findings, and making the `proofs` subcommands concrete. Not taken: dropping the txpool transaction type parameters (premium's policy pool uses its own type), dropping the engine type from the `OpEngineApi` RPC trait (premium's tests use it), and a type alias for `OpEthApiBuilder`'s `EthApi`.\n\nBREAKING CHANGE: Rust crates that build on op-reth must drop the removed type arguments and items:\n- `OpEvmConfig<ChainSpec, N, R, EvmFactory>` is now `OpEvmConfig<EvmFactory>`, built for `OpChainSpec`, `OpPrimitives` and `OpRethReceiptBuilder`. `OpEvmConfig::new` is removed (use `OpEvmConfig::optimism`), and `new_with_evm_factory` no longer takes a receipt builder. Bound an EVM config by `NextBlockEnvCtx = OpNextBlockEnvAttributes` instead of `BuildNextEnv<...>`.\n- `OpBlockAssembler`, `OpPayloadBuilderAttributes`, `OpBuiltPayload` and the `Attrs` parameter of `OpPayloadBuilderCtx`, `OpPayloadBuilder`, `OpDebugWitnessApi` and `DebugApiExt` are gone, as are the `OpPayloadPrimitives`, `OpAttributes` and `OpReplayNodePrimitives` traits and the unused `ExecutedPayload`. Read `OpPayloadBuilderAttributes`' public fields instead of the `OpAttributes` methods.\n- `OpPayloadTypes` becomes `OpEngineTypes` (now in `reth-optimism-payload-builder`, still re-exported from `reth-optimism-node`), `OpFullNodeTypes` becomes `OpNodeTypes`, and `OpEngineValidator::new` takes only the chain spec. `OpAddOns::{with_engine_api, with_payload_validator, with_engine_validator, with_rpc_middleware}` and `OpAddOnsBuilder::with_rpc_middleware` are gone; a node that needs a different engine API or validator implements its own add-ons.\n- `OpPayloadBuilder::with_transactions` and `OpPayloadTransactions` are gone: the payload builder always takes the pool's best transactions. `OpPooledTransaction` takes no type arguments, the unused `OpTransactionPool` alias is gone, `OpCustomTransactionPool<S, V, O>` is `OpCustomTransactionPool<V, O>`, and `OpPoolBuilder` only builds pools for nodes whose types are `OpNodeTypes`.\n- `Cli<OpChainSpecParser, Args>` becomes `Cli<Args>`; `Commands`, `CliApp`, `InitStateCommandOp` and the `proofs` subcommands take no chain spec parser.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-19T01:46:08Z",
+      "mergedAt": null,
+      "additions": 963,
+      "deletions": 2386
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABQSGfoA",
+      "title": "op-reth!: make the node, RPC, engine and consensus wiring concrete",
+      "author": "joshklop",
+      "number": 24272,
+      "body": "Builds on ethereum-optimism/optimism#24270 and should be reviewed after it; the diff here includes that PR's commit until it merges and this branch is rebased.\n\nop-reth's node, RPC, engine and consensus wiring carried type parameters that every caller, in this repo and in op-reth-premium, fills with the same type. They make each bound and signature longer and suggest extension points no one uses. This is step 1b of making op-reth-premium a thin wrapper over op-reth: removing them first keeps the later overrides structure small. Nodes behave the same; only the Rust API changes.\n\nA few changes go slightly past removing parameters, because removing them made something else dead:\n- `OpEngineTypes` moves into the payload crate and replaces `OpPayloadTypes`, which had an identical `PayloadTypes` impl. The RPC crate's `OpEngineApi` needs to name it, and the RPC crate cannot depend on the node crate.\n- `OpEngineValidator` loses its provider: the field was only read by the hand-written `Clone`.\n- `OpAddOns::min_suggested_priority_fee` goes: the value reaches the eth API through `OpEthApiBuilder`, and only the removed `with_*` mappers read the field.\n- The `engine-api-access` example goes: it only demonstrated replacing the engine API builder, which `OpAddOns` no longer allows.\n\n`OpEngineApi` keeps its `Validator` parameter: the validator type lives in the node crate, which the RPC crate cannot name.\n\nThe rust-code-reviewer and deletion-reviewer agents found no behavior change. Two suggestions are not taken: a type alias for `OpEthApiBuilder`'s `EthApi` (a new name for a type spelled out four times), and dropping the engine type parameter from the `OpEngineApi` RPC trait, because op-reth-premium's in-process tests call `OpEngineApiClient::<OpEngineTypes>`.\n\nBREAKING CHANGE: Rust crates that build on op-reth must drop the removed type arguments. `OpPayloadTypes` becomes `OpEngineTypes` (now in `reth-optimism-payload-builder`, still re-exported from `reth-optimism-node`), `OpFullNodeTypes` becomes `OpNodeTypes`, and `OpEngineValidator::new` takes only the chain spec. `OpAddOns::{with_engine_api, with_payload_validator, with_engine_validator, with_rpc_middleware}` and `OpAddOnsBuilder::with_rpc_middleware` are gone; a node that needs a different engine API or validator implements its own add-ons. op-reth-premium's side is a draft PR in optimism-premium.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-19T02:29:50Z",
+      "mergedAt": "2026-11-19T02:42:40Z",
+      "additions": 403,
+      "deletions": 913
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABQRXFmQ",
+      "title": "op-acceptance-tests,op-service,op-devstack: delete the interop load tests and their helpers",
+      "author": "joshklop",
+      "number": 24269,
+      "body": "Deletes the interop load tests: `TestRelaySteady`, `TestRelayBurst`, `TestRelayWithInvalidMessagesSteady` and `TestMaxExecutingMessagesBurst`, plus their metrics and graph output. They ran in the gating `op-acceptance-tests` jobs (`memory-all-*-op-reth-fusaka`) for about 3 minutes each, so this removes that coverage on purpose and shortens those jobs. The `gonum.org/v1/plot` dependency goes with the graphing code.\n\nFive other acceptance tests (batcher throttling, fusaka, glamsterdam, jovian DA footprint, osaka-on-L2) use the package's spam helpers. Those helpers move to `op-acceptance-tests/tests/loadtest`, trimmed to what those tests call, and those tests behave as before. The `NAT_INTEROP_LOADTEST_*` exports in the root `justfile` are removed. They never reached these tests, because `op-acceptance-tests` is in `EXCLUDED_TEST_PKGS` for those jobs.\n\nReviews: go-code-reviewer, deletion-reviewer and ci-config-reviewer found nothing blocking. I applied their cleanups.\n\nA second commit deletes the library code that only these tests used: the `op-service/accounting` package, `txinclude`'s `CostOracle`/`TxBudget` and the budget plumbing in `Persistent`, and `dsl.MakeInvalid{BlockNumber,ChainID,Origin,Timestamp}`. None of the remaining `Persistent` callers passed a budget, so they behave as before. A new test checks that a failed `Include` releases its nonce. `docs/ai/gas-repricing.md` and `docs/ai/opgeth-decoupling.md` no longer describe the deleted code. deletion-reviewer and go-code-reviewer found nothing blocking in this commit.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-19T01:08:51Z",
+      "mergedAt": "2026-11-19T03:30:32Z",
+      "additions": 275,
+      "deletions": 2363
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABQQygNg",
+      "title": "op-service,op-batcher: End pending sends when the tx manager closes",
+      "author": "ajsutton",
+      "number": 24266,
+      "body": "The batcher `Stop` can hang forever. `Stop` closes the tx manager, which closes its L1 client. Sometimes a receipt query sees a tx as mined just before the close, and the next RPC call fails. The send then waits for a confirmation that it cannot get, because every receipt query now fails with `client is closed`. This hang made `op-e2e-cannon-tests-super` time out in 3 of 48 `develop-fault-proofs` runs. With 10 confirmations in production, the window covers most of each tx's life.\n\nNow a pending send returns `ErrClosed` as soon as the tx manager closes. This applies to op-batcher, op-proposer, op-challenger and the other tx manager users. Before, the old documented behaviour was to wait for mined txs after close. That never worked with a real client, because the client was already closed.\n\nThis PR also fixes two related problems:\n- A send that was still in `prepare` at close kept retrying for about 58 s. It now stops at once.\n- Each receipt waiter now gets its own published tx. Before, a waiter that started late read the shared variable and could watch a later fee-bumped tx. The earlier tx then had no waiter. The race detector reported this race.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/24265\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-19T00:10:39Z",
+      "mergedAt": "2026-11-19T01:17:33Z",
+      "additions": 109,
+      "deletions": 61
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABQQ8N1w",
+      "title": "op-core: Re-snapshot the Lagoon NUT bundle",
+      "author": "ajsutton",
+      "number": 24268,
+      "body": "ethereum-optimism/optimism#24012 changed the L2CrossDomainMessenger bytecode. The frozen Lagoon NUT bundle still deployed the old implementation. Without this change, Lagoon activation installs an L2CrossDomainMessenger that does not match the current contracts.\n\nThis PR freezes the new bundle and regenerates the Lagoon pre-fork states. It also updates the Lagoon L2ContractsManager address in `PastNUTBundles.t.sol`. ethereum-optimism/optimism#24267 applies the same bundle and lock entry to `proposal/op-contracts/v10.0.0`. Both branches build a byte-identical bundle.\n\nThe `deposit-reviewer` agent and a general review ran. Each found the stale `LAGOON_L2CM` constant, and this PR fixes it. The security review runs after the PR opens.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-19T00:26:22Z",
+      "mergedAt": null,
+      "additions": 24,
+      "deletions": 24
+    }
+  ],
+  "codeChanges": {
+    "additions": 787,
+    "deletions": 3337,
+    "files": 67,
+    "commitCount": 19
+  },
+  "completedItems": [
+    {
+      "title": "op-reth!: make the node, RPC, engine and consensus wiring concrete",
+      "prNumber": 24272,
+      "type": "other",
+      "body": "Builds on ethereum-optimism/optimism#24270 and should be reviewed after it; the diff here includes that PR's commit until it merges and this branch is rebased.\n\nop-reth's node, RPC, engine and consensus wiring carried type parameters that e",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/op-reth-test-engine/src/exec.rs",
+        "rust/op-reth/crates/consensus/src/lib.rs",
+        "rust/op-reth/crates/consensus/src/proof.rs",
+        "rust/op-reth/crates/consensus/src/sdm_metrics.rs",
+        "rust/op-reth/crates/consensus/src/validation/mod.rs",
+        "rust/op-reth/crates/evm/src/build.rs",
+        "rust/op-reth/crates/flashblocks/src/consensus.rs",
+        "rust/op-reth/crates/node/Cargo.toml",
+        "rust/op-reth/crates/node/src/engine.rs",
+        "rust/op-reth/crates/node/src/lib.rs",
+        "rust/op-reth/crates/node/src/node.rs",
+        "rust/op-reth/crates/node/src/rpc.rs",
+        "rust/op-reth/crates/node/tests/it/custom_pool/ordering.rs",
+        "rust/op-reth/crates/node/tests/it/custom_pool/validator.rs",
+        "rust/op-reth/crates/payload/Cargo.toml",
+        "rust/op-reth/crates/payload/src/builder.rs",
+        "rust/op-reth/crates/payload/src/builder/admission_tests.rs",
+        "rust/op-reth/crates/payload/src/builder/tests.rs",
+        "rust/op-reth/crates/payload/src/lib.rs",
+        "rust/op-reth/crates/payload/src/payload.rs",
+        "rust/op-reth/crates/payload/src/validator.rs",
+        "rust/op-reth/crates/rpc/Cargo.toml",
+        "rust/op-reth/crates/rpc/src/debug.rs",
+        "rust/op-reth/crates/rpc/src/engine.rs",
+        "rust/op-reth/crates/rpc/src/eth/mod.rs",
+        "rust/op-reth/crates/rpc/src/sdm_admin.rs",
+        "rust/op-reth/crates/rpc/src/witness.rs",
+        "rust/op-reth/examples/engine-api-access/Cargo.toml",
+        "rust/op-reth/examples/engine-api-access/src/main.rs"
+      ]
+    },
+    {
+      "title": "op-acceptance-tests,op-service,op-devstack: delete the interop load tests and their helpers",
+      "prNumber": 24269,
+      "type": "tests",
+      "body": "Deletes the interop load tests: `TestRelaySteady`, `TestRelayBurst`, `TestRelayWithInvalidMessagesSteady` and `TestMaxExecutingMessagesBurst`, plus their metrics and graph output. They ran in the gating `op-acceptance-tests` jobs (`memory-a",
+      "files": [
+        "docs/ai/gas-repricing.md",
+        "docs/ai/opgeth-decoupling.md",
+        "go.mod",
+        "go.sum",
+        "justfile",
+        "op-acceptance-tests/justfile",
+        "op-acceptance-tests/tests/batcher/throttling/throttling_test.go",
+        "op-acceptance-tests/tests/fusaka/fusaka_test.go",
+        "op-acceptance-tests/tests/glamsterdam_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/.gitignore",
+        "op-acceptance-tests/tests/interop/loadtest/doc.go",
+        "op-acceptance-tests/tests/interop/loadtest/interop_load_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/invalid_msg_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/max_execute_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/metrics_collector.go",
+        "op-acceptance-tests/tests/interop/loadtest/relay_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/schedule.go",
+        "op-acceptance-tests/tests/interop/loadtest/schedule_test.go",
+        "op-acceptance-tests/tests/jovian/da_footprint.go",
+        "op-acceptance-tests/tests/loadtest/doc.go",
+        "op-acceptance-tests/tests/loadtest/fund.go",
+        "op-acceptance-tests/tests/loadtest/schedule.go",
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-devstack/dsl/invalid_msg.go",
+        "op-service/accounting/budget.go",
+        "op-service/accounting/budget_test.go",
+        "op-service/txinclude/cost_oracle.go",
+        "op-service/txinclude/cost_oracle_test.go",
+        "op-service/txinclude/interfaces.go",
+        "op-service/txinclude/persistent.go",
+        "op-service/txinclude/persistent_test.go",
+        "op-service/txinclude/txbudget.go",
+        "op-service/txinclude/txbudget_test.go",
+        "op-service/txintent/interop_wait_test.go"
+      ]
+    },
+    {
+      "title": "op-service,op-batcher: End pending sends when the tx manager closes",
+      "prNumber": 24266,
+      "type": "other",
+      "body": "The batcher `Stop` can hang forever. `Stop` closes the tx manager, which closes its L1 client. Sometimes a receipt query sees a tx as mined just before the close, and the next RPC call fails. The send then waits for a confirmation that it c",
+      "files": [
+        "op-batcher/batcher/service.go",
+        "op-service/txmgr/txmgr.go",
+        "op-service/txmgr/txmgr_test.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 187.76732168972828,
+      "prScore": 154.8293216897283,
+      "issueScore": 0,
+      "reviewScore": 32.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 81.05202048900085,
+      "prScore": 66.35202048900085,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 6,
+  "mergedPRs": 3,
+  "newIssues": 0,
+  "closedIssues": 2,
+  "activeContributors": 5
+}
