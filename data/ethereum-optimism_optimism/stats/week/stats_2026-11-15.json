@@ -5,7 +5,7 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-15 to 2026-11-22, ethereum-optimism/optimism had 76 new PRs (76 merged), 22 new issues, and 51 active contributors.",
+  "overview": "From 2026-11-15 to 2026-11-22, ethereum-optimism/optimism had 103 new PRs (94 merged), 26 new issues, and 54 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABf_bzXA",
@@ -118,23 +118,23 @@
       "deletions": 67
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABPilLeg",
-      "title": "op-core,op-chain-ops,op-node: pin golden vectors for the values only op-geth pins",
-      "author": "sebastianst",
-      "number": 24187,
-      "body": "The op-geth differential tests are deleted at the cutover to upstream go-ethereum, and some op-core values lose their only pin with them. This pins those values as golden vectors while op-geth is still there to prove them. Test files only.\n\nEvery literal is op-geth's output, and this PR's CI proves it: the existing differential tests now run over the same case tables as the golden tests, or a new assertion compares op-geth's output with the literal. The op-geth half goes with the differential tests; the tables and literal assertions stay, and the files that stay use nothing that only op-geth provides.\n\nPinned:\n- **Deposit transactions:** binary encoding, hash and JSON for nil mint, nil value, empty data, the system-tx flag and extreme values; JSON with a nonce and without the `isSystemTx` key.\n- **Receipts:** trie preimage, binary and RLP encodings of deposit receipts before Regolith, before Canyon and after it, with and without logs; a post-exec receipt; the receipts root over a mixed list.\n- **Fees:** `L1CostBedrock`, `L1CostFjord` (including a zero FastLZ size and large sizes with maximal scalars), and `TxRollupCostData` per transaction type, unsigned and signed.\n- **DA footprint:** the constants, every error path of the scalar extraction, and the footprint for the transaction-type mix, extra deposits and boundary scalars.\n- **Chain config and genesis:** the exact chain-config JSON (key set and order), decoding op-geth-written configs and genesis files with and without `osakaTime`, the genesis header hash per fork schedule and message-passer variant, the full genesis JSON, and `NewL2Genesis` per schedule.\n- **Other encodings:** post-exec transaction JSON, receipt JSON including `l1FeeScalar`, and the span-batch fields of a post-exec transaction.\n\n`TestFjordL1CostParity` now runs over the golden table instead of its previous parameter grid.\n\nStacked on #24184, whose `CalcDAFootprint` takes binary-encoded transactions: the DA footprint vectors hold deposits, which a go-ethereum transaction cannot hold after the cutover.\n\nPart of #24172.\n\n🤖 *Co-created with Claude Opus 5.5 and Claude Fable 5.2*\n",
+      "id": "PR_kwDODjvEJM8AAAABQghPBQ",
+      "title": "op-chain-ops: add sequencer-recovery for interop reorg stalls",
+      "author": "karlfloersch",
+      "number": 24295,
+      "body": "After a supernode invalidates a block that holds an invalid executing message, the conductor cluster can stop sequencing until an operator intervenes. The sequencers' op-nodes move to the supernode's deposit-only replacement, but every conductor's raft log still holds the payload committed before the reorg. Each conductor that becomes leader fails `unsafe head mismatch`, does not start its sequencer and transfers leadership. Leadership then loops through the cluster and no blocks are produced.\n\n`sequencer-recovery` gives operators a health check and a scripted restart for this state. It reads the op-conductor-ops config that netchef renders, plus the chain's supernode RPC. `status` separates problems that stop sequencing from per-node problems that need a resync. `recover` prints the plan, and with `--execute` runs it. The README in `op-chain-ops/cmd/sequencer-recovery` has the runbook.\n\n**Testing on a devnet.** On a two-chain interop devnet (`dev/int-reorg-0`, permissive interop filter, three sequencers per chain under op-conductor, light nodes following three supernodes), invalid executing messages reproduced the stall repeatedly. The tool recovered it each time, both by hand and from an automatic loop. Running it unattended found four problems, now fixed and covered by tests:\n\n- A failed step left every conductor paused. The resume steps now run as cleanup after any failure.\n- Stopping a sequencer that had already stopped, during the conductor's own leadership handoff, aborted the run. Now it does not.\n- Supernode or proxyd-cl errors during a supernode rewind made active sequencers look inactive and triggered false recoveries. A failed supernode comparison is now a per-node problem only.\n- Resuming the conductors as soon as the restarted leader had built two blocks let its own conductor judge it unhealthy, because catch-up blocks carry old timestamps. Leadership then moved to a standby without those blocks and the stall returned. The plan now waits until the leader's head is within `--caught-up-within` (default 10s) of wall-clock time.\n\n**Limitations.**\n- It does not repair a node whose execution client cannot backfill the gap after a reorg.\n- It does not repair a light op-node that cannot reach the supernode's replacement block because its execution client lacks that block.\n- It assumes the sequencer IDs in the config are the raft server IDs. The netchef-rendered config satisfies this.\n\nThe root cause is in op-conductor. A leader should accept its op-node's unsafe head when that head is on the supernode-verified chain, rather than insist on the stale raft payload. This tool is the recovery procedure until that change lands.\n\n**Review status.** The review agents in `.claude/agents` (`go-code-reviewer`) have not been run on this draft yet. `go test ./op-chain-ops/sequencerrecovery/...` passes, and the repo's custom golangci-lint reports 0 issues on the new packages.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-16T13:27:02Z",
-      "mergedAt": "2026-11-18T10:33:21Z",
-      "additions": 1291,
-      "deletions": 261
+      "createdAt": "2026-11-19T20:55:22Z",
+      "mergedAt": null,
+      "additions": 1330,
+      "deletions": 0
     }
   ],
   "codeChanges": {
-    "additions": 23036,
-    "deletions": 13750,
-    "files": 549,
-    "commitCount": 547
+    "additions": 28740,
+    "deletions": 17910,
+    "files": 696,
+    "commitCount": 647
   },
   "completedItems": [
     {
@@ -412,6 +412,27 @@
       ]
     },
     {
+      "title": "op-devstack,op-acceptance-tests: run the follow-source tests against kona-node",
+      "prNumber": 23947,
+      "type": "tests",
+      "body": "The three `follow_l2` acceptance tests now run against kona-node instead of skipping. They skipped because the single-chain test sequencer requires an op-node CL, and the two-verifiers preset applied `DEVSTACK_L2CL_KIND` to every node, so a",
+      "files": [
+        "op-acceptance-tests/tests/sync/follow_l2/sync_test.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/singlechain_twoverifiers.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build_test.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_variants_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-devstack/README.md",
+        "op-devstack/sysgo/mixed_runtime_test.go"
+      ]
+    },
+    {
       "title": "kona-gossip: record dial and connection counts as counters, not gauges",
       "prNumber": 23984,
       "type": "other",
@@ -463,6 +484,65 @@
         "packages/contracts-bedrock/snapshots/semver-lock.json",
         "packages/contracts-bedrock/src/L1/OptimismPortal2.sol",
         "packages/contracts-bedrock/test/L1/OptimismPortal2.t.sol"
+      ]
+    },
+    {
+      "title": "kona-engine,kona-node-service: keep a stale delegated safe head from moving safe below finality",
+      "prNumber": 24004,
+      "type": "other",
+      "body": "A stale delegate snapshot can report a safe head below kona-node's finalized head, and kona-node applies it, moving safe behind its own finality.\n\nKona-node now drops a delegate status whose labels are out of order or whose local-safe L1 or",
+      "files": [
+        "rust/kona/crates/node/engine/src/lib.rs",
+        "rust/kona/crates/node/engine/src/state/core.rs",
+        "rust/kona/crates/node/engine/src/state/finality.rs",
+        "rust/kona/crates/node/engine/src/state/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/helper.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/tests.rs",
+        "rust/kona/crates/node/engine/src/test_utils/rpc.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/actor.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/tests.rs",
+        "rust/kona/crates/node/service/src/actors/engine/actor.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/actor.rs",
+        "rust/kona/crates/node/engine/src/sync/error.rs",
+        "rust/kona/crates/node/engine/src/sync/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/mod.rs",
+        "rust/kona/crates/node/engine/src/test_utils/engine_state.rs",
+        "op-acceptance-tests/tests/sync/follow_l2/sync_test.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/singlechain_twoverifiers.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_build_test.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "op-devstack/sysgo/singlechain_variants_test.go",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/canonicalize_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/id.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/task.rs",
+        "rust/kona/crates/node/engine/src/test_utils/blocks.rs",
+        "rust/kona/crates/node/engine/src/test_utils/deposits.rs",
+        "rust/kona/crates/node/engine/src/test_utils/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/core.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/database.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/op_node_parity.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/finalizer.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/request.rs",
+        "rust/kona/crates/node/service/src/actors/engine/client.rs",
+        "rust/kona/crates/node/service/src/actors/engine/queue_tests.rs",
+        "rust/kona/crates/node/service/src/actors/engine/tests.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs"
       ]
     },
     {
@@ -654,6 +734,23 @@
         "rust/kona/crates/node/service/src/actors/network/builder.rs",
         "rust/kona/docker/recipes/kona-node-dev/compose.yaml",
         "rust/kona/docker/recipes/kona-node/docker-compose.yaml"
+      ]
+    },
+    {
+      "title": "op-devstack,op-e2e: use the deployer's dependency set and deactivate later forks in WithForkAtOffset",
+      "prNumber": 24154,
+      "type": "other",
+      "body": "Prepares devstack for removing op-deployer's Karst cap (`standard.maxDefaultHardfork`), which would put Lagoon in the default fork schedule. No behaviour change today.\n\n- **One dependency set:** single-chain runtimes use op-deployer's set (",
+      "files": [
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_supernode_synctester_variant.go",
+        "op-devstack/sysgo/world.go",
+        "op-e2e/e2eutils/intentbuilder/builder.go",
+        "op-e2e/e2eutils/intentbuilder/builder_test.go"
       ]
     },
     {
@@ -1113,6 +1210,86 @@
       ]
     },
     {
+      "title": "go.mod: build against upstream go-ethereum v1.17.10",
+      "prNumber": 24176,
+      "type": "other",
+      "body": "**Draft to run CI on the cutover. Not for review or merge in this form.**\n\nRemoves the op-geth `replace` and builds the whole tree against upstream go-ethereum v1.17.10. The tree has never run its tests against upstream go-ethereum, so this",
+      "files": [
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/main.yml",
+        ".golangci.yaml",
+        "AGENTS.md",
+        "Makefile",
+        "cannon/mipsevm/testutil/evm.go",
+        "cannon/mipsevm/testutil/mips.go",
+        "docs/ai/deposit-review.md",
+        "docs/ai/execution-layer.md",
+        "docs/ai/go-dev.md",
+        "docs/ai/opgeth-decoupling.md",
+        "docs/ai/rust-dev.md",
+        "go.mod",
+        "go.sum",
+        "justfile",
+        "op-acceptance-tests/tests/glamsterdam_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/schedule.go",
+        "op-batcher/batcher/driver.go",
+        "op-batcher/batcher/driver_test.go",
+        "op-batcher/batcher/test_batch_submitter.go",
+        "op-chain-ops/cmd/check-jovian/main.go",
+        "op-chain-ops/genesis/genesis_test.go",
+        "op-chain-ops/superroot/superroot.go",
+        "op-core/fees/dafootprint.go",
+        "op-core/fees/dafootprint_test.go",
+        "op-core/fees/fees.go",
+        "op-core/fees/fees_test.go",
+        "op-core/genesis/block_test.go",
+        "op-core/genesis/genesis.go",
+        "op-core/genesis/genesis_test.go",
+        "op-core/genesis/geth.go",
+        "op-core/params/chain_config.go",
+        "op-core/params/chain_config_json.go",
+        "op-core/params/chain_config_json_test.go",
+        "op-core/params/chain_config_test.go",
+        "op-core/params/geth.go",
+        "op-core/params/opgethtest/opgethtest.go",
+        "op-core/predeploys/addresses_test.go",
+        "op-core/types/deposit_tx.go",
+        "op-core/types/deposit_tx_test.go",
+        "op-core/types/post_exec_tx.go",
+        "op-core/types/post_exec_tx_test.go",
+        "op-core/types/receipt.go",
+        "op-core/types/receipt_consensus.go",
+        "op-core/types/receipt_consensus_test.go",
+        "op-core/types/receipt_test.go",
+        "op-core/types/transaction_json_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_boot.go",
+        "op-deployer/pkg/deployer/l1_fork.go",
+        "op-devstack/dsl/l2_network.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/deployer_test.go",
+        "op-e2e/actions/batcher/l2_batcher_test.go",
+        "op-e2e/actions/helpers/l1_miner.go",
+        "op-e2e/actions/helpers/l2_batcher.go",
+        "op-e2e/actions/sync/sync_test.go",
+        "op-e2e/actions/upgrades/span_batch_test.go",
+        "op-e2e/e2eutils/geth/engine_helpers.go",
+        ".github/dependabot.yml",
+        "docs/ai/gas-repricing.md",
+        "op-e2e/e2eutils/geth/engine_helpers_test.go",
+        "op-e2e/e2eutils/geth/fakepos.go",
+        "op-e2e/system/da/brotli_batcher_test.go",
+        "op-e2e/system/da/eip4844_test.go",
+        "op-fetcher/fetch/deps_test.go",
+        "op-node/p2p/gossip_test.go",
+        "op-node/rollup/derive/fuzz_parsers_test.go",
+        "op-node/rollup/derive/span_batch_tx_test.go",
+        "op-node/rollup/derive/span_batch_txs_test.go",
+        "op-service/log/geth.go",
+        "mise.toml",
+        "op-node/p2p/gossip.go"
+      ]
+    },
+    {
       "title": "op-acceptance-tests,kona: drop leftovers of the op-geth L2 EL",
       "prNumber": 24175,
       "type": "tests",
@@ -1194,6 +1371,22 @@
       ]
     },
     {
+      "title": "docs: point node snapshot docs at snapshots.optimism.io",
+      "prNumber": 24237,
+      "type": "docs",
+      "body": "<!-- claude-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1794959192171099)_\n\n**Before:** The snapshot docs sent operators to datadirs.optimism.io for OP Mainnet op-",
+      "files": [
+        "docs/public-docs/node-operators/guides/management/archive-node.mdx",
+        "docs/public-docs/node-operators/guides/management/restore-from-snapshot.mdx",
+        "docs/public-docs/node-operators/guides/troubleshooting.mdx",
+        "docs/public-docs/node-operators/reference/consensus-layer-sync.mdx",
+        "docs/public-docs/node-operators/tutorials/node-from-docker.mdx",
+        "docs/public-docs/node-operators/tutorials/run-node-from-source.mdx",
+        "docs/public-docs/notices/op-reth-storage-v1-deprecation.mdx",
+        "docs/public-docs/op-mainnet/network-information/snapshots.mdx"
+      ]
+    },
+    {
       "title": "contracts-bedrock: block withdrawals to L1StandardBridge only while a bridge hook is set",
       "prNumber": 24234,
       "type": "other",
@@ -1265,6 +1458,18 @@
       ]
     },
     {
+      "title": "op-reth: report a zero blobGasUsed on deposit receipts",
+      "prNumber": 24229,
+      "type": "other",
+      "body": "From Jovian, the block's DA footprint (the header's `blobGasUsed`) skips deposits, but op-reth's RPC receipt builder computed a footprint for every transaction. `eth_getTransactionReceipt` therefore reported `estimated size * daFootprintGas",
+      "files": [
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "rust/op-reth/crates/rpc/src/eth/receipt.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt/tests.rs",
+        "rust/op-revm/src/transaction.rs"
+      ]
+    },
+    {
       "title": "op-core,op-chain-ops,op-sync-tester: delete the op-geth differential tests",
       "prNumber": 24228,
       "type": "tests",
@@ -1306,6 +1511,36 @@
         "op-deployer/pkg/deployer/l1_fork.go",
         "op-node/cmd/batch_decoder/fetch/fetch.go",
         "op-node/cmd/genesis/cmd.go"
+      ]
+    },
+    {
+      "title": "Fix translation drift",
+      "prNumber": 24224,
+      "type": "bugfix",
+      "body": "## Summary\nSyncs Korean (`ko`) translations with English docs changes merged between 2026-11-12 and 2026-11-17.\n\n## Changes\n- Updated 21 `ko/` pages and snippets: interop topology/FAQ, kona rollup RPC (`optimism_safeHeadAtL1Block`, `superro",
+      "files": [
+        "docs/public-docs/ko/app-developers/guides/interoperability/message-expiration.mdx",
+        "docs/public-docs/ko/app-developers/guides/interoperability/message-passing.mdx",
+        "docs/public-docs/ko/chain-operators/guides/management/network-architecture.mdx",
+        "docs/public-docs/ko/chain-operators/launch-paths.mdx",
+        "docs/public-docs/ko/chain-operators/tools/chain-monitoring.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/reference/artifacts-locators.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/release-workflows.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/verify.mdx",
+        "docs/public-docs/ko/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/ko/node-operators/guides/configuration/supernode.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/rpc/rollup.mdx",
+        "docs/public-docs/ko/node-operators/op-reth/cli/op-reth/node.mdx",
+        "docs/public-docs/ko/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "docs/public-docs/ko/notices/interop-prep.mdx",
+        "docs/public-docs/ko/notices/specialized-node-topology.mdx",
+        "docs/public-docs/ko/op-stack/interop/explainer.mdx",
+        "docs/public-docs/ko/op-stack/interop/index.mdx",
+        "docs/public-docs/ko/op-stack/interop/superchain-eth-bridge.mdx",
+        "docs/public-docs/ko/op-stack/interop/supernode.mdx",
+        "docs/public-docs/ko/snippets/op-enterprise-feature.mdx",
+        "docs/public-docs/ko/snippets/runbook-tool-versions.mdx"
       ]
     },
     {
@@ -1509,6 +1744,31 @@
       ]
     },
     {
+      "title": "op-core: Re-snapshot the Lagoon NUT bundle",
+      "prNumber": 24268,
+      "type": "other",
+      "body": "ethereum-optimism/optimism#24012 changed the L2CrossDomainMessenger bytecode. The frozen Lagoon NUT bundle still deployed the old implementation. Without this change, Lagoon activation installs an L2CrossDomainMessenger that does not match ",
+      "files": [
+        "op-core/nuts/bundles/lagoon_nut_bundle.json",
+        "op-core/nuts/fork_lock.toml",
+        "op-core/nuts/state/lagoon_multichain_state.json",
+        "op-core/nuts/state/lagoon_state.json",
+        "packages/contracts-bedrock/test/setup/PastNUTBundles.t.sol"
+      ]
+    },
+    {
+      "title": "op-core: Re-snapshot the Lagoon NUT bundle",
+      "prNumber": 24267,
+      "type": "other",
+      "body": "ethereum-optimism/optimism#24233 changed the L2CrossDomainMessenger bytecode on this branch. The frozen Lagoon NUT bundle still deployed the old implementation. Without this change, Lagoon activation installs an L2CrossDomainMessenger that ",
+      "files": [
+        "op-core/nuts/bundles/lagoon_nut_bundle.json",
+        "op-core/nuts/fork_lock.toml",
+        "op-core/nuts/state/lagoon_state.json",
+        "packages/contracts-bedrock/test/setup/PastNUTBundles.t.sol"
+      ]
+    },
+    {
       "title": "op-service,op-batcher: End pending sends when the tx manager closes",
       "prNumber": 24266,
       "type": "other",
@@ -1526,6 +1786,17 @@
       "body": "**One line switches a merge-queue safeguard back on. It has been silently off since 2026-10-16.**\n\n`reth-optimism-node` integration tests sometimes segfault at process exit, after the test has passed (#20973). `op-reth-integration-tests` is",
       "files": [
         "rust/.config/nextest.toml"
+      ]
+    },
+    {
+      "title": "ci: add a ci-gate-proposals gate for release branches",
+      "prNumber": 24262,
+      "type": "other",
+      "body": "Human: adds a new job `ci-gate-proposals` which is required by `ci-gate`. Once this is merged, we can change the ruleset for `proposal/**` branches to require only `ci-gate-proposals`. \n\n\n---\n\nRelease branches (`proposal/**`) run the develo",
+      "files": [
+        ".circleci/continue/main.yml",
+        "docs/ai/ci-config-review.md",
+        "docs/ai/ci-ops.md"
       ]
     },
     {
@@ -1574,46 +1845,195 @@
         "rust/kona/crates/node/sources/src/rpc.rs",
         "rust/kona/crates/providers/providers-alloy/src/beacon_client.rs"
       ]
+    },
+    {
+      "title": "superchain: bump registry to 0b95886 for op-int-0 and uni-int-0",
+      "prNumber": 24301,
+      "type": "other",
+      "body": "## Summary\r\n\r\nBumps the `superchain-registry` submodule `0ca0a93` → `0b95886` (SR main) via `just sync-superchain 0b95886b…`.\r\n\r\nPulls in the two new staging devnets so the next component releases embed them:\r\n\r\n- ethereum-optimism/supercha",
+      "files": [
+        "op-core/superchain/bundle/superchain-configs.zip.sha256",
+        "rust/kona/crates/protocol/registry/etc/chainList.json",
+        "rust/kona/crates/protocol/registry/etc/configs.json",
+        "rust/kona/crates/protocol/registry/etc/depsets.json",
+        "rust/op-reth/crates/chainspec/res/superchain-configs.tar.sha256",
+        "rust/op-reth/crates/chainspec/src/superchain/chain_specs.rs",
+        "superchain-registry"
+      ]
+    },
+    {
+      "title": "Fix translation drift",
+      "prNumber": 24289,
+      "type": "bugfix",
+      "body": "## Summary\nResyncs Korean (`ko`) pages that had drifted from their English sources.\n\n## Changes\n- `ko/op-mainnet/network-information/snapshots.mdx`: retranslated to cover snapshots.optimism.io, OP Sepolia, storage v1, and pre-Bedrock sectio",
+      "files": [
+        "docs/public-docs/ko/chain-operators/tutorials/kona-custom-prestate.mdx",
+        "docs/public-docs/ko/node-operators/guides/management/restore-from-snapshot.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/run/rpc-trust.mdx",
+        "docs/public-docs/ko/node-operators/tutorials/node-from-docker.mdx",
+        "docs/public-docs/ko/node-operators/tutorials/run-node-from-source.mdx",
+        "docs/public-docs/ko/op-mainnet/network-information/snapshots.mdx"
+      ]
+    },
+    {
+      "title": "op-node!: reject an OP Stack chain as L1",
+      "prNumber": 24286,
+      "type": "other",
+      "body": "Alternative to #24281: drop support for a chain whose L1 is itself an OP Stack chain (an L3), instead of keeping it across the move to upstream go-ethereum (#24176).\n\nEvery block of an OP Stack L1 holds deposit transactions, which upstream ",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "op-node/rollup/derive/data_source.go",
+        "op-node/service.go",
+        "op-node/service_l1_chain_config_test.go"
+      ]
+    },
+    {
+      "title": "ci: build images with the unified build-images workflow",
+      "prNumber": 24285,
+      "type": "other",
+      "body": "## Summary\n\n- Replaces the apko image caller with the reusable `build-images.yaml` workflow from [ethereum-optimism/factory](https://github.com/ethereum-optimism/factory), pinned to `96195784dc85831e97bdae00676683bc51f16a6d`. The caller is ",
+      "files": [
+        ".github/images.apko.json",
+        ".github/images.json",
+        ".github/workflows/build-images.apko.yaml",
+        ".github/workflows/build-images.yaml",
+        "op-deployer/scripts/genesis-smoke-test-image.sh",
+        "rust/lokahi/README.md"
+      ]
+    },
+    {
+      "title": "kona-host,kona-sp1: Remove the websocket size limits to match HTTP",
+      "prNumber": 24283,
+      "type": "other",
+      "body": "## What\n\nkona-host's websocket RPC connections, and kona-sp1's L2 block client, now read responses of any size, as they do over HTTP.\n\nFor operators: kona-host and the kona-sp1 proposer with `ws://` or `wss://` endpoints read large response",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/bin/host/Cargo.toml",
+        "rust/kona/bin/host/src/eth/mod.rs",
+        "rust/kona/crates/node/sources/Cargo.toml",
+        "rust/kona/crates/node/sources/src/rpc.rs",
+        "rust/kona/sp1/crates/super-range-executor/Cargo.toml",
+        "rust/kona/sp1/crates/super-range-executor/src/l2.rs"
+      ]
+    },
+    {
+      "title": "op-service,op-challenger: Remove the websocket size limit to match HTTP",
+      "prNumber": 24282,
+      "type": "other",
+      "body": "## What\n\nop-service's websocket RPC clients now read responses of any size, as they do over HTTP.\n\nFor operators:\n- Services with `ws://` or `wss://` endpoints read large responses as they would over HTTP: op-node, op-supernode, op-batcher,",
+      "files": [
+        "op-challenger/game/client/provider.go",
+        "op-service/client/dial_test.go",
+        "op-service/client/lazy_dial.go",
+        "op-service/client/rpc.go",
+        "op-service/client/ws_read_limit_test.go",
+        "op-service/txmgr/cli.go"
+      ]
+    },
+    {
+      "title": "all: update the remaining mentions of op-geth",
+      "prNumber": 24279,
+      "type": "other",
+      "body": "Follow-up to #24176: with the Go module on upstream go-ethereum and op-reth as the only L2 execution client in the tests, a number of comments, docs and test branches still describe op-geth as the L2 engine or as a dependency. This updates ",
+      "files": [
+        "README.md",
+        "cannon/README.md",
+        "docs/ai/execution-layer.md",
+        "docs/ai/opgeth-decoupling.md",
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/system.go",
+        "op-acceptance-tests/tests/sync/elsync/gap_clp2p/sync_test.go",
+        "op-acceptance-tests/tests/sync/elsync/gap_elp2p/sync_test.go",
+        "op-acceptance-tests/tests/sync/elsync/reorg/sync_test.go",
+        "op-batcher/readme.md",
+        "op-chain-ops/cmd/check-lagoon/checks/checks.go",
+        "op-chain-ops/cmd/check-lagoon/checks/checks_test.go",
+        "op-challenger/flags/flags.go",
+        "op-challenger/scripts/check-game-block-hashes.sh",
+        "op-conductor/RUNBOOK.md",
+        "op-conductor/conductor/config.go",
+        "op-conductor/conductor/service.go",
+        "op-core/types/deposit_tx_test.go",
+        "op-core/types/receipt_consensus_test.go",
+        "op-devstack/README.md",
+        "op-e2e/actions/derivation/blocktime_test.go",
+        "op-e2e/e2eutils/disputegame/super_dispute_system.go",
+        "op-e2e/e2eutils/testengine/client.go",
+        "op-e2e/faultproofs/precompile_test.go",
+        "op-e2e/faultproofs/super_test.go",
+        "op-e2e/interop/supersystem.go",
+        "op-e2e/interop/supersystem_l2.go",
+        "op-e2e/system/isthmus/set_code_tx_test.go",
+        "op-e2e/system/p2p/gossip_test.go",
+        "op-e2e/system/verifier/basic_test.go",
+        "op-interop-filter/README.md",
+        "op-node/README.md",
+        "op-node/rollup/types_test.go",
+        "op-proposer/README.md",
+        "op-service/txinclude/monitor.go",
+        "op-wheel/README.md",
+        "op-wheel/commands.go",
+        "packages/contracts-bedrock/scripts/libraries/UpgradeUtils.sol",
+        "packages/contracts-bedrock/scripts/upgrade/ExecuteNUTBundle.s.sol",
+        "packages/contracts-bedrock/scripts/upgrade/GenerateNUTBundle.s.sol",
+        "packages/contracts-bedrock/test/L2/fork/L2ForkUpgrade.t.sol",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/op-reth-test-engine/src/bin/op-reth-test-engine.rs",
+        "rust/op-reth-test-engine/src/builder.rs",
+        "rust/op-reth-test-engine/src/lib.rs"
+      ]
+    },
+    {
+      "title": "docs/ai: forbid CI cost cuts that regress coverage, maintainability or security",
+      "prNumber": 24277,
+      "type": "docs",
+      "body": "CI refactors and cost cuts tend to happen as a series of small trades: a skipped variant here, a hand-maintained list there. Each looks harmless, and together they leave CI less robust. The CI config review guide gains item 12, which makes ",
+      "files": [
+        ".claude/agents/ci-config-reviewer.md",
+        "AGENTS.md",
+        "docs/ai/ci-config-review.md"
+      ]
     }
   ],
   "topContributors": [
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 709.5916971057694,
-      "prScore": 517.3136971057694,
-      "issueScore": 22,
-      "reviewScore": 169.5,
-      "commentScore": 0.7779999999999999,
+      "totalScore": 951.373537152722,
+      "prScore": 719.057537152722,
+      "issueScore": 30.1,
+      "reviewScore": 201,
+      "commentScore": 1.2159999999999997,
       "summary": null
     },
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 384.7122958384187,
-      "prScore": 238.7742958384187,
+      "totalScore": 489.98914368411727,
+      "prScore": 311.05114368411733,
       "issueScore": 0,
-      "reviewScore": 145.5,
+      "reviewScore": 178.5,
       "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 363.6133036481212,
+      "totalScore": 415.05130364812123,
       "prScore": 211.4373036481212,
       "issueScore": 8.3,
-      "reviewScore": 143,
-      "commentScore": 0.8759999999999999,
+      "reviewScore": 194,
+      "commentScore": 1.3139999999999998,
       "summary": null
     },
     {
       "username": "mds1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
-      "totalScore": 341.15649163175294,
+      "totalScore": 361.15649163175294,
       "prScore": 282.15649163175294,
       "issueScore": 0,
-      "reviewScore": 59,
+      "reviewScore": 79,
       "commentScore": 0,
       "summary": null
     },
@@ -1628,12 +2048,32 @@
       "summary": null
     },
     {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 270.49081486484164,
+      "prScore": 185.55281486484165,
+      "issueScore": 4,
+      "reviewScore": 80.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 212.45040259870012,
-      "prScore": 183.95040259870012,
+      "totalScore": 248.11826817657226,
+      "prScore": 199.77826817657225,
       "issueScore": 0,
-      "reviewScore": 28.5,
+      "reviewScore": 48,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 219.99665718296873,
+      "prScore": 159.99665718296873,
+      "issueScore": 2,
+      "reviewScore": 58,
       "commentScore": 0,
       "summary": null
     },
@@ -1648,52 +2088,52 @@
       "summary": null
     },
     {
-      "username": "aakoshh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
-      "totalScore": 172.87697821896367,
-      "prScore": 87.93897821896368,
-      "issueScore": 4,
-      "reviewScore": 80.5,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 172.65904489430062,
-      "prScore": 134.65904489430062,
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 202.3523971853192,
+      "prScore": 172.3523971853192,
       "issueScore": 0,
-      "reviewScore": 38,
+      "reviewScore": 30,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 102.5437738965761,
-      "prScore": 43.5437738965761,
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 151.57455891685305,
+      "prScore": 142.07455891685305,
       "issueScore": 0,
-      "reviewScore": 59,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 151.07711837261803,
+      "prScore": 146.07711837261803,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "wwared",
       "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
-      "totalScore": 93,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 93,
+      "totalScore": 120.39260667202811,
+      "prScore": 6.8926066720281085,
+      "issueScore": 2,
+      "reviewScore": 111.5,
       "commentScore": 0,
       "summary": null
     },
     {
-      "username": "Wazabie",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
-      "totalScore": 66.78917136791702,
-      "prScore": 46.78917136791702,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 107.5437738965761,
+      "prScore": 43.5437738965761,
       "issueScore": 0,
-      "reviewScore": 20,
+      "reviewScore": 64,
       "commentScore": 0,
       "summary": null
     },
@@ -1728,6 +2168,16 @@
       "summary": null
     },
     {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 45.43985005244421,
+      "prScore": 44.223850052444206,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 1.2159999999999997,
+      "summary": null
+    },
+    {
       "username": "op-will",
       "avatarUrl": "https://avatars.githubusercontent.com/u/232669456?u=5f04beb08c95d47f6fdb538cfef7082c68d07b9d&v=4",
       "totalScore": 32.664306144334056,
@@ -1748,23 +2198,23 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 31.208612288668107,
-      "prScore": 26.208612288668107,
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 29.5,
+      "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 5,
+      "reviewScore": 29.5,
       "commentScore": 0,
       "summary": null
     },
     {
       "username": "teddyknox",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
-      "totalScore": 26.195306144334054,
+      "totalScore": 26.395306144334054,
       "prScore": 26.195306144334054,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -1778,8 +2228,18 @@
       "summary": null
     },
     {
-      "username": "Inphi",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 23.38,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 22.5,
+      "commentScore": 0.8799999999999999,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
       "totalScore": 20,
       "prScore": 0,
       "issueScore": 0,
@@ -1824,26 +2284,6 @@
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 10,
-      "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "wiz-0f98cca50a",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
-      "totalScore": 9.54,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.54,
-      "summary": null
-    },
-    {
-      "username": "karlfloersch",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
-      "totalScore": 9.5,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 9.5,
       "commentScore": 0,
       "summary": null
     },
@@ -1908,8 +2348,18 @@
       "summary": null
     },
     {
-      "username": "raffaele-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -1938,16 +2388,6 @@
       "summary": null
     },
     {
-      "username": "mintlify",
-      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 0.7779999999999999,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.7779999999999999,
-      "summary": null
-    },
-    {
       "username": "tuantqse90",
       "avatarUrl": "https://avatars.githubusercontent.com/u/53461362?u=49dde14505e237db24cda2e46ff1d16d5d9f07a7&v=4",
       "totalScore": 0.2,
@@ -1968,9 +2408,9 @@
       "summary": null
     }
   ],
-  "newPRs": 76,
-  "mergedPRs": 76,
-  "newIssues": 22,
-  "closedIssues": 25,
-  "activeContributors": 51
+  "newPRs": 103,
+  "mergedPRs": 94,
+  "newIssues": 26,
+  "closedIssues": 34,
+  "activeContributors": 54
 }

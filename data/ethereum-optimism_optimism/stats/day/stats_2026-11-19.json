@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-19 to 2026-11-20, ethereum-optimism/optimism had 6 new PRs (3 merged), 0 new issues, and 5 active contributors.",
+  "overview": "From 2026-11-19 to 2026-11-20, ethereum-optimism/optimism had 33 new PRs (21 merged), 4 new issues, and 32 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABeW163A",
@@ -30,9 +30,69 @@
       "closedAt": "2026-11-19T01:17:35Z",
       "state": "CLOSED",
       "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABguRpKg",
+      "title": "kona: cannot derive a chain whose L1 is an OP Stack chain",
+      "author": "sebastianst",
+      "number": 24284,
+      "repository": "ethereum-optimism/optimism",
+      "body": "kona cannot derive a chain whose L1 is itself an OP Stack chain (an L3). op-node supports that setup, and the derivation spec [lists the deposit type](https://github.com/ethereum-optimism/specs/blob/48504e5b0fdcd0f01a2c0b522e91f699cfc95b71/specs/protocol/derivation.md?plain=1#L507-L508) among the batcher transaction types \"to support force-inclusion of batcher transactions on nested OP Stack chains\".\n\nThis is from reading the code; it was not run against an OP Stack L1.\n\n## Where it stops\n\nEvery block of an OP Stack L1 starts with an L1-info deposit (type `0x7E`) and can hold post-exec transactions (`0x7D`). kona reads L1 blocks with alloy's Ethereum transaction envelope, which has neither:\n\n- **kona-node:** [`AlloyChainProvider::block_info_and_transactions_by_hash`](https://github.com/ethereum-optimism/optimism/blob/f0d907fd862acb2fecd354a0cfe6fbe9c7a47a2a/rust/kona/crates/providers/providers-alloy/src/chain_provider.rs#L764-L805) fetches the full block through an Ethereum-network provider and maps it to `Vec<TxEnvelope>`, so deserializing the block fails on the first transaction.\n- **kona-client:** [`OracleL1ChainProvider`](https://github.com/ethereum-optimism/optimism/blob/f0d907fd862acb2fecd354a0cfe6fbe9c7a47a2a/rust/kona/crates/proof/proof/src/l1/chain_provider.rs#L139-L148) decodes each transaction of the trie with `TxEnvelope::decode_2718`, which fails on `0x7E`.\n- **Data sources:** even with a decodable envelope, the [calldata source](https://github.com/ethereum-optimism/optimism/blob/f0d907fd862acb2fecd354a0cfe6fbe9c7a47a2a/rust/kona/crates/protocol/derive/src/sources/calldata.rs#L46-L54) and the [blob source](https://github.com/ethereum-optimism/optimism/blob/f0d907fd862acb2fecd354a0cfe6fbe9c7a47a2a/rust/kona/crates/protocol/derive/src/sources/blobs.rs#L50-L66) only consider legacy, EIP-2930, EIP-1559 and EIP-4844 transactions, so a batcher transaction that was force-included as a deposit is ignored.\n\nNot checked: L1 receipts, which kona also decodes with Ethereum types and which hold deposit receipts on an OP Stack L1.\n\n## What op-node does\n\nop-node reads the L1 block's transactions as EIP-2718 bytes and decodes each by its class (#24281): a deposit to the batch inbox whose `From` is the batcher address is a batcher transaction, since a deposit carries its sender instead of a signature; a post-exec transaction never is; every other transaction goes through the signature check.\n\n## To decide\n\n- Should kona support an OP Stack L1? If yes, its L1 providers need a transaction type that covers the OP transaction types, and the data sources need the deposit rule above.\n- If not, the spec and op-node keep a rule that the Rust stack does not implement, and that should be stated somewhere an L3 operator finds it.\n\nThe spec text itself needs a small fix either way: it says the sender is \"recovered from the transaction signature\", which does not apply to a deposit.\n\n🤖 *Co-created with Claude Opus 5.5 and Claude Fable 5.2*\n",
+      "createdAt": "2026-11-19T13:45:26Z",
+      "closedAt": "2026-11-19T16:39:40Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM76DvHi",
+      "title": "supernode: Resolve \"Optimistic\" function name conflicts",
+      "author": "axelKingsley",
+      "number": 19902,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Currently there is some overloaded meaning in the term \"Optimistic\", which differs when there is a replacement block. For posterity:\n\nVerified: The block is a valid block, and will be a replacement block if not. An invalid block will never be verified.\n\nOptimistic: The block which would be on the chain if no replacements occurred. Will be the valid OR invalid block, but never a replacement block.\nTechnically, Optimistic blocks are uncles of the chain when they represent the replaced block. So there is no forward progression of a replaced block as a chain.\n\nLocal: The chain currently known to the derivation pipeline. At-tip, blocks may be Verified, Invalid, or Replaced (because we may be actively verifying the chain by protocol rules), but behind some point the chain is always Verified.\n\nIn updating Superroots to use the Denylist as preference for Optimistic Outputs, I noticed we also have `OptimisticAt` which is used in more places. At present I am not sure if that method is meant to reference the chain by Optimistic or Local concept. This task is to capture some investigation of the intent of callers so we can correctly amend the function names or usages.",
+      "createdAt": "2026-04-02T15:14:58Z",
+      "closedAt": "2026-11-19T06:24:05Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABATvMFg",
+      "title": "opgeth-decoupling: final cutover (flip go.mod to upstream go-ethereum)",
+      "author": "sebastianst",
+      "number": 20266,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of #20257. The last step after all other sub-issues land.\n\n## Goal\n\nRemove the op-geth `replace` directive from `go.mod`; clean up any remaining shims or transitional code.\n\n## Scope\n\n- Remove from `go.mod`: `replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth vX.Y.Z`.\n- Update the direct `github.com/ethereum/go-ethereum` dependency to the target upstream version.\n- Run `go mod tidy`; resolve any residual import issues.\n- Remove the `DepositTx` differential test added in #20262 (no longer meaningful without op-geth as a comparison point).\n- Delete `op-service/superutil/` if any orphaned files remain.\n- Update CI / build configs that referenced op-geth.\n- Verify `go build ./...` and `go test ./...` across the in-scope packages.\n- Update `CLAUDE.md` / `AGENTS.md` pointer text (currently says \"migrating\"; after this lands, the plan doc is historical reference).\n\n## Dependencies\n\nBlocked on all other sub-issues: #20258, #20259, #20260, #20261, #20262, #20263, #20264, #20265.\n\n🤖 *Generated by Claude Code*",
+      "createdAt": "2026-04-23T11:43:44Z",
+      "closedAt": "2026-11-19T17:41:26Z",
+      "state": "CLOSED",
+      "commentCount": 0
     }
   ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABQghPBQ",
+      "title": "op-chain-ops: add sequencer-recovery for interop reorg stalls",
+      "author": "karlfloersch",
+      "number": 24295,
+      "body": "After a supernode invalidates a block that holds an invalid executing message, the conductor cluster can stop sequencing until an operator intervenes. The sequencers' op-nodes move to the supernode's deposit-only replacement, but every conductor's raft log still holds the payload committed before the reorg. Each conductor that becomes leader fails `unsafe head mismatch`, does not start its sequencer and transfers leadership. Leadership then loops through the cluster and no blocks are produced.\n\n`sequencer-recovery` gives operators a health check and a scripted restart for this state. It reads the op-conductor-ops config that netchef renders, plus the chain's supernode RPC. `status` separates problems that stop sequencing from per-node problems that need a resync. `recover` prints the plan, and with `--execute` runs it. The README in `op-chain-ops/cmd/sequencer-recovery` has the runbook.\n\n**Testing on a devnet.** On a two-chain interop devnet (`dev/int-reorg-0`, permissive interop filter, three sequencers per chain under op-conductor, light nodes following three supernodes), invalid executing messages reproduced the stall repeatedly. The tool recovered it each time, both by hand and from an automatic loop. Running it unattended found four problems, now fixed and covered by tests:\n\n- A failed step left every conductor paused. The resume steps now run as cleanup after any failure.\n- Stopping a sequencer that had already stopped, during the conductor's own leadership handoff, aborted the run. Now it does not.\n- Supernode or proxyd-cl errors during a supernode rewind made active sequencers look inactive and triggered false recoveries. A failed supernode comparison is now a per-node problem only.\n- Resuming the conductors as soon as the restarted leader had built two blocks let its own conductor judge it unhealthy, because catch-up blocks carry old timestamps. Leadership then moved to a standby without those blocks and the stall returned. The plan now waits until the leader's head is within `--caught-up-within` (default 10s) of wall-clock time.\n\n**Limitations.**\n- It does not repair a node whose execution client cannot backfill the gap after a reorg.\n- It does not repair a light op-node that cannot reach the supernode's replacement block because its execution client lacks that block.\n- It assumes the sequencer IDs in the config are the raft server IDs. The netchef-rendered config satisfies this.\n\nThe root cause is in op-conductor. A leader should accept its op-node's unsafe head when that head is on the supernode-verified chain, rather than insist on the stale raft payload. This tool is the recovery procedure until that change lands.\n\n**Review status.** The review agents in `.claude/agents` (`go-code-reviewer`) have not been run on this draft yet. `go test ./op-chain-ops/sequencerrecovery/...` passes, and the repo's custom golangci-lint reports 0 issues on the new packages.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-19T20:55:22Z",
+      "mergedAt": null,
+      "additions": 1330,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABQgiuOQ",
+      "title": "op-chain-ops: add interop reorg stress tooling",
+      "author": "karlfloersch",
+      "number": 24297,
+      "body": "Adds two op-chain-ops tools for stress-testing interop invalidation on a devnet whose interop filter lets invalid executing messages through, such as one running the permissive filter mock.\n\n- `interop-safety-check` independently re-validates every `CrossL2Inbox` executing message up to each op-supernode's cross-safe head against the initiating log, using that supernode's own ELs. It also checks that all supernodes agree on the cross-safe chain, that given invalidated transactions are gone, that replaced blocks hold only deposits, and that cross-safe keeps advancing. It answers the main safety question of an invalidation test, whether an invalid message ever reaches cross-safe, without trusting any supernode's decision.\n- `interop-smoke invalid-spam` sends invalid executing messages back to back on both chains, without waiting for reorgs, so nearly every batch has to be invalidated. The existing `invalid-message` subcommand waits for each reorg, which limits it to a few invalidations per run.\n\nOn the two-chain int-reorg-0 devnet (three supernodes, three conductor-managed sequencers per chain), the safety check ran every 30s through repeated single, multi-block and chained invalidations. It found no invalid executing message in any supernode's cross-safe chain, and the supernodes always agreed.\n\nLimitations:\n- The safety check reads each supernode's cross-safe head through its rollup RPC. It needs one EL per supernode per chain, so that it validates against the same chain view.\n- `invalid-spam` only lands transactions when the sequencers' interop filter accepts invalid messages.\n\nNo effect on users; these are test tools. The repo's review agents were not run on this draft.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-19T20:57:08Z",
+      "mergedAt": null,
+      "additions": 1026,
+      "deletions": 0
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABQRsrGA",
       "title": "op-reth!: drop the generics that only ever take one type",
@@ -46,61 +106,272 @@
       "deletions": 2386
     },
     {
-      "id": "PR_kwDODjvEJM8AAAABQSGfoA",
-      "title": "op-reth!: make the node, RPC, engine and consensus wiring concrete",
-      "author": "joshklop",
-      "number": 24272,
-      "body": "Builds on ethereum-optimism/optimism#24270 and should be reviewed after it; the diff here includes that PR's commit until it merges and this branch is rebased.\n\nop-reth's node, RPC, engine and consensus wiring carried type parameters that every caller, in this repo and in op-reth-premium, fills with the same type. They make each bound and signature longer and suggest extension points no one uses. This is step 1b of making op-reth-premium a thin wrapper over op-reth: removing them first keeps the later overrides structure small. Nodes behave the same; only the Rust API changes.\n\nA few changes go slightly past removing parameters, because removing them made something else dead:\n- `OpEngineTypes` moves into the payload crate and replaces `OpPayloadTypes`, which had an identical `PayloadTypes` impl. The RPC crate's `OpEngineApi` needs to name it, and the RPC crate cannot depend on the node crate.\n- `OpEngineValidator` loses its provider: the field was only read by the hand-written `Clone`.\n- `OpAddOns::min_suggested_priority_fee` goes: the value reaches the eth API through `OpEthApiBuilder`, and only the removed `with_*` mappers read the field.\n- The `engine-api-access` example goes: it only demonstrated replacing the engine API builder, which `OpAddOns` no longer allows.\n\n`OpEngineApi` keeps its `Validator` parameter: the validator type lives in the node crate, which the RPC crate cannot name.\n\nThe rust-code-reviewer and deletion-reviewer agents found no behavior change. Two suggestions are not taken: a type alias for `OpEthApiBuilder`'s `EthApi` (a new name for a type spelled out four times), and dropping the engine type parameter from the `OpEngineApi` RPC trait, because op-reth-premium's in-process tests call `OpEngineApiClient::<OpEngineTypes>`.\n\nBREAKING CHANGE: Rust crates that build on op-reth must drop the removed type arguments. `OpPayloadTypes` becomes `OpEngineTypes` (now in `reth-optimism-payload-builder`, still re-exported from `reth-optimism-node`), `OpFullNodeTypes` becomes `OpNodeTypes`, and `OpEngineValidator::new` takes only the chain spec. `OpAddOns::{with_engine_api, with_payload_validator, with_engine_validator, with_rpc_middleware}` and `OpAddOnsBuilder::with_rpc_middleware` are gone; a node that needs a different engine API or validator implements its own add-ons. op-reth-premium's side is a draft PR in optimism-premium.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "id": "PR_kwDODjvEJM8AAAABQZ2myg",
+      "title": "op-node,op-alt-da: read L1 block transactions without decoding deposits",
+      "author": "sebastianst",
+      "number": 24281,
+      "body": "An L3's L1 is an OP Stack chain: every L1 block starts with an L1-info deposit, and a batch can be force-included through a deposit. op-node's data sources and the alt-DA challenge processing decode all of an L1 block's transactions with go-ethereum, which works only on op-geth. On upstream go-ethereum (#24176) the decode fails on every such block and derivation stalls.\n\nThey now read the block's transactions as EIP-2718 bytes through the new `InfoAndRawTxsByHash` and decode each by its class:\n\n- A deposit to the batch inbox from the batcher address is a batcher transaction, as op-geth's signer made it before by returning the deposit's `From`.\n- A post-exec transaction never is.\n- Anything else goes through `isValidBatchTx` unchanged.\n\nA transaction that does not decode still fails the block with a temporary error. No chain's derivation changes. New tests feed a block shaped like an OP Stack block through the real L1 client into the calldata source, the blob source and the alt-DA challenge processing; on #24176 without this change they fail with `failed to decode tx 0: transaction type not supported`.\n\nThe L1 request-time metric's `method` label changes from `InfoAndTxsByHash` to `InfoAndRawTxsByHash`, and its time no longer includes decoding the transactions. The unused `node.L1Client` interface is removed.\n\nkona does not derive from an OP Stack L1 either: its L1 providers decode with alloy's Ethereum transaction envelope. That is not changed here and is tracked in #24284.\n\n🤖 *Co-created with Claude Opus 5.5 and Claude Fable 5.2*\n",
       "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-19T02:29:50Z",
-      "mergedAt": "2026-11-19T02:42:40Z",
-      "additions": 403,
-      "deletions": 913
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABQRXFmQ",
-      "title": "op-acceptance-tests,op-service,op-devstack: delete the interop load tests and their helpers",
-      "author": "joshklop",
-      "number": 24269,
-      "body": "Deletes the interop load tests: `TestRelaySteady`, `TestRelayBurst`, `TestRelayWithInvalidMessagesSteady` and `TestMaxExecutingMessagesBurst`, plus their metrics and graph output. They ran in the gating `op-acceptance-tests` jobs (`memory-all-*-op-reth-fusaka`) for about 3 minutes each, so this removes that coverage on purpose and shortens those jobs. The `gonum.org/v1/plot` dependency goes with the graphing code.\n\nFive other acceptance tests (batcher throttling, fusaka, glamsterdam, jovian DA footprint, osaka-on-L2) use the package's spam helpers. Those helpers move to `op-acceptance-tests/tests/loadtest`, trimmed to what those tests call, and those tests behave as before. The `NAT_INTEROP_LOADTEST_*` exports in the root `justfile` are removed. They never reached these tests, because `op-acceptance-tests` is in `EXCLUDED_TEST_PKGS` for those jobs.\n\nReviews: go-code-reviewer, deletion-reviewer and ci-config-reviewer found nothing blocking. I applied their cleanups.\n\nA second commit deletes the library code that only these tests used: the `op-service/accounting` package, `txinclude`'s `CostOracle`/`TxBudget` and the budget plumbing in `Persistent`, and `dsl.MakeInvalid{BlockNumber,ChainID,Origin,Timestamp}`. None of the remaining `Persistent` callers passed a budget, so they behave as before. A new test checks that a failed `Include` releases its nonce. `docs/ai/gas-repricing.md` and `docs/ai/opgeth-decoupling.md` no longer describe the deleted code. deletion-reviewer and go-code-reviewer found nothing blocking in this commit.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-19T01:08:51Z",
-      "mergedAt": "2026-11-19T03:30:32Z",
-      "additions": 275,
-      "deletions": 2363
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABQQygNg",
-      "title": "op-service,op-batcher: End pending sends when the tx manager closes",
-      "author": "ajsutton",
-      "number": 24266,
-      "body": "The batcher `Stop` can hang forever. `Stop` closes the tx manager, which closes its L1 client. Sometimes a receipt query sees a tx as mined just before the close, and the next RPC call fails. The send then waits for a confirmation that it cannot get, because every receipt query now fails with `client is closed`. This hang made `op-e2e-cannon-tests-super` time out in 3 of 48 `develop-fault-proofs` runs. With 10 confirmations in production, the window covers most of each tx's life.\n\nNow a pending send returns `ErrClosed` as soon as the tx manager closes. This applies to op-batcher, op-proposer, op-challenger and the other tx manager users. Before, the old documented behaviour was to wait for mined txs after close. That never worked with a real client, because the client was already closed.\n\nThis PR also fixes two related problems:\n- A send that was still in `prepare` at close kept retrying for about 58 s. It now stops at once.\n- Each receipt waiter now gets its own published tx. Before, a waiter that started late read the shared variable and could watch a later fee-bumped tx. The earlier tx then had no waiter. The race detector reported this race.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/24265\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-19T00:10:39Z",
-      "mergedAt": "2026-11-19T01:17:33Z",
-      "additions": 109,
-      "deletions": 61
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABQQ8N1w",
-      "title": "op-core: Re-snapshot the Lagoon NUT bundle",
-      "author": "ajsutton",
-      "number": 24268,
-      "body": "ethereum-optimism/optimism#24012 changed the L2CrossDomainMessenger bytecode. The frozen Lagoon NUT bundle still deployed the old implementation. Without this change, Lagoon activation installs an L2CrossDomainMessenger that does not match the current contracts.\n\nThis PR freezes the new bundle and regenerates the Lagoon pre-fork states. It also updates the Lagoon L2ContractsManager address in `PastNUTBundles.t.sol`. ethereum-optimism/optimism#24267 applies the same bundle and lock entry to `proposal/op-contracts/v10.0.0`. Both branches build a byte-identical bundle.\n\nThe `deposit-reviewer` agent and a general review ran. Each found the stale `LAGOON_L2CM` constant, and this PR fixes it. The security review runs after the PR opens.\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-19T00:26:22Z",
+      "createdAt": "2026-11-19T13:28:44Z",
       "mergedAt": null,
-      "additions": 24,
-      "deletions": 24
+      "additions": 934,
+      "deletions": 95
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABN5-3uw",
+      "title": "kona-engine,kona-node-service: keep a stale delegated safe head from moving safe below finality",
+      "author": "einar-oplabs",
+      "number": 24004,
+      "body": "A stale delegate snapshot can report a safe head below kona-node's finalized head, and kona-node applies it, moving safe behind its own finality.\n\nKona-node now drops a delegate status whose labels are out of order or whose local-safe L1 origin is not canonical. The engine skips a delegated safe head below or conflicting with established finality, and `synchronize` refuses any update that leaves safe or local-safe below finalized. A lagging delegate no longer moves safe back; only an EL block with a different hash proves divergence and reorgs the engine, above finality. If the EL rejects that reorg as an invalid forkchoice state (a fork from below finalized), the update is skipped instead of resetting every poll. Still uncovered: an EL still syncing toward such a fork answers `SYNCING` and cannot reject it.\n\nBREAKING CHANGE: `ConsolidateTaskError` gains `BreaksFinality` and `DelegatedReorgRejected`; `FinalizeTaskError::{BehindFinalizedHead, ConflictsWithFinalizedHead}` become `BreaksFinality(FinalityViolation)`; `SynchronizeTaskError` gains the Critical `FinalizedAheadOfSafe`.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/23910. Stacked on #23947 (#23900 → #23899 → #23908 → #23947 → #24004 → #24005 → #24006 → #24007).\n\n## Breakdown\n\n|                | Added | Removed |  Net |\n|----------------|------:|--------:|-----:|\n| Implementation |   241 |      85 |  156 |\n| Tests          |   340 |       4 |  336 |\n| Docs           |     0 |       0 |    0 |\n\n## AI Reviews\n\n- [x] Claude: Opus 5.5 (xhigh)\n- [x] Claude: Fable 5.1 (xhigh)\n- [ ] Codex: GPT-6.1-Sol (xhigh)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T17:28:02Z",
+      "mergedAt": "2026-11-19T09:26:58Z",
+      "additions": 925,
+      "deletions": 187
     }
   ],
   "codeChanges": {
-    "additions": 787,
-    "deletions": 3337,
-    "files": 67,
-    "commitCount": 19
+    "additions": 6491,
+    "deletions": 7497,
+    "files": 308,
+    "commitCount": 112
   },
   "completedItems": [
+    {
+      "title": "op-devstack,op-acceptance-tests: run the follow-source tests against kona-node",
+      "prNumber": 23947,
+      "type": "tests",
+      "body": "The three `follow_l2` acceptance tests now run against kona-node instead of skipping. They skipped because the single-chain test sequencer requires an op-node CL, and the two-verifiers preset applied `DEVSTACK_L2CL_KIND` to every node, so a",
+      "files": [
+        "op-acceptance-tests/tests/sync/follow_l2/sync_test.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/singlechain_twoverifiers.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build_test.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_variants_test.go",
+        "op-acceptance-tests/tests/sdm/init_test.go",
+        "op-devstack/README.md",
+        "op-devstack/sysgo/mixed_runtime_test.go"
+      ]
+    },
+    {
+      "title": "kona-engine,kona-node-service: keep a stale delegated safe head from moving safe below finality",
+      "prNumber": 24004,
+      "type": "other",
+      "body": "A stale delegate snapshot can report a safe head below kona-node's finalized head, and kona-node applies it, moving safe behind its own finality.\n\nKona-node now drops a delegate status whose labels are out of order or whose local-safe L1 or",
+      "files": [
+        "rust/kona/crates/node/engine/src/lib.rs",
+        "rust/kona/crates/node/engine/src/state/core.rs",
+        "rust/kona/crates/node/engine/src/state/finality.rs",
+        "rust/kona/crates/node/engine/src/state/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/consolidate/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/task_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/error.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/helper.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/tests.rs",
+        "rust/kona/crates/node/engine/src/test_utils/rpc.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/actor.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/tests.rs",
+        "rust/kona/crates/node/service/src/actors/engine/actor.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/actor.rs",
+        "rust/kona/crates/node/engine/src/sync/error.rs",
+        "rust/kona/crates/node/engine/src/sync/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/core.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/mod.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/synchronize/mod.rs",
+        "rust/kona/crates/node/engine/src/test_utils/engine_state.rs",
+        "op-acceptance-tests/tests/sync/follow_l2/sync_test.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/singlechain_twoverifiers.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_build_test.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "op-devstack/sysgo/singlechain_variants_test.go",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/canonicalize_test.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/finalize/id.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/insert/task.rs",
+        "rust/kona/crates/node/engine/src/task_queue/tasks/task.rs",
+        "rust/kona/crates/node/engine/src/test_utils/blocks.rs",
+        "rust/kona/crates/node/engine/src/test_utils/deposits.rs",
+        "rust/kona/crates/node/engine/src/test_utils/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/core.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/database.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/actor/tests/op_node_parity.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/delegated/mod.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/finalizer.rs",
+        "rust/kona/crates/node/service/src/actors/derivation/request.rs",
+        "rust/kona/crates/node/service/src/actors/engine/client.rs",
+        "rust/kona/crates/node/service/src/actors/engine/queue_tests.rs",
+        "rust/kona/crates/node/service/src/actors/engine/tests.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs"
+      ]
+    },
+    {
+      "title": "op-devstack,op-e2e: use the deployer's dependency set and deactivate later forks in WithForkAtOffset",
+      "prNumber": 24154,
+      "type": "other",
+      "body": "Prepares devstack for removing op-deployer's Karst cap (`standard.maxDefaultHardfork`), which would put Lagoon in the default fork schedule. No behaviour change today.\n\n- **One dependency set:** single-chain runtimes use op-deployer's set (",
+      "files": [
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/multichain_supernode_runtime.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_supernode_synctester_variant.go",
+        "op-devstack/sysgo/world.go",
+        "op-e2e/e2eutils/intentbuilder/builder.go",
+        "op-e2e/e2eutils/intentbuilder/builder_test.go"
+      ]
+    },
+    {
+      "title": "go.mod: build against upstream go-ethereum v1.17.10",
+      "prNumber": 24176,
+      "type": "other",
+      "body": "**Draft to run CI on the cutover. Not for review or merge in this form.**\n\nRemoves the op-geth `replace` and builds the whole tree against upstream go-ethereum v1.17.10. The tree has never run its tests against upstream go-ethereum, so this",
+      "files": [
+        ".circleci/continue/helpers.yml",
+        ".circleci/continue/main.yml",
+        ".golangci.yaml",
+        "AGENTS.md",
+        "Makefile",
+        "cannon/mipsevm/testutil/evm.go",
+        "cannon/mipsevm/testutil/mips.go",
+        "docs/ai/deposit-review.md",
+        "docs/ai/execution-layer.md",
+        "docs/ai/go-dev.md",
+        "docs/ai/opgeth-decoupling.md",
+        "docs/ai/rust-dev.md",
+        "go.mod",
+        "go.sum",
+        "justfile",
+        "op-acceptance-tests/tests/glamsterdam_test.go",
+        "op-acceptance-tests/tests/interop/loadtest/schedule.go",
+        "op-batcher/batcher/driver.go",
+        "op-batcher/batcher/driver_test.go",
+        "op-batcher/batcher/test_batch_submitter.go",
+        "op-chain-ops/cmd/check-jovian/main.go",
+        "op-chain-ops/genesis/genesis_test.go",
+        "op-chain-ops/superroot/superroot.go",
+        "op-core/fees/dafootprint.go",
+        "op-core/fees/dafootprint_test.go",
+        "op-core/fees/fees.go",
+        "op-core/fees/fees_test.go",
+        "op-core/genesis/block_test.go",
+        "op-core/genesis/genesis.go",
+        "op-core/genesis/genesis_test.go",
+        "op-core/genesis/geth.go",
+        "op-core/params/chain_config.go",
+        "op-core/params/chain_config_json.go",
+        "op-core/params/chain_config_json_test.go",
+        "op-core/params/chain_config_test.go",
+        "op-core/params/geth.go",
+        "op-core/params/opgethtest/opgethtest.go",
+        "op-core/predeploys/addresses_test.go",
+        "op-core/types/deposit_tx.go",
+        "op-core/types/deposit_tx_test.go",
+        "op-core/types/post_exec_tx.go",
+        "op-core/types/post_exec_tx_test.go",
+        "op-core/types/receipt.go",
+        "op-core/types/receipt_consensus.go",
+        "op-core/types/receipt_consensus_test.go",
+        "op-core/types/receipt_test.go",
+        "op-core/types/transaction_json_test.go",
+        "op-deployer/pkg/deployer/integration_test/cli/pcd_boot.go",
+        "op-deployer/pkg/deployer/l1_fork.go",
+        "op-devstack/dsl/l2_network.go",
+        "op-devstack/sysgo/deployer.go",
+        "op-devstack/sysgo/deployer_test.go",
+        "op-e2e/actions/batcher/l2_batcher_test.go",
+        "op-e2e/actions/helpers/l1_miner.go",
+        "op-e2e/actions/helpers/l2_batcher.go",
+        "op-e2e/actions/sync/sync_test.go",
+        "op-e2e/actions/upgrades/span_batch_test.go",
+        "op-e2e/e2eutils/geth/engine_helpers.go",
+        ".github/dependabot.yml",
+        "docs/ai/gas-repricing.md",
+        "op-e2e/e2eutils/geth/engine_helpers_test.go",
+        "op-e2e/e2eutils/geth/fakepos.go",
+        "op-e2e/system/da/brotli_batcher_test.go",
+        "op-e2e/system/da/eip4844_test.go",
+        "op-fetcher/fetch/deps_test.go",
+        "op-node/p2p/gossip_test.go",
+        "op-node/rollup/derive/fuzz_parsers_test.go",
+        "op-node/rollup/derive/span_batch_tx_test.go",
+        "op-node/rollup/derive/span_batch_txs_test.go",
+        "op-service/log/geth.go",
+        "mise.toml",
+        "op-node/p2p/gossip.go"
+      ]
+    },
+    {
+      "title": "docs: point node snapshot docs at snapshots.optimism.io",
+      "prNumber": 24237,
+      "type": "docs",
+      "body": "<!-- claude-slack-attribution -->\n_Requested by **Matthew Cruz** · [Slack thread](https://oplabs-pbc.slack.com/archives/D0BCFDF7F7V/p1794959192171099)_\n\n**Before:** The snapshot docs sent operators to datadirs.optimism.io for OP Mainnet op-",
+      "files": [
+        "docs/public-docs/node-operators/guides/management/archive-node.mdx",
+        "docs/public-docs/node-operators/guides/management/restore-from-snapshot.mdx",
+        "docs/public-docs/node-operators/guides/troubleshooting.mdx",
+        "docs/public-docs/node-operators/reference/consensus-layer-sync.mdx",
+        "docs/public-docs/node-operators/tutorials/node-from-docker.mdx",
+        "docs/public-docs/node-operators/tutorials/run-node-from-source.mdx",
+        "docs/public-docs/notices/op-reth-storage-v1-deprecation.mdx",
+        "docs/public-docs/op-mainnet/network-information/snapshots.mdx"
+      ]
+    },
+    {
+      "title": "op-reth: report a zero blobGasUsed on deposit receipts",
+      "prNumber": 24229,
+      "type": "other",
+      "body": "From Jovian, the block's DA footprint (the header's `blobGasUsed`) skips deposits, but op-reth's RPC receipt builder computed a footprint for every transaction. `eth_getTransactionReceipt` therefore reported `estimated size * daFootprintGas",
+      "files": [
+        "op-acceptance-tests/tests/sdm/helpers_test.go",
+        "rust/op-reth/crates/rpc/src/eth/receipt.rs",
+        "rust/op-reth/crates/rpc/src/eth/receipt/tests.rs",
+        "rust/op-revm/src/transaction.rs"
+      ]
+    },
+    {
+      "title": "Fix translation drift",
+      "prNumber": 24224,
+      "type": "bugfix",
+      "body": "## Summary\nSyncs Korean (`ko`) translations with English docs changes merged between 2026-11-12 and 2026-11-17.\n\n## Changes\n- Updated 21 `ko/` pages and snippets: interop topology/FAQ, kona rollup RPC (`optimism_safeHeadAtL1Block`, `superro",
+      "files": [
+        "docs/public-docs/ko/app-developers/guides/interoperability/message-expiration.mdx",
+        "docs/public-docs/ko/app-developers/guides/interoperability/message-passing.mdx",
+        "docs/public-docs/ko/chain-operators/guides/management/network-architecture.mdx",
+        "docs/public-docs/ko/chain-operators/launch-paths.mdx",
+        "docs/public-docs/ko/chain-operators/tools/chain-monitoring.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/reference/artifacts-locators.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/release-workflows.mdx",
+        "docs/public-docs/ko/chain-operators/tools/op-deployer/usage/verify.mdx",
+        "docs/public-docs/ko/chain-operators/tools/proxyd.mdx",
+        "docs/public-docs/ko/node-operators/guides/configuration/supernode.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/rpc/rollup.mdx",
+        "docs/public-docs/ko/node-operators/op-reth/cli/op-reth/node.mdx",
+        "docs/public-docs/ko/node-operators/reference/op-reth-historical-proof-config.mdx",
+        "docs/public-docs/ko/notices/interop-prep.mdx",
+        "docs/public-docs/ko/notices/specialized-node-topology.mdx",
+        "docs/public-docs/ko/op-stack/interop/explainer.mdx",
+        "docs/public-docs/ko/op-stack/interop/index.mdx",
+        "docs/public-docs/ko/op-stack/interop/superchain-eth-bridge.mdx",
+        "docs/public-docs/ko/op-stack/interop/supernode.mdx",
+        "docs/public-docs/ko/snippets/op-enterprise-feature.mdx",
+        "docs/public-docs/ko/snippets/runbook-tool-versions.mdx"
+      ]
+    },
     {
       "title": "op-reth!: make the node, RPC, engine and consensus wiring concrete",
       "prNumber": 24272,
@@ -182,6 +453,31 @@
       ]
     },
     {
+      "title": "op-core: Re-snapshot the Lagoon NUT bundle",
+      "prNumber": 24268,
+      "type": "other",
+      "body": "ethereum-optimism/optimism#24012 changed the L2CrossDomainMessenger bytecode. The frozen Lagoon NUT bundle still deployed the old implementation. Without this change, Lagoon activation installs an L2CrossDomainMessenger that does not match ",
+      "files": [
+        "op-core/nuts/bundles/lagoon_nut_bundle.json",
+        "op-core/nuts/fork_lock.toml",
+        "op-core/nuts/state/lagoon_multichain_state.json",
+        "op-core/nuts/state/lagoon_state.json",
+        "packages/contracts-bedrock/test/setup/PastNUTBundles.t.sol"
+      ]
+    },
+    {
+      "title": "op-core: Re-snapshot the Lagoon NUT bundle",
+      "prNumber": 24267,
+      "type": "other",
+      "body": "ethereum-optimism/optimism#24233 changed the L2CrossDomainMessenger bytecode on this branch. The frozen Lagoon NUT bundle still deployed the old implementation. Without this change, Lagoon activation installs an L2CrossDomainMessenger that ",
+      "files": [
+        "op-core/nuts/bundles/lagoon_nut_bundle.json",
+        "op-core/nuts/fork_lock.toml",
+        "op-core/nuts/state/lagoon_state.json",
+        "packages/contracts-bedrock/test/setup/PastNUTBundles.t.sol"
+      ]
+    },
+    {
       "title": "op-service,op-batcher: End pending sends when the tx manager closes",
       "prNumber": 24266,
       "type": "other",
@@ -191,9 +487,179 @@
         "op-service/txmgr/txmgr.go",
         "op-service/txmgr/txmgr_test.go"
       ]
+    },
+    {
+      "title": "ci: add a ci-gate-proposals gate for release branches",
+      "prNumber": 24262,
+      "type": "other",
+      "body": "Human: adds a new job `ci-gate-proposals` which is required by `ci-gate`. Once this is merged, we can change the ruleset for `proposal/**` branches to require only `ci-gate-proposals`. \n\n\n---\n\nRelease branches (`proposal/**`) run the develo",
+      "files": [
+        ".circleci/continue/main.yml",
+        "docs/ai/ci-config-review.md",
+        "docs/ai/ci-ops.md"
+      ]
+    },
+    {
+      "title": "superchain: bump registry to 0b95886 for op-int-0 and uni-int-0",
+      "prNumber": 24301,
+      "type": "other",
+      "body": "## Summary\r\n\r\nBumps the `superchain-registry` submodule `0ca0a93` → `0b95886` (SR main) via `just sync-superchain 0b95886b…`.\r\n\r\nPulls in the two new staging devnets so the next component releases embed them:\r\n\r\n- ethereum-optimism/supercha",
+      "files": [
+        "op-core/superchain/bundle/superchain-configs.zip.sha256",
+        "rust/kona/crates/protocol/registry/etc/chainList.json",
+        "rust/kona/crates/protocol/registry/etc/configs.json",
+        "rust/kona/crates/protocol/registry/etc/depsets.json",
+        "rust/op-reth/crates/chainspec/res/superchain-configs.tar.sha256",
+        "rust/op-reth/crates/chainspec/src/superchain/chain_specs.rs",
+        "superchain-registry"
+      ]
+    },
+    {
+      "title": "Fix translation drift",
+      "prNumber": 24289,
+      "type": "bugfix",
+      "body": "## Summary\nResyncs Korean (`ko`) pages that had drifted from their English sources.\n\n## Changes\n- `ko/op-mainnet/network-information/snapshots.mdx`: retranslated to cover snapshots.optimism.io, OP Sepolia, storage v1, and pre-Bedrock sectio",
+      "files": [
+        "docs/public-docs/ko/chain-operators/tutorials/kona-custom-prestate.mdx",
+        "docs/public-docs/ko/node-operators/guides/management/restore-from-snapshot.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/run/rpc-trust.mdx",
+        "docs/public-docs/ko/node-operators/tutorials/node-from-docker.mdx",
+        "docs/public-docs/ko/node-operators/tutorials/run-node-from-source.mdx",
+        "docs/public-docs/ko/op-mainnet/network-information/snapshots.mdx"
+      ]
+    },
+    {
+      "title": "op-node!: reject an OP Stack chain as L1",
+      "prNumber": 24286,
+      "type": "other",
+      "body": "Alternative to #24281: drop support for a chain whose L1 is itself an OP Stack chain (an L3), instead of keeping it across the move to upstream go-ethereum (#24176).\n\nEvery block of an OP Stack L1 holds deposit transactions, which upstream ",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/custom-deployments.mdx",
+        "op-node/rollup/derive/data_source.go",
+        "op-node/service.go",
+        "op-node/service_l1_chain_config_test.go"
+      ]
+    },
+    {
+      "title": "ci: build images with the unified build-images workflow",
+      "prNumber": 24285,
+      "type": "other",
+      "body": "## Summary\n\n- Replaces the apko image caller with the reusable `build-images.yaml` workflow from [ethereum-optimism/factory](https://github.com/ethereum-optimism/factory), pinned to `96195784dc85831e97bdae00676683bc51f16a6d`. The caller is ",
+      "files": [
+        ".github/images.apko.json",
+        ".github/images.json",
+        ".github/workflows/build-images.apko.yaml",
+        ".github/workflows/build-images.yaml",
+        "op-deployer/scripts/genesis-smoke-test-image.sh",
+        "rust/lokahi/README.md"
+      ]
+    },
+    {
+      "title": "kona-host,kona-sp1: Remove the websocket size limits to match HTTP",
+      "prNumber": 24283,
+      "type": "other",
+      "body": "## What\n\nkona-host's websocket RPC connections, and kona-sp1's L2 block client, now read responses of any size, as they do over HTTP.\n\nFor operators: kona-host and the kona-sp1 proposer with `ws://` or `wss://` endpoints read large response",
+      "files": [
+        "rust/Cargo.lock",
+        "rust/kona/bin/host/Cargo.toml",
+        "rust/kona/bin/host/src/eth/mod.rs",
+        "rust/kona/crates/node/sources/Cargo.toml",
+        "rust/kona/crates/node/sources/src/rpc.rs",
+        "rust/kona/sp1/crates/super-range-executor/Cargo.toml",
+        "rust/kona/sp1/crates/super-range-executor/src/l2.rs"
+      ]
+    },
+    {
+      "title": "op-service,op-challenger: Remove the websocket size limit to match HTTP",
+      "prNumber": 24282,
+      "type": "other",
+      "body": "## What\n\nop-service's websocket RPC clients now read responses of any size, as they do over HTTP.\n\nFor operators:\n- Services with `ws://` or `wss://` endpoints read large responses as they would over HTTP: op-node, op-supernode, op-batcher,",
+      "files": [
+        "op-challenger/game/client/provider.go",
+        "op-service/client/dial_test.go",
+        "op-service/client/lazy_dial.go",
+        "op-service/client/rpc.go",
+        "op-service/client/ws_read_limit_test.go",
+        "op-service/txmgr/cli.go"
+      ]
+    },
+    {
+      "title": "all: update the remaining mentions of op-geth",
+      "prNumber": 24279,
+      "type": "other",
+      "body": "Follow-up to #24176: with the Go module on upstream go-ethereum and op-reth as the only L2 execution client in the tests, a number of comments, docs and test branches still describe op-geth as the L2 engine or as a dependency. This updates ",
+      "files": [
+        "README.md",
+        "cannon/README.md",
+        "docs/ai/execution-layer.md",
+        "docs/ai/opgeth-decoupling.md",
+        "op-acceptance-tests/tests/osaka_on_l2_test.go",
+        "op-acceptance-tests/tests/sdm/sdmtest/system.go",
+        "op-acceptance-tests/tests/sync/elsync/gap_clp2p/sync_test.go",
+        "op-acceptance-tests/tests/sync/elsync/gap_elp2p/sync_test.go",
+        "op-acceptance-tests/tests/sync/elsync/reorg/sync_test.go",
+        "op-batcher/readme.md",
+        "op-chain-ops/cmd/check-lagoon/checks/checks.go",
+        "op-chain-ops/cmd/check-lagoon/checks/checks_test.go",
+        "op-challenger/flags/flags.go",
+        "op-challenger/scripts/check-game-block-hashes.sh",
+        "op-conductor/RUNBOOK.md",
+        "op-conductor/conductor/config.go",
+        "op-conductor/conductor/service.go",
+        "op-core/types/deposit_tx_test.go",
+        "op-core/types/receipt_consensus_test.go",
+        "op-devstack/README.md",
+        "op-e2e/actions/derivation/blocktime_test.go",
+        "op-e2e/e2eutils/disputegame/super_dispute_system.go",
+        "op-e2e/e2eutils/testengine/client.go",
+        "op-e2e/faultproofs/precompile_test.go",
+        "op-e2e/faultproofs/super_test.go",
+        "op-e2e/interop/supersystem.go",
+        "op-e2e/interop/supersystem_l2.go",
+        "op-e2e/system/isthmus/set_code_tx_test.go",
+        "op-e2e/system/p2p/gossip_test.go",
+        "op-e2e/system/verifier/basic_test.go",
+        "op-interop-filter/README.md",
+        "op-node/README.md",
+        "op-node/rollup/types_test.go",
+        "op-proposer/README.md",
+        "op-service/txinclude/monitor.go",
+        "op-wheel/README.md",
+        "op-wheel/commands.go",
+        "packages/contracts-bedrock/scripts/libraries/UpgradeUtils.sol",
+        "packages/contracts-bedrock/scripts/upgrade/ExecuteNUTBundle.s.sol",
+        "packages/contracts-bedrock/scripts/upgrade/GenerateNUTBundle.s.sol",
+        "packages/contracts-bedrock/test/L2/fork/L2ForkUpgrade.t.sol",
+        "rust/alloy-op-evm/src/block/tests/structural_tests.rs",
+        "rust/op-reth-test-engine/src/bin/op-reth-test-engine.rs",
+        "rust/op-reth-test-engine/src/builder.rs",
+        "rust/op-reth-test-engine/src/lib.rs"
+      ]
+    },
+    {
+      "title": "docs/ai: forbid CI cost cuts that regress coverage, maintainability or security",
+      "prNumber": 24277,
+      "type": "docs",
+      "body": "CI refactors and cost cuts tend to happen as a series of small trades: a skipped variant here, a hand-maintained list there. Each looks harmless, and together they leave CI less robust. The CI config review guide gains item 12, which makes ",
+      "files": [
+        ".claude/agents/ci-config-reviewer.md",
+        "AGENTS.md",
+        "docs/ai/ci-config-review.md"
+      ]
     }
   ],
   "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 241.7818400469526,
+      "prScore": 201.7438400469526,
+      "issueScore": 8.1,
+      "reviewScore": 31.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
@@ -205,6 +671,56 @@
       "summary": null
     },
     {
+      "username": "karlfloersch",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/706123?u=7139cab162926014e8b6dcbf7dc5dee2e4708cbc&v=4",
+      "totalScore": 142.07455891685305,
+      "prScore": 142.07455891685305,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 135.56322581740218,
+      "prScore": 125.56322581740218,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 119.86850608394994,
+      "prScore": 119.86850608394994,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 105.2768478456986,
+      "prScore": 72.2768478456986,
+      "issueScore": 0,
+      "reviewScore": 33,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 97.61383664587797,
+      "prScore": 97.61383664587797,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
       "totalScore": 81.05202048900085,
@@ -213,11 +729,141 @@
       "reviewScore": 14.5,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 51.438,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 51,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 47.33761228866811,
+      "prScore": 25.33761228866811,
+      "issueScore": 2,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 44.66185005244421,
+      "prScore": 44.223850052444206,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 35.66786557787215,
+      "prScore": 15.827865577872142,
+      "issueScore": 0,
+      "reviewScore": 19.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 27.39260667202811,
+      "prScore": 6.8926066720281085,
+      "issueScore": 2,
+      "reviewScore": 18.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 13.84,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 6,
-  "mergedPRs": 3,
-  "newIssues": 0,
-  "closedIssues": 2,
-  "activeContributors": 5
+  "newPRs": 33,
+  "mergedPRs": 21,
+  "newIssues": 4,
+  "closedIssues": 11,
+  "activeContributors": 32
 }
