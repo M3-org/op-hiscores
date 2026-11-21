@@ -5,9 +5,21 @@
     "intervalType": "week"
   },
   "repository": "ethereum-optimism/ecosystem",
-  "overview": "From 2026-11-15 to 2026-11-22, ethereum-optimism/ecosystem had 1 new PRs (1 merged), 0 new issues, and 27 active contributors.",
+  "overview": "From 2026-11-15 to 2026-11-22, ethereum-optimism/ecosystem had 3 new PRs (1 merged), 0 new issues, and 33 active contributors.",
   "topIssues": [],
   "topPRs": [
+    {
+      "id": "PR_kwDOKSJyfM8AAAABQyk9fg",
+      "title": "feat(viem): support OP Stack Upgrade 22 (Lagoon) and viem 2.58.2",
+      "author": "sbvegan",
+      "number": 1031,
+      "body": "## Summary\n\nBrings `@eth-optimism/viem` up to the current viem release and to OP Stack Upgrade 22 (Lagoon), so app developers can use it for interop between OP Mainnet and Unichain and for withdrawals after the shared-contract migration.\n\nLagoon timing, from the [Upgrade 22 notice](https://github.com/ethereum-optimism/optimism/pull/24328):\n- **Shared-contract migration** (OP Mainnet and Unichain move to a shared `DisputeGameFactory`): Sepolia 2026-12-08, Mainnet 2026-12-14.\n- **Lagoon activation** (interop between OP Mainnet and Unichain): Sepolia 2026-12-10, Mainnet 2027-01-11.\n- **ZK dispute game (type `10`) becomes the respected game type:** Sepolia 2026-12-11, Mainnet 2027-01-14.\n\nContracts were checked against `ethereum-optimism/optimism` `develop` at `65e8033` (`packages/contracts-bedrock`) and the specs at `ethereum-optimism/specs` `f4b6735`.\n\n## Changes\n\nThe peer range is `^2.58.2`, the current latest viem release. The upstream factory and game-type `10` fix (wevm/viem#5625) is merged but not yet released; see *Left to do*.\n\n### 1. viem `^2.17.9` → `^2.58.2`\n- Raises the `viem` dependency and peer range to `^2.58.2`.\n- **Gas estimation fix.** viem 2.58 fills transactions with `eth_fillTransaction`, which estimates gas with no gas price. `CrossL2Inbox.validateMessage` reverts with `CrossL2Inbox_NoExecutingDeposits` when `tx.gasprice == 0` and the base fee is positive (`src/L2/CrossL2Inbox.sol`). As a result, `relayCrossDomainMessage` failed under the new viem. `baseWriteAction`, `estimateRelayCrossDomainMessageGas`, and `simulateRelayCrossDomainMessage` now fill the EIP-1559 fees the caller did not set before estimating. Caller-set fees are used as given.\n- Two tests asserted an old viem `parseEventLogs` bug, and their TODOs said so. viem fixed the bug, so the assertions now expect one `SentMessageExtension1` log.\n- Workspace dependents with their own viem pin now use the same version: `packages/wagmi`, `apps/autorelayer-interop`, and `apps/superchain-playground`. Without that, nx `build` and `typecheck` failed on mismatched viem types. No code changes were needed there.\n- **No duplicated upstream code was found.** The chains already spread `viem/op-stack`'s `chainConfig`, so they use upstream formatters, serializers, and L1 and L2 actions. The package's own actions (ERC20 deposits and withdrawals, interop) have no upstream equivalent.\n\n### 2. Interop actions and ABIs for Lagoon\nSources: `L2ToL2CrossDomainMessenger.sol`, `SuperchainETHBridge.sol`, `ETHLiquidity.sol`, `UndeliveredMessageExporter.sol`, `L1CrossDomainMessenger.sol`, and `Predeploys.sol` on `develop`. Specs: `interop/message-expiry.md`, `interop/predeploys.md`, and `interop/superchain-eth-bridge.md`.\n\n- **ABIs:** `l2ToL2CrossDomainMessengerAbi`, `superchainETHBridgeAbi`, and `crossL2InboxAbi` are regenerated from the `develop` ABI snapshots. `ethLiquidityAbi` and `undeliveredMessageExporterAbi` are new.\n  - `L2ToL2CrossDomainMessenger` gains `expiredMessages(bytes32)`, `sentMessageTimestamps(bytes32)`, `expiryPeriod()`, `expireMessage`, and the `MessageExpired` event. `resendMessage` was removed from the contract, and `sentMessages` is now `mapping(uint256 => bytes32)`.\n  - `SuperchainETHBridge` gains `refundETH`, `refunded`, the `RefundETH` event, and new errors.\n  - `CrossL2Inbox` gains `CrossL2Inbox_NoExecutingDeposits`.\n- **Addresses:** adds `interopContracts.ethLiquidity` (`0x4200…0025`) and `interopContracts.undeliveredMessageExporter` (`0x4200…0030`).\n- **New actions** (also on `publicClient.interop` and `walletClient.interop`):\n  - `getCrossDomainMessageExpiry` (source chain). Returns `expired`, `sentAt`, `expiryPeriod` (691200 s, 8 days, on production, per `predeploys.md`), and `exportableAfter`. It covers `expiredMessages(bytes32)`. Apps that watch logs can decode the `MessageExpired` event with the updated ABI.\n  - `exportUndeliveredMessage` / `estimate…Gas` / `simulate…` (destination chain). This calls `UndeliveredMessageExporter.exportUndeliveredMessage`. The L1 gas limit defaults to 1,000,000, the value the monorepo's message-expiry acceptance test uses (`op-acceptance-tests/tests/interop/expiry`).\n  - `refundETH` / `estimateRefundETHGas` / `simulateRefundETH` (source chain). This calls `SuperchainETHBridge.refundETH`. The parameter is `messageNonce` so it does not collide with the transaction `nonce`.\n  - `getETHLiquidityPaused`. While paused, `ETHLiquidity` reverts `burn` and `mint` with `ETHLiquidity_Paused`, so `sendETH`, ETH relays, and `refundETH` revert. The JSDoc on `sendETH` notes this.\n- **Deprecated:** `sendSuperchainERC20` (and its estimate and simulate variants) and `interopContracts.superchainTokenBridge`. `SuperchainTokenBridge` and `SuperchainERC20` were deleted from the OP Stack contracts in ethereum-optimism/optimism#19999, and `Predeploys.sol` on `develop` and in `op-contracts/v10.0.0-rc.1` has no `0x4200…0028` predeploy. They are kept exported and still work on supersim.\n- `hashCrossDomainMessage` now accepts a `CrossDomainMessageFields` (the message without its `log`). The parameter type is wider, so existing callers keep working.\n\n### 3. Withdrawals after the shared-contract migration\n- Generated chain definitions (`src/chains/mainnet.ts`, `src/chains/sepolia.ts`) no longer set `contracts.disputeGameFactory`, and `scripts/chaingen.ts` no longer emits it.\n  - In viem 2.58.2, `getGames` uses the chain definition's factory first. It falls back to `OptimismPortal2.disputeGameFactory()` only when the definition has none (`op-stack/actions/getGames.ts`).\n  - Without the stored address, `getGames`, `getWithdrawalStatus`, `waitToProve`, `getTimeToProve`, and `buildProveWithdrawal` read the factory from the portal. That keeps them working after `OPContractsManagerV2.migrate` repoints OP Mainnet's and Unichain's portals at the shared factory, as the Upgrade 22 notice asks (\"read the dispute game factory from `OptimismPortal2.disputeGameFactory()` rather than a stored address\").\n  - This matches the upstream fix in wevm/viem#5625 (for issue wevm/viem#5623), which makes `getGames` always read the factory from the portal. Until a viem release includes it, leaving the address out of the chain definitions is what makes viem 2.58.2 read the portal. It applies to all generated chains, since any chain's factory can move.\n- **Game type `10` (`ZK_DISPUTE_GAME`):** this package has no game-lookup or proving code of its own; it uses `viem/op-stack`. Upstream `superGameTypes` is still `[4, 5, 7, 9]` in 2.58.2. wevm/viem#5625 adds `10` to `superGameTypes`; it is merged but not yet in a viem release. Until a release includes it, `getGames` treats type-`10` games as non-super-root games. It reads their L2 timestamp as a block number and does not use `rootClaimByChainId`. See *Left to do*.\n\n### 4. Post-exec transactions (`0x7D`) and `opGasRefund`\nThis package defines no chain formatters. Its chains use `viem/op-stack`'s `chainConfig`, so receipt and transaction formatting comes from upstream. wevm/viem#5625 adds `opGasRefund` (as `bigint | null`). The `0x7D` type is tracked in wevm/viem#5623. Until a release includes #5625 (and `0x7D` support lands), `opGasRefund` passes through unformatted as a hex string, and a `0x7D` transaction has no `type`.\n\n## Testing\n\nRun locally with supersim `0.1.0-alpha.60` and anvil:\n- `packages/viem`: `build`, `typecheck`, `lint` (0 errors; 4 existing warnings), and `test` (101 passed, 3 skipped). The skipped tests are the existing `sendSuperchainERC20` tests.\n- New unit tests:\n  - `src/actions/interop/lagoon.spec.ts` covers the ABI surface, the predeploy addresses, and encoding and decoding for the four new actions. It uses a mocked transport, so no node is needed.\n  - `src/chains/chains.spec.ts` checks that no generated chain hardcodes `disputeGameFactory` and that OP, Unichain, and their Sepolia chains have a portal.\n  - A relay test estimates and simulates `relayMessage` with no fees set.\n- `nx affected --base=main --target=build,typecheck,lint,test` passes for all affected projects: `viem`, `wagmi`, `autorelayer-interop`, `ponder-interop`, `sponsored-sender`, `superchain-playground`, `utils-app`, and `supersim`. `ponder-interop:build` only passes from a clean `dist/`, because its build has no clean step; this is not caused by this PR. `wagmi` has no test files.\n\n**Not run locally:**\n- `exportUndeliveredMessage`, `refundETH`, `getCrossDomainMessageExpiry`, and `getETHLiquidityPaused` were **not tested against a node**. supersim `0.1.0-alpha.60` predates the Lagoon predeploys, and the full expiry flow needs a finalized withdrawal and a deposit across two chains. These actions are covered only by the calldata and decoding unit tests above.\n- Withdrawal proving after the migration was **not tested against a forked OP Mainnet or Unichain**, because the migration has not executed on any network yet. The change relies on viem's existing portal fallback in `getGames`.\n- `apps/autorelayer-interop` and `apps/superchain-playground` were built and typechecked but not run.\n\n## Left to do\n- **Game type `10` and receipt formatting depend on wevm/viem#5625.** It merged on 2026-11-20, but the latest viem release is still 2.58.2, so this PR sets the peer range to `^2.58.2`. Raise the peer range to the first viem release that contains #5625 once it is published. This must happen before the ZK switch (Sepolia 2026-12-11, Mainnet 2027-01-14).\n- `scripts/abigen.ts` still builds from the pinned `lib/optimism` submodule (June 2025), which has no `UndeliveredMessageExporter`. On `develop`, `SuperchainTokenBridge` and `SuperchainERC20` are gone. This PR regenerated the five interop ABIs from the `develop` ABI snapshots instead. Bumping the submodule and teaching `abigen` where to source the deprecated ABIs is a follow-up. Until then, running `gen:abis` would revert these ABIs.\n- Once the migration executes, run the withdrawal-proving actions against OP Sepolia and Unichain Sepolia.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/ecosystem",
+      "createdAt": "2026-11-20T23:24:35Z",
+      "mergedAt": null,
+      "additions": 8215,
+      "deletions": 14093
+    },
     {
       "id": "PR_kwDOKSJyfM8AAAABQZbo3A",
       "title": "ci: build images with the unified build-images workflow",
@@ -19,13 +31,25 @@
       "mergedAt": "2026-11-19T13:11:42Z",
       "additions": 69,
       "deletions": 51
+    },
+    {
+      "id": "PR_kwDOKSJyfM8AAAABQt4dvg",
+      "title": "chore: make cloud-security the sole owner of .github",
+      "author": "falcorocks",
+      "number": 1030,
+      "body": "## Summary\n- Changes under `.github/` (workflows, actions, CODEOWNERS) now require review from cloud-security.\n- Other paths are unchanged.",
+      "repository": "ethereum-optimism/ecosystem",
+      "createdAt": "2026-11-20T16:35:07Z",
+      "mergedAt": null,
+      "additions": 3,
+      "deletions": 2
     }
   ],
   "codeChanges": {
     "additions": 69,
     "deletions": 51,
     "files": 2,
-    "commitCount": 2
+    "commitCount": 4
   },
   "completedItems": [
     {
@@ -43,31 +67,41 @@
     {
       "username": "sebastianst",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
-      "totalScore": 951.373537152722,
-      "prScore": 719.057537152722,
+      "totalScore": 1246.8812709755405,
+      "prScore": 981.5652709755406,
       "issueScore": 30.1,
-      "reviewScore": 201,
+      "reviewScore": 234,
       "commentScore": 1.2159999999999997,
       "summary": null
     },
     {
       "username": "nonsense",
       "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
-      "totalScore": 489.98914368411727,
-      "prScore": 311.05114368411733,
+      "totalScore": 538.640344911379,
+      "prScore": 339.86234491137907,
       "issueScore": 0,
-      "reviewScore": 178.5,
-      "commentScore": 0.43799999999999994,
+      "reviewScore": 198,
+      "commentScore": 0.7779999999999999,
       "summary": null
     },
     {
       "username": "geoknee",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
-      "totalScore": 415.05130364812123,
+      "totalScore": 430.05130364812123,
       "prScore": 211.4373036481212,
       "issueScore": 8.3,
-      "reviewScore": 194,
+      "reviewScore": 209,
       "commentScore": 1.3139999999999998,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 368.9425374960048,
+      "prScore": 292.5045374960048,
+      "issueScore": 0,
+      "reviewScore": 76,
+      "commentScore": 0.43799999999999994,
       "summary": null
     },
     {
@@ -81,42 +115,42 @@
       "summary": null
     },
     {
-      "username": "joshklop",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
-      "totalScore": 307.8361915754338,
-      "prScore": 231.39819157543383,
-      "issueScore": 0,
-      "reviewScore": 76,
-      "commentScore": 0.43799999999999994,
-      "summary": null
-    },
-    {
-      "username": "aakoshh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
-      "totalScore": 270.49081486484164,
-      "prScore": 185.55281486484165,
-      "issueScore": 4,
-      "reviewScore": 80.5,
-      "commentScore": 0.43799999999999994,
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 341.11367618152565,
+      "prScore": 271.11367618152565,
+      "issueScore": 2,
+      "reviewScore": 68,
+      "commentScore": 0,
       "summary": null
     },
     {
       "username": "maurelian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
-      "totalScore": 248.11826817657226,
-      "prScore": 199.77826817657225,
+      "totalScore": 336.37391083619787,
+      "prScore": 276.69391083619786,
       "issueScore": 0,
-      "reviewScore": 48,
-      "commentScore": 0.33999999999999997,
+      "reviewScore": 59,
+      "commentScore": 0.6799999999999999,
       "summary": null
     },
     {
-      "username": "sbvegan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
-      "totalScore": 219.99665718296873,
-      "prScore": 159.99665718296873,
-      "issueScore": 2,
-      "reviewScore": 58,
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 274.49081486484164,
+      "prScore": 185.55281486484165,
+      "issueScore": 8,
+      "reviewScore": 80.5,
+      "commentScore": 0.43799999999999994,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 224.58508507463097,
+      "prScore": 219.58508507463097,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -151,13 +185,23 @@
       "summary": null
     },
     {
-      "username": "falcorocks",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
-      "totalScore": 151.07711837261803,
-      "prScore": 146.07711837261803,
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 142.4336966110597,
+      "prScore": 78.43369661105972,
       "issueScore": 0,
-      "reviewScore": 5,
+      "reviewScore": 64,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 120.82671775411472,
+      "prScore": 106.92671775411472,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0.4,
       "summary": null
     },
     {
@@ -171,13 +215,23 @@
       "summary": null
     },
     {
-      "username": "jelias2",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
-      "totalScore": 107.5437738965761,
-      "prScore": 43.5437738965761,
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 73.10344778646854,
+      "prScore": 54.603447786468536,
       "issueScore": 0,
-      "reviewScore": 64,
+      "reviewScore": 18.5,
       "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yash251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/47234407?u=903bd5873d4c7375ebb76a8a435811b2cac6cae5&v=4",
+      "totalScore": 54.30112778332357,
+      "prScore": 54.10112778332357,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -188,16 +242,6 @@
       "issueScore": 0,
       "reviewScore": 5,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "pauldowman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
-      "totalScore": 49.985773896576106,
-      "prScore": 40.7857738965761,
-      "issueScore": 0,
-      "reviewScore": 9,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -213,11 +257,21 @@
     {
       "username": "mintlify",
       "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
-      "totalScore": 45.43985005244421,
+      "totalScore": 45.87785005244421,
       "prScore": 44.223850052444206,
       "issueScore": 0,
       "reviewScore": 0,
-      "commentScore": 1.2159999999999997,
+      "commentScore": 1.654,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 40,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 40,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -241,6 +295,16 @@
       "summary": null
     },
     {
+      "username": "teddyknox",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
+      "totalScore": 31.395306144334054,
+      "prScore": 26.195306144334054,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
       "totalScore": 29.5,
@@ -248,16 +312,6 @@
       "issueScore": 0,
       "reviewScore": 29.5,
       "commentScore": 0,
-      "summary": null
-    },
-    {
-      "username": "teddyknox",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/1178653?v=4",
-      "totalScore": 26.395306144334054,
-      "prScore": 26.195306144334054,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -281,13 +335,13 @@
       "summary": null
     },
     {
-      "username": "raffaele-oplabs",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
-      "totalScore": 20,
-      "prScore": 0,
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 20.036213344056215,
+      "prScore": 9.836213344056215,
       "issueScore": 0,
-      "reviewScore": 20,
-      "commentScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0.2,
       "summary": null
     },
     {
@@ -301,32 +355,42 @@
       "summary": null
     },
     {
-      "username": "yash251",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/47234407?u=903bd5873d4c7375ebb76a8a435811b2cac6cae5&v=4",
-      "totalScore": 10.651867951399863,
-      "prScore": 10.451867951399864,
-      "issueScore": 0,
-      "reviewScore": 0,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
-      "username": "donoso-eth",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
-      "totalScore": 10.2,
-      "prScore": 0,
-      "issueScore": 0,
-      "reviewScore": 10,
-      "commentScore": 0.2,
-      "summary": null
-    },
-    {
       "username": "bitwiseguy",
       "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
-      "totalScore": 10,
+      "totalScore": 15,
       "prScore": 0,
       "issueScore": 0,
-      "reviewScore": 10,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hehuanlu",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/300192024?v=4",
+      "totalScore": 11.324586159726387,
+      "prScore": 11.324586159726387,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JulienKervarrec",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/114134889?v=4",
+      "totalScore": 9.63522457733622,
+      "prScore": 9.63522457733622,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "lumoswiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "totalScore": 9.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
       "commentScore": 0,
       "summary": null
     },
@@ -371,6 +435,16 @@
       "summary": null
     },
     {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
       "totalScore": 5.068306144334055,
@@ -391,8 +465,8 @@
       "summary": null
     },
     {
-      "username": "lumoswiz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/97650124?u=f9cb29b52ec285d9a5de91099681fee25a7c3095&v=4",
+      "username": "otto-op-centaur",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -401,12 +475,32 @@
       "summary": null
     },
     {
-      "username": "0xOneTony",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "username": "mamacmark23-bot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/348454003?v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
       "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jefr90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/32399166?u=f827e4edffd5a9407141e223985a4d49d2b1675b&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xarktos",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/263621852?u=7a1c95ff1a1cfa73d784020518a43a80906c5420&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
       "commentScore": 0,
       "summary": null
     },
@@ -451,9 +545,9 @@
       "summary": null
     }
   ],
-  "newPRs": 1,
+  "newPRs": 3,
   "mergedPRs": 1,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 27
+  "activeContributors": 33
 }
