@@ -5,7 +5,7 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-22 to 2026-11-23, ethereum-optimism/optimism had 4 new PRs (0 merged), 2 new issues, and 3 active contributors.",
+  "overview": "From 2026-11-22 to 2026-11-23, ethereum-optimism/optimism had 9 new PRs (0 merged), 2 new issues, and 11 active contributors.",
   "topIssues": [
     {
       "id": "I_kwDODjvEJM8AAAABhZwdZw",
@@ -18,6 +18,18 @@
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABeoL5qQ",
+      "title": "kona-node: execution-layer sync parity with op-node",
+      "author": "einar-oplabs",
+      "number": 24100,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:** Tracker for what kona-node needs in order to match op-node's execution-layer (EL) sync. Tickets on the op-node deprecation board already cover parts of it. This issue groups them and lists the gaps that have no ticket yet.\n\n## Background\n\nop-node has two sync modes, selected by `--syncmode` (default `consensus-layer`). In `execution-layer` mode, its engine controller moves through these statuses in order: `WillStartEL` → `StartedEL` → `FinishedELButNotFinalized` → `FinishedEL` (`op-node/rollup/engine/engine_controller.go`).\n- `WillStartEL` skips EL sync when the EL already has a non-genesis finalized block and the engine kind does not support post-finalization EL sync.\n- `FinishedELButNotFinalized` sets the safe and finalized heads with `headsAfterELSync`. If the SafeDB tip is canonical, it resumes from that tip. Otherwise it places both heads `--syncmode.offset-el-safe` (default 12h) behind the synced tip.\n\nkona-node has a single model. Derivation waits in `AwaitingELSyncCompletion` until the EL first answers a forkchoice update with `VALID`. The status is spread across booleans in `EngineState` and `EngineActor`. kona-node has no `--syncmode` flag, no EL-sync completion step and no unsafe-payload queue.\n\n## Sub-issues\n\n### Sync-mode model\n- [ ] ethereum-optimism/protocol-team#631 CL-sync mode (`--syncmode=consensus-layer`)\n- [ ] #24099 model EL sync status as an explicit state instead of booleans\n\n### Before EL sync completes\n- [ ] #24030 resend the forkchoice update until the EL answers `VALID` after an initial `SYNCING`\n- [ ] #23931 a missing L2 block during EL catch-up resets the engine in a loop\n- [ ] ethereum-optimism/protocol-team#634 the EL head behind its finalized block crash-loops the engine reset\n\n### EL-sync completion\n- [ ] ethereum-optimism/protocol-team#590 completion step: port `headsAfterELSync` and `--syncmode.offset-el-safe`\n- [ ] #24066 the finalized head does not leave genesis after an EL datadir wipe\n- [ ] #23658 resume derivation from the canonical SafeDB tip after EL sync (deferred)\n- [ ] ethereum-optimism/protocol-team#589 engine-reset head selection differs from `FindL2Heads`. EL-sync completion runs a reset today.\n\n### Unsafe payloads during and after EL sync\n- [ ] ethereum-optimism/protocol-team#574 unsafe-payload queue and stalled-head gap fill\n- [ ] ethereum-optimism/protocol-team#681 unsafe inserts treat `SYNCING` as applied after initial EL sync\n- [ ] ethereum-optimism/protocol-team#601 a persistently failing insert blocks the engine queue\n- [ ] ethereum-optimism/protocol-team#641 sequencer backoff when the EL reports `SYNCING` on build\n\n### Acceptance coverage\n- [ ] #23828 `TestELSyncSafeRetractedByOffset`\n- [ ] #22275 `TestUnsafeGapFillAfterSafeReorg`\n- [ ] #22276 `TestUnsafeGapFillAfterUnsafeReorg_RestartL2CL`\n- [ ] #22277 `TestUnsafeGapFillAfterUnsafeReorg_RestartCLP2P`\n- [ ] #22271 `TestSDMPostExecBlockDerivesOnIsolatedVerifier` (needs CL-sync mode)\n\n## Open questions without a ticket\n\n- **Finalized hash in forkchoice updates.** During initial EL sync, op-node leaves the finalized hash out of forkchoice updates (`tryUpdateEngineInternal`, `insertUnsafePayload`). kona-node always sends `finalized_head` (`EngineSyncState::create_forkchoice_state`). The impact has not been assessed.\n- **Skipping EL sync for op-geth.** op-node skips EL sync when the EL has a non-genesis finalized block and `--l2.engine-kind=geth`. kona's `EngineKind::supports_post_finalization_elsync` is deprecated and unused, so kona-node always EL-syncs. Decide whether kona-node needs this, given op-geth's deprecation.\n- **`SYNCING` after initial EL sync.** In `execution-layer` mode, op-node still accepts `SYNCING` on unsafe inserts and plain forkchoice updates after EL sync finishes. In `consensus-layer` mode it does not. The target behavior for #681 depends on which mode kona-node matches.\n\n## Related\n\n- ethereum-optimism/protocol-team#545 delegated derivation parity. Covers EL catch-up on the delegated path: #23675, #23676, #24061.\n- ethereum-optimism/protocol-team#101 inventory of acceptance-test skips.\n",
+      "createdAt": "2026-11-12T13:02:21Z",
+      "closedAt": "2026-11-22T21:24:35Z",
+      "state": "CLOSED",
+      "commentCount": 0
     },
     {
       "id": "I_kwDODjvEJM8AAAABhZwCTg",
@@ -34,6 +46,30 @@
   ],
   "topPRs": [
     {
+      "id": "PR_kwDODjvEJM8AAAABN5_HOQ",
+      "title": "kona-engine: wait for EL sync instead of resetting on a missing consolidation block",
+      "author": "einar-oplabs",
+      "number": 24006,
+      "body": "Kona-node resets whenever derived attributes name a block the EL lacks below the unsafe head, so after an EL datadir wipe it re-derives from genesis in a loop and finalization stays at genesis.\n\nThe engine now resends the unchanged forkchoice. On `SYNCING`, or a transient probe failure, the task waits (new `Wait` severity): it is parked, unsafe imports and builds run as they arrive, and nothing resets, so the finalization queue survives. If the EL's sync progress (`eth_syncing` stages and counters, or `eth_blockNumber` when idle) does not change for 1 hour, it resets. The bound is long because op-reth's headers stage reports progress only after downloading its whole range; the cost is that an EL that can never fetch the block stalls kona-node for up to an hour first. On `VALID` the block is looked up again and resets only if still missing. op-node waits only during initial EL sync, but kona's `el_sync_finished` stays true after a wipe. The delegated path is #23900.\n\nBREAKING CHANGE: `EngineTaskErrorSeverity::Wait`; `ConsolidateTaskError::{MissingUnsafeL2BlockDuringElSync, MissingUnsafeL2BlockProbeFailed, FailedToRecheckUnsafeL2Block}`; `synchronize` returns `ForkchoiceReply`; `ConsolidateTask` is built only through a non-const `new`.\n\nPart of https://github.com/ethereum-optimism/optimism/issues/23931: the datadir-wipe kona skip lives in #23440 and goes once both land. Stacked on #24005.\n\n## Breakdown\n\n|                | Added | Removed |  Net |\n|----------------|------:|--------:|-----:|\n| Implementation |   398 |      27 |  371 |\n| Tests          |   491 |      47 |  444 |\n| Docs           |     0 |       0 |    0 |\n\n## AI Reviews\n\n- [x] Claude: Opus 5.5 (xhigh)\n- [x] Claude: Fable 5.1 (xhigh)\n- [ ] Codex: GPT-6.1-Sol (xhigh)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-09T17:28:17Z",
+      "mergedAt": null,
+      "additions": 1829,
+      "deletions": 143
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABKcxyeg",
+      "title": "kona-node: keep the safe head across L1 reorgs that leave its L1 data canonical",
+      "author": "teddyknox",
+      "number": 23634,
+      "body": "kona-node now answers an L1 reorg with a safe-head rewind only as deep as the reorg. Before this change, every L1 reorg that derivation detected triggered a full engine reset. That reset re-runs `find_starting_forkchoice`, which moves the safe head back a full sequencing window and stops early only at the finalized head. A one-block replacement of the L1 tip therefore cost as much as a cold start. While L1 finality was stalled on glamsterdam-defense-2, one such replacement rewound the safe head about 72k L2 blocks (ethereum-optimism/protocol-team#328).\n\nThe derivation actor now keeps an in-memory record of recent safe heads, each with an L1 block that all of its L1 data is at or below. It sends that record with the reset request. The engine keeps the newest recorded safe head whose L1 block is still canonical. For a tip reorg that is usually the current safe head, so nothing is rewound and no forkchoice update is sent. If the reorg replaced the L1 block a recent safe head came from, the safe labels are rewound to the previous recorded safe head. The pipeline then restarts from the kept safe head, the same way it does today after `find_starting_forkchoice`.\n\n**Why this is sound.** Derivation is a function of the L1 chain it has read. If the L1 block a safe head depends on is still canonical, the new chain derives the same safe head. Restarting from it relies only on what every reset already relies on: restarting a channel timeout behind a correct safe head re-derives the chain above it.\n\nThe pipeline's origin alone does not bound that dependency. After a reset, the pipeline replays from before the safe head's L1 origin. It can produce the next block from an L1 block below the one its parent needed, for example from a batch that was dropped as a future batch on the first pass. So the record keeps a floor, and records a safe head only when its attributes came from at or above it.\n- After a reset to a recorded safe head, the floor is that head's L1 block.\n- After any other reset, and at EL sync completion, the floor is one past the end of the safe head's sequencing window. That is the latest block by which derivation must have decided that head.\n\n**Fallbacks to the full reset.** The full reset still runs in these cases:\n- The reorg reaches an L1 block that every recorded safe head depends on, or a block older than the record.\n- The unsafe head's L1 origin was reorged out. The full walk is still what rewinds the unsafe chain.\n- The kept safe head is no longer on the engine's chain, or is below the finalized head.\n- Any other reset is requested while a reorg reset is pending: sequencer, admin RPC, or engine error.\n- Cold starts, which are unchanged.\n\nThe engine reports its safe head to derivation only when it changes. So when a reset keeps the safe head derivation has already confirmed, derivation resumes immediately. Otherwise it would wait for the next L1 head, because it drops the L1 heads that arrived while it was awaiting the reset.\n\nBefore asking the engine, derivation drops recorded safe heads that depend on the pipeline's origin or above. The pipeline has just seen that origin reorged out. This way, an engine L1 node that has not yet seen the reorg cannot vote those safe heads back in.\n\n**Effect on operators.** An L1 reorg no longer moves the safe head back, unless it replaced the block the safe head was derived from or reached the unsafe head's L1 origin. Even then it moves back only to the previous recorded safe head. The new counter `kona_node_engine_reorg_reset_count` counts the reorgs answered this way. `kona_node_engine_reset_count` still counts full resets.\n\n**Trade-offs and limits**\n- The record is separate from the safe head database (#23583) because that database is optional. The record is bounded to 64 entries and needs only the reorg-depth window.\n- The finalizer is still cleared on reset. Safe heads kept across a reorg are not re-derived, so they are not queued for finalization again. The finalized head waits until the next derived block's L1 block finalizes.\n- A reorg of the unsafe head's L1 origin still takes the full walk. Rewinding just the unsafe chain to its last canonical origin would remove that case.\n- No consensus change. The fault proof program never sees a reorg: it derives against a fixed L1 head and never runs the node actors.\n- op-node has the same flaw: `FindL2Heads` is used for every reset. This PR does not change op-node. A port would use the same argument.\n- This is complementary to `--verifier.l1-confs` and the chart default of 4 (ethereum-optimism/optimism-charts#270). Confirmations make reorgs rarer; this makes them cheap.\n\n**Review.** `rust-code-reviewer` ran on the change before and after the rebase onto #23268 and #23583. Dismissed findings:\n- `find_reorg_safe_head` stays public, alongside `find_starting_forkchoice`.\n- No binary search over the recorded safe heads. The lookups are sequential, and up to 64 run only on a reorg deeper than the whole record.\n- An earlier revision had the engine resend an unchanged safe head after every reset. The review found that the resend could race with an L1 head, so derivation now resumes on its own instead.\n- The safe head database write is out of scope (see below).\n\n`safedb-reviewer` was not run, because this PR does not change what the safe head database records.\n\nUnder plain `cargo test`, `test_chain_label_metrics` and `records_http_batches_websocket_calls_and_subscription_setup` can fail because tests in one process share a global recorder and log capture. They pass in isolation, and the second also fails on develop.\n\n**Not in scope; flagged for follow-up**\n- `find_starting_forkchoice` checks the unsafe head's L1 origin by hash. That shows the block exists, not that it is canonical. op-node's `FindL2Heads` checks by number.\n- The safe head database (#23583) does not apply the floor. After any reset, full or targeted, the replay effect described above can make it record a safe head against an L1 block below its parent's. That breaks its exact-answer invariant. This predates this PR, since every reorg already caused a reset with a longer replay. A fix would record at the higher of `derived_from` and the database's tip after truncation. That changes what the database writes, so it should go in its own PR with `safedb-reviewer`.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-24T14:27:59Z",
+      "mergedAt": null,
+      "additions": 1341,
+      "deletions": 110
+    },
+    {
       "id": "PR_kwDODjvEJM8AAAABQ-qVoQ",
       "title": "kona-engine,kona-node!: never move the safe head above the previous safe head on a reset",
       "author": "joshklop",
@@ -46,6 +82,18 @@
       "deletions": 81
     },
     {
+      "id": "PR_kwDODjvEJM8AAAABRH2h8A",
+      "title": "kona-node-service!: send the engine's messages to derivation on an unbounded channel",
+      "author": "joshklop",
+      "number": 24345,
+      "body": "Stacked on #24344 (base `joshklop/kona-sequencer-survive-engine-reset`), so the diff shows only this change. Stack, in merge order: #23883 → #23859 → #24339 → #24344 → **this PR**.\n\nkona-node's engine and derivation actors can deadlock. The engine awaited its sends into derivation's bounded inbox, and derivation awaits its sends into the engine's bounded inbox while it handles a request. With both inboxes full, neither actor reads again. Unsafe blocks stop importing, the safe and finalized heads stop, a sequencer stops building, and nothing exits, so only a restart recovers the node. The likely case is a node in delegated mode after a long execution layer outage. #23859 listed this as not done.\n\nThe engine's messages to derivation now go on their own unbounded channel, so the engine cannot wait on derivation. Operators see no new flags.\n\nThe issue proposes a `watch` channel instead. A `watch` merges messages, so derivation would need new handling for a safe-head confirmation that a reset overwrites. An unbounded channel keeps every message in order, so derivation handles them as before. The cost is that the backlog is bounded by argument, not by the type: apart from one EL-sync completion, the engine sends at most a safe head and one flush or reset signal for each request it takes from its own bounded inbox. Growth without limit would need derivation to stop reading while the engine keeps resetting.\n\nDerivation reads the engine's channel ahead of the L1 watcher's inbox. That is an order the shared inbox could already produce if the L1 watcher had sent a little later.\n\nCloses https://github.com/ethereum-optimism/protocol-team/issues/718\n\nThe issue's acceptance criteria are written for a `watch`. This PR meets the ones that still apply: the engine has no awaited send to derivation, and a two-actor test covers both `DerivationActor` and `DelegateDerivationActor`.\n\nReviewed with the `rust-code-reviewer` and `safedb-reviewer` agents; `safedb-reviewer` had no findings. **Findings dismissed, for the author to confirm:**\n- *Move the test helpers shared with the derivation tests out of `engine::tests` into a `#[cfg(test)]` helper module.* Left as is to keep the diff narrow.\n- *The deadlock tests cannot catch a regression, because an awaited send no longer compiles against the synchronous client.* Kept to document the scenario. They time out when the engine is put back on the shared bounded inbox.\n\nBREAKING CHANGE: affects code that builds kona-node-service's actors directly. `QueuedEngineDerivationClient` now holds an `mpsc::UnboundedSender<DerivationActorRequest>`, the three methods of `EngineDerivationClient` are no longer `async`, and `DerivationActor::new` and `DelegateDerivationActor::new` take the matching `mpsc::UnboundedReceiver` as a new third argument. To migrate, create an `mpsc::unbounded_channel()`, give the sender to the engine's client and the receiver to the derivation actor, and drop `.await` from calls to the client.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-22T22:25:12Z",
+      "mergedAt": null,
+      "additions": 368,
+      "deletions": 98
+    },
+    {
       "id": "PR_kwDODjvEJM8AAAABQ_Pkug",
       "title": "op-devstack,kona-node-rpc: run follow_l2 and no-supernode interop tests on kona-node",
       "author": "joshklop",
@@ -54,51 +102,15 @@
       "repository": "ethereum-optimism/optimism",
       "createdAt": "2026-11-22T02:50:17Z",
       "mergedAt": null,
-      "additions": 279,
+      "additions": 344,
       "deletions": 348
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABNu8yKA",
-      "title": "kona-engine: read only headers for the super-root output",
-      "author": "joshklop",
-      "number": 23988,
-      "body": "Stacked on #23960 (base `einar/superroot-by-number`); merge that first.\n\n`superroot_atTimestamp` reads the target block with all its transactions to build an `L2BlockInfo`, but an output root only needs the header. On busy chains a full block is megabytes of JSON, which eats into the RPC timeout that #23960 is meant to fit inside. op-node's `OutputV0AtBlock` reads only the header.\n\n`superroot_atTimestamp` now asks the EL only for headers (`eth_getBlockByHash` / `eth_getBlockByNumber` with `false`). Its answers are unchanged. `optimism_outputAtBlock` still reads the full block, because its response needs the L1 origin and sequence number from the L1-info deposit.\n\nIf the EL returns a header whose reported hash is not its own hash, the query now fails with an internal error, as op-node's header check does. Before, the block id was computed from the header but the output root used the reported hash. For a block read by number, nothing compared the two, so after Isthmus a mismatch would have been served in the output root.\n\nReviews: `rust-code-reviewer` found nothing blocking. I applied its point about using one hash and its doc nit. I dismissed its nit to replace the `(id, output)` tuple with a struct, because that shape predates this PR and `output_at_block` shares it. `safedb-reviewer` found nothing that changes when the query answers or which `required_l1` it pairs with the output. Its one finding was the unchecked hash above, which this PR fixes.\n\nPart of #23473.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-09T00:12:05Z",
-      "mergedAt": null,
-      "additions": 135,
-      "deletions": 53
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABQ_R8hw",
-      "title": "op-test-sequencer: return the start error instead of panicking on close",
-      "author": "joshklop",
-      "number": 24341,
-      "body": "When a configured service fails to start, op-test-sequencer now returns that error. Before this change it panicked with a nil-pointer dereference in `work.(*Ensemble).Close`, because each error path in `Ensemble.Start` returned `nil` into the named result that the deferred cleanup closed. The panic hid the real cause of the failure. One acceptance run crashed with SIGSEGV when the actual problem was that the L2 builder could not fetch `optimism_dependencySet`. There is no change when startup succeeds.\n\nThe services that already started are still closed, and any close error is joined to the start error. The new tests fail with the original SIGSEGV on the old code. They can't show that the started services are closed, because noop services have no observable `Close` and the config has no way to plug in a test service. I didn't think it was worth adding one for this fix.\n\n`go-code-reviewer` ran. I applied its suggestion to drop a test assertion that didn't prove `Start` closes anything.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-22T02:55:29Z",
-      "mergedAt": null,
-      "additions": 52,
-      "deletions": 20
-    },
-    {
-      "id": "PR_kwDODjvEJM8AAAABQ-FGxQ",
-      "title": "ci: bump rust nightly pin to nightly-2026-11-21",
-      "author": "opgitgovernance",
-      "number": 24335,
-      "body": "Automated weekly bump of the pinned nightly Rust toolchain from `nightly-2026-10-31` to `nightly-2026-11-21`. CI on this PR will validate the new toolchain compiles cleanly.",
-      "repository": "ethereum-optimism/optimism",
-      "createdAt": "2026-11-22T00:02:14Z",
-      "mergedAt": null,
-      "additions": 1,
-      "deletions": 1
     }
   ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 17
+    "commitCount": 39
   },
   "completedItems": [],
   "topContributors": [
@@ -113,12 +125,32 @@
       "summary": null
     },
     {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 7.802947636399185,
+      "prScore": 7.802947636399185,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "opgitgovernance",
       "avatarUrl": "https://avatars.githubusercontent.com/u/188376469?u=041d7b9060b2b1b5db7f8631b82745a46744bb7f&v=4",
       "totalScore": 5.068306144334055,
       "prScore": 5.068306144334055,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -131,11 +163,31 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "kenny-ish",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/114967656?u=2dad5f6b3f8c355d787bd21f7237c15aa992271f&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "chillsauce",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/37008057?u=64d05ba5130763cd9b85b54c416f8ce6b0241178&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 4,
+  "newPRs": 9,
   "mergedPRs": 0,
   "newIssues": 2,
-  "closedIssues": 0,
-  "activeContributors": 3
+  "closedIssues": 1,
+  "activeContributors": 11
 }
