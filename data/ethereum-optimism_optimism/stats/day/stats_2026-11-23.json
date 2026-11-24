@@ -5,9 +5,94 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-23 to 2026-11-24, ethereum-optimism/optimism had 1 new PRs (0 merged), 0 new issues, and 4 active contributors.",
-  "topIssues": [],
+  "overview": "From 2026-11-23 to 2026-11-24, ethereum-optimism/optimism had 36 new PRs (18 merged), 3 new issues, and 29 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABezEe1Q",
+      "title": "op-devstack: run the two-verifiers deriving verifier on DEVSTACK_L2CL_KIND and assert follow mode",
+      "author": "einar-oplabs",
+      "number": 24122,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of ethereum-optimism/protocol-team#545.\n\n## Summary\nThe two-verifiers preset runs only the follow-source verifier `c` on `DEVSTACK_L2CL_KIND`. The sequencer and the deriving verifier `b` stay on op-node, because `replaceSingleChainTestSequencer` requires `b` to be an `*OpNode`. The follow_l2 tests also never assert that `c` follows its source rather than deriving from L1, so a regression of `c` to L1 derivation would not fail them.\n\n## Acceptance criteria\n- [ ] `b` takes a CL kind. The test sequencer is wired from `b`'s RPC URLs, as `startTestSequencerForRPCs` already does. This covers kona-node as the follow-source upstream (`optimism_syncStatus`), kona-node following kona-node, and op-node following kona-node if per-node kinds are configurable.\n- [ ] A follow_l2 test stalls `c`'s follow source (`NewStallableFollowSourceProxies().L2CLOption()`, as the supernode follow_l2 tests use) and asserts that `c`'s local-safe and finalized heads stop while `b`'s advance, then that `c` catches up after unstalling.\n",
+      "createdAt": "2026-11-13T00:13:18Z",
+      "closedAt": "2026-11-23T16:24:21Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABezEd2A",
+      "title": "op-devstack: run kona-node as sequencer on interop-at-genesis single-chain presets",
+      "author": "einar-oplabs",
+      "number": 24121,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of ethereum-optimism/protocol-team#545.\n\n## Summary\nThe single-chain runtimes in op-devstack pin the sequencer to op-node when the chain runs interop at genesis (`cfg.InteropAtGenesis`), regardless of `DEVSTACK_L2CL_KIND`:\n- `resolveSequencerCLKind` returns op-node when `cfg.InteropAtGenesis` is set.\n- `startDefaultSingleChainPrimary` takes the `world.Interop` branch and starts op-node directly.\n- The NoSupernode interop runtimes set `SequencerCLKind` to op-node.\n\nThe kona acceptance job therefore never runs kona-node as the sequencer of these chains. This matches the behavior before #23947, which made the pin explicit.\n\n## Acceptance criteria\n- [ ] Identify what kona-node lacks to sequence a single-chain interop-at-genesis network.\n- [ ] Remove the pin once kona-node supports it, or record why it stays.\n",
+      "createdAt": "2026-11-13T00:13:16Z",
+      "closedAt": "2026-11-23T16:24:19Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABen3a8A",
+      "title": "op-service, op-devstack: review the eth client APIs for L2 reads",
+      "author": "sebastianst",
+      "number": 24098,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Part of #20257. A cleanup that does not block the go.mod flip (#20266) and can be done before or after it.\n\nThe test migration (#20265) moved L2 reads onto `op-service/sources` call site by call site. That was the right order, but it left seams in the client APIs that every new L2 read has to work around. This issue collects them for one review of the client surface: `op-service/apis`, `op-service/sources`, `op-service/txplan` and the op-devstack DSL on top.\n\n## Seams\n\n**1. The L2 body gate is tied to a Go type, not to the endpoint.** `sources.L2Client` shadows `HeaderAndTxsByHash` and `InfoAndTxsBy{Hash,Number,Label}` of the embedded `EthClient` and returns `ErrSyntheticTxInBody` for a body that holds a deposit or post-exec tx (#23863). A plain `sources.EthClient` dialled at an L2 endpoint is not gated; op-interop-mon, `check-karst` and `interopsmoke` hold such clients. None calls the gated accessors today. The shadowing is also by hand: a whole-body accessor added to `EthClient` later is not gated until someone adds a matching shadow.\n\n**2. Whole-body and partitioned accessors live on different interfaces.** `apis.EthClient` carries `InfoAndTxsBy*`, which is only correct on L1. The partitioned accessors (`InfoAndUserTxsBy*`, `InfoAndDepositsBy*`, `InfoAndFirstDepositBy*`) are in [`apis.EthL2BlockTxs`](https://github.com/ethereum-optimism/optimism/blob/768ddb94301cada08d3fdeb00458a7aa7f941c01/op-service/apis/eth.go#L53-L70), which only the extended and L2 client interfaces embed. Code that holds a generic client must downcast to reach them. The partitioned set has no `ByLabel` variants, and no accessor returns only a block's tx hashes, so \"is this tx in that block\" reads full bodies.\n\n**3. A DSL `EOA` does not know it is on an L2.** It holds a generic [`ELNode`](https://github.com/ethereum-optimism/optimism/blob/768ddb94301cada08d3fdeb00458a7aa7f941c01/op-devstack/dsl/eoa.go#L37). `OperatorFee.ValidateTransactionFees` asserts `from.el.stackEL().(stack.L2ELNode)` to reach the L2 client (`dsl/operator_fee.go`, added in #23863), while `dsl/fjord_fees.go` takes it from its `L2Network`.\n\n**4. `txplan` drops the OP receipt fields.** [`PlannedTx.Included`](https://github.com/ethereum-optimism/optimism/blob/768ddb94301cada08d3fdeb00458a7aa7f941c01/op-service/txplan/txplan.go#L38) is a `plan.Lazy[*types.Receipt]`. Its fetchers already receive an `*optypes.Receipt` from the `ReceiptGetter` and return [`&receipt.Receipt`](https://github.com/ethereum-optimism/optimism/blob/768ddb94301cada08d3fdeb00458a7aa7f941c01/op-service/txplan/txplan.go#L354), which discards `L1Fee`, `OperatorFeeScalar` and the other L2-only fields. A helper that needs them fetches the same receipt a second time through sources. After #23863 this happens in `dsl/operator_fee.go`, `dsl/fjord_fees.go`, `dsl/ecotone_fees.go`, `dsl/bridge.go` and `tests/fjord/check_scripts_test.go`.\n\n## Work\n\nReview the surface as a whole and decide the target shape before changing call sites. Questions to settle:\n\n- Should L1 and L2 clients be distinct types with distinct interfaces, so that a whole-body accessor does not exist on an L2 client and the runtime gate is unnecessary?\n- Which partitioned accessors are missing (`ByLabel`, tx hashes only, a paired user-tx/receipt read), and which existing ones have no caller?\n- How does a DSL helper get the L2 client: through the network, or through an `EOA` that knows its chain kind?\n\nConcrete items that hold whatever the answers are:\n\n- Make `PlannedTx.Included` a `plan.Lazy[*optypes.Receipt]` and delete the second receipt fetches listed in 4. L1 plans keep getting receipts whose OP fields are nil through `FromGethReceipts`.\n- Drop the type assertion in `dsl/operator_fee.go`.\n\n🤖 *Co-created with Claude Fable 5.2*\n",
+      "createdAt": "2026-11-12T12:43:05Z",
+      "closedAt": "2026-11-23T15:34:21Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABgU_ojA",
+      "title": "op-reth: test eth_sendRawTransactionConditional, lost with op-e2e/opgeth",
+      "author": "sebastianst",
+      "number": 24247,
+      "repository": "ethereum-optimism/optimism",
+      "body": "#23864 deleted [`op-e2e/opgeth/conditional_tx_test.go`](https://github.com/ethereum-optimism/optimism/blob/26a3318e09e60166f661a753035f743486eacb5d/op-e2e/opgeth/conditional_tx_test.go), which tested `eth_sendRawTransactionConditional` on op-geth. #24088 and #24193 cover only `op_geth_test.go`, so this coverage has not come back. op-reth implements the endpoint, but no test exercises it.\n\n| Deleted op-geth test | Rule | op-reth code | op-reth tests |\n|---|---|---|---|\n| [`TestSendRawTransactionConditionalDisabled`](https://github.com/ethereum-optimism/optimism/blob/26a3318e09e60166f661a753035f743486eacb5d/op-e2e/opgeth/conditional_tx_test.go#L51) | Without the flag the method does not exist (`-32601`) | [`node.rs` registers the extension only if `enable_tx_conditional`](https://github.com/ethereum-optimism/optimism/blob/89b4a22c130ef374fd15859bf5137b9a1b65b1da/rust/op-reth/crates/node/src/node.rs#L1026-L1032) | only the [CLI flag parse](https://github.com/ethereum-optimism/optimism/blob/89b4a22c130ef374fd15859bf5137b9a1b65b1da/rust/op-reth/crates/node/src/args.rs#L482) |\n| [`TestSendRawTransactionConditionalEnabled`](https://github.com/ethereum-optimism/optimism/blob/26a3318e09e60166f661a753035f743486eacb5d/op-e2e/opgeth/conditional_tx_test.go#L69) | A condition that can no longer hold is rejected; an accepted one is included | [`send_raw_transaction_conditional`](https://github.com/ethereum-optimism/optimism/blob/89b4a22c130ef374fd15859bf5137b9a1b65b1da/rust/op-reth/crates/rpc/src/eth/ext.rs#L113-L168) (cost limit, block and timestamp bounds, [`validate_known_accounts`](https://github.com/ethereum-optimism/optimism/blob/89b4a22c130ef374fd15859bf5137b9a1b65b1da/rust/op-reth/crates/rpc/src/eth/ext.rs#L61)) | none |\n| [`TestSendRawTransactionConditionalTxForwarding`](https://github.com/ethereum-optimism/optimism/blob/26a3318e09e60166f661a753035f743486eacb5d/op-e2e/opgeth/conditional_tx_test.go#L99) | A non-sequencer node forwards the conditional tx to the sequencer, which includes it | [`forward_raw_transaction_conditional`](https://github.com/ethereum-optimism/optimism/blob/89b4a22c130ef374fd15859bf5137b9a1b65b1da/rust/op-reth/crates/rpc/src/sequencer.rs#L173) | [`sequencer.rs` tests](https://github.com/ethereum-optimism/optimism/blob/89b4a22c130ef374fd15859bf5137b9a1b65b1da/rust/op-reth/crates/rpc/src/sequencer.rs#L206) check only request serialization |\n\nAlso untested, and not covered by the op-geth tests either: the txpool maintenance task that evicts conditional transactions whose condition fails at a new block ([`maintain.rs`](https://github.com/ethereum-optimism/optimism/blob/89b4a22c130ef374fd15859bf5137b9a1b65b1da/rust/op-reth/crates/txpool/src/maintain.rs#L31-L34)).\n\nThe op-geth tests checked op-geth's error codes, but the rule is the behaviour above. Before choosing between an op-reth node test and an acceptance test, check whether op-reth's error codes match the [spec](https://github.com/ethereum-optimism/specs) and op-geth (pre-Karst).\n\n🤖 *Co-created with Claude Opus 5.5*\n",
+      "createdAt": "2026-11-18T09:53:09Z",
+      "closedAt": "2026-11-23T14:50:28Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABhxO4_w",
+      "title": "Bump Foundry to 1.10.0",
+      "author": "sebastianst",
+      "number": 24358,
+      "repository": "ethereum-optimism/optimism",
+      "body": "We pin Foundry 1.8.7 ([`mise.toml`](https://github.com/ethereum-optimism/optimism/blob/2ad37990e12cc9d023008aeab2c036427157efdd/mise.toml#L63-L65), [op-deployer's `version.json`](https://github.com/ethereum-optimism/optimism/blob/2ad37990e12cc9d023008aeab2c036427157efdd/op-deployer/pkg/deployer/forge/version.json)). Since then, 1.9.0 (2026-11-02) and 1.10.0 (2026-11-19) shipped. This issue collects what a bump to 1.10.0 gets us and what it may break, so we can decide who does it.\n\n## What we'd get\n\n- **Faster tests.** 1.10.0 replaces revm with [evm2](https://github.com/alloy-rs/evm2) in Forge, Anvil and Cast. Foundry reports `forge test` 2.1–4.5× faster than 1.9.0 on large projects. 1.9.0 also reuses an existing fork in `createSelectFork`/`rollFork` instead of reloading its cache, which our fork and upgrade tests use.\n- **A way to remove the `bpo2` pin on anvil forks** ([#23640](https://github.com/ethereum-optimism/optimism/issues/23640), [`canned.go`](https://github.com/ethereum-optimism/optimism/blob/2ad37990e12cc9d023008aeab2c036427157efdd/op-service/testutils/devnet/canned.go#L21-L23)). Under Amsterdam, op-deployer's broadcasts ran out of gas on anvil's own estimates. 1.10.0 includes foundry-rs/foundry#18128: calls and estimates now treat empty accounts as absent, as mining does, so they include EIP-8037 account-creation state gas. That is the likely cause; the bump should drop the pin and run the tests #23640 lists.\n- **Upstream fixes for issues we reported:**\n  - foundry-rs/foundry#18024 (1.9.0): deleting a cached test file recompiled scripts that don't import it. #23830 moved test inits to `test/setup` to avoid this; that layout can stay.\n  - foundry-rs/foundry#18130 (1.10.0): anvil's beacon blobs endpoint treated a slot as a block number.\n  - foundry-rs/foundry#17829 and foundry-rs/foundry#17836 were already fixed in 1.8.7.\n- Still open upstream: foundry-rs/foundry#18186, a stable machine interface for `forge script`. op-deployer still parses forge's human output (see below).\n\n## What I checked\n\nOn develop at 2ad37990e1, with forge 1.10.0 in `packages/contracts-bedrock`:\n\n- `forge remappings` output is identical to 1.8.7.\n- `just build-source` and `just snapshots-no-build` leave `snapshots/` unchanged: same ABIs, storage layouts and `semver-lock.json` hashes. So the 1.9 and 1.10 remapping changes don't change our production bytecode.\n- `forge build --deny warnings` (all sources, tests and scripts) passes. The new ERC-7201 lints don't fire, since `lint_on_build = false`.\n- `just test` passes, in both the Amsterdam and the default-EVM pass. Fork and upgrade tests were skipped (no `FORK_TEST`), and I didn't compare test times with 1.8.7.\n\n**op-deployer breaks on 1.9.0 and later**, so the bump needs an op-deployer change or an upstream fix (foundry-rs/foundry#18677). I couldn't time op-deployer on 1.10.0.\n\nop-deployer runs `forge script` on its bundle with its own sanitized config: `--root <bundle> --config-path <sandbox config>` ([`client.go`](https://github.com/ethereum-optimism/optimism/blob/2ad37990e12cc9d023008aeab2c036427157efdd/op-deployer/pkg/deployer/forge/client.go#L195)). Since foundry-rs/foundry#17469 (1.9.0), `--root` and `--config-path` conflict, and the config file's directory becomes the root. The alternatives forge still allows detect different remappings than a build inside the project, so forge recompiles and op-deployer refuses to run:\n\n- `--root` with `FOUNDRY_CONFIG`: forge also applies our config when it reads each library's own `foundry.toml`, so a library's `src` and remappings are lost.\n- `FOUNDRY_ROOT` with `--config-path`: a library's own remappings resolve against the project root. lib-keccak's `@solady-test/` becomes `lib/solady/test/` instead of `lib/lib-keccak/lib/solady/test/`, and that alone recompiles.\n\nBoth env vars misbehave on 1.8.7 too; foundry-rs/foundry#18677 has a minimal repro and asks for either fix. Bundling itself is fine: a fresh bundle reuses its cache when forge runs in it.\n\nWorkaround if upstream doesn't move: write the sanitized config as the bundle's own `foundry.toml` and pass only `--root`. That reuses the cache on 1.10.0, but:\n- the per-run read-write `fs_permissions` can't live in a config that runs share, and forge ignores `FOUNDRY_FS_PERMISSIONS`;\n- the fallback that runs forge on an unbundled project in place would write into the user's project;\n- `--config-path` only accepts a file named `foundry.toml`, so a per-run config next to the bundle's isn't possible.\n\nOn 1.8.7, `TestApplyGenesisStrategy` takes about 9–13 s and `TestEndToEndApply` about 62 s on my machine (warm caches). Both fail on 1.10.0 at the first `forge script`. They are a baseline for the bump. evm2 should mainly speed up the script simulations and the L2 genesis; `--slow` broadcasts wait on blocks.\n\n## What else could change\n\nContracts tests (`packages/contracts-bedrock`). The local suite passes, so these mainly concern the fork and upgrade tests and new tests:\n\n- **Gas.** Regenerate gas expectations. Under evm2, fork warmth and fork transient storage no longer leak from `setUp`, and `vm.setArbitraryStorage` leaves slots cold. A halting call under `vm.expectRevert` consumes all forwarded gas, except a direct non-static call with `isolate = true` (which [we set](https://github.com/ethereum-optimism/optimism/blob/2ad37990e12cc9d023008aeab2c036427157efdd/packages/contracts-bedrock/foundry.toml#L88)). In 1.9.0, `vm.deployCode` (which dynamic test linking turns `new` into) charges its creation gas to the caller.\n- **Invariants.** Snapshot fuzzing is on by default: a run can start from a state an earlier run reached, not from `setUp`. Handlers that assume a fresh state per run can fail (`test/invariants/`).\n- **`vm.getRecordedLogs`** no longer returns logs from reverted or halted calls, including ones expected with `expectRevert` (1.9.0). Many of our tests use it.\n- **Test discovery.** Only suites under `src`, `test` and `script` run. All our suites are under `test/`.\n- **Remappings.** In 1.10.0, a dependency's remapping that conflicts with another dependency or a root path applies only inside that dependency. `lib/openzeppelin-contracts-v5/remappings.txt` maps `@openzeppelin/contracts/` to itself, while our root maps it to OZ v4. The unchanged snapshots suggest nothing resolves differently, but the scripts and tests should be checked for the new warning.\n\nop-deployer and the Go tests that drive Foundry:\n\n- **op-deployer's compile cache.** op-deployer runs forge with the cache that `build-no-tests` warms and fails if forge recompiles. The 1.9/1.10 compile-cache fixes and the remapping scoping can change when forge recompiles; check that the warmed cache still satisfies op-deployer (its bundle tests and `build-embedded-contracts.sh`). Older versions discard fork caches written by 1.10, so downgrading after the bump costs a cache rebuild.\n- **Output parsing.** op-deployer matches forge's stdout and stderr ([`client.go`](https://github.com/ethereum-optimism/optimism/blob/2ad37990e12cc9d023008aeab2c036427157efdd/op-deployer/pkg/deployer/forge/client.go#L229-L237), e.g. `Compiler run successful`, revert reasons). 1.9.0 and 1.10.0 add warnings (e.g. a dry run with the default sender) and a list of deployed contracts to `forge script` output.\n- **Scripts.** In 1.9.0, a `DELEGATECALL` or `CALLCODE` at the broadcast depth is an error instead of being recorded as a `CALL`. When `--sender` and a single `--private-key` are both given, the script now runs as `--sender`. `--resume` and rebroadcast rules got stricter; op-deployer uses a fresh broadcast directory per run, so that one shouldn't matter.\n- **Anvil.**\n  - 1.9.0 mines each transaction as it arrives, so concurrent transactions can land in separate blocks; `--transaction-coalescing-window 5` restores 1.8. Block timestamps strictly increase, and priced calls below the base fee return `-32003`.\n  - 1.10.0 removes empty touched accounts (EIP-161), so state roots differ from 1.9, and rejects EIP-4844 transactions on OP Stack networks.\n  - Affected users: op-deployer's L1 fork ([`anvil.go`](https://github.com/ethereum-optimism/optimism/blob/2ad37990e12cc9d023008aeab2c036427157efdd/op-deployer/pkg/deployer/forge/anvil.go#L45-L53)) and `op-service/testutils/devnet`.\n- **Debugger.** 1.9.0 replaced the built-in debugger with SolDB, and `--debug-layout` is gone. Nothing in CI uses it.\n\n## What the bump touches\n\n#23642 (1.8.3 → 1.8.7) is the template: `mise.toml`, op-deployer's `version.json` (version and checksums), the runbook tool versions in `docs/public-docs/snippets/runbook-tool-versions.mdx` (and the `ko` copy), and anything the probe above flags.\n\n🤖 *Co-created with Claude Opus 5.5*\n\n\n",
+      "createdAt": "2026-11-23T14:11:25Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABLljv9A",
+      "title": "contracts-bedrock: add mock ComplianceModule and Policy for the bridge-screener devnet",
+      "author": "0xiamflux",
+      "number": 23782,
+      "body": "# DO NOT MERGE\r\n**Description**\r\n\r\nAdds the devnet-only compliance mocks the bridge screener integrates against, so the\r\noff-chain service can build against real addresses and the production interfaces before the\r\nreal contracts exist.\r\n\r\nNothing under `src/` or `snapshots/` changes beyond a 5-line interface rename. The mocks live\r\nin `scripts/deploy/mocks/`, which keeps them clear of the `src/`-scoped interface-mirror,\r\nsnapshot and semver checks. No OPCM, op-deployer or dev-feature changes.\r\n\r\n`DeployComplianceMocks.s.sol` deploys the mocks and points a live Portal's `bridgeHook` at the\r\nmodule. The Portal already stores a hook and `initialize` already sets one, but `initialize`\r\nis a `reinitializer` whose version the live proxy has consumed, and that version is\r\n`immutable`. So the script clears the proxy's `_initialized` byte and re-runs `initialize`,\r\nthe same sequence OPCM uses in `OPContractsManagerUtils.upgrade`.\r\n\r\nA `useMockPortal` flag decides what the Portal is left running:\r\n\r\n- **false**: re-installs the implementation the Portal already had, reading every value passed\r\n  back to `initialize` off the Portal first, so the call changes nothing but the hook. The only\r\n  effect on the chain is that the module joins the Portal's unsafe-target set.\r\n- **true**: installs `MockOptimismPortal2`, which screens deposits and withdrawals through the\r\n  hook, so the whole flow works before #23736 and the withdrawal path land. Its storage mirrors\r\n  the real Portal's slot for slot, with a spacer for every field it does not use, so the swap\r\n  preserves live state and is reversible. Set it false once the real paths are in.\r\n\r\n**Tests**\r\n\r\n`MockPolicy`: the three screening outcomes, override precedence over the per-direction\r\ndefaults, completion vs withdrawal dispatch, clearance expiry, the clear and revoke write\r\npath, owner gating.\r\n\r\n`MockComplianceModule`: hook entry points gated on both the caller and still being the\r\nPortal's hook, `Held` carrying a preimage that round-trips through `hashItem`, policy-only\r\nverdicts, the record deleted before calling out (including a re-entering policy), the disable\r\nswitch respecting the L2 nonce cutoff.\r\n\r\n`MockOptimismPortal2`: deposit and withdrawal screening, holds emitting no\r\n`TransactionDeposited` / `WithdrawalFinalized`, completion on committed terms, the deposit\r\ncounter distinguishing otherwise identical deposits.\r\n\r\n`DeployComplianceMocks`: runs against a full stack. Asserts the Portal's initialized byte is\r\nback to 4, its configuration and `l2Sender` are unchanged, and an ordinary deposit still works.\r\nWith the mock installed, asserts it reads `SystemConfig`, `AnchorStateRegistry`, `ETHLockbox`,\r\nthe maturity delay and `l2Sender` back at the live values, which is what the storage padding\r\nexists to guarantee. A second run is refused.\r\n\r\n162 tests pass.\r\n\r\n**Notes for review**\r\n\r\n- The `expiresAt` rename in the first commit follows `flux/compliance-specs`. specs#977 landed\r\n  upstream keeping `clearedAt`, so that one is unsettled and worth a decision.\r\n- `ItemObserved` on the Policy is mock-only. A deposit that proceeds leaves no on-chain record\r\n  of its item ID, since `TransactionDeposited` does not carry the deposit counter.\r\n- The script requires the L1 ProxyAdmin owner to be the broadcaster, so a multisig PAO will not\r\n  work with it as written.\r\n- `scripts/deploy/mocks/README.md` is the integration contract for the screener.\r\n\r\n**Metadata**\r\n\r\n- Part of ethereum-optimism/optimism-private#842\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-29T17:22:06Z",
+      "mergedAt": null,
+      "additions": 3279,
+      "deletions": 5
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABRVIbTA",
+      "title": "op-node,op-service,kona-protocol: pin L1 info deposits, block hashes and RPC tx decoding with real chain data",
+      "author": "sebastianst",
+      "number": 24379,
+      "body": "Tests and fixtures only. Three consensus-critical Go paths were pinned thinly or only against their own output, so a decoder regression like the one fixed in #24350 passed every unit test. Each path is now pinned against real chain data.\n\n- **L1-info deposit calldata**: op-node and kona assert the same vectors from one fixture file, so the two cannot drift apart. The vectors are tx 0 of real OP Mainnet and Base blocks for Bedrock, Ecotone, Isthmus and Jovian, plus synthetic ones for a non-zero operator fee and near-maximum Jovian fields, which no live chain has. Both suites check calldata, source hash and deposit tx hash, and decode the calldata back.\n- **`CheckBlockHash`**: a table over real op-reth payloads, one per payload shape from pre-Canyon to Karst. Each row also changes one header input and must then mismatch. Until now the gossip and batcher tests computed the expected hash with the function under test.\n- **`RawTransaction` JSON decoding**: real L1 blocks covering tx types 0–4, including Ethereum mainnet block 26268195 with the authorization `yParity` 28 behind #24350, and an OP Mainnet block with legacy, EIP-1559 and EIP-7702 user txs. `TestBlockJSON` now checks every tx hash.\n\nNo effect on users.\n\nFor the reviewer:\n- The two mainnet block fixtures are large (roughly a quarter megabyte each). The second one exists for type-1 coverage; no smaller block with a type-1 tx turned up.\n- Both mainnet blocks contain a transaction whose calldata is a solicitation text addressed to wallet owners. It is inert test data, but it cannot be removed without breaking the tx root.\n- Not covered: a type-1 tx on L2, a real L2 user deposit with non-zero mint (the existing devnet fixtures pin mint and contract-creation deposits), and kona's production deposit builder, which the Rust test would only reach after a small refactor.\n\nReviews run: Go review, Rust review, security review.\n\n🤖 *Co-created with Claude Fable 5.2*\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-23T17:30:07Z",
+      "mergedAt": null,
+      "additions": 1810,
+      "deletions": 4
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABRI-ZJw",
       "title": "kona-node,op-devstack!: add a consensus-layer sync mode that derives without gossip",
@@ -19,16 +104,414 @@
       "mergedAt": null,
       "additions": 526,
       "deletions": 86
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABRTa2vA",
+      "title": "op-service: reject malformed L1 headers instead of panicking",
+      "author": "sebastianst",
+      "number": 24366,
+      "body": "A malicious or broken L1 RPC could crash op-node, op-challenger, op-batcher and the txmgr blob tip oracle (dynamic blob tips) with a single header. These now get an error and retry:\n\n- A `newHeads` notification with `\"result\": null`, or any header whose number is 2^64 or more (go-ethereum decodes the number as a 256-bit integer), panicked in `eth.WatchHeadChanges` on WebSocket and HTTP polling alike. The head subscription now fails with an error, and op-node and op-challenger resubscribe. Headers that op-batcher, txplan, the blob tip oracle and `CheckRecentTxs` fetch get the same check (`eth.CheckHeader`).\n- A header with `excessBlobGas` but a timestamp before the blob fork of the local L1 chain config made `eip4844.CalcBlobFee` panic. This affects op-node (`L1InfoDeposit`) and the blob tip oracle. `BlockInfo.BlobBaseFee` now returns an error, which `L1InfoDeposit` returns. A misconfigured `--rollup.l1-chain-config` also hits this path: the node now stops with an error instead of panicking.\n- A header with a huge `excessBlobGas` made the blob fee computation run for hours: it takes time quadratic in the value. It is now an error when the fee exponent `excessBlobGas / updateFraction` is 178 or more. From that point on the fee no longer fits 256 bits, so no honest L1 header reaches it.\n- Blob tip oracle: a header with a different number than requested was cached under that number. Also, a head at `MaxUint64` made two loops run forever.\n- `CheckRecentTxs` (op-batcher startup): it panicked when the chain was shorter than the check depth, and it recursed without limit while nonces looked reorged. It now clamps the oldest block at 0 and gives up after 3 attempts.\n\nop-node still turns the `L1InfoDeposit` error into a critical error. Making errors from L1 header data temporary is a separate change in `op-node/rollup/derive/attributes.go`.\n\nBefore this change, kona-node used Cancun blob parameters for a header with `excessBlobGas` before the blob fork, and op-node panicked. Now op-node returns an error, and kona-node still computes a fee. For a fee exponent of 178 or more, kona-node saturates the blob fee at `u128::MAX`, and op-node now returns an error where it used to hang. Only an invalid header or a misconfigured L1 chain config can reach either case.\n\nThe mock changes in op-interop-filter and op-supernode are whitespace only: gofmt realigned them after the `BlobBaseFee` signature change.\n\n🤖 *Co-created with Claude Opus 5.5*\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-23T15:40:07Z",
+      "mergedAt": null,
+      "additions": 468,
+      "deletions": 114
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABMd-xvg",
+      "title": "contracts-bedrock: compile every profile with Solar (PoC, do not merge)",
+      "author": "pcw109550",
+      "number": 23857,
+      "body": "**PoC only, do not merge.** Compiles every contracts-bedrock profile with Solar so that `forge-artifacts/` and everything downstream (op-deployer, L2 genesis, snapshots, semver-lock, the interface checks, coverage, cannon, the Go and acceptance tests) run on Solar output through the full pipeline. The first two commits are cherry-picked from `mds/solar-lite-benchmark` (his branch is untouched); the rest are the diagnostic and the fixes it motivated. Full write-up with measurements: https://app.notion.com/p/oplabs/40df153ee1628064bc38d26a82553e6f.\n\n## Status (commit d163560a4f, fifth pipeline): 189 passed, 9 failed\n\n| Failing job | Cause |\n|---|---|\n| `memory-all-{kona,opn}-op-reth-fusaka` | one test each, `TestInitExecMsgWithDSL`: finding 1 below |\n| `go-tests` | op-deployer only, three classes: finding 6 |\n| `contracts-bedrock-checks-fast-feature-tests` | `semver-diff` only: every tracked contract changes init-code hash, policy demands 63 version bumps |\n| `check-nut-prefork-states` | committed pre-fork state embeds predeploy proxy bytecode; not regenerated (needs the Rust test engine build) |\n| `main`, `contracts-feature-tests`, `ci-gate`, `required-contracts-ci` | fan-in gates of the above |\n\nEvery `contracts-bedrock-tests`, coverage, upgrade and l2-fork job passes, with a caveat: on non-develop branches the matrix runs `test_profile: liteci`, optimizer off. The optimized `ci` profile only runs on develop, so it was run locally (finding 5).\n\n## Findings\n\n1. **Solar's optimizer deletes CrossL2Inbox's access-list check.** `_isWarm` times an `sload` between two `gas()` calls; the loaded value is unused, Solar removes the read, every slot looks warm, `validateMessage` accepts any executing message. The CI-built artifact has 0 SLOAD opcodes (solc: 1). The contract's `@dev` note says the value is returned \"so that the compiler doesn't optimize out the sload\"; the only caller discards it, so that guard does not hold under an IR optimizer. **solc 0.8.25 via-IR with the optimizer on drops the SLOAD identically**; only the legacy pipeline, which production uses, keeps it, by conservatism rather than guarantee. Not exploitable today; latent for any pipeline change. Needs an interop owner's severity call, a guardrail test on the compiled bytecode, and a compatibility note to the Solar team. Unit tests cover it (4 fail under the optimized profile) but CI's PR matrix cannot see it.\n2. **MIPS64 pinned solc's memory base.** `step` asserted the structs at 0x80/0x260 and 59 words; Solar allocates the same layout 160 to 192 bytes higher, so every step reverted in the cannon differential tests. Fixed in ff5afd4330: the prologue places the structs at a fixed base and bumps the free memory pointer. The full cannon suite passes with MIPS64 compiled by solc 0.8.15 and by Solar 0.3.0. ~430 gas/step for the gap; needs cannon owners' review before it is more than a PoC.\n3. **AST consumers.** Solar emits no AST. `test-validation` failed loudly; `generate-snapshots`, `generate-semver-lock` and the `interfaces` check **passed vacuously** (no input, nothing checked). All four now fall back to the source file named in the compiler metadata (01b9f4f31b, f1b464d8fd).\n4. **Environments without mise.** The melange op-deployer build has no mise, so the wrapper failed; it now honours `SOLAR_BIN` and the pipeline installs the pinned release (cc69ad63cb). op-deployer's forge path extracts the contracts bundle and the shared `Untar` dropped file modes, so the wrapper was not executable (d163560a4f). op-deployer would have to ship or fetch Solar as it does forge.\n5. **Optimized-profile suite, run locally** (`just test`, ci profile): L2 half 522 passed / 4 failed, L1 half 2163 passed / 14 failed, 14 distinct tests: the 4 CrossL2Inbox tests; 8 tests that copy `block.timestamp`/`block.number` into a local and then warp or roll (the class Matt's branch handles for lite; the optimized build folds more sites); 2 `SafeCall` gas-exact tests measured on the unoptimized build.\n6. **Remaining `go-tests` (op-deployer)**: `TestProofParamOverrides` searches deployed code for immutables as 32-byte words (solc's encoding); the deploy-superchain stage transactions in `TestSuperchain`, `TestInteropMigration`, `TestApplyDefaultsSP1VerifierOnSepolia` run out of gas, and this is **not Solar**: it is the anvil 1.8.3 to 1.8.7 bump in the cherry-picked toolchain commit. anvil 1.8.7 forks Sepolia as Amsterdam (1.8.3: Bpo2), the `ProxyAdmin` creation then costs about 7x more gas (6.38M vs 0.93M for the Solar initcode, 10.4M vs 1.48M for solc), and 1.8.7's `eth_estimateGas` comes out exactly 183,600 short of its own execution for both compilers, so every transaction sent at the estimate reverts. anvil 1.8.3 estimates both to the gas. Matt's first pipeline on his branch shows the same `go-tests` failure; `TestNewDeploySuperchainScriptForge` and `TestDeploySuperchain_WithForge_ManualCall` assert the script is not recompiled, and forge 1.8.7 skips its cache whenever warnings are denied, which the default profile does.\n7. **Diagnostic-only changes**: the NUT bundle is regenerated from Solar artifacts (8ddd5c7063) so the l2-fork jobs get past the bundle check.\n\n## Measurements\n\nsolc 570 to 594 s wall for the full build vs Solar 26 to 28 s through forge; on the identical standard-JSON inputs with forge removed, 78 s vs 1.9 s (default job) and 510 s vs 18 s (dispute-profile job). The slow solc job is the `dispute` compilation profile pulling 101 test files, 651 test contracts, into its closure: a `--skip test` solc build takes about 20 s.\n\nReview agents skipped on purpose: `ci-config-reviewer`, `go-code-reviewer`, `deletion-reviewer` and `rust-code-reviewer` all match the diff, but this PR is not a merge candidate.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-03T04:05:27Z",
+      "mergedAt": null,
+      "additions": 464,
+      "deletions": 136
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 2409,
+    "deletions": 1118,
+    "files": 149,
+    "commitCount": 93
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "op-conductor: expose raft and node unsafe head metrics",
+      "prNumber": 24118,
+      "type": "other",
+      "body": "After `admin_overrideLeader`, op-node stops committing unsafe payloads to raft until restarted. In a recent OP Mainnet incident, a sequencer with a leftover override built 512 blocks that never reached raft. When leadership moved, every con",
+      "files": [
+        "op-conductor/RUNBOOK.md",
+        "op-conductor/conductor/service.go",
+        "op-conductor/conductor/service_test.go",
+        "op-conductor/consensus/iface.go",
+        "op-conductor/consensus/mocks/Consensus.go",
+        "op-conductor/consensus/raft.go",
+        "op-conductor/health/monitor.go",
+        "op-conductor/metrics/metrics.go",
+        "op-conductor/metrics/noop.go"
+      ]
+    },
+    {
+      "title": "op-proposer,op-deployer!: reject game type 0, and type 1 as an additional dispute game",
+      "prNumber": 24150,
+      "type": "other",
+      "body": "op-program reached end of support on 2026-05-31, no chain has CANNON (0) games left, and op-challenger is about to stop playing types 0 and 1.\n\n- **Type 1 stays** in op-proposer and as op-deployer's respected game type: every CANNON_KONA (8",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/proposer.mdx",
+        "docs/public-docs/chain-operators/tutorials/migrating-permissionless.mdx",
+        "op-deployer/pkg/deployer/pipeline/dispute_games.go",
+        "op-deployer/pkg/deployer/state/chain_intent.go",
+        "op-deployer/pkg/deployer/state/chain_intent_test.go",
+        "op-deployer/pkg/deployer/state/intent_test.go",
+        "op-proposer/proposer/config.go",
+        "op-proposer/proposer/config_test.go"
+      ]
+    },
+    {
+      "title": "kona-node,op-devstack!: boot the sequencer stopped and always serve the admin API",
+      "prNumber": 24206,
+      "type": "other",
+      "body": "kona-node accepted `--rpc.admin-state` and then ignored it. A sequencer stopped through the admin RPC was therefore active again after a restart, and without op-conductor that can leave two active sequencers. This PR doesn't implement op-no",
+      "files": [
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/design/sequencer.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/rpc/admin.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/rpc/overview.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/run/docker.mdx",
+        "docs/public-docs/ko/node-operators/kona-node/run/sequencer.mdx",
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/design/sequencer.mdx",
+        "docs/public-docs/node-operators/kona-node/rpc/admin.mdx",
+        "docs/public-docs/node-operators/kona-node/rpc/overview.mdx",
+        "docs/public-docs/node-operators/kona-node/run/docker.mdx",
+        "docs/public-docs/node-operators/kona-node/run/sequencer.mdx",
+        "op-acceptance-tests/tests/sequencer/restart_test.go",
+        "op-devstack/sysgo/l2_cl.go",
+        "op-devstack/sysgo/l2_cl_kona.go",
+        "op-devstack/sysgo/l2_cl_kona_config.go",
+        "op-devstack/sysgo/l2_cl_kona_config_test.go",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "rust/Cargo.lock",
+        "rust/kona/bin/node/src/commands/node/command.rs",
+        "rust/kona/bin/node/src/flags/rpc.rs",
+        "rust/kona/bin/node/src/flags/sequencer.rs",
+        "rust/kona/crates/node/rpc/src/config.rs",
+        "rust/kona/crates/node/service/Cargo.toml",
+        "rust/kona/crates/node/service/src/actors/sequencer/actor.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/actor/tests/admin.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/actor/tests/mod.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/config.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs",
+        "rust/kona/crates/node/service/src/service/node/tests.rs",
+        "rust/kona/docker/recipes/kona-node-dev/compose.yaml",
+        "rust/kona/docker/recipes/kona-node/README.md",
+        "rust/kona/docker/recipes/kona-node/docker-compose.yaml"
+      ]
+    },
+    {
+      "title": "op-revm,op-alloy: saturate the mint on a failed deposit as on a successful one",
+      "prNumber": 24261,
+      "type": "other",
+      "body": "Follow-up to https://github.com/ethereum-optimism/optimism/pull/24257#discussion_r4619829293.\n\nWhen a deposit's mint pushes the caller's balance past `U256::MAX`, op-revm saturated the balance at `U256::MAX` if the deposit executed, but dro",
+      "files": [
+        "rust/op-alloy/crates/consensus/src/reth_codec.rs",
+        "rust/op-revm/src/catch_error_tests.rs",
+        "rust/op-revm/src/handler.rs"
+      ]
+    },
+    {
+      "title": "op-reth: test eth_sendRawTransactionConditional and evict expired conditional txs",
+      "prNumber": 24288,
+      "type": "tests",
+      "body": "Deleting `op-e2e/opgeth` (#23864) removed the only tests of `eth_sendRawTransactionConditional`. This adds an op-reth test for each rule in the table in #24247:\n\n| Deleted op-geth test | Rule | op-reth tests before | Test in this PR |\n|---|",
+      "files": [
+        "rust/op-reth/crates/node/tests/it/conditional_tx.rs",
+        "rust/op-reth/crates/node/tests/it/main.rs",
+        "rust/op-reth/crates/txpool/src/maintain.rs",
+        "rust/op-reth/crates/txpool/src/maintain/tests.rs",
+        "rust/op-reth/crates/rpc/src/eth/ext.rs"
+      ]
+    },
+    {
+      "title": "ci: add a ci-gate-proposals gate for release branches (#24262)",
+      "prNumber": 24325,
+      "type": "other",
+      "body": "Backport of #24262 ([f0d907fd86](https://github.com/ethereum-optimism/optimism/commit/f0d907fd862acb2fecd354a0cfe6fbe9c7a47a2a)) to `proposal/op-contracts/v10.0.0`, which was cut the day the original merged and does not contain it. CircleCI",
+      "files": [
+        ".circleci/continue/main.yml",
+        "docs/ai/ci-config-review.md",
+        "docs/ai/ci-ops.md"
+      ]
+    },
+    {
+      "title": "op-supernode: cache canonical hashes of finalized L1 blocks in the interop L1 checker",
+      "prNumber": 24322,
+      "type": "other",
+      "body": "## Why\n\nInterop verification catch-up is bound by L1 round-trips. Each round verifies one timestamp, and `observeRound` calls `SameL1Chain` twice: once for the last verified L1 inclusion, once for the frontier L1 heads. `l1ByNumberChecker` ",
+      "files": [
+        "op-supernode/config/config.go",
+        "op-supernode/supernode/activity/interop/checker.go",
+        "op-supernode/supernode/activity/interop/checker_test.go",
+        "op-supernode/supernode/activity/interop/interop.go",
+        "op-supernode/supernode/activity/interop/interop_test.go",
+        "op-supernode/supernode/supernode.go"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: require at least two chains in OPCM migrate",
+      "prNumber": 24318,
+      "type": "other",
+      "body": "`OPContractsManagerMigrator.migrate` only rejected an empty chain list, so it would build a one-chain \"interop set\": shared lockbox, factory and registry for a single chain, with INTEROP permanently enabled. Interop sets are meant to have a",
+      "files": [
+        "docs/public-docs/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "docs/public-docs/ko/chain-operators/tutorials/merge-shared-dispute-game.mdx",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/interfaces/L1/opcm/IOPContractsManagerV2.sol",
+        "packages/contracts-bedrock/snapshots/abi/OPContractsManagerMigrator.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrationValidator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerMigrator.sol",
+        "packages/contracts-bedrock/src/L1/opcm/OPContractsManagerV2.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerMigrationValidator.t.sol",
+        "packages/contracts-bedrock/test/L1/opcm/OPContractsManagerV2.t.sol"
+      ]
+    },
+    {
+      "title": "op-service,op-node: return errors instead of panicking on malformed RPC responses",
+      "prNumber": 24311,
+      "type": "other",
+      "body": "A broken or malicious RPC endpoint could crash op-node, op-batcher, op-proposer, op-challenger, op-conductor or op-supernode by answering with JSON `null` or by omitting a field the caller dereferences. The clients now check these responses",
+      "files": [
+        "op-node/rollup/derive/l1_block_info.go",
+        "op-node/rollup/derive/l1_block_info_test.go",
+        "op-service/eth/account_proof.go",
+        "op-service/eth/account_proof_test.go",
+        "op-service/eth/superroot_at_timestamp.go",
+        "op-service/eth/superroot_at_timestamp_test.go",
+        "op-service/sources/call.go",
+        "op-service/sources/engine_client.go",
+        "op-service/sources/engine_client_test.go",
+        "op-service/sources/l2_client.go",
+        "op-service/sources/l2_client_test.go",
+        "op-service/sources/opstack_client.go",
+        "op-service/sources/receipts.go",
+        "op-service/sources/receipts_caching.go",
+        "op-service/sources/receipts_caching_test.go",
+        "op-service/sources/receipts_test.go",
+        "op-service/sources/rollupclient.go",
+        "op-service/sources/rollupclient_test.go",
+        "op-service/sources/supernode_client.go",
+        "op-service/sources/supernode_client_test.go",
+        "op-service/txmgr/txmgr.go",
+        "op-service/txmgr/txmgr_test.go",
+        "op-service/sources/batching/batching.go",
+        "op-service/sources/batching/batching_test.go"
+      ]
+    },
+    {
+      "title": "op-devstack,kona-node-rpc: run follow_l2 and no-supernode interop tests on kona-node",
+      "prNumber": 24340,
+      "type": "tests",
+      "body": "The kona-node acceptance job never ran kona-node as the follow_l2 sequencer or follow source, and it skipped every interop test that runs without a supernode, because those presets pinned or only started op-node. kona-node replaces op-node,",
+      "files": [
+        "docs/ai/acceptance-tests.md",
+        "docs/public-docs/node-operators/kona-node/rpc/rollup.mdx",
+        "op-acceptance-tests/tests/interop/super-opnode/challenger_test.go",
+        "op-acceptance-tests/tests/interop/super-opnode/fault_proofs_test.go",
+        "op-acceptance-tests/tests/proofs/zk/honest_challenger_test.go",
+        "op-acceptance-tests/tests/sync/follow_l2/setup_test.go",
+        "op-acceptance-tests/tests/sync/follow_l2/sync_test.go",
+        "op-devstack/README.md",
+        "op-devstack/presets/interop.go",
+        "op-devstack/presets/op_node_only.go",
+        "op-devstack/presets/op_node_only_test.go",
+        "op-devstack/presets/option_validation.go",
+        "op-devstack/presets/options.go",
+        "op-devstack/presets/options_test.go",
+        "op-devstack/sysgo/preset_config.go",
+        "op-devstack/sysgo/runtime_state.go",
+        "op-devstack/sysgo/singlechain_build.go",
+        "op-devstack/sysgo/singlechain_build_test.go",
+        "op-devstack/sysgo/singlechain_interop.go",
+        "op-devstack/sysgo/singlechain_runtime.go",
+        "op-devstack/sysgo/singlechain_variants.go",
+        "rust/kona/crates/node/rpc/src/jsonrpsee.rs",
+        "rust/kona/crates/node/rpc/src/lib.rs",
+        "rust/kona/crates/node/rpc/src/p2p.rs",
+        "rust/kona/crates/node/rpc/src/plain_error.rs",
+        "rust/kona/crates/node/rpc/src/rollup/rpc.rs",
+        "rust/kona/crates/node/rpc/src/rollup/safedb_tests.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs",
+        "rust/kona/crates/node/service/src/service/node/tests.rs",
+        "op-acceptance-tests/tests/sync/follow_l2/stalled_source_test.go"
+      ]
+    },
+    {
+      "title": "kona-node: make the L1 finalized poll interval configurable",
+      "prNumber": 24342,
+      "type": "other",
+      "body": "kona-node polls the L1 finalized block every 60 s, hard-coded and timed from node start, so a kona node's finalized L2 head only moves at its own start + k·60 s. Two kona nodes started some seconds apart hold finalized L1 blocks that far ap",
+      "files": [
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "op-devstack/sysgo/mixed_runtime.go",
+        "rust/kona/bin/node/src/commands/node/command.rs",
+        "rust/kona/bin/node/src/flags/engine/providers.rs",
+        "rust/kona/crates/node/service/src/service/builder.rs",
+        "rust/kona/crates/node/service/src/service/node/rollup.rs"
+      ]
+    },
+    {
+      "title": "op-deployer: generate the superchain registry bundle in just build and test",
+      "prNumber": 24387,
+      "type": "tests",
+      "body": "On a fresh clone, `just build` and `just test` in `op-deployer` fail with `pattern superchain-configs.zip: no matching files found`, because the Go build embeds the gitignored registry bundle and neither recipe generated it. Both now run th",
+      "files": [
+        "op-deployer/justfile"
+      ]
+    },
+    {
+      "title": "docs: document op-deployer test releases and the pre-tag CI check",
+      "prNumber": 24386,
+      "type": "docs",
+      "body": "Two parts of the internal op-deployer release process page were not in the repo docs: how to cut `-dev-test` (or feature-labelled) test releases, and checking CI on the proposal branch before tagging. Both are now in the release workflows p",
+      "files": [
+        "docs/public-docs/chain-operators/tools/op-deployer/usage/release-workflows.mdx"
+      ]
+    },
+    {
+      "title": "op-conductor: extract CLI wiring into app package",
+      "prNumber": 24383,
+      "type": "other",
+      "body": "The setup in `op-conductor/cmd/main.go` lived in package main, so anything wanting to run op-conductor as a library had to copy it.\n\nThis moves the flag registration, config parsing and lifecycle wiring into a new `op-conductor/app` package",
+      "files": [
+        "op-conductor/app/app.go",
+        "op-conductor/cmd/main.go"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: drop the CALL stipend from value wrapper simulation",
+      "prNumber": 24380,
+      "type": "other",
+      "body": "`ExecuteNUTBundle.executeWrapper` simulates a deposit-like wrapper, but when it sends value the `CALL` gives the callee an extra 2,300 gas stipend that a deposit's top frame never gets. A value wrapper with a gas limit up to 2,300 too low c",
+      "files": [
+        "packages/contracts-bedrock/scripts/upgrade/ExecuteNUTBundle.s.sol",
+        "packages/contracts-bedrock/test/scripts/ExecuteNUTBundle.t.sol"
+      ]
+    },
+    {
+      "title": "ci: bump factory build-images workflow",
+      "prNumber": 24354,
+      "type": "other",
+      "body": "## Summary\n\nPushes to `develop` now build every image in the catalog, so every image gets a tag for every `develop` commit. Pull requests still build only the images affected by the change.\n\nThis bumps the `build-images.yaml` reusable workf",
+      "files": [
+        ".github/workflows/build-images.yaml"
+      ]
+    },
+    {
+      "title": "op-service,op-node!: gate OP txs in every whole-body read and drop unused accessors",
+      "prNumber": 24351,
+      "type": "other",
+      "body": "A whole-body read (`InfoAndTxsBy*`) of a block that holds a 0x7E deposit or a 0x7D post-exec tx now returns `sources.ErrOpTxInBody` from every `op-service/sources` client. Before, only `sources.L2Client` returned it, through hand-written sh",
+      "files": [
+        "docs/ai/opgeth-decoupling.md",
+        "op-node/node/node.go",
+        "op-service/apis/eth.go",
+        "op-service/sources/eth_client.go",
+        "op-service/sources/eth_client_test.go",
+        "op-service/sources/l2_client.go",
+        "op-service/sources/l2_client_test.go",
+        "op-service/sources/raw_transaction.go",
+        "op-service/sources/raw_transaction_test.go",
+        "op-service/testutils/mock_eth_client.go"
+      ]
+    },
+    {
+      "title": "go.mod: bump go-ethereum to 3dee18e7108c",
+      "prNumber": 24350,
+      "type": "other",
+      "body": "## What\n\nBumps go-ethereum from v1.17.10 to [3dee18e](https://github.com/ethereum/go-ethereum/commit/3dee18e7108cf3121a977adb2e2b13a8b59c19be), the merge commit of ethereum/go-ethereum#36024. With it, op-node can again read blocks that hold",
+      "files": [
+        "go.mod",
+        "go.sum",
+        "op-service/sources/raw_transaction_test.go"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 198.56713488496874,
+      "prScore": 171.36713488496875,
+      "issueScore": 2,
+      "reviewScore": 25,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 146.11199527542377,
+      "prScore": 109.61199527542377,
+      "issueScore": 0,
+      "reviewScore": 36.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 126.28885128841732,
+      "prScore": 107.28885128841732,
+      "issueScore": 0,
+      "reviewScore": 19,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 117.44782949105837,
+      "prScore": 117.44782949105837,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 74.59360208084601,
+      "prScore": 64.59360208084601,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 72.29464412505223,
+      "prScore": 57.59464412505223,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 54.5,
+      "prScore": 0,
+      "issueScore": 4,
+      "reviewScore": 50.5,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "joshklop",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
@@ -36,6 +519,136 @@
       "prScore": 46.09182467968106,
       "issueScore": 0,
       "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 44.63838528568335,
+      "prScore": 44.298385285683345,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 29.6118610425784,
+      "prScore": 29.6118610425784,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 28.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 28.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 28.4161682252932,
+      "prScore": 19.216168225293202,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 20,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 20,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "oplabs-renovate",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 15.059947636399187,
+      "prScore": 15.059947636399187,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 14.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 13.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 13.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ultrafellen",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/13742922?u=ece3679d557d7f422cbe237cf70854b225860a85&v=4",
+      "totalScore": 13.197572066704307,
+      "prScore": 13.197572066704307,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hormuz-ops",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/360368053?v=4",
+      "totalScore": 11.179588722239782,
+      "prScore": 11.179588722239782,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "otto-op-centaur",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
       "commentScore": 0,
       "summary": null
     },
@@ -48,11 +661,21 @@
       "reviewScore": 4.5,
       "commentScore": 0,
       "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 4.5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 4.5,
+      "commentScore": 0,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 0,
-  "newIssues": 0,
-  "closedIssues": 0,
-  "activeContributors": 4
+  "newPRs": 36,
+  "mergedPRs": 18,
+  "newIssues": 3,
+  "closedIssues": 4,
+  "activeContributors": 29
 }
