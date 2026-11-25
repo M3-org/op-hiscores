@@ -1,0 +1,186 @@
+{
+  "interval": {
+    "intervalStart": "2026-11-25T00:00:00.000Z",
+    "intervalEnd": "2026-11-26T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-11-25 to 2026-11-26, ethereum-optimism/optimism had 4 new PRs (3 merged), 0 new issues, and 13 active contributors.",
+  "topIssues": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABRunwpg",
+      "title": "op-supernode: read ahead batch-inbox blobs for derivation",
+      "author": "jelias2",
+      "number": 24419,
+      "body": "## Why\nWhen catch-up is limited by derivation, each beacon blob request takes about 1s and derivation fetches blobs one L1 block at a time.\n\n## Change\nNew opt-in flag `--l1.blob-prefetch-depth` (default 0, off). When derivation opens L1 block n, it fetches the batch-inbox blobs for n+1..n+depth in the background. Results go into a 512-blob LRU and are served only on an exact versioned-hash match; any lookup not in the cache goes to the beacon as before. Same beacon client and the same KZG checks, so derivation inputs are unchanged. New metric: `supernode_blob_prefetch_lookups_total{result}`.\n\n## Data\n**No measurable gain in this test.** Same-time A/B on int-reorg-0 (dev), both nodes cold-started from activation 9s apart, 56 minutes:\n\n| | timestamps verified | rate |\n|---|---|---|\n| control (v1.2.0-rc.5 + #24417) | 182,553 | 54.3/s |\n| this change (depth 8) + #24418 | 187,140 | 55.8/s |\n\n- The 3% difference is within node-to-node noise. Read-ahead served 193 lookups, all in the first 20 minutes, and none after.\n- Profiles showed derivation was not the limit in this run. It had reached the tip while verification was still far behind, and the loop spent 73–81% of CPU in `SafeDB.L1AtSafeHead`.\n- An earlier before/after on one node (15 → 51/s) compared different stretches of chain history and isn't a clean result.\n\nThis change can only help while derivation is the limit and batches are in blobs. I haven't measured that case in isolation.\n\n## Tests\nUnit tests for read-ahead hits, misses, ignoring blobs sent to other addresses, and the window reset. `go test ./op-supernode/...` passes; the changed packages also pass with `-race`.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-25T03:38:42Z",
+      "mergedAt": null,
+      "additions": 355,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABQzb_KA",
+      "title": "op-challenger: pay out the ZK game's DelayedWETH withdrawal",
+      "author": "pauldowman",
+      "number": 24331,
+      "body": "`ZKDisputeGame.claimCredit` pays a bond out in two calls. The first call zeroes `credit()` and unlocks the amount in DelayedWETH. The second call, after the DelayedWETH delay, withdraws it. op-challenger read zero credit after the unlock and never sent the second call, so its ZK bonds stayed in DelayedWETH until someone called `claimCredit` by hand.\n\n- `ZKDisputeGameContractLatest.GetCredit` returns the pending DelayedWETH withdrawal when credit is zero and the game is resolved. The claimer keeps coming back to the game until the payout lands. Until the withdrawal matures, the `claimCredit` simulation reverts and the claimer logs \"Credit still locked\", the same way it already waits on FaultDisputeGame bonds.\n- The claimer records the bond metric only once a claim leaves no credit behind. FaultDisputeGame also keeps credit non-zero between unlock and payout, so `op_challenger_bonds` previously counted each two-phase FDG bond twice. Dashboards will see the FDG rate halve.\n- The devstack adds `WaitForCreditUnlocked`, and `WaitForClaimedCredit` now also requires the DelayedWETH withdrawal to be paid out. The old check passed straight after the unlock, which is how this went unnoticed. The ZK acceptance tests now walk through the unlock, the delay and the payout.\n\n`TestZKGame_GetCreditFallsBackToPendingWithdrawal/Unlocked` and `TestClaimer_ClaimBonds/TwoStepClaimRecordsBondOnceOnPayout` fail without the production changes.\n\nCloses ethereum-optimism/proofs-team#37\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-21T01:00:05Z",
+      "mergedAt": "2026-11-25T01:03:30Z",
+      "additions": 243,
+      "deletions": 49
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABDo7PmA",
+      "title": "op-conductor: persist an empty Raft snapshot when no unsafe head is committed",
+      "author": "PeaStew",
+      "number": 22908,
+      "body": "## Why\r\n\r\n`snapshot.Persist` calls `MarshalSSZ` on the FSM's unsafe head without a nil check. Raft decides to snapshot from log growth, not from FSM content, so a cluster that has not committed any unsafe head yet crashes as soon as its first snapshot fires. That state is normal during a single-to-HA migration or a fresh bootstrap: conductors paused, every sequencer stopped, members added one at a time. Leadership churn and membership changes are enough to reach the snapshot threshold. After the panic the on-disk state re-crashes on restart, so the Raft directory has to be wiped and the cluster re-bootstrapped.\r\n\r\nReported in #13363 (December 2024, still open) and hit again by another operator in February 2026. #19149 by @0xVasconcelos fixed it by returning an error from `Snapshot()`; it was approved but went stale and was closed unmerged. We hit the same window during creation of a new network and migrating to an HA setup.\r\n\r\n## What\r\n\r\nA nil unsafe head is now a valid FSM state for snapshots:\r\n\r\n- `Persist` writes a zero-length snapshot instead of dereferencing the nil payload.\r\n- `Restore` treats a zero-length snapshot as \"no unsafe head\" and resets the tracker.\r\n- `Snapshot` sets the snapshot's logger. The existing error path in `Persist` already logged through it and would have dereferenced a nil logger.\r\n\r\nCompared with #19149, Raft can still snapshot and compact its log while the cluster is idle. With an error from `Snapshot()`, `setLastSnapshot` is never reached, `shouldSnapshot()` stays true, and `runSnapshots` logs `failed to take snapshot` at ERROR every `SnapshotInterval` for as long as the migration window lasts. The review of #19149 rejected a no-op `Persist` because `Restore` would crash on empty bytes; this change makes the empty snapshot round-trip explicitly instead. A pre-change `Persist` can never produce a zero-length snapshot and a truncated `state.bin` fails the store's CRC check, so \"empty means nil head\" cannot misclassify a corrupt snapshot.\r\n\r\n## Effect on operators\r\n\r\n- A freshly bootstrapped or fully stopped conductor cluster no longer crashes on its first Raft snapshot. A node restarted from such a snapshot comes up with no unsafe head and continues normally.\r\n- One `WARN` line is logged when an empty snapshot is persisted; restoring one logs at `INFO`.\r\n- Compatibility: op-conductor versions before this change cannot restore a zero-length snapshot and fail at startup with `failed to load any existing snapshots`. A zero-length snapshot is only written when the cluster has never committed an unsafe head, which is the state in which older versions panic instead. To downgrade a node that holds one, stop it, delete its `<raft.storage.dir>/<server-id>` directory, and re-join it to the cluster; deleting only `snapshots/` is not safe once log compaction has removed the initial configuration entry. Do not mix versions in a cluster that has not yet committed an unsafe head. Existing non-empty snapshots are unchanged. I have not used the `!` marker because upgrading requires no downstream action; happy to add it if maintainers prefer.\r\n\r\n## Tests\r\n\r\n- `TestUnsafeHeadTrackerRestore`: restores an empty snapshot over a populated tracker, and rejects truncated snapshots so that only the exact zero-length case is accepted.\r\n- `TestUnsafeHeadTrackerSnapshotRoundTrip`: nil and committed heads through `raft.FileSnapshotStore`, the store op-conductor uses in production, including CRC on reopen. The nil case panics without this change.\r\n- `TestSnapshotBeforeFirstCommit`: a live single-node Raft cluster snapshots before any commit, restarts from the empty snapshot, commits a head, snapshots again, and restarts from the non-empty snapshot. Snapshotting before the first commit reproduces the #13363 panic without this change.\r\n\r\n`op-conductor` `go test ./...` passes, the consensus package passes with `-race -count=3`, and `just lint-go` is clean.\r\n\r\nFixes #13363\r\nSupersedes #19149\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\r\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-09-15T16:22:36Z",
+      "mergedAt": null,
+      "additions": 186,
+      "deletions": 0
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABRvVlag",
+      "title": "op-node/safedb: binary search L1AtSafeHead instead of scanning back from the tip",
+      "author": "jelias2",
+      "number": 24420,
+      "body": "## Why\n`SafeDB.L1AtSafeHead` starts at the newest entry and steps back one entry at a time until it reaches the target L2 block. The supernode's interop activity calls it once per chain per verification round, so during catch-up every round scans back from the tip. CPU profiles of two supernodes mid-backfill showed 73% and 81% of all CPU in this function.\n\n## Change\nBinary search the L1 number range instead: about `log2(range)` seeks. The result is the same because recorded safe heads never decrease as the L1 number increases: `SafeHeadUpdated` only records forward progress, and `SafeHeadReset` truncates everything from the first entry at or above the new safe head. Errors are unchanged (`ErrL1AtSafeHeadNotFound`, `ErrL1AtSafeHeadUnavailable`).\n\n## Data\nSame-time A/B on int-reorg-0 (dev), 2 chains, interop cold start from activation (about 5 days behind). Both nodes started 11s apart; 22-minute window:\n\n| | timestamps verified | rate | verification round |\n|---|---|---|---|\n| control (v1.2.0-rc.5 + #24417) | 80,754 | 61.4/s | 16.3 ms |\n| control + this change | 126,011 | 94.9/s | 10.5 ms |\n\nAbout 1.55× faster. The gap was steady over the window. The gain should grow with distance from the tip, since the old scan length did; that isn't measured here.\n\n## Tests\n`TestL1AtSafeHead_MatchesScan` compares the new lookup against the old scan for every target, over dense, sparse and repeated-safe-head histories, before and after a `SafeHeadReset`. `go test -race ./op-node/node/safedb/` passes, as do `./op-node/node/...`, `./op-node/rollup/driver/...` and the supernode `virtual_node` package.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-25T04:58:35Z",
+      "mergedAt": null,
+      "additions": 145,
+      "deletions": 12
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABRunsMw",
+      "title": "op-supernode: meter the shared L1 client caches",
+      "author": "jelias2",
+      "number": 24417,
+      "body": "## Why\nThe L1 client shared by all virtual nodes has no cache metrics, so nobody can tell whether its cache helps interop catch-up.\n\n## Change\nPass `SupernodeMetrics.L1SourceCache` to `sources.NewL1Client`. Metrics appear as `supernode_l1_source_cache_{get,add,size}`, the same families op-node uses. No behaviour change.\n\n## Data\nMeasured on int-reorg-0 (dev) during an interop backfill, chains in lockstep. Hit rates: receipts about 50%, txs about 78%, headers 88%. 50% is the ceiling for receipts with 2 chains. Once one chain gets thousands of L1 blocks ahead of the other, hits drop to about 0%.\n\n## Tests\nNew unit test. `go test ./op-supernode/...` passes; the changed packages also pass with `-race`.\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-25T03:38:37Z",
+      "mergedAt": null,
+      "additions": 37,
+      "deletions": 5
+    }
+  ],
+  "codeChanges": {
+    "additions": 275,
+    "deletions": 67,
+    "files": 15,
+    "commitCount": 6
+  },
+  "completedItems": [
+    {
+      "title": "op-challenger: pay out the ZK game's DelayedWETH withdrawal",
+      "prNumber": 24331,
+      "type": "other",
+      "body": "`ZKDisputeGame.claimCredit` pays a bond out in two calls. The first call zeroes `credit()` and unlocks the amount in DelayedWETH. The second call, after the DelayedWETH delay, withdraws it. op-challenger read zero credit after the unlock an",
+      "files": [
+        "op-acceptance-tests/tests/proofs/zk/honest_challenger_test.go",
+        "op-acceptance-tests/tests/proofs/zk/zk_dispute_game_test.go",
+        "op-challenger/game/fault/claims/claimer.go",
+        "op-challenger/game/fault/claims/claimer_test.go",
+        "op-challenger/game/fault/contracts/zkdisputegame.go",
+        "op-challenger/game/fault/contracts/zkdisputegame_test.go",
+        "op-devstack/dsl/proofs/zk_dispute_game.go"
+      ]
+    },
+    {
+      "title": "docs: fix ZK proofs review findings",
+      "prNumber": 24329,
+      "type": "bugfix",
+      "body": "Follow-up to #23751 with fixes from a review of the merged ZK proofs docs.\n\n- **Broken cast snippets** (`migrate-to-zk-proofs.mdx`, `zk-proposer.mdx`). `cast call` prints each return value on its own line, so `read -r GAME_TYPE CREATED_AT G",
+      "files": [
+        "docs/public-docs/chain-operators/guides/configuration/zk-proposer.mdx",
+        "docs/public-docs/chain-operators/tutorials/migrate-to-zk-proofs.mdx",
+        "docs/public-docs/op-stack/zk-proofs/proof-system.mdx",
+        "docs/public-docs/op-stack/zk-proofs/security.mdx",
+        "docs/public-docs/op-stack/zk-proofs/zk-dispute-game.mdx"
+      ]
+    },
+    {
+      "title": "op-deployer: target op-contracts/v10.0.0-rc.2",
+      "prNumber": 24388,
+      "type": "other",
+      "body": "Bumps the superchain-registry validation module to 524f756597582822030d24a74945e6640c230f11 (ethereum-optimism/superchain-registry#1424), which adds the op-contracts/v10.0.0-rc.2 standard versions, and points `CurrentTag` at that release. S",
+      "files": [
+        "go.mod",
+        "go.sum",
+        "op-deployer/pkg/deployer/standard/standard.go"
+      ]
+    }
+  ],
+  "topContributors": [
+    {
+      "username": "jelias2",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
+      "totalScore": 73.56374904525305,
+      "prScore": 73.22374904525304,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 9.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "Inphi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "ihooni",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/37792049?u=5d5dfa80bc54fd29248ecec7b4a6d259f56450c1&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    }
+  ],
+  "newPRs": 4,
+  "mergedPRs": 3,
+  "newIssues": 0,
+  "closedIssues": 0,
+  "activeContributors": 13
+}
