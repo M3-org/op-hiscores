@@ -5,17 +5,100 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-11-25 to 2026-11-26, ethereum-optimism/infra had 0 new PRs (0 merged), 0 new issues, and 4 active contributors.",
+  "overview": "From 2026-11-25 to 2026-11-26, ethereum-optimism/infra had 1 new PRs (0 merged), 0 new issues, and 20 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ88AAAABR0OZOw",
+      "title": "build: move all Go modules off op-geth onto upstream go-ethereum",
+      "author": "nonsense",
+      "number": 815,
+      "body": "**Description**\n\nMoves every Go module in this repo off the op-geth fork, onto upstream go-ethereum and the current Optimism monorepo, and adds a CI check so op-geth can't come back.\n\nAll seven modules drop `replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth`: bailiff, op-conductor-mon, op-signer, op-txproxy, op-ufm, peer-mgmt-service and proxyd. One commit per module, then review follow-ups.\n\n| | Version |\n|---|---|\n| `github.com/ethereum-optimism/optimism` | `v1.21.0` |\n| `github.com/ethereum/go-ethereum` | `v1.17.11-0.20261028021739-3dee18e7108c` |\n\n- `v1.21.0` is the monorepo's tagged release of `2ad37990e12c`, on `develop` after the op-geth cutover (optimism#24176, then optimism#24350).\n- The go-ethereum version is the one `v1.21.0` itself requires. go-ethereum has no release tag at or after that commit (the latest is `v1.17.10`), and Go's minimum version selection would pick this version anyway. infrastructure-services uses the same go-ethereum version.\n- **Pion:** the patched `pion/stun/v3 v3.1.7` and `pion/dtls/v3 v3.1.5` now come in through the monorepo's own requires. peer-mgmt-service's `replace`s for them pinned older versions (v3.1.5 and v3.1.4), so they're dropped.\n\n**What changed beyond the version bump**\n\n- **Logging, all modules.** The monorepo's CLI log helpers moved to `op-service/log/logcli`, and `op-service/log` now has its own `Logger` type and its own global logger. Each module's logging moves from `go-ethereum/log` to `op-service/log`, which has the same functions and level constants.\n- **proxyd: global logger.** After the cutover, `op-service/log`'s global logger discards records until `op-service/log.SetDefault` installs one. `SetLogLevel` used go-ethereum's `SetDefault`, so records that monorepo packages log through `op-service/log`'s global logger would have been dropped. It now uses `op-service/log.SetDefault`, which also installs the logger as go-ethereum's.\n- **proxyd: interop access lists.** op-geth's `core/types/interoptypes` doesn't exist upstream. `checkInteropAndReturnAccessList` used only its `TxToInteropAccessList`, which is ported as `txToInteropAccessList`: the tx's CrossL2Inbox storage keys, raw and in order. Interop validation is unchanged: the strategies still parse, validate and deduplicate those raw entries, already through `op-core/interop/messages`.\n- **op-txproxy.** `eth_sendRawTransactionConditional` used three op-geth-only things:\n  - `types.TransactionConditional`, with its JSON codec, `Cost` and `Validate`. It's copied into `conditional.go` unchanged, with op-geth's unit tests.\n  - The `params.TransactionConditional*` limits and error codes, copied with the same values (max cost 1000, -32003, -32005).\n  - `rpc.JsonError`, replaced by `op-service/jsonrpc.Error`, which has the same fields and methods.\n\n  The service's limits, error codes and wire format don't change. op-reth enforces a different limit (5000) and code (-32602), so op-txproxy stays stricter, as it was against op-geth.\n- **op-conductor-mon.** op-conductor's API client now takes an op-service `client.RPC`. The geth RPC client is wrapped with `NewBaseRPCClient`, which caps every call at a timeout of its own, so the configured `rpc_timeout` is passed through. When `rpc_timeout` is unset, the wrapper's 10s default applies; before, the bare HTTP client had no limit.\n- **bailiff in CI.** bailiff had no CircleCI jobs: it was missing from the path-filter mapping. It now gets lint and test jobs like the other modules, and this PR fixes what golangci-lint found on its first run (separate commit).\n- **`no-op-geth` CI check.** `ops/scripts/check-no-op-geth.sh` fails when a tracked `go.mod` or `go.sum` names `ethereum-optimism/op-geth`, when a `go.mod` replaces `github.com/ethereum/go-ethereum` with anything (a fork, a local checkout), or when a `go.work` is committed. It can be run locally. The `no-op-geth` job runs it on every pipeline, so new modules are covered too. Ported from infrastructure-services#1785.\n\n**Upstream go-ethereum traps checked**\n\nUpstream go-ethereum can't decode OP deposit (`0x7E`) or post-exec (`0x7D`) transactions, so ethclient's block, receipt and tx reads can fail at runtime against L2 even though the code compiles. Checked every decode site:\n- **proxyd:**\n  - It decodes only user-submitted txs. A submitted deposit now fails decoding instead of being rejected later, so it's still rejected.\n  - Its tx-monitor block fetcher reads only tx hashes from raw JSON.\n  - Its flashblock decoder already skips txs it can't decode.\n- **op-txproxy** decodes only submitted conditional txs. A deposit now fails decoding (\"transaction type not supported\") instead of failing the EntryPoint target check, so it's still rejected.\n- **op-ufm** reads back only its own EIP-1559 txs and headers.\n- No other module reads L2 blocks, txs or receipts through ethclient.\n\n**Tests**\n\nPer module, mirroring the CI `go-lint`/`go-test` jobs: `go mod tidy` (no diff), `go build ./...`, `go vet ./...`, `golangci-lint fmt --diff` and `golangci-lint run` (v2.11.4), and `go test ./...` with `-checklinkname=0`. All seven pass. op-signer also builds with `CGO_ENABLED=0`.\n\n- **proxyd:** new `TestTxToInteropAccessList` pins the ported helper: raw entries in order, across duplicate CrossL2Inbox tuples, other addresses ignored. The interop integration tests (`TestInteropValidation_*`, `TestTxFilter_*`) pass, including `StaticParseAccessPrevalidationCheck`: a malformed access list is rejected with -32602 and never reaches the filter, as on `main`.\n- **op-txproxy:** op-geth's `TransactionConditional` tests are ported. A new marshal test pins the JSON forwarded to the backend; its expected strings were produced by op-geth's own type for the same values. New tests pin the cost limit (a cost of exactly 1000 passes, 1001 is rejected) and the error codes and messages, the latter also as a client receives them over JSON-RPC.\n- **op-signer:** checked against `main` with a LOCAL-provider key over mTLS.\n  - `eth_signTransaction` (EIP-1559) and `opsigner_signBlockPayloadV2` return byte-identical results from `main` and this branch.\n  - The tx signature recovers to the key's address.\n  - `op-signer --help` (flags and env vars) is identical.\n  - The only difference is a trailing newline in the JSON-RPC response body (upstream's RPC server doesn't write one).\n- **`check-no-op-geth.sh`:** passes on this branch. Against throwaway repos it fails, naming the file, for an op-geth `replace`, a local-path, versioned, block-form or quoted `replace` of go-ethereum, a root-level `go.mod`, op-geth in a `go.sum`, and a `go.work` at the root or in a module; it passes a plain go-ethereum `require`.\n- **`govulncheck`** on every module reports no go-ethereum advisories. It still reports `gorilla/websocket` v1.5.3 (GO-2026-6278). That's already on `main` at the same version and pinned by the monorepo; its fix is only on an untagged commit, so it's left for a separate change.\n\n**Additional context**\n\n- op-txproxy reports go-ethereum's version as its app version (`cmd/main.go`), so its reported version changes from op-geth's to upstream's.\n- CircleCI's path filter sends `.circleci/` changes to `run-all`, so this PR runs every module's jobs.\n\n**Metadata**\n\n- Fixes ethereum-optimism/protocol-team#385\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-11-25T11:37:13Z",
+      "mergedAt": null,
+      "additions": 1374,
+      "deletions": 1071
+    }
+  ],
   "codeChanges": {
     "additions": 0,
     "deletions": 0,
     "files": 0,
-    "commitCount": 0
+    "commitCount": 10
   },
   "completedItems": [],
   "topContributors": [
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 178.78754779315219,
+      "prScore": 87.0875477931522,
+      "issueScore": 0,
+      "reviewScore": 91.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "sebastianst",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2607372?u=b72d05409d41d8654c6c8c7c174d8534297757dd&v=4",
+      "totalScore": 162.79854145871235,
+      "prScore": 117.49854145871237,
+      "issueScore": 8.1,
+      "reviewScore": 37,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "Wazabie",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/48911235?u=a3ae7a5fe8f04676a02d733b8d8b1df425633cc2&v=4",
+      "totalScore": 106.50441779562746,
+      "prScore": 106.50441779562746,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 100.85906412289398,
+      "prScore": 73.35906412289398,
+      "issueScore": 0,
+      "reviewScore": 27.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 95.8837738965761,
+      "prScore": 43.5437738965761,
+      "issueScore": 0,
+      "reviewScore": 52,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "sbvegan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/85043086?u=adbe0ee2757d660d7cf1ca6756ede0ba598c7be8&v=4",
+      "totalScore": 86.4697147170773,
+      "prScore": 47.969714717077295,
+      "issueScore": 0,
+      "reviewScore": 38.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 74.64156646354624,
+      "prScore": 68.64156646354624,
+      "issueScore": 0,
+      "reviewScore": 6,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "jelias2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/19310318?u=5379d59e88f8cb95ef750ee49504db394d84ad5a&v=4",
@@ -24,6 +107,66 @@
       "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 53.89167878804493,
+      "prScore": 44.191678788044925,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 32.09637686896634,
+      "prScore": 27.09637686896634,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "claude",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/1236702?v=4",
+      "totalScore": 25.210306144334055,
+      "prScore": 23.210306144334055,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "JulienKervarrec",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/114134889?v=4",
+      "totalScore": 10.248572066704309,
+      "prScore": 10.248572066704309,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "ZakAyesh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44901995?u=4dad258f3251b54cf1513748b7361b5d7c92db6d&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
       "summary": null
     },
     {
@@ -37,6 +180,36 @@
       "summary": null
     },
     {
+      "username": "wiz-0f98cca50a",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 9.34,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "bitwiseguy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35908605?u=66116d982611a681a8a71a9ac3e3f3d0a7df4e69&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mds1",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17163988?u=95114a00aa1ebac94d8fc8519598f168d2c5949f&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "digorithm",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
       "totalScore": 5,
@@ -47,8 +220,28 @@
       "summary": null
     },
     {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
       "username": "Inphi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/3516807?u=760e102e0dd9d0d8c7361293c2b6c326e5bbf61a&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xiamflux",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175354924?u=a1b15ed46794542530aed61f7f7fd40dc0968c3f&v=4",
       "totalScore": 5,
       "prScore": 0,
       "issueScore": 0,
@@ -75,11 +268,21 @@
       "reviewScore": 0,
       "commentScore": 0.2,
       "summary": null
+    },
+    {
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
+  "newPRs": 1,
   "mergedPRs": 0,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 4
+  "activeContributors": 20
 }
