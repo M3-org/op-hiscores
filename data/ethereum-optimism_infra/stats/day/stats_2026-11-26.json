@@ -5,17 +5,322 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/infra",
-  "overview": "From 2026-11-26 to 2026-11-27, ethereum-optimism/infra had 0 new PRs (0 merged), 0 new issues, and 1 active contributors.",
+  "overview": "From 2026-11-26 to 2026-11-27, ethereum-optimism/infra had 3 new PRs (3 merged), 0 new issues, and 13 active contributors.",
   "topIssues": [],
-  "topPRs": [],
+  "topPRs": [
+    {
+      "id": "PR_kwDOL-xLQ88AAAABR0OZOw",
+      "title": "build: move all Go modules off op-geth onto upstream go-ethereum",
+      "author": "nonsense",
+      "number": 815,
+      "body": "**Description**\n\nMoves every Go module in this repo off the op-geth fork, onto upstream go-ethereum and the current Optimism monorepo, and adds a CI check so op-geth can't come back.\n\nAll seven modules drop `replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth`: bailiff, op-conductor-mon, op-signer, op-txproxy, op-ufm, peer-mgmt-service and proxyd. One commit per module, then review follow-ups.\n\n| | Version |\n|---|---|\n| `github.com/ethereum-optimism/optimism` | `v1.21.0` |\n| `github.com/ethereum/go-ethereum` | `v1.17.11-0.20261028021739-3dee18e7108c` |\n\n- `v1.21.0` is the monorepo's tagged release of `2ad37990e12c`, on `develop` after the op-geth cutover (optimism#24176, then optimism#24350).\n- The go-ethereum version is the one `v1.21.0` itself requires. go-ethereum has no release tag at or after that commit (the latest is `v1.17.10`), and Go's minimum version selection would pick this version anyway. infrastructure-services uses the same go-ethereum version.\n- **Pion:** the patched `pion/stun/v3 v3.1.7` and `pion/dtls/v3 v3.1.5` now come in through the monorepo's own requires. peer-mgmt-service's `replace`s for them pinned older versions (v3.1.5 and v3.1.4), so they're dropped.\n\n**What changed beyond the version bump**\n\n- **Logging, all modules.** The monorepo's CLI log helpers moved to `op-service/log/logcli`, and `op-service/log` now has its own `Logger` type and its own global logger. Each module's logging moves from `go-ethereum/log` to `op-service/log`, which has the same functions and level constants.\n- **proxyd: global logger.** After the cutover, `op-service/log`'s global logger discards records until `op-service/log.SetDefault` installs one. `SetLogLevel` used go-ethereum's `SetDefault`, so records that monorepo packages log through `op-service/log`'s global logger would have been dropped. It now uses `op-service/log.SetDefault`, which also installs the logger as go-ethereum's.\n- **proxyd: interop access lists.** op-geth's `core/types/interoptypes` doesn't exist upstream. `checkInteropAndReturnAccessList` used only its `TxToInteropAccessList`, which is ported as `txToInteropAccessList`: the tx's CrossL2Inbox storage keys, raw and in order. Interop validation is unchanged: the strategies still parse, validate and deduplicate those raw entries, already through `op-core/interop/messages`.\n- **op-txproxy.** `eth_sendRawTransactionConditional` used three op-geth-only things:\n  - `types.TransactionConditional`, with its JSON codec, `Cost` and `Validate`. It's copied into `conditional.go` unchanged, with op-geth's unit tests.\n  - The `params.TransactionConditional*` limits and error codes, copied with the same values (max cost 1000, -32003, -32005).\n  - `rpc.JsonError`, replaced by `op-service/jsonrpc.Error`, which has the same fields and methods.\n\n  The service's limits, error codes and wire format don't change. op-reth enforces a different limit (5000) and code (-32602), so op-txproxy stays stricter, as it was against op-geth.\n- **op-conductor-mon.** op-conductor's API client now takes an op-service `client.RPC`. The geth RPC client is wrapped with `NewBaseRPCClient`, which caps every call at a timeout of its own, so the configured `rpc_timeout` is passed through. When `rpc_timeout` is unset, the wrapper's 10s default applies; before, the bare HTTP client had no limit.\n- **bailiff in CI.** bailiff had no CircleCI jobs: it was missing from the path-filter mapping. It now gets lint and test jobs like the other modules, and this PR fixes what golangci-lint found on its first run (separate commit).\n- **`no-op-geth` CI check.** `ops/scripts/check-no-op-geth.sh` fails when a tracked `go.mod` or `go.sum` names `ethereum-optimism/op-geth`, when a `go.mod` replaces `github.com/ethereum/go-ethereum` with anything (a fork, a local checkout), or when a `go.work` is committed. It can be run locally. The `no-op-geth` job runs it on every pipeline, so new modules are covered too. Ported from infrastructure-services#1785.\n\n**Upstream go-ethereum traps checked**\n\nUpstream go-ethereum can't decode OP deposit (`0x7E`) or post-exec (`0x7D`) transactions, so ethclient's block, receipt and tx reads can fail at runtime against L2 even though the code compiles. Checked every decode site:\n- **proxyd:**\n  - It decodes only user-submitted txs. A submitted deposit now fails decoding instead of being rejected later, so it's still rejected.\n  - Its tx-monitor block fetcher reads only tx hashes from raw JSON.\n  - Its flashblock decoder already skips txs it can't decode.\n- **op-txproxy** decodes only submitted conditional txs. A deposit now fails decoding (\"transaction type not supported\") instead of failing the EntryPoint target check, so it's still rejected.\n- **op-ufm** reads back only its own EIP-1559 txs and headers.\n- No other module reads L2 blocks, txs or receipts through ethclient.\n\n**Tests**\n\nPer module, mirroring the CI `go-lint`/`go-test` jobs: `go mod tidy` (no diff), `go build ./...`, `go vet ./...`, `golangci-lint fmt --diff` and `golangci-lint run` (v2.11.4), and `go test ./...` with `-checklinkname=0`. All seven pass. op-signer also builds with `CGO_ENABLED=0`.\n\n- **proxyd:** new `TestTxToInteropAccessList` pins the ported helper: raw entries in order, across duplicate CrossL2Inbox tuples, other addresses ignored. The interop integration tests (`TestInteropValidation_*`, `TestTxFilter_*`) pass, including `StaticParseAccessPrevalidationCheck`: a malformed access list is rejected with -32602 and never reaches the filter, as on `main`.\n- **op-txproxy:** op-geth's `TransactionConditional` tests are ported. A new marshal test pins the JSON forwarded to the backend; its expected strings were produced by op-geth's own type for the same values. New tests pin the cost limit (a cost of exactly 1000 passes, 1001 is rejected) and the error codes and messages, the latter also as a client receives them over JSON-RPC.\n- **op-signer:** checked against `main` with a LOCAL-provider key over mTLS.\n  - `eth_signTransaction` (EIP-1559) and `opsigner_signBlockPayloadV2` return byte-identical results from `main` and this branch.\n  - The tx signature recovers to the key's address.\n  - `op-signer --help` (flags and env vars) is identical.\n  - The only difference is a trailing newline in the JSON-RPC response body (upstream's RPC server doesn't write one).\n- **`check-no-op-geth.sh`:** passes on this branch. Against throwaway repos it fails, naming the file, for an op-geth `replace`, a local-path, versioned, block-form or quoted `replace` of go-ethereum, a root-level `go.mod`, op-geth in a `go.sum`, and a `go.work` at the root or in a module; it passes a plain go-ethereum `require`.\n- **`govulncheck`** on every module reports no go-ethereum advisories. It still reports `gorilla/websocket` v1.5.3 (GO-2026-6278). That's already on `main` at the same version and pinned by the monorepo; its fix is only on an untagged commit, so it's left for a separate change.\n\n**Additional context**\n\n- op-txproxy reports go-ethereum's version as its app version (`cmd/main.go`), so its reported version changes from op-geth's to upstream's.\n- CircleCI's path filter sends `.circleci/` changes to `run-all`, so this PR runs every module's jobs.\n\n**Metadata**\n\n- Fixes ethereum-optimism/protocol-team#385\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-11-25T11:37:13Z",
+      "mergedAt": "2026-11-26T11:06:08Z",
+      "additions": 1409,
+      "deletions": 1090
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABSJtR3w",
+      "title": "feat(proxyd): resolve client IP behind trusted proxies, sample request logs",
+      "author": "hdcesario-op",
+      "number": 818,
+      "body": "**Description**\n\nproxyd keys its per-IP frontend rate limits, and logs `remote_ip`, using the leftmost `X-Forwarded-For` entry. Behind a proxy that appends to the header, that entry is whatever the caller sent, not the address the proxy saw. GCP Application Load Balancers append `CLIENT_IP,LOAD_BALANCER_IP` after any existing value.\n\n- New `[rate_limit] xff_trusted_hops` (default `0`, unchanged behaviour). When set to N, the client IP is the entry immediately left of the N proxy-appended entries, counted across all header lines. A header with N or fewer entries, or a selected entry that is not an IP, falls back to the connection's remote address. The resolved IP is used as the rate-limit key and `remote_ip`, and is what `strip_trailing_xff` backends receive. Other backends get the full chain: every non-empty header field, joined in order. Startup rejects it combined with `ip_header_override`.\n- New `[server] request_log_sample_rate` (default `0`). Logs that fraction of HTTP requests at info as `served RPC request`, with `remote_ip`, method label, HTTP status and duration. Requests rejected in authentication are included. WebSocket connection logs now include `remote_ip`.\n\nBehind GCP ALBs (GKE Gateway `gke-l7-regional-external-managed` / `gke-l7-rilb`), set `xff_trusted_hops = 1`.\n\n- New counter `proxyd_client_ip_fallbacks_total{reason}` (`header_too_short`, `invalid_entry`). It makes a hop count that does not match the proxy chain visible.\n\n**Hop count verification**\n\nA header-echo service in a dev cluster, routed through both shared gateway classes and called from a pod (pod IP `10.193.211.178`, egress `35.229.100.239`), received:\n\n| Gateway | Client sent | Backend received |\n|---|---|---|\n| `gke-l7-rilb` | nothing | `10.193.211.178,10.65.192.21` |\n| `gke-l7-rilb` | `192.0.2.77, 198.51.100.9` | `192.0.2.77, 198.51.100.9,10.193.211.178,10.65.192.21` |\n| `gke-l7-regional-external-managed` | nothing | `35.229.100.239,35.243.219.134` |\n| `gke-l7-regional-external-managed` | `192.0.2.77, 198.51.100.9` | `192.0.2.77, 198.51.100.9,35.229.100.239,35.243.219.134` |\n\nBoth classes keep the client's value and append exactly `CLIENT_IP,LOAD_BALANCER_IP` in a single field, so `1` is correct when the load balancer is the only hop. A CDN in front, such as a Cloudflare-proxied hostname, adds an entry, so the right value depends on the deployment. In netchef it is opt-in per network (ethereum-optimism/infrastructure-services#1810).\n\n**Tests**\n\n- `integration_tests/xff_trusted_hops_test.go`: requests whose client-supplied entries differ but whose trusted-position entry matches share one limit; a short header falls back to the peer address. Fails on `main` (200 where 429 is expected) and passes with this change.\n- `TestClientIP` (table), `TestClientIPMultipleHeaderLines` (including an empty first field), `TestHandleRPCSampledRequestLog`, `TestHandleRPCSampledRequestLogUnauthorized`, `TestValidateClientIPConfig` (including a `nan` sample rate), `TestPopulateContextForwardsFullXFFChain`.\n- `go test ./...` and `golangci-lint` 2.11.4 pass locally.\n\n**Additional context**\n\nThe setting is correct only if every request reaches proxyd through exactly N appending proxies. A caller that can reach proxyd directly, such as another pod via its ClusterIP Service, still chooses its own key. This is documented in the README.\n\n**Metadata**\n\n- Part of ethereum-optimism/core-team#3423\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-11-26T15:49:30Z",
+      "mergedAt": null,
+      "additions": 454,
+      "deletions": 19
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABSCU8WA",
+      "title": "feat(proxyd): support backend dial timeouts and consensus fetch timeouts",
+      "author": "yashvardhan-kukreja",
+      "number": 816,
+      "body": "Signed-off-by: Yashvardhan Kukreja <yashvardhan@oplabs.co>\r\n\r\n<!-- Contributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md -->\r\n\r\n**Description**\r\n\r\nThe consensus loop of the consensus_poller fetches a block from each backend one at a time, with no per-call deadline.  If a backend silently drops connections, as a Kubernetes Service with no ready pods/endpoints does, each fetch hangs until Go's 30s dial timeout. The whole loop freezes: the dead backend stays in the consensus group, the consensus_max_update_threshold staleness check never runs, and the consensus latest block stops advancing. \r\n\r\n\r\nClient requests routed to that backend also use up their time budget before they can fail over, so they surface as no backend is currently healthy to serve traffic even though other backends are fine. \r\n\r\nThis PR adds `consensus_fetch_timeout` (default 5s), a per-fetch deadline in the consensus loop so one unresponsive backend can't stall it. \r\n\r\nIt also adds an opt-in `dial_timeout_milliseconds` (in [backend], with a per-backend override) that caps TCP connect time, so requests fail over quickly instead of waiting out the 30s default.\r\n\r\n**Tests**\r\n\r\nPlease describe any tests you've added. If you've added no tests, or left important behavior untested, please explain why not.\r\n\r\n**Additional context**\r\n\r\nAdd any other context about the problem you're solving.\r\n\r\n**Metadata**\r\n\r\n- Fixes #[Link to Issue]\r\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-11-26T06:46:29Z",
+      "mergedAt": "2026-11-26T18:26:44Z",
+      "additions": 440,
+      "deletions": 8
+    },
+    {
+      "id": "PR_kwDOL-xLQ88AAAABSIAvxg",
+      "title": "build(replica-healthcheck): move minimatch to 11.0.9 and glob to 14.0.6",
+      "author": "falcorocks",
+      "number": 817,
+      "body": "## Summary\n\nClears GHSA-g3hv-75wg-m249 (minimatch >= 7.0.0 < 11.0.1) from the `replica-healthcheck` dev dependency tree. Every minimatch 7.x and 9.x instance moves to 11.0.9. The glob move also clears GHSA-3g3m-2fjr-6pw4 (glob >= 9.0.0 <= 14.0.1).\n\n| Package | Old | New | Mechanism |\n| --- | --- | --- | --- |\n| minimatch (via `@typescript-eslint/typescript-estree`) | 9.0.9 | 11.0.9 | parent bump |\n| `@typescript-eslint/eslint-plugin`, `@typescript-eslint/parser` and their `@typescript-eslint/*` siblings | 8.26.0 | 8.74.0 | devDependency range `^8.74.0` (8.73.0 and later depend on minimatch `^11.0.1`) |\n| minimatch (via glob) | 9.0.9 | 11.0.9 | parent bump |\n| glob | 10.5.0 | 14.0.6 | existing `glob` resolution raised (14.x depends on minimatch `^11.0.5`); the `glob/minimatch` resolution is dropped |\n| minimatch (via mocha) | 9.0.9 | 11.0.9 | new `mocha/minimatch` resolution (mocha 11.8.0 declares `^9.0.5`, mocha 12 still declares `^10.2.2`) |\n| minimatch (via depcheck) | 7.4.9 | removed | `depcheck` devDependency removed together with its `depcheck/minimatch` and `depcheck/js-yaml` resolutions |\n| brace-expansion (under minimatch 11) | 2.1.7 | 5.1.0 | global `brace-expansion` resolution removed |\n| brace-expansion (under minimatch 3.1.5) | 2.1.7 | 1.1.22 | global `brace-expansion` resolution removed |\n\nNotes:\n\n- glob 10.5.0 returns no matches when paired with minimatch 11, so glob moves to 14.0.6 instead of keeping a `glob/minimatch` override.\n- depcheck 1.4.7 is the latest release, requires minimatch `^7.4.6`, and throws `_minimatch.default is not a function` on minimatch 11. It is not referenced by any script, lint-staged entry, justfile target, Dockerfile, or CI job, so it is removed.\n- The global `brace-expansion: 2.1.7` resolution forced one version onto every consumer. minimatch 11 requires brace-expansion `^5.0.12` (5.x exports a different API than 2.x), while minimatch 3.1.5 declares `^1.1.7` and cannot load 5.x. With the pin removed, each minimatch line resolves the patched release of its own brace-expansion line: 5.1.0 (>= 5.0.12) and 1.1.22 (>= 1.1.21), which cover every published brace-expansion advisory, including GHSA-q2hr-2g5m-vwhr that the pin was added for. This is the only lockfile entry whose version number goes down, and it moves to the range its parent declares.\n- minimatch 3.1.5 stays as is: it is outside the advisory range and its consumers (eslint, eslint plugins, copyfiles, test-exclude) use the 3.x API.\n- Verified locally: `yarn install --frozen-lockfile`, `yarn build`, `yarn lint:check`, `tsc --noEmit`, mocha and ts-mocha runs with glob, brace and `--ignore` patterns, direct glob and minimatch calls. `yarn audit` no longer lists minimatch or glob.\n",
+      "repository": "ethereum-optimism/infra",
+      "createdAt": "2026-11-26T13:56:17Z",
+      "mergedAt": "2026-11-26T14:07:07Z",
+      "additions": 213,
+      "deletions": 510
+    }
+  ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 0
+    "additions": 1785,
+    "deletions": 1257,
+    "files": 61,
+    "commitCount": 14
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "build: move all Go modules off op-geth onto upstream go-ethereum",
+      "prNumber": 815,
+      "type": "other",
+      "body": "**Description**\n\nMoves every Go module in this repo off the op-geth fork, onto upstream go-ethereum and the current Optimism monorepo, and adds a CI check so op-geth can't come back.\n\nAll seven modules drop `replace github.com/ethereum/go-e",
+      "files": [
+        ".circleci/config.yml",
+        ".circleci/continue_config.yml",
+        "bailiff/cmd/bailiff/main.go",
+        "bailiff/go.mod",
+        "bailiff/go.sum",
+        "bailiff/internal/pkg/bailiff/handler.go",
+        "bailiff/internal/pkg/bailiff/handler_test.go",
+        "bailiff/internal/pkg/bailiff/log.go",
+        "bailiff/internal/pkg/bailiff/repush.go",
+        "bailiff/internal/pkg/bailiff/repush_test.go",
+        "bailiff/internal/pkg/bailiff/server.go",
+        "bailiff/internal/pkg/bailiff/server_test.go",
+        "bailiff/internal/pkg/bailiff/whitelist.go",
+        "op-conductor-mon/cmd/monitor/main.go",
+        "op-conductor-mon/go.mod",
+        "op-conductor-mon/go.sum",
+        "op-conductor-mon/pkg/metrics/metrics.go",
+        "op-conductor-mon/pkg/metrics/opconductor_client/conductor.go",
+        "op-conductor-mon/pkg/monitor/poll.go",
+        "op-conductor-mon/pkg/monitor/poller.go",
+        "op-conductor-mon/pkg/service/healthz_server.go",
+        "op-conductor-mon/pkg/service/service.go",
+        "op-signer/app.go",
+        "op-signer/cmd/main.go",
+        "op-signer/config.go",
+        "op-signer/go.mod",
+        "op-signer/go.sum",
+        "op-signer/provider/aws_kms.go",
+        "op-signer/provider/aws_kms_test.go",
+        "op-signer/provider/gcp_kms.go",
+        "op-signer/provider/gcp_kms_test.go",
+        "op-signer/provider/local_kms.go",
+        "op-signer/provider/local_kms_test.go",
+        "op-signer/provider/provider.go",
+        "op-signer/service/service.go",
+        "op-signer/service/service_test.go",
+        "op-txproxy/cmd/main.go",
+        "op-txproxy/conditional.go",
+        "op-txproxy/conditional_test.go",
+        "op-txproxy/conditional_txs.go",
+        "op-txproxy/conditional_txs_test.go",
+        "op-txproxy/go.mod",
+        "op-txproxy/go.sum",
+        "op-txproxy/txproxy.go",
+        "op-ufm/cmd/ufm/main.go",
+        "op-ufm/go.mod",
+        "op-ufm/go.sum",
+        "op-ufm/pkg/metrics/clients/signer.go",
+        "op-ufm/pkg/metrics/metrics.go",
+        "op-ufm/pkg/provider/heartbeat.go"
+      ]
+    },
+    {
+      "title": "build(replica-healthcheck): move minimatch to 11.0.9 and glob to 14.0.6",
+      "prNumber": 817,
+      "type": "other",
+      "body": "## Summary\n\nClears GHSA-g3hv-75wg-m249 (minimatch >= 7.0.0 < 11.0.1) from the `replica-healthcheck` dev dependency tree. Every minimatch 7.x and 9.x instance moves to 11.0.9. The glob move also clears GHSA-3g3m-2fjr-6pw4 (glob >= 9.0.0 <= 1",
+      "files": [
+        "replica-healthcheck/package.json",
+        "replica-healthcheck/yarn.lock"
+      ]
+    },
+    {
+      "title": "feat(proxyd): support backend dial timeouts and consensus fetch timeouts",
+      "prNumber": 816,
+      "type": "feature",
+      "body": "Signed-off-by: Yashvardhan Kukreja <yashvardhan@oplabs.co>\r\n\r\n<!-- Contributions welcome! See https://github.com/ethereum-optimism/.github/blob/master/CONTRIBUTING.md -->\r\n\r\n**Description**\r\n\r\nThe consensus loop of the consensus_poller fetc",
+      "files": [
+        "proxyd/backend.go",
+        "proxyd/backend_test.go",
+        "proxyd/config.go",
+        "proxyd/consensus_poller.go",
+        "proxyd/consensus_poller_test.go",
+        "proxyd/example.config.toml",
+        "proxyd/integration_tests/consensus_custom_config_test.go",
+        "proxyd/integration_tests/testdata/consensus_connect_timeouts.toml",
+        "proxyd/proxyd.go"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 83.14140714767018,
+      "prScore": 81.14140714767018,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 76.7,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 76.5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 65.86760299484014,
+      "prScore": 56.86760299484014,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 63.80603660847538,
+      "prScore": 49.80603660847538,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 49.753791392385715,
+      "prScore": 34.753791392385715,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "mintlify",
+      "avatarUrl": "https://avatars.githubusercontent.com/in/222410?v=4",
+      "totalScore": 38.60188564638216,
+      "prScore": 38.261885646382154,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 37.06347554698921,
+      "prScore": 27.563475546989213,
+      "issueScore": 0,
+      "reviewScore": 9.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 32.02272077083992,
+      "prScore": 8.522720770839918,
+      "issueScore": 0,
+      "reviewScore": 23.5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "010egg",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/88847484?v=4",
+      "totalScore": 20.913952030043703,
+      "prScore": 20.913952030043703,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "aakoshh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2684603?u=5ac02e30cb884869fbfc6b10cc958959888e6e7d&v=4",
+      "totalScore": 14,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 14,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "im-xiangda-li",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/102507799?u=a25d47d781e2ba2527b376fa79fdd596130e474e&v=4",
+      "totalScore": 13.527240182896207,
+      "prScore": 13.527240182896207,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 13.472147180559945,
+      "prScore": 6.472147180559945,
+      "issueScore": 2,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "DamianFigiel",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/68967763?u=6078a283b999cfb58ed7fafe94c2cb28b5ec88cc&v=4",
+      "totalScore": 6.44571895621705,
+      "prScore": 6.44571895621705,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "pauldowman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/17709?u=4829e9440317cd206fbde5eaeab866d1db79d8d1&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "otto-op-centaur",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/58791460?v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "rudyalmanza0407-lang",
       "avatarUrl": "https://avatars.githubusercontent.com/u/271686908?v=4",
@@ -25,11 +330,21 @@
       "reviewScore": 4.5,
       "commentScore": 0.43799999999999994,
       "summary": null
+    },
+    {
+      "username": "PeaStew",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/34198053?u=c1178a388c47df85d6a5c6915905b12e2b5606c5&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 0,
-  "mergedPRs": 0,
+  "newPRs": 3,
+  "mergedPRs": 3,
   "newIssues": 0,
   "closedIssues": 0,
-  "activeContributors": 1
+  "activeContributors": 13
 }

@@ -1,0 +1,83 @@
+{
+  "interval": {
+    "intervalStart": "2026-11-27T00:00:00.000Z",
+    "intervalEnd": "2026-11-28T00:00:00.000Z",
+    "intervalType": "day"
+  },
+  "repository": "ethereum-optimism/optimism",
+  "overview": "From 2026-11-27 to 2026-11-28, ethereum-optimism/optimism had 1 new PRs (0 merged), 1 new issues, and 6 active contributors.",
+  "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABi7FOOA",
+      "title": "kona-node: An engine reset can stop the sequencer",
+      "author": "ajsutton",
+      "number": 24463,
+      "repository": "ethereum-optimism/optimism",
+      "body": "**Claude:**\n\n## Summary\n\nAn engine reset can stop a kona-node sequencer. The engine actor clears its task queue on a reset. A queued seal or canonicalize request from the sequencer then gets `EngineClientError::ResponseError`. The sequencer treats that error as fatal, and `spawn_and_wait!` then cancels all actors.\n\nThe build path already treats `ResponseError` as engine recovery and retries. The seal and canonicalize paths do not.\n\n## How it happens\n\nThe engine actor drains its queue before it accepts the next request. Seal and canonicalize tasks have the highest priority. So a seal stays in the queue only while the engine is in retry backoff. The sequence below causes the failure:\n\n1. L1 finality advances. Derivation sends a finalize request.\n2. The EL fails `eth_getBlockByNumber`, for example during an EL restart. `FinalizeTaskError::TransportError` is temporary, so the engine starts a backoff. The backoff starts at 100 ms and grows to 5 s while the EL keeps failing.\n3. The engine actor still accepts requests during the backoff. The sequencer's build ticker sends a seal request, which waits in the queue.\n4. Derivation detects an L1 reorg and sends a reset.\n5. `begin_reset` calls `engine.clear()`, which drops the seal's reply channel. `seal_block` returns `ResponseError`.\n6. `handle_seal_error` returns the error from `step()`, and the node stops.\n\nA canonicalize request follows the same path through `handle_canonicalize_error`.\n\n## Impact\n\nA sequencer stops when an EL outage and an L1 reorg overlap. The existing tests never combine an EL failure with a reset, so they do not find this.\n\n## Fix\n\nThe engine did not run the cleared task, so the sequencer can recover safely:\n\n- Seal: drop the build job and rebuild on a later tick.\n- Canonicalize: retry the exact sealed envelope. The conductor can already have committed it, so the sequencer must not replace it. A changed parent still fails closed through `UnsafeHeadChangedSinceBuild`.\n",
+      "createdAt": "2026-11-27T02:21:04Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 0
+    }
+  ],
+  "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABSQX6BA",
+      "title": "kona-node: Recover the sequencer when an engine reset clears a queued task",
+      "author": "ajsutton",
+      "number": 24464,
+      "body": "An engine reset clears the engine task queue. A seal or canonicalize request that waits in the queue then gets `ResponseError`. Before this change, the sequencer treated that error as fatal, and the whole kona-node stopped. This happens when an EL failure puts the engine in retry backoff and derivation then resets on an L1 reorg.\n\nThe engine never ran a cleared task, so the sequencer now recovers. It drops a cleared seal and rebuilds after 1 s. This is the same recovery that the build path already has. It retries a cleared canonicalization with the same payload, because the conductor can already have committed that payload. A lost connection to the engine actor gives `RequestError`, and that error still stops the node.\n\nThe engine queue test shows that the reset clears a queued seal in a production sequence.\n\nReview findings not applied:\n- I did not add a constant for the 1 s retry delay. The sequencer uses `Duration::from_secs(1)` for all its retries, not only for engine recovery.\n- The seal test does not check the 1 s delay.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/24463\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-27T02:23:40Z",
+      "mergedAt": null,
+      "additions": 175,
+      "deletions": 31
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABJ4wneA",
+      "title": "kona-node-service,kona-node: make actor shutdown crash-only",
+      "author": "aakoshh",
+      "number": 23580,
+      "body": "# What\n\nFollow-up to #23534, which it is based on: actor shutdown becomes crash-only. When an actor fails, the node returns without waiting for the others, and an actor in the middle of handling an input does not get to finish it.\n\n# Why\n\nAs discussed on #23534 (https://github.com/ethereum-optimism/optimism/pull/23534#issuecomment-6324276212), the node has to recover from being killed at any point anyway, so supporting a single shutdown path is simpler, and kona-node keeps no state of its own that a half-handled input could corrupt. #23534 restores the cooperative cancellation that #20948 dropped by accident; this PR replaces it on purpose.\n\n# How\n\nThe actor loop calls `next` and `handle` and no longer races either against a cancellation token: when the first actor fails, the node returns, and dropping the `JoinSet` aborts the others wherever they are. The token, which only served graceful shutdown, is gone. The loop itself is the new public `run_actor`, which the `net` command, the gossip example and tests now use instead of their own `step` loops. No actor changes: thanks to the `next`/`handle` split, the shutdown policy lives in the macro only.\n\nOS signals go back to the CLI, which drops the node on SIGINT, as before #23534, and now also on SIGTERM. Before #23534 the macro handled SIGTERM; without any handler, kona-node running as PID 1 in a container would ignore SIGTERM and only stop on SIGKILL at the end of the grace period.\n\n# Caveats\n\nThe SIGTERM test checks the CLI's runner, not that the `node` command uses it, and cannot reproduce running as PID 1.\n\n# Alternatives\n\nRunning an init process such as tini in the images would also forward SIGTERM, but only for those images.\n\nThe derivation design doc described graceful shutdown on a cancellation token since before #23534, and the custom actor guide describes #23534's graceful shutdown; both now describe crash-only shutdown, and the guide points to `run_actor`. The general code and security reviews were not run.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-10-21T21:15:23Z",
+      "mergedAt": null,
+      "additions": 164,
+      "deletions": 301
+    }
+  ],
+  "codeChanges": {
+    "additions": 0,
+    "deletions": 0,
+    "files": 0,
+    "commitCount": 1
+  },
+  "completedItems": [],
+  "topContributors": [
+    {
+      "username": "ajsutton",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
+      "totalScore": 22.329078189898055,
+      "prScore": 20.329078189898055,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "quant-oss",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/264892691?v=4",
+      "totalScore": 10.518057329615258,
+      "prScore": 8.178057329615259,
+      "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0.33999999999999997,
+      "summary": null
+    }
+  ],
+  "newPRs": 1,
+  "mergedPRs": 0,
+  "newIssues": 1,
+  "closedIssues": 0,
+  "activeContributors": 6
+}
