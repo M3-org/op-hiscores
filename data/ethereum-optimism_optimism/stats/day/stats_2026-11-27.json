@@ -5,8 +5,44 @@
     "intervalType": "day"
   },
   "repository": "ethereum-optimism/optimism",
-  "overview": "From 2026-11-27 to 2026-11-28, ethereum-optimism/optimism had 1 new PRs (0 merged), 1 new issues, and 6 active contributors.",
+  "overview": "From 2026-11-27 to 2026-11-28, ethereum-optimism/optimism had 8 new PRs (6 merged), 4 new issues, and 21 active contributors.",
   "topIssues": [
+    {
+      "id": "I_kwDODjvEJM8AAAABi-buvA",
+      "title": "[Bug] SaferSafes: Hardcoded 2 * timelockDelay minimum in _checkCombinedConfig() is too short",
+      "author": "calnix",
+      "number": 24467,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\nWhen both `TimelockGuard` and `LivenessModule2` are enabled on a Safe, `SaferSafes._checkCombinedConfig()` enforces:\n\n```solidity\nif (livenessResponsePeriod < 2 * timelockDelay) {\n    revert SaferSafes_InsufficientLivenessResponsePeriod();\n}\n```\n\nThat check (`iSAFE-006`) is meant to guarantee that a live Safe can always `respond()` to a `challenge()` before the countdown ends (`iSAFE-003`). Twice the delay covers one cancelled attempt plus one successful attempt, and it leaves no time to coordinate.\n\nCancel is not a Safe transaction; `cancelTransaction()` is immediate. \n- The number of signatures it requires starts at 1 and goes up by 1 after every cancel, until it hits `maxCancellationThreshold` (`min(quorum, owners - quorum + 1)`)\n- A minority below both quorum and the blocking threshold cannot move funds and cannot stop the honest owners from signing.\n- However, they can still burn `respond()` attempts until that cap stops them\n\nThis shows up in two ways:\n\n1. **3-of-5 and larger majority Safes.** On a 3-of-5 the cap is 3. Two rogue signers cancel twice (1 signature, then 2). The attempt they cannot cancel is the third, so the honest owners need more than `3 * timelockDelay`, not `2 *`.\n2. **No slack, even on a 2-of-3.** The cap is 2, so one rogue gets one cancel and `2 * timelockDelay` is exactly one failure plus one success. Any time `δ > 0` that the honest owners take to schedule the first `respond()` pushes the second one past the countdown.\n\n---\n\n### Walkthrough\n\n`D` is the timelock delay. Two of five signers are rogue. The other three are live. They schedule one `respond()` at a time, and each time they reschedule in the same block as the cancel. A cancelled hash cannot be scheduled again, so each new `respond()` has to differ in some hashed field, such as `safeTxGas`.\n\n| Time | What happens | Signatures needed to cancel |\n| :--- | :--- | :---: |\n| `t = δ` | Three honest signers schedule the first `respond()`. It can execute at `D + δ`. | 1 |\n| `t = D + δ - 1s` | One rogue cancels the first one. The honest signers schedule the second, ready at `2D + δ - 1s`. | 1 → 2 |\n| `t = 2D + δ - 2s` | Both rogues cancel the second. The honest signers schedule the third, ready at `3D + δ - 2s`. | 2 → 3 |\n\nThe third `respond()` can no longer be cancelled by those two signers, but it is not executable until `3D + δ - 2s`.\n\n- Countdown of `2D`: the third `respond()` is about one full delay late.\n- Countdown of `3D`: the third `respond()` lands on the deadline only if `δ` is about 2 seconds and every cancel happens a second early. Any longer pause, or a cancel in the block where the transaction becomes executable, and the countdown is already over.\n\n`changeOwnershipToFallback()` is allowed as soon as the countdown ends. At an exact tie, that call and `respond()` are both valid in the same block, and ordering decides which runs.\n\n### Removing the rogue signer does not win the race\n\n`removeOwner` / `swapOwner` waits out the same timelock, and the rogue signers can cancel it on the same ladder.\n\n- Until the removal executes, they are still owners\n- Removing an owner does not cancel the challenge. `respond()`, `configureLivenessModule()`, or `clearLivenessModule()` does\n- A successful removal resets the cancel requirement to 1. A rogue who is still an owner gets a one-signature cancel again\n- Batching `[removeOwner, respond]` or scheduling them at nonces `N` and `N + 1` does not help. The Safe executes nonces in order. Cancelling nonce `N` blocks nonce `N + 1` until some other transaction at nonce `N` has waited another full `D`\n\n### Owner changes are not checked again\n\nA 2-of-3 has a cap of 2, so `2D` matches one cancel plus one success. `addOwnerWithThreshold()` can turn that Safe into a 3-of-5, where the cap is 3. It does not call `_checkCombinedConfig()`, so the stored countdown stays at `2D`.\n\n### Impact\n\nA live quorum can miss the countdown when the period is near `2 * timelockDelay`, and on a 3-of-5 when it is at or under about `3 * timelockDelay`. That is the break of `iSAFE-003` and `iSAFE-006`.\n\nOnce the countdown ends, `fallbackOwner` can take the Safe, remove the honest owners, and turn the timelock off. A compromised backup owner will do that. An honest one can do it too by treating \"countdown ended\" as \"the Safe is dead\" without checking `pendingTransactions()` for a response that is still waiting.\n\n### Suggested fix\n\nReject a countdown that is not strictly longer than one full delay per cancel the cap allows:\n\n```solidity\nif (livenessResponsePeriod <= maxCancellationThreshold(_safe) * timelockDelay) {\n    revert SaferSafes_InsufficientLivenessResponsePeriod();\n}\n```\n\n`iSAFE-006` and the NatSpec should say to add a real reaction buffer on top of that product, and to re-check the countdown whenever an owner or threshold change raises `maxCancellationThreshold`. The strict `>` only adds one second. The buffer covers human coordination time",
+      "createdAt": "2026-11-27T07:38:27Z",
+      "closedAt": "2026-11-27T08:01:34Z",
+      "state": "CLOSED",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABi-YXkg",
+      "title": "[Bug] TimelockGuard.scheduleTransaction() allows replaying historical nonces (< safe.nonce()), polluting pendingTransactions()",
+      "author": "calnix",
+      "number": 24466,
+      "repository": "ethereum-optimism/optimism",
+      "body": "## Summary\n\n`TimelockGuard.scheduleTransaction()` (`packages/contracts-bedrock/src/safe/TimelockGuard.sol`) is permissionless and validates signatures via `_safe.checkSignatures()`, but never checks `_nonce >= _safe.nonce()`.\n\n## Impact\n\n1. **`pendingTransactions()` pollution / off-chain view gas griefing:** Anyone can replay historical, already-executed Safe transactions + signatures from public calldata (from before `TimelockGuard` was enabled, or from a prior `_safeConfigNonces` generation after `clearTimelockGuard()`), provided the signers are still current owners. Because Safe strictly rejects `nonce < safe.nonce()`, these entries can never execute or be removed via `checkTransaction()` and remain in `pendingTxHashes` until explicitly pruned via `cancelTransaction()` or wiped via `clearTimelockGuard()`. The junk set is finite (at most one entry per eligible historical transaction) and only affects off-chain callers of `pendingTransactions()`, as nothing in `SaferSafes` calls `pendingTransactions()` in a state-changing function.\n2. **Operational `cancellationThreshold` trap:** If operators or monitoring scripts call `cancelTransaction()` to clear unexpected entries from `pendingTransactions()`, each cancellation increments `cancellationThreshold` up to `maxCancellationThreshold`, disabling 1-signer emergency cancellation until the next Safe transaction executes and resets `cancellationThreshold` to `1`.\n\n## Reproduction\n\n1. A Safe executes N transactions (`nonce` `0 .. N-1`) prior to enabling `TimelockGuard`.\n2. Safe enables and configures `TimelockGuard` at `nonce == N`.\n3. Any unprivileged address calls `timelockGuard.scheduleTransaction(safe, 0, params0, sigs0)` using the historical calldata.\n4. `scheduleTransaction()` succeeds and adds the unexecutable transaction to `pendingTransactions(safe)`.\n\n## Suggested Fix\n\nAdd `error TimelockGuard_InvalidNonce();` and revert in `scheduleTransaction()` if `_nonce < _safe.nonce()`:\n```solidity\nif (_nonce < _safe.nonce()) {\n    revert TimelockGuard_InvalidNonce();\n}\n```",
+      "createdAt": "2026-11-27T07:34:04Z",
+      "closedAt": null,
+      "state": "OPEN",
+      "commentCount": 1
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABcGDoYA",
+      "title": "kona-node: Apply --l2-engine-timeout to Engine API requests",
+      "author": "aakoshh",
+      "number": 23861,
+      "repository": "ethereum-optimism/optimism",
+      "body": "Split out of #23034, which covers several flags that are parsed but never applied. `--p2p.no-discovery` was done in #23753, and `--p2p.peers.lo/hi/grace` is #23700. This one covers the engine timeout.\n\n### Current behaviour\n- **The flag is parsed and ignored.** `--l2-engine-timeout` (alias `--l2.timeout`, `KONA_NODE_L2_ENGINE_TIMEOUT`) takes milliseconds and defaults to 30000 ([providers.rs](https://github.com/ethereum-optimism/optimism/blob/da1970af0df07ee612bd187cbbadcbec90c89e2a/rust/kona/bin/node/src/flags/engine/providers.rs#L70-L77)). `grep -rn l2_engine_timeout rust/kona` only finds the flag and its default.\n- **The deadline is a constant.** Since #23202, each request the engine client sends, to the Engine API and to L1, is bounded by `RPC_TIMEOUT = 10 s`, a `MapFutureLayer` on the alloy transport ([client.rs](https://github.com/ethereum-optimism/optimism/blob/da1970af0df07ee612bd187cbbadcbec90c89e2a/rust/kona/crates/node/engine/src/client.rs#L36-L53)). So the engine no longer waits forever on a hung EL. A timeout is a transport error, which the engine tasks treat as temporary and retry.\n- **So the documented default is wrong, and it can't be changed.** The help text promises 30 s, while every call times out after 10 s. An operator whose EL is slow under load, e.g. a large `engine_newPayload` during sync, can't raise it, and one who wants a hung EL noticed sooner can't lower it.\n\n### What op-node does\n- `--l2.engine-rpc-timeout` (`OP_NODE_L2_ENGINE_RPC_TIMEOUT`), a duration defaulting to `10s` ([flags.go](https://github.com/ethereum-optimism/optimism/blob/da1970af0df07ee612bd187cbbadcbec90c89e2a/op-node/flags/flags.go#L231-L237)).\n- It is applied as the call timeout of the L2 engine client only ([l2_el_rpc.go](https://github.com/ethereum-optimism/optimism/blob/da1970af0df07ee612bd187cbbadcbec90c89e2a/op-node/config/l2_el_rpc.go#L62)). The L1 client is configured separately.\n\n### Proposal\n- Pass the flag into `EngineClientBuilder` and use it as the Engine API client's per-request deadline, in place of `RPC_TIMEOUT`. `EngineClient::rpc_client` is also used by `validate_jwt` at startup, so that call gets it too.\n- Change the default to 10 s, matching op-node and what kona does today.\n- Decide:\n  - whether the engine client's L1 requests keep their own 10 s deadline (as op-node, where the engine timeout covers L2 only), or get a flag of their own;\n  - whether to accept op-node's name, `--l2.engine-rpc-timeout`, as an alias. op-node's value is a duration (`10s`) and kona's is milliseconds, so an alias under op-node's name should parse op-node's format, or the two can't share configs.\n- Reject 0 when parsing, since a zero deadline fails every call.\n- Docs: add the flag to `docs/public-docs/node-operators/kona-node/configuration.mdx`, which doesn't list it, and correct its help text.\n\n### Tests\n- The value of `--l2-engine-timeout` reaches the engine client: a request to an Engine API that never answers fails after the configured deadline, not after 10 s (the existing test in `client.rs` drives a stalled endpoint).\n- The default is 10 s; 0 is rejected.\n- If an op-node-style alias is added, `--l2.engine-rpc-timeout 5s` parses to the same value as `--l2-engine-timeout 5000`.\n",
+      "createdAt": "2026-11-03T10:05:08Z",
+      "closedAt": "2026-11-27T19:10:42Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
     {
       "id": "I_kwDODjvEJM8AAAABi7FOOA",
       "title": "kona-node: An engine reset can stop the sequencer",
@@ -15,12 +51,48 @@
       "repository": "ethereum-optimism/optimism",
       "body": "**Claude:**\n\n## Summary\n\nAn engine reset can stop a kona-node sequencer. The engine actor clears its task queue on a reset. A queued seal or canonicalize request from the sequencer then gets `EngineClientError::ResponseError`. The sequencer treats that error as fatal, and `spawn_and_wait!` then cancels all actors.\n\nThe build path already treats `ResponseError` as engine recovery and retries. The seal and canonicalize paths do not.\n\n## How it happens\n\nThe engine actor drains its queue before it accepts the next request. Seal and canonicalize tasks have the highest priority. So a seal stays in the queue only while the engine is in retry backoff. The sequence below causes the failure:\n\n1. L1 finality advances. Derivation sends a finalize request.\n2. The EL fails `eth_getBlockByNumber`, for example during an EL restart. `FinalizeTaskError::TransportError` is temporary, so the engine starts a backoff. The backoff starts at 100 ms and grows to 5 s while the EL keeps failing.\n3. The engine actor still accepts requests during the backoff. The sequencer's build ticker sends a seal request, which waits in the queue.\n4. Derivation detects an L1 reorg and sends a reset.\n5. `begin_reset` calls `engine.clear()`, which drops the seal's reply channel. `seal_block` returns `ResponseError`.\n6. `handle_seal_error` returns the error from `step()`, and the node stops.\n\nA canonicalize request follows the same path through `handle_canonicalize_error`.\n\n## Impact\n\nA sequencer stops when an EL outage and an L1 reorg overlap. The existing tests never combine an EL failure with a reset, so they do not find this.\n\n## Fix\n\nThe engine did not run the cleared task, so the sequencer can recover safely:\n\n- Seal: drop the build job and rebuild on a later tick.\n- Canonicalize: retry the exact sealed envelope. The conductor can already have committed it, so the sequencer must not replace it. A changed parent still fails closed through `UnsafeHeadChangedSinceBuild`.\n",
       "createdAt": "2026-11-27T02:21:04Z",
+      "closedAt": "2026-11-27T19:05:44Z",
+      "state": "CLOSED",
+      "commentCount": 0
+    },
+    {
+      "id": "I_kwDODjvEJM8AAAABi9x-2A",
+      "title": "[Bug] SaferSafes._checkCombinedConfig() stays skipped after a disabled extension is turned back on",
+      "author": "calnix",
+      "number": 24465,
+      "repository": "ethereum-optimism/optimism",
+      "body": "# Background\n\n**SaferSafes adds two optional security features to a Safe wallet:**\n\n1. Timelock Guard: Every owner-executed Safe transaction (`execTransaction`) must wait a set delay (e.g., 90 days) while the guard is enabled and `timelockDelay != 0` (module calls via `execTransactionFromModule` do not wait)\n2. Liveness Module: A dead-man's switch. A backup owner pings the wallet with `challenge()`. If the wallet does not execute `respond()` before the countdown ends, the backup owner can take ownership by calling `changeOwnershipToFallback()`\n\n`respond()` is executed via `Safe.execTransaction()`, so `TimelockGuard` delays it whenever the guard is enabled and `timelockDelay != 0`.\n\nIf Timelock delay is 90 days, but the dead-man's switch countdown is only 1 day, it is physically impossible to answer in time. Even if all signers are awake and respond immediately, the backup owner can take over the wallet on Day 1 while the response txn remains delayed until Day 90.\n\nIf an attacker gains control of the backup owner and the timers are set this way, the attacker can take full ownership of the Safe.\n\nTo prevent users from accidentally setting up this trap, SaferSafes has a built-in Rule Checker (_checkCombinedConfig()) that enforces:\n`dead-man's switch countdown must be at least 2× the Timelock wait (e.g., at least 180 days for a 90-day wait)`.\n\n**Loophole found:**\n\n1. Switching a feature OFF (`setGuard(address(0))` or `disableModule`) stops the Safe from using it, but does not erase its saved timer inside SaferSafes\n2. The feature that is still ON can still be edited. The Rule Checker sees that the other feature is OFF and skips the check\n3. Switching the feature back ON (`setGuard` / `enableModule`) does not call SaferSafes, so the Rule Checker does not run. The old stored timer is what that feature uses from then on\n\n## Walkthrough\n\n1. Initial setup: Timelock is ON (90 days) and Dead-Man's Switch is ON (180 days)\n2. Timelock is temporarily switched OFF (without calling a separate \"wipe memory\" function), so \"90 days\" stays saved inside SaferSafes\n3. Adjust the active feature: While Timelock is OFF, we can change the Dead-Man's Switch (still ON) to 1 day. The Rule Checker sees Timelock is OFF, skips the check, and approves it\n4. Turn the Timelock back ON. Safe flips the switch without running SaferSafes's Rule Checker, and the stored 90-day wait immediately kicks in\n5. Both features are now ON at the same time with a 90-day wait and a 1-day countdown. This traps a healthy, active wallet so it cannot answer a Dead-Man's Switch challenge in time. (And the opposite works too: turn Dead-Man's Switch OFF → raise Timelock from 90d to 200d → turn Dead-Man's Switch back ON with its old 180d timer still saved)\n\n## TLDR\n\n- Disabling an extension via `Safe.setGuard(address(0))` or `Safe.disableModule()` preserves `timelockDelay` / `livenessResponsePeriod` in storage (unless `clearTimelockGuard()` / `clearLivenessModule()` is also called).\n- `_checkCombinedConfig()` returns early whenever either extension is disabled (`if (!(_isGuardEnabled(_safe) && _safe.isModuleEnabled(address(this)))) return;`).\n- `Safe.setGuard()` and `Safe.enableModule()` do not invoke `_checkCombinedConfig()`.\n\n## Suggested Fix\n\nIn `_checkCombinedConfig()`, enforce the timing check whenever the counterpart's stored configuration is non-zero (`timelockDelay != 0` / `livenessResponsePeriod != 0`) even if the counterpart is currently disabled (requiring explicit `clear*()` first).",
+      "createdAt": "2026-11-27T06:41:59Z",
       "closedAt": null,
       "state": "OPEN",
       "commentCount": 0
     }
   ],
   "topPRs": [
+    {
+      "id": "PR_kwDODjvEJM8AAAABSXKgoA",
+      "title": "ci: publish release images from the v10 proposal branch with the factory workflow",
+      "author": "maurelian",
+      "number": 24474,
+      "body": "Tag pushes on this branch can't publish images. The `op-deployer/v0.10.0` tag's run failed in `apko (op-deployer) / publish` with `DENIED: Permission 'artifactregistry.repositories.uploadArtifacts'` ([run](https://github.com/ethereum-optimism/optimism/actions/runs/45709253762)): this branch still has the old `build-images.apko.yaml`, which develop replaced in #24285 with the factory `build-images.yaml` that publishes through the `release` environment. A tag runs the workflow from the tagged commit, so `op-deployer/v0.10.1` needs the new workflow on this branch.\n\nThis cherry-picks #24285, #24312, #24313, #24315 and #24354. The last commit drops the catalog entries that only fit develop: the `op-zk-proposer-cuda` image (no melange or apko config here), `anvil --version` in op-deployer's smoke test (this branch's image has no anvil) and op-deployer's genesis smoke script, which needs develop's `--deploy-mock-sp1-verifier`. The later `-slim` variants are not ported.\n\nThis PR's own build-images run builds every image, because it changes the catalog.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code) · session 57a89f91-9030-4e02-937f-95438a53f8be",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-27T13:12:09Z",
+      "mergedAt": null,
+      "additions": 542,
+      "deletions": 671
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABSKWhyg",
+      "title": "op-challenger: add challenge-latest-zk-game subcommand",
+      "author": "wwared",
+      "number": 24451,
+      "body": "Adds a `challenge-latest-zk-game` subcommand that challenges the newest unchallenged ZK game from the given creators, so a scheduled job can check that op-zk-proposer defends its valid games by proving them. It is a subcommand rather than a separate script so it runs from the shipped op-challenger image. The ZK `list-claims` report also gains `gameCreator`. Related to ethereum-optimism/proofs-team#22.",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-26T16:36:01Z",
+      "mergedAt": "2026-11-27T08:56:01Z",
+      "additions": 322,
+      "deletions": 2
+    },
     {
       "id": "PR_kwDODjvEJM8AAAABSQX6BA",
       "title": "kona-node: Recover the sequencer when an engine reset clears a queued task",
@@ -44,22 +116,191 @@
       "mergedAt": null,
       "additions": 164,
       "deletions": 301
+    },
+    {
+      "id": "PR_kwDODjvEJM8AAAABSW7prw",
+      "title": "kona-node,kona-sources!: apply --l2-engine-timeout to the engine connection",
+      "author": "nonsense",
+      "number": 24472,
+      "body": "kona-node parses `--l2-engine-timeout` but ignores it: every request to the L2 execution client times out after a fixed 10 s, while the help text promises 30 s. An operator whose execution client is slow under load, such as a large `engine_newPayload` during sync, can't raise the deadline, and one who wants a hung execution client noticed sooner can't lower it.\n\nThe flag now sets the deadline of every request on the engine connection: the Engine API calls, the startup capability exchange, and the L2 reads that derivation, the sequencer and the RPC server send over the same connection. op-node's `--l2.engine-rpc-timeout` covers its L2 engine client the same way. The default is now 10 000 ms, op-node's default and the deadline every request already had, so a node that does not set the flag behaves as before. L1 requests keep their fixed 10 s deadline; op-node has no flag for that either.\n\nThere is no alias under op-node's name, `--l2.engine-rpc-timeout`, whose value is a Go duration such as `10s`. A clap alias shares the flag's parser, and kona-node already shares `--p2p.peers.grace` with op-node while taking whole seconds, so one alias would not make op-node command lines portable. Accepting op-node's formats is better done for all the shared flag names at once.\n\nBREAKING CHANGE: operators who set `--l2-engine-timeout`, `--l2.timeout` or `KONA_NODE_L2_ENGINE_TIMEOUT` now get that deadline; before, it was ignored and every request had 10 s. Check the value before upgrading, in particular a `30000` copied from the old help text. A value of `0` now stops the node at startup. Code that embeds `kona-sources` must pass the engine deadline to `kona_sources::rpc::engine(url, jwt, timeout)` and the duration to `kona_sources::rpc::with_deadline(timeout, request)`; `kona_sources::rpc::TIMEOUT` is the previous value.\n\nCloses https://github.com/ethereum-optimism/optimism/issues/23861\n\nReview agents run: `rust-code-reviewer` and a security review. Applied: the deadline tests now use a deadline above 10 s, so a leftover 10 s cap fails them; a test that tied the L1 deadline to the engine flag's default is gone; smaller wording and visibility nits. The security review approved, at low risk. Dismissed: its optional upper limit on `--l2-engine-timeout`. Only the operator sets the value, and op-node's `--l2.engine-rpc-timeout` has no upper limit either. No other repo review agent applies: the diff touches no CI config, contracts, derivation, deposits, interop or safe head database, and deletes no externally observable name.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+      "repository": "ethereum-optimism/optimism",
+      "createdAt": "2026-11-27T12:54:15Z",
+      "mergedAt": "2026-11-27T19:10:40Z",
+      "additions": 153,
+      "deletions": 55
     }
   ],
   "codeChanges": {
-    "additions": 0,
-    "deletions": 0,
-    "files": 0,
-    "commitCount": 1
+    "additions": 594,
+    "deletions": 74,
+    "files": 24,
+    "commitCount": 20
   },
-  "completedItems": [],
+  "completedItems": [
+    {
+      "title": "op-challenger: add challenge-latest-zk-game subcommand",
+      "prNumber": 24451,
+      "type": "tests",
+      "body": "Adds a `challenge-latest-zk-game` subcommand that challenges the newest unchallenged ZK game from the given creators, so a scheduled job can check that op-zk-proposer defends its valid games by proving them. It is a subcommand rather than a",
+      "files": [
+        "op-challenger/README.md",
+        "op-challenger/cmd/challenge_latest_zk_game.go",
+        "op-challenger/cmd/challenge_latest_zk_game_test.go",
+        "op-challenger/cmd/list_claims.go",
+        "op-challenger/cmd/list_claims_test.go",
+        "op-challenger/cmd/main.go"
+      ]
+    },
+    {
+      "title": "op-interop-filter: add to release-paths",
+      "prNumber": 24449,
+      "type": "other",
+      "body": "op-interop-filter is now released with the weekly component releases, whose notes come from `just release-notes`. That recipe takes its paths from `release-paths`, which currently fails for op-interop-filter (`error: component must be one o",
+      "files": [
+        "justfile"
+      ]
+    },
+    {
+      "title": "op-reth: drain the metrics recorder for every CLI command",
+      "prNumber": 24473,
+      "type": "other",
+      "body": "op-reth installs its Prometheus recorder for every command, but only the node and `proofs` started the upkeep that drains buffered histogram samples. Every other command, including `init-state`, `stage`, `re-execute`, `prune` and `db`, kept",
+      "files": [
+        "rust/op-reth/crates/cli/src/app.rs",
+        "rust/op-reth/crates/cli/src/commands/op_proofs/mod.rs"
+      ]
+    },
+    {
+      "title": "kona-node,kona-sources!: apply --l2-engine-timeout to the engine connection",
+      "prNumber": 24472,
+      "type": "other",
+      "body": "kona-node parses `--l2-engine-timeout` but ignores it: every request to the L2 execution client times out after a fixed 10 s, while the help text promises 30 s. An operator whose execution client is slow under load, such as a large `engine_",
+      "files": [
+        "docs/public-docs/ko/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/configuration.mdx",
+        "docs/public-docs/node-operators/kona-node/design/engine.mdx",
+        "rust/kona/bin/node/src/commands/node/command.rs",
+        "rust/kona/bin/node/src/flags/engine/providers.rs",
+        "rust/kona/crates/node/engine/src/client.rs",
+        "rust/kona/crates/node/rpc/src/superroot/server/safedb_tests/execution_layer.rs",
+        "rust/kona/crates/node/service/src/actors/l1_watcher/actor/tests.rs",
+        "rust/kona/crates/node/service/src/actors/sequencer/origin_prefetch_test.rs",
+        "rust/kona/crates/node/sources/src/rpc.rs"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: add startBlock to VisionPolicyV1",
+      "prNumber": 24470,
+      "type": "other",
+      "body": "Stacked on #24469.\n\nAn offchain indexer that keeps VisionPolicyV1's allowlist and deny list learns the policy's address only from the module's `PolicySet`, which comes after the policy is deployed. The constructor emits the initial list ent",
+      "files": [
+        "packages/contracts-bedrock/interfaces/compliance/IVisionPolicyV1.sol",
+        "packages/contracts-bedrock/snapshots/abi/VisionPolicyV1.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/compliance/VisionPolicyV1.sol",
+        "packages/contracts-bedrock/test/compliance/VisionPolicyV1.t.sol"
+      ]
+    },
+    {
+      "title": "contracts-bedrock: add a semver to VisionPolicyV1",
+      "prNumber": 24469,
+      "type": "other",
+      "body": "VisionPolicyV1 is the only compliance contract without a version. Offchain tooling such as bridge-screener reads `version()` from the Portal, the bridge and the module to know which build it is talking to, but cannot do so for the policy. T",
+      "files": [
+        "packages/contracts-bedrock/interfaces/compliance/IVisionPolicyV1.sol",
+        "packages/contracts-bedrock/snapshots/abi/VisionPolicyV1.json",
+        "packages/contracts-bedrock/snapshots/semver-lock.json",
+        "packages/contracts-bedrock/src/compliance/VisionPolicyV1.sol"
+      ]
+    }
+  ],
   "topContributors": [
+    {
+      "username": "falcorocks",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/14293929?u=61bb02f7fad7925839e19741abf389390f834471&v=4",
+      "totalScore": 91.80110792563116,
+      "prScore": 86.60110792563115,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "nonsense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/50459?u=5dec4acc1aaa51471b718aa578918f3f0970282c&v=4",
+      "totalScore": 85.7761102389905,
+      "prScore": 85.5761102389905,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "pcw109550",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/29061389?u=37a4f55d3c4ccdc2e3ec9bd138c959e03bdb695a&v=4",
+      "totalScore": 65.19896337267943,
+      "prScore": 65.19896337267943,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "maurelian",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/23033765?u=2e7a6d419d3bcf8c495155dad1fd1c7575eab951&v=4",
+      "totalScore": 29.787886948288048,
+      "prScore": 19.787886948288048,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
     {
       "username": "ajsutton",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72675?u=8070033640575176b21190c71c18aed01a7216ee&v=4",
       "totalScore": 22.329078189898055,
       "prScore": 20.329078189898055,
       "issueScore": 2,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "digorithm",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3484025?u=ba44cbc19627007c99a16ee3741044560ce916c7&v=4",
+      "totalScore": 19.921628141225792,
+      "prScore": 19.921628141225792,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "hdcesario-op",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/253914476?u=28d1b8b0573730d6a3f984d74672ed9521531aa3&v=4",
+      "totalScore": 17.480316284596384,
+      "prScore": 17.280316284596385,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "raffaele-oplabs",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/151576068?u=68d11345b93e7988c446a71c08f3f47dafe02379&v=4",
+      "totalScore": 15,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 15,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "piohei",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1212808?u=594d22469f7ab4aecf64372625f23a12645c51b2&v=4",
+      "totalScore": 14.055268903666201,
+      "prScore": 14.055268903666201,
+      "issueScore": 0,
       "reviewScore": 0,
       "commentScore": 0,
       "summary": null
@@ -73,11 +314,91 @@
       "reviewScore": 0,
       "commentScore": 0.33999999999999997,
       "summary": null
+    },
+    {
+      "username": "donoso-eth",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30406536?u=e14c63f3bdcf5d7c693dda433a30fe11b8b74162&v=4",
+      "totalScore": 10,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 10,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "MuncleUscles",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/2372232?u=20ebe0390cae1ff0f96080725f4e0803827ecbc2&v=4",
+      "totalScore": 9.05249421592915,
+      "prScore": 9.05249421592915,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "yashvardhan-kukreja",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/25801460?u=2a32a3da993655526c3670024f95d6e60737a068&v=4",
+      "totalScore": 9,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 9,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "calnix",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/22549197?u=af07ccb8fd67e4e3867bac383176ea6752f1ff38&v=4",
+      "totalScore": 8.299999999999999,
+      "prScore": 0,
+      "issueScore": 8.1,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "joshklop",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31332481?v=4",
+      "totalScore": 5.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0.2,
+      "summary": null
+    },
+    {
+      "username": "geoknee",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/1833419?u=89cf6b0e4e1cae909bb2641e58be5201710f6d82&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "0xOneTony",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/112496816?u=774dc2790ed3cdafdad8d496326cd5e7b20c3c66&v=4",
+      "totalScore": 5,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 5,
+      "commentScore": 0,
+      "summary": null
+    },
+    {
+      "username": "wwared",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/541936?u=5b432db84a72d2bf12343f33b9047ca46679ec8c&v=4",
+      "totalScore": 0.2,
+      "prScore": 0,
+      "issueScore": 0,
+      "reviewScore": 0,
+      "commentScore": 0.2,
+      "summary": null
     }
   ],
-  "newPRs": 1,
-  "mergedPRs": 0,
-  "newIssues": 1,
-  "closedIssues": 0,
-  "activeContributors": 6
+  "newPRs": 8,
+  "mergedPRs": 6,
+  "newIssues": 4,
+  "closedIssues": 3,
+  "activeContributors": 21
 }
